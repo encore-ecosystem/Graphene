@@ -1,0 +1,8 @@
+[project]
+name = "graphene"
+version = "0.1.0"
+description = "Graphene real-time engine and editor"
+readme = "README.md"
+licence = "MIT"
+build = "build.enq"
+dependencies = ["index@json", "index@linalg", "workspace@vulkan_native", "index@luma[fonts]"]
