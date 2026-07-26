@@ -1,0 +1,66 @@
+name: Linux CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ENCORE_BOOTSTRAP_TAG: bootstrap/v0.1.4.3
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install Encore 0.1.4
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/encore-bootstrap"
+          mkdir -p "$destination"
+          gh release download "$ENCORE_BOOTSTRAP_TAG" \
+            --repo encore-ecosystem/encore \
+            --pattern encore-x86_64-unknown-linux-gnu.tar.gz \
+            --pattern encore-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            --dir "$destination"
+          cd "$destination"
+          expected=$(awk 'NF {print tolower($1); exit}' encore-x86_64-unknown-linux-gnu.tar.gz.sha256)
+          actual=$(sha256sum encore-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+          test "$actual" = "$expected"
+          mkdir distribution
+          tar -xzf encore-x86_64-unknown-linux-gnu.tar.gz -C distribution
+          compiler=$(find distribution -type f -path '*/bin/encore' -print -quit)
+          test -n "$compiler"
+          test -x "$compiler"
+          echo "$(dirname "$compiler")" >> "$GITHUB_PATH"
+
+      - name: Restore locked dependencies
+        run: encore sync
+
+      - name: Check formatting
+        run: encore format --check
+
+      - name: Check modules
+        run: encore check
+
+      - name: Lint
+        run: encore lint
+
+      - name: Test
+        run: encore test
+
+      - name: Build
+        run: encore build
