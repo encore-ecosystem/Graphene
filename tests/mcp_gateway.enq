@@ -1,0 +1,33 @@
+import graphene::{
+    AutomationServer, EditorState, GrapheneMcpGateway, Scene, Transform
+}
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    scene.create_entity("Cube", Transform::identity())
+    let api = AutomationServer::new(EditorState::new(scene), "secret")
+    let mut mcp = GrapheneMcpGateway::new(api, "secret")
+
+    let initialized = mcp.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+    if !initialized.contains("\"graphene-mcp\"") || !initialized.contains("\"tools\"") { ret 1_u32 }
+
+    let tools = mcp.handle("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}")
+    if !tools.contains("\"rename_actor\"") || !tools.contains("\"add_actor\"") ||
+        !tools.contains("\"approval_status\"") || !tools.contains("\"build_project\"") ||
+        !tools.contains("\"inputSchema\"") { ret 2_u32 }
+
+    let renamed = mcp.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"rename_actor\",\"arguments\":{\"actor\":1,\"name\":\"Player\"}}}")
+    if !renamed.contains("\\\"ok\\\":true") || !renamed.contains("\\\"scene.actor.renamed\\\"") { ret 3_u32 }
+
+    let resource = mcp.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"resources/read\",\"params\":{\"uri\":\"graphene://scene\"}}")
+    if !resource.contains("graphene://scene") || !resource.contains("Player") { ret 4_u32 }
+    let challenged = mcp.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_actor\",\"arguments\":{\"actor\":1}}}")
+    if !challenged.contains("approval_required") || !challenged.contains("approvalId") {
+        ret 5_u32
+    }
+    ret 0_u32
+}

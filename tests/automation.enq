@@ -1,0 +1,121 @@
+import core::option::Option
+import graphene:: {
+    ActorSelectionCommand, ApprovalBroker, AutomationScopes, AutomationServer, EditorState,
+    GrapheneCommand, Scene, Transform
+}
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let actor = scene.create_entity("Cube", Transform::identity())
+    let mut server = AutomationServer::new(EditorState::new(scene), "secret")
+
+    let denied = server.handle(
+        "{\"id\":\"h0\",\"token\":\"wrong\",\"method\":\"graphene.handshake\",\"params\":{}}")
+    if !denied.contains("\"unauthorized\"") {
+        ret 1_u32
+    }
+
+    let handshake = server.handle(
+        "{\"id\":\"h1\",\"token\":\"secret\",\"method\":\"graphene.handshake\",\"params\":{}}")
+    if !handshake.contains("\"graphene-automation\"") || !handshake.contains("\"scene.rename\"") {
+        ret 2_u32
+    }
+
+    let renamed = server.handle(
+        "{\"id\":\"c1\",\"token\":\"secret\",\"method\":\"scene.rename\",\"params\":{\"actor\":1,\"name\":\"Player\"}}")
+    if !renamed.contains("\"ok\":true") || !renamed.contains("\"revision\":1") {
+        ret 3_u32
+    }
+
+    let snapshot = server.handle(
+        "{\"id\":\"s1\",\"token\":\"secret\",\"method\":\"graphene.snapshot\",\"params\":{}}")
+    if !snapshot.contains("\"Player\"") || !snapshot.contains("\"actors\"") {
+        ret 4_u32
+    }
+    let events = server.handle(
+        "{\"id\":\"e1\",\"token\":\"secret\",\"method\":\"graphene.events\",\"params\":{\"after\":0}}")
+    if !events.contains("\"scene.actor.renamed\"") || !events.contains("\"revision\":1") {
+        ret 7_u32
+    }
+    match server.state().scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.name() != "Player" {
+                ret 5_u32
+            }
+        }
+        Option::None => {
+            ret 6_u32
+        }
+    }
+
+    let mut event_scene = Scene::new()
+    let event_actor = event_scene.create_entity("Event source", Transform::identity())
+    let mut event_state = EditorState::new(event_scene)
+    let mut event_index = 0_usize
+    while event_index < 257_usize {
+        let selection = if event_index % 2_usize == 0_usize {
+            Option[u64]::Some(event_actor)
+        } else {
+            Option[u64]::None
+        }
+        event_state.execute(GrapheneCommand::Select(ActorSelectionCommand::new(selection)))
+        event_index = event_index + 1_usize
+    }
+    let mut event_server = AutomationServer::new(event_state, "secret")
+    let reset = event_server.handle(
+        "{\"id\":\"e2\",\"token\":\"secret\",\"method\":\"graphene.events\",\"params\":{\"after\":0}}")
+    if !reset.contains("\"resetRequired\":true") ||
+    !reset.contains("\"oldestRevision\":2") ||
+    !reset.contains("\"events\":[]") {
+        ret 8_u32
+    }
+    let mut protected_scene = Scene::new()
+    protected_scene.create_entity("Protected", Transform::identity())
+    let mut read_only = AutomationServer::with_scopes(
+        EditorState::new(protected_scene), "secret", AutomationScopes::read_only(),)
+    let readable = read_only.handle(
+        "{\"id\":\"r1\",\"token\":\"secret\",\"method\":\"graphene.snapshot\",\"params\":{}}")
+    let forbidden = read_only.handle(
+        "{\"id\":\"r2\",\"token\":\"secret\",\"method\":\"scene.rename\",\"params\":{\"actor\":1,\"name\":\"Denied\"}}")
+    let scoped_handshake = read_only.handle(
+        "{\"id\":\"r3\",\"token\":\"secret\",\"method\":\"graphene.handshake\",\"params\":{}}")
+    if !readable.contains("\"ok\":true") || !forbidden.contains("\"forbidden\"") ||
+        !forbidden.contains("scene.write") || !scoped_handshake.contains("\"scope:read\"") ||
+        scoped_handshake.contains("\"scope:scene.write\"") {
+        ret 9_u32
+    }
+
+    let mut approval_scene = Scene::new()
+    approval_scene.create_entity("Disposable", Transform::identity())
+    let mut approval_server = AutomationServer::with_security(
+        EditorState::new(approval_scene), "secret", AutomationScopes::all(),
+        ApprovalBroker::new())
+    let challenged = approval_server.handle(
+        "{\"id\":\"delete-1\",\"token\":\"secret\",\"method\":\"scene.delete\",\"params\":{\"actor\":1}}")
+    if !challenged.contains("\"approval_required\"") { ret 10_u32 }
+    let approval_parts = approval_server.into_parts()
+    let mut approval_state = approval_parts.0
+    let mut approval_broker = approval_parts.1
+    let pending = match approval_broker.pending() {
+        Option::Some(request) => { request }
+        Option::None => { ret 11_u32 }
+    }
+    if approval_state.scene().get(1_u64).is_none() ||
+        !approval_broker.approve(pending.id()) { ret 12_u32 }
+    let approved = match approval_broker.find(pending.id()) {
+        Option::Some(request) => { request }
+        Option::None => { ret 13_u32 }
+    }
+    approval_server = AutomationServer::with_security(
+        approval_state, "secret", AutomationScopes::all(), approval_broker)
+    let deleted = approval_server.handle(
+        "{\"id\":\"delete-1\",\"token\":\"secret\",\"approval\":\"" +
+        approved.token() + "\",\"method\":\"scene.delete\",\"params\":{\"actor\":1}}")
+    let replayed = approval_server.handle(
+        "{\"id\":\"delete-1\",\"token\":\"secret\",\"approval\":\"" +
+        approved.token() + "\",\"method\":\"scene.delete\",\"params\":{\"actor\":1}}")
+    approval_state = approval_server.state()
+    if !deleted.contains("\"ok\":true") || approval_state.scene().get(1_u64).is_some() ||
+        !replayed.contains("\"approval_required\"") { ret 14_u32 }
+    ret 0_u32
+}

@@ -1,0 +1,68 @@
+//! Stdio MCP proxy for a running Graphene editor.
+
+import core::io::println
+import core::option::Option
+import core::os::{env, file_exists, home_dir, read_file}
+import core::result::Result
+import graphene::GrapheneMcpGateway
+import json::{Json, parse}
+import std::io:: {
+    read_line, stdin_fd
+}
+
+fn discovery_value(name: str) -> Option[str] {
+    let path = home_dir() + "/.graphene/automation.json"
+    if !file_exists(path) {
+        ret Option[str]::None
+    }
+    match parse(read_file(path)) {
+        Result::Ok(value) => {
+            ret value.get(name).unwrap_or(Json::Null).as_str()
+        }
+        Result::Err(_error) => {
+            ret Option[str]::None
+        }
+    }
+}
+
+fn main() -> u32 {
+    let endpoint = match env("GRAPHENE_AUTOMATION_ENDPOINT") {
+        Option::Some(value) => {
+            value
+        }
+        Option::None => {
+            match discovery_value("endpoint") {
+                Option::Some(value) => { value }
+                Option::None => { ret 2_u32 }
+            }
+        }
+    }
+    let token = match env("GRAPHENE_AUTOMATION_TOKEN") {
+        Option::Some(value) => {
+            value
+        }
+        Option::None => {
+            match discovery_value("token") {
+                Option::Some(value) => { value }
+                Option::None => { ret 3_u32 }
+            }
+        }
+    }
+    let mut gateway = GrapheneMcpGateway::proxy(endpoint, token)
+    let input = stdin_fd()
+    let mut open = true
+    while open {
+        match read_line(input) {
+            Option::Some(message) => {
+                let response = gateway.handle(message)
+                if response != "" {
+                    println(response)
+                }
+            }
+            Option::None => {
+                open = false
+            }
+        }
+    }
+    ret 0_u32
+}

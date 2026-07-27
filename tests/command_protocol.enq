@@ -1,0 +1,83 @@
+import core::result::Result
+import graphene::{
+    EditorState, GrapheneCommand, Scene, Transform, command_registry_json,
+    decode_command_request, encode_command_response
+}
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let actor = scene.create_entity("Cube", Transform::identity())
+    let mut state = EditorState::new(scene)
+    match decode_command_request(
+        "{\"id\":\"request-1\",\"method\":\"scene.rename\",\"params\":{\"actor\":1,\"name\":\"Player\"}}") {
+        Result::Ok(envelope) => {
+            if envelope.id() != "request-1" { ret 1_u32 }
+            let response = encode_command_response(envelope.id(), state.execute(envelope.command()))
+            if !response.contains("\"ok\":true") || !response.contains("\"scene.actor.renamed\"") { ret 2_u32 }
+        }
+        Result::Err(_) => { ret 3_u32 }
+    }
+    match decode_command_request(
+        "{\"id\":\"request-3\",\"method\":\"scene.add\",\"params\":{\"name\":\"Sphere\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"scale\":[1,1,1]}}") {
+        Result::Ok(envelope) => {
+            match envelope.command() {
+                GrapheneCommand::AddActor(_) => {}
+                _ => { ret 11_u32 }
+            }
+        }
+        Result::Err(_) => { ret 12_u32 }
+    }
+    match decode_command_request(
+        "{\"id\":\"request-4\",\"method\":\"scene.set_parent\",\"params\":{\"actor\":1,\"parent\":null}}") {
+        Result::Ok(envelope) => {
+            match envelope.command() {
+                GrapheneCommand::SetParent(_) => {}
+                _ => { ret 13_u32 }
+            }
+        }
+        Result::Err(_) => { ret 14_u32 }
+    }
+    match state.scene().get(actor) {
+        Some(entity) => { if entity.name() != "Player" { ret 4_u32 } }
+        None => { ret 5_u32 }
+    }
+    match decode_command_request(
+        "{\"id\":\"request-2\",\"method\":\"scene.set_transform\",\"params\":{\"actor\":1,\"position\":[1,2,3],\"rotation\":[0,0,0],\"scale\":[1,1,1]}}") {
+        Result::Ok(envelope) => {
+            match envelope.command() {
+                GrapheneCommand::SetTransform(_) => {}
+                _ => { ret 6_u32 }
+            }
+        }
+        Result::Err(_) => { ret 7_u32 }
+    }
+    match decode_command_request("{\"id\":\"bad\",\"method\":\"scene.rename\",\"params\":{\"actor\":1}}") {
+        Result::Ok(_) => { ret 8_u32 }
+        Result::Err(error) => { if !error.message().contains("requires actor") { ret 9_u32 } }
+    }
+    state.configure_project(true)
+    match decode_command_request(
+        "{\"id\":\"simulation-1\",\"method\":\"simulation.start\",\"params\":{\"mode\":\"play\"}}") {
+        Result::Ok(envelope) => {
+            if !state.execute(envelope.command()).success() || state.simulation_mode() != "play" {
+                ret 15_u32
+            }
+        }
+        Result::Err(_) => { ret 16_u32 }
+    }
+    match decode_command_request(
+        "{\"id\":\"save-1\",\"method\":\"project.save\",\"params\":{}}") {
+        Result::Ok(envelope) => {
+            match envelope.command() {
+                GrapheneCommand::RequestSave => {
+                }
+                _ => { ret 17_u32 }
+            }
+        }
+        Result::Err(_) => { ret 18_u32 }
+    }
+    if !command_registry_json().contains("history.undo") ||
+        !command_registry_json().contains("simulation.start") ||
+        !command_registry_json().contains("build.start") { ret 10_u32 }
+    ret 0_u32
+}

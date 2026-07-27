@@ -4,8 +4,10 @@ import vulkan_native:: {
     native_adapter_api_version, native_adapter_count, native_adapter_device, native_adapter_kind,
     native_adapter_mesh_shader, native_adapter_name, native_adapter_ray_pipeline, native_adapter_ray_query,
     native_adapter_tier, native_adapter_vendor, native_api_version, native_available, native_create,
+    native_borrow,
     native_destroy, native_error, native_device_available, native_device_compute, native_device_create,
     native_device_destroy, native_device_error, native_device_graphics, native_device_queue_family,
+    native_device_borrow,
     native_present_device_create,
     native_shader_available, native_shader_create, native_shader_destroy, native_shader_error, native_shader_stage,
     native_bind_group_available, native_bind_group_create, native_bind_group_destroy, native_bind_group_error,
@@ -34,13 +36,18 @@ import vulkan_native:: {
     native_window_key_down, native_window_mouse_down, native_window_mouse_dx, native_window_mouse_dy,
     native_window_mouse_x, native_window_mouse_y,
     native_swapchain_available, native_swapchain_clear, native_swapchain_create, native_offscreen_create,
-    native_swapchain_destroy, native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound,
+    native_shared_offscreen_create,
+    native_swapchain_destroy, native_swapchain_destroy_retired,
+    native_swapchain_last_frame_complete,
+    native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound,
     native_swapchain_draw_pipeline,
     native_swapchain_error,
     native_swapchain_frames_in_flight, native_swapchain_height, native_swapchain_width,
-    native_swapchain_pixels, native_swapchain_pitch,
+    native_swapchain_pixels, native_swapchain_pitch, native_swapchain_external_image,
+    native_swapchain_external_layout,
     native_frame_acquire, native_frame_available, native_frame_begin_render_pass, native_frame_slot,
     native_frame_bind_group, native_frame_bind_index_buffer, native_frame_bind_vertex_buffer,
+    native_frame_bind_pipeline,
     native_frame_destroy, native_frame_draw_indexed, native_frame_end_render_pass,
     native_frame_error, native_frame_present, native_frame_set_viewport, native_frame_upload_ui
 }
@@ -622,6 +629,11 @@ impl for RenderPassEncoder {
 }
 
 impl for RenderFrame {
+    pub fn borrow(handle: usize) -> Self {
+        ret Self {
+            handle
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_frame_available(self.handle)
     }
@@ -647,6 +659,14 @@ impl for RenderFrame {
             self.handle, begun
         }
     }
+    /// Continues Luma's active compatible render pass with another pipeline.
+    pub fn continue_render_pass(self: Self, pipeline: RenderPipeline) -> RenderPassEncoder {
+        let begun = self.handle != 0_usize &&
+            native_frame_bind_pipeline(self.handle, pipeline.handle)
+        ret RenderPassEncoder {
+            self.handle, begun
+        }
+    }
     pub fn set_viewport(self: Self, x: u32, y: u32, width: u32, height: u32) -> bool {
         ret self.handle != 0_usize && native_frame_set_viewport(self.handle, x, y, width, height)
     }
@@ -664,6 +684,11 @@ impl for RenderFrame {
 }
 
 impl for Swapchain {
+    pub fn borrow(handle: usize) -> Self {
+        ret Self {
+            handle
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_swapchain_available(self.handle)
     }
@@ -709,6 +734,20 @@ impl for Swapchain {
             native_swapchain_pitch(self.handle)
         }
     }
+    pub fn external_image(self: Self) -> usize {
+        ret if self.handle == 0_usize {
+            0_usize
+        } else {
+            native_swapchain_external_image(self.handle)
+        }
+    }
+    pub fn external_layout(self: Self) -> u32 {
+        ret if self.handle == 0_usize {
+            0_u32
+        } else {
+            native_swapchain_external_layout(self.handle)
+        }
+    }
     pub fn clear(self: Self, red: f32, green: f32, blue: f32, alpha: f32) -> bool {
         ret self.handle != 0_usize && native_swapchain_clear(self.handle, red, green, blue, alpha)
     }
@@ -735,6 +774,14 @@ impl for Swapchain {
     }
     pub fn destroy(self: Self) -> bool {
         ret self.handle != 0_usize && native_swapchain_destroy(self.handle)
+    }
+    pub fn last_frame_complete(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_swapchain_last_frame_complete(self.handle)
+    }
+    pub fn destroy_retired(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_swapchain_destroy_retired(self.handle)
     }
 }
 
@@ -948,6 +995,12 @@ impl for CommandEncoder {
 }
 
 impl for GraphicsDevice {
+    /// Borrows the exact backend device object owned by Luma.
+    pub fn borrow_backend(handle: usize, adapter: AdapterInfo) -> Self {
+        ret Self {
+            handle, adapter
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_device_available(self.handle)
     }
@@ -1149,6 +1202,11 @@ impl for GraphicsDevice {
             native_offscreen_create(self.handle, width, height)
         }
     }
+    pub fn create_shared_offscreen_target(self: Self, width: u32, height: u32) -> Swapchain {
+        ret Swapchain {
+            native_shared_offscreen_create(self.handle, width, height)
+        }
+    }
     pub fn destroy(self: Self) -> bool {
         ret self.handle != 0_usize && native_device_destroy(self.handle)
     }
@@ -1171,6 +1229,11 @@ impl for GraphicsInstance {
     pub fn with_external_window_support(debug: bool) -> GraphicsInstance {
         ret GraphicsInstance {
             native_create(debug, true, true), debug, true
+        }
+    }
+    pub fn borrow(instance: usize, physical_device: usize) -> GraphicsInstance {
+        ret GraphicsInstance {
+            native_borrow(instance, physical_device), false, false
         }
     }
     pub fn available(self: Self) -> bool {
@@ -1248,6 +1311,28 @@ impl for GraphicsInstance {
     pub fn create_device(self: Self, adapter: AdapterInfo) -> GraphicsDevice {
         ret GraphicsDevice {
             native_device_create(self.handle, adapter.index()), adapter
+        }
+    }
+    pub fn borrow_device(self: Self, device: usize, queue_family: u32) -> GraphicsDevice {
+        let adapters = self.adapters()
+        match adapters.get(0_usize) {
+            Option::Some(adapter) => {
+                ret GraphicsDevice {
+                    native_device_borrow(self.handle, device, queue_family), adapter
+                }
+            }
+            Option::None => {
+                ret GraphicsDevice {
+                    0_usize,
+                    AdapterInfo {
+                        0_usize, "Unavailable borrowed Vulkan device", 0_u32, 0_u32,
+                        adapter_other(), ApiVersion::from_raw(0_u32),
+                        RenderCapabilities {
+                            0_u32, false, false, false
+                        }
+                    }
+                }
+            }
         }
     }
     pub fn create_present_device(self: Self, adapter: AdapterInfo, window: GrapheneWindow) -> GraphicsDevice

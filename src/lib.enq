@@ -1,14 +1,31 @@
 pub import mod::assets:: {
     MaterialAssets, MeshAssets, StandardMaterial
 }
+pub import mod::approval::{ApprovalBroker, ApprovalRequest}
+pub import mod::automation::{AutomationScopes, AutomationServer}
+pub import mod::automation_transport:: {
+    AutomationListener, automation_capability_token, automation_request, automation_secure_file
+}
 pub import mod::content_search:: {
     content_asset_matches, outliner_actor_matches, search_matches
+}
+pub import mod::command_bus:: {
+    ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand,
+    ActorVisibilityCommand, AddActorCommand, DuplicateActorCommand,
+    AssetImportCommand, CommandResult, EditorState, GrapheneCommand, GrapheneDiagnostic,
+    GrapheneEvent, GrapheneTask, OperationCompletionCommand, ProjectLoadedCommand,
+    ProjectRequestCommand, SimulationCommand
+}
+pub import mod::command_console::{console_help, decode_console_command}
+pub import mod::command_protocol:: {
+    CommandEnvelope, ProtocolError, command_registry_json, decode_command_request, encode_command_response
 }
 pub import mod::editor_guard:: {
     action_needs_confirmation, guard_editor_action, guarded_action
 }
 pub import mod::editor_history:: {
-    ActorRecord, EditorActors, EditorEdit, ParentEdit, RenameEdit, TransformEdit, VisibilityEdit
+    ActorRecord, EditorActors, EditorEdit, ParentEdit, RenameEdit, TransformEdit, VisibilityEdit,
+    editor_actors_from_scene
 }
 pub import mod::editor_values:: {
     EditorTransform, apply_editor_transform, parse_editor_scalar
@@ -16,6 +33,7 @@ pub import mod::editor_values:: {
 pub import mod::material_asset:: {
     edit_default_material, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color
 }
+pub import mod::mcp_gateway::GrapheneMcpGateway
 pub import mod::preview::ViewportRenderer
 pub import mod::project_assets:: {
     ImportedMeshAsset, add_actor_mesh_name, discover_obj_assets, import_obj_asset, load_obj_asset, project_mesh_directory

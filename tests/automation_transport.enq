@@ -1,0 +1,37 @@
+import core::os::remove_file
+import core::thread::JoinHandle
+import core::time:: {
+    perf_counter_ms, sleep_ms
+}
+import graphene::{
+    AutomationListener, automation_capability_token, automation_request
+}
+
+fn request(endpoint: str) -> str {
+    ret automation_request(endpoint, "{\"id\":\"transport\",\"method\":\"ping\",\"params\":{}}")
+}
+
+fn main() -> u32 {
+    let token_one = automation_capability_token()
+    let token_two = automation_capability_token()
+    if token_one.char_len() != 64_usize || token_two.char_len() != 64_usize ||
+        token_one == token_two { ret 6_u32 }
+    let endpoint = "/tmp/graphene-automation-" + perf_counter_ms().fmt() + ".sock"
+    let listener = AutomationListener::listen(endpoint)
+    if !listener.available() { ret 1_u32 }
+    let client = spawn request(endpoint)
+    let mut incoming = ""
+    let mut attempts = 0_u32
+    while incoming == "" && attempts < 200_u32 {
+        incoming = listener.poll()
+        if incoming == "" { sleep_ms(1_u64) }
+        attempts = attempts + 1_u32
+    }
+    if !incoming.contains("\"transport\"") { listener.destroy() ret 2_u32 }
+    if !listener.respond("{\"ok\":true}") { listener.destroy() ret 3_u32 }
+    let response = client.join()
+    if response != "{\"ok\":true}" { listener.destroy() ret 4_u32 }
+    if !listener.destroy() { ret 5_u32 }
+    remove_file(endpoint)
+    ret 0_u32
+}

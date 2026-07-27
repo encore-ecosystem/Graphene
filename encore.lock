@@ -23,11 +23,9 @@ path = "workspace/vulkan_native"
 
 [[packages]]
 name = "luma"
-ref = "index@luma"
+ref = "path@../Luma"
 version = "0.1.1"
 features = ["fonts"]
-archive = "https://github.com/encore-ecosystem/Luma/releases/download/v0.1.1/luma-0.1.1.tar.gz"
-checksum = "6963dcbeed7371083f27c2c43aa651c9e0996b063652cddab5fc5bfe4a15feb4"
 
 [[packages]]
 name = "core"
@@ -61,4 +59,3 @@ ref = "workspace@ui_native"
 version = "0.1.0"
 source = "embedded@luma"
 path = "workspace/ui_native"
-distribution-checksum = "6963dcbeed7371083f27c2c43aa651c9e0996b063652cddab5fc5bfe4a15feb4"

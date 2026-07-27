@@ -1,0 +1,28 @@
+import core::result::Result
+import graphene::{GrapheneCommand, decode_console_command}
+
+fn main() -> u32 {
+    match decode_console_command("history.undo") {
+        Result::Ok(command) => {
+            match command {
+                GrapheneCommand::Undo => {
+                }
+                _ => { ret 1_u32 }
+            }
+        }
+        Result::Err(_) => { ret 2_u32 }
+    }
+    match decode_console_command("scene.rename {\"actor\":7,\"name\":\"Console Actor\"}") {
+        Result::Ok(command) => {
+            match command {
+                GrapheneCommand::Rename(value) => {
+                    if value.actor() != 7_u64 || value.value() != "Console Actor" { ret 3_u32 }
+                }
+                _ => { ret 4_u32 }
+            }
+        }
+        Result::Err(_) => { ret 5_u32 }
+    }
+    if decode_console_command("scene.rename not-json").is_ok() { ret 6_u32 }
+    ret 0_u32
+}

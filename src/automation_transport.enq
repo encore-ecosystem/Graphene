@@ -1,0 +1,68 @@
+//! Local Unix-socket or Windows named-pipe transport for Automation API.
+
+extern fn graphene_automation_listen(endpoint: str) -> usize
+extern fn graphene_automation_available(handle: usize) -> bool
+extern fn graphene_automation_error(handle: usize) -> str
+extern fn graphene_automation_poll(handle: usize) -> str
+extern fn graphene_automation_respond(handle: usize, response: str) -> bool
+extern fn graphene_automation_request(endpoint: str, request: str) -> str
+extern fn graphene_automation_destroy(handle: usize) -> bool
+extern fn graphene_automation_secure_file(path: str) -> bool
+extern fn graphene_automation_capability_token() -> str
+
+pub struct AutomationListener {
+    handle: usize
+}
+
+pub fn automation_request(endpoint: str, request: str) -> str {
+    unsafe {
+        ret graphene_automation_request(endpoint, request)
+    }
+}
+
+pub fn automation_secure_file(path: str) -> bool {
+    unsafe {
+        ret graphene_automation_secure_file(path)
+    }
+}
+
+pub fn automation_capability_token() -> str {
+    unsafe {
+        ret graphene_automation_capability_token()
+    }
+}
+
+impl for AutomationListener {
+    pub fn listen(endpoint: str) -> Self {
+        unsafe {
+            ret Self {
+                graphene_automation_listen(endpoint)
+            }
+        }
+    }
+    pub fn available(self: Self) -> bool {
+        unsafe {
+            ret self.handle != 0_usize && graphene_automation_available(self.handle)
+        }
+    }
+    pub fn error(self: Self) -> str {
+        unsafe {
+            ret graphene_automation_error(self.handle)
+        }
+    }
+    pub fn poll(self: Self) -> str {
+        unsafe {
+            ret graphene_automation_poll(self.handle)
+        }
+    }
+    pub fn respond(self: Self, response: str) -> bool {
+        unsafe {
+            ret graphene_automation_respond(self.handle, response)
+        }
+    }
+    pub fn destroy(self: Self) -> bool {
+        unsafe {
+            ret graphene_automation_destroy(self.handle)
+        }
+    }
+}

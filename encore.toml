@@ -5,4 +5,4 @@ description = "Graphene real-time engine and editor"
 readme = "README.md"
 licence = "MIT"
 build = "build.enq"
-dependencies = ["index@json", "index@linalg", "workspace@vulkan_native", "index@luma[fonts]"]
+dependencies = ["index@json", "index@linalg", "path@../Luma/workspace/vulkan_native", "path@../Luma[fonts]"]

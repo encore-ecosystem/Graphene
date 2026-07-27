@@ -1,0 +1,205 @@
+//! Local approval broker for sensitive Automation API operations.
+
+import core::option::Option
+import core::time::perf_counter_ms
+import core::vec::Vec
+import mod::automation_transport::automation_capability_token
+
+pub struct ApprovalRequest {
+    id: str
+    client_request: str
+    scope: str
+    method: str
+    status: str
+    token: str
+    expires_at_ms: u64
+}
+
+pub struct ApprovalBroker {
+    requests: Vec[ApprovalRequest]
+}
+
+impl for ApprovalRequest {
+    fn new(id: str, client_request: str, scope: str, method: str) -> Self {
+        ret Self {
+            id, client_request, scope, method, "pending", "",
+            perf_counter_ms() + 120000_u64
+        }
+    }
+    pub fn id(self: Self) -> str {
+        ret self.id
+    }
+    pub fn client_request(self: Self) -> str {
+        ret self.client_request
+    }
+    pub fn scope(self: Self) -> str {
+        ret self.scope
+    }
+    pub fn method(self: Self) -> str {
+        ret self.method
+    }
+    pub fn status(self: Self) -> str {
+        ret self.status
+    }
+    pub fn token(self: Self) -> str {
+        ret self.token
+    }
+    pub fn expires_at_ms(self: Self) -> u64 {
+        ret self.expires_at_ms
+    }
+}
+
+impl for ApprovalBroker {
+    pub fn new() -> Self {
+        ret Self {
+            Vec[ApprovalRequest]::new()
+        }
+    }
+
+    /// Registers a request without granting it. Calling this repeatedly for
+    /// the same client request and method returns the existing approval ID.
+    pub fn request(self: mut Self, client_request: str, scope: str, method: str) -> str {
+        let mut index = 0_usize
+        while index < self.requests.len() {
+            match self.requests.get(index) {
+                Option::Some(request) => {
+                    if request.client_request() == client_request &&
+                    request.scope() == scope && request.method() == method &&
+                    request.status() != "consumed" &&
+                    perf_counter_ms() <= request.expires_at_ms() {
+                        ret request.id()
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        let id = automation_capability_token()
+        if id == "" {
+            ret ""
+        }
+        if self.requests.len() >= 64_usize {
+            let mut retained = Vec[ApprovalRequest]::with_capacity(64_usize)
+            let mut retained_index = self.requests.len() - 63_usize
+            while retained_index < self.requests.len() {
+                match self.requests.get(retained_index) {
+                    Option::Some(request) => { retained.push(request) }
+                    Option::None => {
+                    }
+                }
+                retained_index = retained_index + 1_usize
+            }
+            self.requests = retained
+        }
+        self.requests.push(ApprovalRequest::new(id, client_request, scope, method))
+        ret id
+    }
+
+    /// Called only by trusted in-process UI code.
+    pub fn approve(self: mut Self, id: str) -> bool {
+        let mut index = 0_usize
+        while index < self.requests.len() {
+            match self.requests.get(index) {
+                Option::Some(request) => {
+                    if request.id() == id && request.status() == "pending" &&
+                    perf_counter_ms() <= request.expires_at_ms() {
+                        let token = automation_capability_token()
+                        if token == "" {
+                            ret false
+                        }
+                        self.requests.set(index, ApprovalRequest {
+                                request.id(), request.client_request(), request.scope(),
+                                request.method(), "approved", token,
+                                perf_counter_ms() + 60000_u64
+                            }
+                            ,)
+                        ret true
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        ret false
+    }
+
+    /// Called only by trusted in-process UI code.
+    pub fn deny(self: mut Self, id: str) -> bool {
+        let mut index = 0_usize
+        while index < self.requests.len() {
+            match self.requests.get(index) {
+                Option::Some(request) => {
+                    if request.id() == id && request.status() == "pending" {
+                        self.requests.set(index, ApprovalRequest {
+                                request.id(), request.client_request(), request.scope(),
+                                request.method(), "denied", "", request.expires_at_ms()
+                            }
+                            ,)
+                        ret true
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        ret false
+    }
+
+    pub fn find(self: Self, id: str) -> Option[ApprovalRequest] {
+        for request in self.requests {
+            if request.id() == id {
+                if (request.status() == "pending" || request.status() == "approved") &&
+                perf_counter_ms() > request.expires_at_ms() {
+                    ret Option[ApprovalRequest]::Some(ApprovalRequest {
+                            request.id(), request.client_request(), request.scope(),
+                            request.method(), "expired", "", request.expires_at_ms()
+                        }
+                        ,)
+                }
+                ret Option[ApprovalRequest]::Some(request)
+            }
+        }
+        ret Option[ApprovalRequest]::None
+    }
+
+    pub fn pending(self: Self) -> Option[ApprovalRequest] {
+        for request in self.requests {
+            if request.status() == "pending" &&
+            perf_counter_ms() <= request.expires_at_ms() {
+                ret Option[ApprovalRequest]::Some(request)
+            }
+        }
+        ret Option[ApprovalRequest]::None
+    }
+
+    /// Consumes exactly one approved token. Replay with the same token fails.
+    pub fn consume(self: mut Self, token: str, scope: str, method: str) -> bool {
+        if token == "" {
+            ret false
+        }
+        let mut index = 0_usize
+        while index < self.requests.len() {
+            match self.requests.get(index) {
+                Option::Some(request) => {
+                    if request.status() == "approved" && request.token() == token &&
+                    request.scope() == scope && request.method() == method &&
+                    perf_counter_ms() <= request.expires_at_ms() {
+                        self.requests.set(index, ApprovalRequest {
+                                request.id(), request.client_request(), request.scope(),
+                                request.method(), "consumed", "", request.expires_at_ms()
+                            }
+                            ,)
+                        ret true
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        ret false
+    }
+}

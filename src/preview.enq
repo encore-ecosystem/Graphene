@@ -62,12 +62,15 @@ pub struct ViewportRenderer {
     camera: PerspectiveCamera
     light: DirectionalLight
     window: Option[GrapheneWindow]
+    retired_targets: Vec[Swapchain]
+    frames_since_resize: u32
     viewport_width: u32
     viewport_height: u32
+    borrowed_target: bool
 }
 
 fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain: Swapchain,
-    window: Option[GrapheneWindow],) -> Option[ViewportRenderer] {
+    window: Option[GrapheneWindow], borrowed_target: bool,) -> Option[ViewportRenderer] {
     let vertex_shader = device.create_shader_module(cube_vertex_spirv(), shader_stage_vertex())
     let fragment_shader = device.create_shader_module(cube_fragment_spirv(), shader_stage_fragment())
     let mut attributes = Vec[VertexAttribute]::new()
@@ -163,12 +166,43 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
                 1.0471976_f32, 0.1_f32, 100.0_f32,),
             DirectionalLight::new(Vec3::new( - 0.45_f32, - 0.8_f32, - 0.35_f32),
                 Vec3::new(1.0_f32, 0.97_f32, 0.92_f32), 1.15_f32,), window,
-            swapchain.width(), swapchain.height()
+            Vec[Swapchain]::new(), 0_u32, swapchain.width(), swapchain.height(),
+            borrowed_target
         }
         ,)
 }
 
 impl for ViewportRenderer {
+    pub fn resize_shared(self: mut Self, width: u32, height: u32) -> bool {
+        if width == 0_u32 || height == 0_u32 ||
+            (self.swapchain.width() == width && self.swapchain.height() == height) {
+            ret width > 0_u32 && height > 0_u32
+        }
+        let next = self.device.create_shared_offscreen_target(width, height)
+        if !next.available() {
+            ret false
+        }
+        self.retired_targets.push(self.swapchain)
+        self.swapchain = next
+        self.frames_since_resize = 0_u32
+        self.viewport_width = width
+        self.viewport_height = height
+        ret self.swapchain.available() && self.pipeline.available()
+    }
+
+    fn collect_retired_targets(self: mut Self) ->() {
+        if self.retired_targets.len() == 0_usize ||
+        self.frames_since_resize == 0_u32 ||
+        !self.swapchain.last_frame_complete() {
+            ret()
+        }
+        for target in self.retired_targets {
+            target.destroy_retired()
+        }
+        self.retired_targets.clear()
+        ret()
+    }
+
     fn object_mesh(self: Self, index: usize) -> MeshId {
         match self.object_meshes.get(index) {
             Option::Some(mesh) => {
@@ -325,7 +359,8 @@ impl for ViewportRenderer {
             Option::Some(adapter) => {
                 let device = instance.create_device(adapter)
                 let swapchain = device.create_offscreen_target(width, height)
-                ret viewport_target(instance, device, swapchain, Option[GrapheneWindow]::None)
+                ret viewport_target(instance, device, swapchain,
+                    Option[GrapheneWindow]::None, false,)
             }
             Option::None => {
                 println("Graphene viewport: no Vulkan adapter found")
@@ -348,10 +383,47 @@ impl for ViewportRenderer {
             Option::Some(adapter) => {
                 let device = instance.create_present_device(adapter, window)
                 let swapchain = device.create_swapchain(window)
-                ret viewport_target(instance, device, swapchain, Option[GrapheneWindow]::Some(window))
+                ret viewport_target(instance, device, swapchain,
+                    Option[GrapheneWindow]::Some(window), false,)
             }
             Option::None => {
                 println("Graphene viewport: no Vulkan adapter found")
+            }
+        }
+        ret Option[ViewportRenderer]::None
+    }
+
+    pub fn create_shared(instance_handle: usize, physical_device: usize, device_handle: usize,
+        queue_family: u32, width: u32, height: u32,) -> Option[ViewportRenderer] {
+        let instance = GraphicsInstance::borrow(instance_handle, physical_device)
+        if !instance.available() {
+            println("Graphene borrowed Vulkan initialization: " + instance.error())
+            ret Option[ViewportRenderer]::None
+        }
+        let device = instance.borrow_device(device_handle, queue_family)
+        let swapchain = device.create_shared_offscreen_target(width, height)
+        ret viewport_target(instance, device, swapchain, Option[GrapheneWindow]::None, false)
+    }
+
+    /// Builds viewport resources against Luma's direct swapchain. The
+    /// swapchain remains owned by Luma and is never resized or destroyed here.
+    pub fn create_composed(instance_handle: usize, physical_device: usize,
+        render_device_handle: usize, swapchain_handle: usize,) ->
+    Option[ViewportRenderer] {
+        let instance = GraphicsInstance::borrow(instance_handle, physical_device)
+        if !instance.available() {
+            println("Graphene borrowed Vulkan initialization: " + instance.error())
+            ret Option[ViewportRenderer]::None
+        }
+        match instance.preferred_adapter() {
+            Option::Some(adapter) => {
+                let device = GraphicsDevice::borrow_backend(render_device_handle, adapter)
+                let swapchain = Swapchain::borrow(swapchain_handle)
+                ret viewport_target(instance, device, swapchain,
+                    Option[GrapheneWindow]::None, true,)
+            }
+            Option::None => {
+                println("Graphene viewport: borrowed Vulkan adapter was not found")
             }
         }
         ret Option[ViewportRenderer]::None
@@ -812,6 +884,7 @@ impl for ViewportRenderer {
 
     pub fn render_camera_at(self: mut Self, yaw: f32, pitch: f32, distance: f32, target: Vec3) -> bool
     {
+        self.collect_retired_targets()
         let frame = self.swapchain.acquire_frame()
         if !frame.available() {
             println("Graphene viewport: " + frame.error()) frame.destroy() ret false
@@ -825,11 +898,41 @@ impl for ViewportRenderer {
         let recorded = self.renderer.render_scene(self.scene, camera, self.light, self.meshes, self.materials,
             pass, frame.slot(), aspect,) && pass.end()
         let presented = recorded && frame.present()
+        if presented {
+            self.frames_since_resize = self.frames_since_resize + 1_u32
+        }
         if !presented {
             println("Graphene viewport: " + frame.error())
         }
         frame.destroy()
         ret presented
+    }
+
+    /// Records the viewport into a frame borrowed from Luma. This method
+    /// neither submits nor presents the frame.
+    pub fn record_camera_at(self: mut Self, frame_handle: usize, frame_slot: u32,
+        viewport_x: u32, viewport_y: u32, viewport_width: u32, viewport_height: u32,
+        yaw: f32, pitch: f32, distance: f32, target: Vec3,) -> bool {
+        if !self.borrowed_target || frame_handle == 0_usize ||
+        viewport_width == 0_u32 || viewport_height == 0_u32 {
+            ret false
+        }
+        let frame = RenderFrame::borrow(frame_handle)
+        if !frame.available() {
+            ret false
+        }
+        self.viewport_width = viewport_width
+        self.viewport_height = viewport_height
+        let aspect = (viewport_width as f32) / (viewport_height as f32)
+        let camera = PerspectiveCamera::new(
+            target.add(Vec3::from_spherical(yaw, pitch).scale(distance)),
+            target, 1.0471976_f32, 0.1_f32, 100.0_f32,)
+        let pass = frame.continue_render_pass(self.pipeline)
+        let viewport_set = frame.set_viewport(viewport_x, viewport_y,
+            viewport_width, viewport_height,)
+        ret viewport_set &&
+            self.renderer.render_scene(self.scene, camera, self.light,
+                self.meshes, self.materials, pass, frame_slot, aspect,)
     }
 
     pub fn render_editor(self: mut Self, yaw: f32, pitch: f32, distance: f32,
@@ -843,6 +946,7 @@ impl for ViewportRenderer {
     pub fn render_editor_at(self: mut Self, yaw: f32, pitch: f32, distance: f32, target: Vec3,
         ui_pixels: usize, ui_width: u32, ui_height: u32, ui_pitch: u32,
         viewport_x: u32, viewport_y: u32, viewport_width: u32, viewport_height: u32,) -> bool {
+        self.collect_retired_targets()
         let frame = self.swapchain.acquire_frame()
         if !frame.available() {
             println("Graphene editor viewport: " + frame.error()) frame.destroy() ret false
@@ -859,6 +963,9 @@ impl for ViewportRenderer {
         let composed = recorded && frame.upload_ui(ui_pixels, ui_width, ui_height, ui_pitch,
             viewport_x, viewport_y, viewport_width, viewport_height,)
         let presented = composed && frame.present()
+        if presented {
+            self.frames_since_resize = self.frames_since_resize + 1_u32
+        }
         if !presented {
             println("Graphene editor viewport: " + frame.error())
         }
@@ -881,16 +988,29 @@ impl for ViewportRenderer {
     pub fn pitch(self: Self) -> u32 {
         ret self.swapchain.pitch()
     }
+    pub fn external_image(self: Self) -> usize {
+        ret self.swapchain.external_image()
+    }
+    pub fn external_layout(self: Self) -> u32 {
+        ret self.swapchain.external_layout()
+    }
 
     pub fn destroy(self: Self) ->() {
-        self.swapchain.destroy()
+        for target in self.retired_targets {
+            target.destroy()
+        }
+        if !self.borrowed_target {
+            self.swapchain.destroy()
+        }
         self.pipeline.destroy()
         self.renderer.destroy()
         self.layout.destroy()
         self.meshes.destroy()
         self.vertex_shader.destroy()
         self.fragment_shader.destroy()
-        self.device.destroy()
+        if !self.borrowed_target {
+            self.device.destroy()
+        }
         match self.window {
             Option::Some(window) => {
                 window.destroy()
