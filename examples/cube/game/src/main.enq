@@ -25,10 +25,15 @@ fn main() -> u32 {
             attributes.push(VertexAttribute::new(2_u32, vertex_format_float32x3(), 24_u32))
             let mut entries = Vec[BindGroupLayoutEntry]::new()
             entries.push(BindGroupLayoutEntry::uniform(0_u32, shader_stage_vertex() | shader_stage_fragment()))
+            entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_vertex()))
             let layout = device.create_bind_group_layout(entries)
             let pipeline = device.create_render_pipeline_with_options(swapchain, vertex_shader, fragment_shader,
                 VertexBufferLayout::new(36_u32, attributes), layout,
                 RenderPipelineOptions::depth().with_backface_culling())
+            let double_sided_pipeline = device.create_render_pipeline_with_options(
+                swapchain, vertex_shader, fragment_shader,
+                VertexBufferLayout::new(36_u32, attributes), layout,
+                RenderPipelineOptions::depth())
             let cube = cube_mesh(1.4_f32)
             let mut meshes = MeshAssets::new()
             let mesh_id = meshes.upload(device, cube)
@@ -37,7 +42,8 @@ fn main() -> u32 {
                 0.0_f32, 0.35_f32))
             let child_material = materials.add(StandardMaterial::new(Vec3::new(1.0_f32, 0.48_f32, 0.24_f32),
                 0.15_f32, 0.7_f32))
-            let mut renderer = SceneRenderer::create(device, layout, swapchain.frames_in_flight())
+            let mut renderer = SceneRenderer::create(
+                device, layout, swapchain.frames_in_flight(), pipeline, double_sided_pipeline)
             if device.available() && swapchain.available() && swapchain.frames_in_flight() == 2_u32 && pipeline.available() &&
                 renderer.available() && meshes.contains(mesh_id) &&
                 materials.get(root_material).is_some() && materials.get(child_material).is_some() {
@@ -91,7 +97,8 @@ fn main() -> u32 {
                     frame.destroy()
                 }
             } else { println("Cube initialization failed") }
-            swapchain.destroy() pipeline.destroy() renderer.destroy() layout.destroy()
+            swapchain.destroy() pipeline.destroy() double_sided_pipeline.destroy()
+            renderer.destroy() layout.destroy()
             meshes.destroy()
             vertex_shader.destroy() fragment_shader.destroy() device.destroy()
         }

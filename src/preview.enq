@@ -30,6 +30,7 @@ pub struct ViewportRenderer {
     fragment_shader: ShaderModule
     layout: BindGroupLayout
     pipeline: RenderPipeline
+    double_sided_pipeline: RenderPipeline
     meshes: MeshAssets
     materials: MaterialAssets
     renderer: SceneRenderer
@@ -79,10 +80,15 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     attributes.push(VertexAttribute::new(2_u32, vertex_format_float32x3(), 24_u32))
     let mut entries = Vec[BindGroupLayoutEntry]::new()
     entries.push(BindGroupLayoutEntry::uniform(0_u32, shader_stage_vertex() | shader_stage_fragment()))
+    entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_vertex()))
     let layout = device.create_bind_group_layout(entries)
     let pipeline = device.create_render_pipeline_with_options(swapchain, vertex_shader, fragment_shader,
         VertexBufferLayout::new(36_u32, attributes), layout,
         RenderPipelineOptions::depth().with_backface_culling(),)
+    let double_sided_pipeline = device.create_render_pipeline_with_options(
+        swapchain, vertex_shader, fragment_shader,
+        VertexBufferLayout::new(36_u32, attributes), layout,
+        RenderPipelineOptions::depth(),)
     let mut meshes = MeshAssets::new()
     let mesh_id = meshes.upload(device, cube_mesh(1.2_f32))
     let grid_mesh_id = meshes.upload(device, editor_grid_mesh(20.0_f32, 20_u32))
@@ -105,7 +111,8 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
             Vec3::new(0.02_f32, 0.62_f32, 0.06_f32), 0.0_f32, 0.35_f32,).with_unlit())
     let gizmo_z_material = materials.add(StandardMaterial::new(
             Vec3::new(0.015_f32, 0.16_f32, 1.0_f32), 0.0_f32, 0.35_f32,).with_unlit())
-    let renderer = SceneRenderer::create(device, layout, swapchain.frames_in_flight())
+    let renderer = SceneRenderer::create(
+        device, layout, swapchain.frames_in_flight(), pipeline, double_sided_pipeline,)
     if !device.available() || !swapchain.available() || !pipeline.available() || !renderer.available()
     ||
     !meshes.contains(mesh_id) || !meshes.contains(grid_mesh_id) || !meshes.contains(gizmo_tip_mesh_id)
@@ -156,6 +163,7 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     scene.set_renderable(gizmo_z_tip, Option[Renderable]::Some(Renderable::new(gizmo_tip_mesh_id, gizmo_z_material)))
     ret Option[ViewportRenderer]::Some(ViewportRenderer {
             instance, device, swapchain, vertex_shader, fragment_shader, layout, pipeline,
+            double_sided_pipeline,
             meshes, materials, renderer, scene, mesh_id, material_id, selected_material_id,
             unlit_material_id, selected_unlit_material_id, outline_material_id,
             selection_outline, grid,
@@ -325,7 +333,7 @@ impl for ViewportRenderer {
         let color = material.base_color()
         let selected_color = Vec3::new(color.x() + 0.04_f32, color.y() + 0.04_f32, color.z() + 0.04_f32)
         let selected = StandardMaterial::new(selected_color, material.metallic(), material.roughness())
-        .with_unlit_value(material.unlit())
+        .with_unlit_value(material.unlit()).with_double_sided_value(material.double_sided())
         let unlit = material.with_unlit()
         let selected_unlit = selected.with_unlit()
         if !self.materials.set(self.cube_material, material) ||
@@ -1003,6 +1011,7 @@ impl for ViewportRenderer {
             self.swapchain.destroy()
         }
         self.pipeline.destroy()
+        self.double_sided_pipeline.destroy()
         self.renderer.destroy()
         self.layout.destroy()
         self.meshes.destroy()

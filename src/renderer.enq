@@ -12,12 +12,11 @@ import mod::scene::world::Scene
 pub struct ObjectUniforms {
     buffers: Vec[GpuBuffer] groups: Vec[BindGroup] frame_count: u32 available: bool
 }
-struct SceneObjectResources {
-    entity: u64 uniforms: ObjectUniforms
-}
 pub struct SceneRenderer {
-    device: GraphicsDevice layout: BindGroupLayout frame_count: u32 objects: Vec[SceneObjectResources]
-    available: bool
+    device: GraphicsDevice layout: BindGroupLayout frame_count: u32
+    frame_buffers: Vec[GpuBuffer] instance_buffers: Vec[GpuBuffer] groups: Vec[BindGroup]
+    solid_pipeline: RenderPipeline double_sided_pipeline: RenderPipeline
+    rendered_objects: usize available: bool
 }
 
 impl for ObjectUniforms {
@@ -94,54 +93,38 @@ impl for ObjectUniforms {
 }
 
 impl for SceneRenderer {
-    pub fn create(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32) -> SceneRenderer
+    pub fn create(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32,
+        solid_pipeline: RenderPipeline, double_sided_pipeline: RenderPipeline,) -> SceneRenderer
     {
+        let mut frame_buffers = Vec[GpuBuffer]::new()
+        let mut instance_buffers = Vec[GpuBuffer]::new()
+        let mut groups = Vec[BindGroup]::new()
+        let mut available = device.available() && layout.available() && frame_count > 0_u32 &&
+        solid_pipeline.available() && double_sided_pipeline.available()
+        let mut slot = 0_u32
+        while slot < frame_count {
+            let frame_buffer = device.create_buffer(96_u64, buffer_uniform(), true)
+            let instance_buffer = device.create_buffer(98304_u64, buffer_storage(), true)
+            let group = device.create_scene_bind_group(
+                layout, 0_u32, frame_buffer, 96_u64, 1_u32, instance_buffer, 98304_u64,)
+            if !frame_buffer.available() || !instance_buffer.available() || !group.available() {
+                available = false
+            }
+            frame_buffers.push(frame_buffer)
+            instance_buffers.push(instance_buffer)
+            groups.push(group)
+            slot = slot + 1_u32
+        }
         ret SceneRenderer {
-            device, layout, frame_count, Vec[SceneObjectResources]::new(),
-            device.available() && layout.available() && frame_count > 0_u32
+            device, layout, frame_count, frame_buffers, instance_buffers, groups,
+            solid_pipeline, double_sided_pipeline, 0_usize, available
         }
     }
     pub fn available(self: Self) -> bool {
         ret self.available
     }
     pub fn object_count(self: Self) -> usize {
-        ret self.objects.len()
-    }
-    fn object_index(self: Self, entity: u64) -> Option[usize] {
-        let mut index = 0_usize
-        while index < self.objects.len() {
-            match self.objects.get(index) {
-                Option::Some(resources) => {
-                    if resources.entity == entity {
-                        ret Option[usize]::Some(index)
-                    }
-                }
-                Option::None => {
-                }
-            }
-            index = index + 1_usize
-        }
-        ret Option[usize]::None
-    }
-    fn ensure_object(self: mut Self, entity: u64) -> Option[usize] {
-        match self.object_index(entity) {
-            Option::Some(index) => {
-                ret Option[usize]::Some(index)
-            }
-            Option::None => {
-            }
-        }
-        let uniforms = ObjectUniforms::create(self.device, self.layout, self.frame_count)
-        if !uniforms.available() {
-            uniforms.destroy() ret Option[usize]::None
-        }
-        let index = self.objects.len()
-        self.objects.push(SceneObjectResources {
-                entity, uniforms
-            }
-            ,
-        )
-        ret Option[usize]::Some(index)
+        ret self.rendered_objects
     }
     pub fn render_scene(self: mut Self, scene: Scene, camera: PerspectiveCamera, light: DirectionalLight,
         meshes: MeshAssets, materials: MaterialAssets, pass: RenderPassEncoder,
@@ -150,63 +133,123 @@ impl for SceneRenderer {
             ret false
         }
         let items = scene.visible_render_items()
-        let mut render_index = 0_usize
+        if items.len() > 1024_usize {
+            ret false
+        }
+        self.rendered_objects = items.len()
+        let mut frame_values = Vec[f32]::with_capacity(24_usize)
+        for value in camera.view_projection(aspect).values() {
+            frame_values.push(value)
+        }
+        for value in light.uniform_values() {
+            frame_values.push(value)
+        }
+        let mut instance_values = Vec[f32]::with_capacity(items.len() * 24_usize)
         for item in items {
-            let mut material = StandardMaterial::default()
-            let mut material_found = false
             match materials.get(item.material()) {
-                Option::Some(value) => {
-                    material = value material_found = true
-                }
-                Option::None => {
-                }
-            }
-            if !material_found {
-                ret false
-            }
-            let mut object_index = 0_usize
-            let mut object_found = false
-            match self.objects.get(render_index) {
-                Option::Some(resources) => {
-                    if resources.entity == item.entity() {
-                        object_index = render_index object_found = true
+                Option::Some(material) => {
+                    for value in item.world().values() {
+                        instance_values.push(value)
                     }
-                }
-                Option::None => {
-                }
-            }
-            if !object_found {
-                match self.ensure_object(item.entity()) {
-                    Option::Some(value) => {
-                        object_index = value object_found = true
-                    }
-                    Option::None => {
-                    }
-                }
-            }
-            if !object_found {
-                ret false
-            }
-            match self.objects.get(object_index) {
-                Option::Some(resources) => {
-                    if !resources.uniforms.update(frame_slot, camera, item.world(), aspect, light, material)
-                    ||
-                    !resources.uniforms.bind(pass, frame_slot) || !meshes.draw(pass, item.mesh()) {
-                        ret false
+                    for value in material.uniform_values() {
+                        instance_values.push(value)
                     }
                 }
                 Option::None => {
                     ret false
                 }
             }
-            render_index = render_index + 1_usize
+        }
+        let mut uploaded = false
+        match self.frame_buffers.get(frame_slot as usize) {
+            Option::Some(frame_buffer) => {
+                match self.instance_buffers.get(frame_slot as usize) {
+                    Option::Some(instance_buffer) => {
+                        uploaded = frame_buffer.write_f32s(0_u64, frame_values) &&
+                        instance_buffer.write_f32s(0_u64, instance_values)
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        if !uploaded {
+            ret false
+        }
+        match self.groups.get(frame_slot as usize) {
+            Option::Some(group) => {
+                if !pass.bind_group(group) {
+                    ret false
+                }
+            }
+            Option::None => {
+                ret false
+            }
+        }
+        let mut batch_mesh = MeshId::new(0_u64)
+        let mut batch_double_sided = false
+        let mut batch_first = 0_u32
+        let mut batch_count = 0_u32
+        let mut item_index = 0_u32
+        for item in items {
+            let material = match materials.get(item.material()) {
+                Option::Some(value) => value
+                Option::None => {
+                    ret false
+                }
+            }
+            let changes = batch_count >= 64_u32 ||
+            (batch_count > 0_u32 &&(item.mesh().value() != batch_mesh.value() ||
+                    material.double_sided() != batch_double_sided)
+            )
+            if changes {
+                if !pass.bind_pipeline(if batch_double_sided {
+                        self.double_sided_pipeline
+                    } else {
+                        self.solid_pipeline
+                    }
+                ) ||
+                !meshes.draw_instanced(pass, batch_mesh, batch_count, batch_first) {
+                    ret false
+                }
+                batch_first = item_index
+                batch_count = 0_u32
+            }
+            if batch_count == 0_u32 {
+                batch_mesh = item.mesh()
+                batch_double_sided = material.double_sided()
+            }
+            batch_count = batch_count + 1_u32
+            item_index = item_index + 1_u32
+        }
+        if batch_count > 0_u32 &&
+        (!pass.bind_pipeline(if batch_double_sided {
+                    self.double_sided_pipeline
+                } else {
+                    self.solid_pipeline
+                }
+            ) ||
+            !meshes.draw_instanced(pass, batch_mesh, batch_count, batch_first)) {
+            ret false
         }
         ret true
     }
     pub fn destroy(self: Self) -> bool {
         let mut destroyed = true
-        for resources in self.objects {
-            if !resources.uniforms.destroy() {
+        for group in self.groups {
+            if !group.destroy() {
+                destroyed = false
+            }
+        }
+        for buffer in self.frame_buffers {
+            if !buffer.destroy() {
+                destroyed = false
+            }
+        }
+        for buffer in self.instance_buffers {
+            if !buffer.destroy() {
                 destroyed = false
             }
         }

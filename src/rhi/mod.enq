@@ -12,6 +12,7 @@ import vulkan_native:: {
     native_shader_available, native_shader_create, native_shader_destroy, native_shader_error, native_shader_stage,
     native_bind_group_available, native_bind_group_create, native_bind_group_destroy, native_bind_group_error,
     native_storage_bind_group_create,
+    native_scene_bind_group_create,
     native_bind_group_layout_available, native_bind_group_layout_create, native_bind_group_layout_destroy,
     native_bind_group_layout_create_entries, native_bind_group_layout_error,
     native_material_bind_group_create, native_sampler_available, native_sampler_create,
@@ -22,7 +23,8 @@ import vulkan_native:: {
     native_encoder_available, native_encoder_create, native_encoder_destroy, native_encoder_error,
     native_encoder_submit_wait, native_buffer_available, native_buffer_create, native_buffer_destroy,
     native_buffer_error, native_buffer_host_visible, native_buffer_size, native_buffer_write_f32,
-    native_buffer_read_u32, native_buffer_write_u32,
+    native_buffer_read_u32, native_buffer_write_u32, native_buffer_write_f32s,
+    native_buffer_write_u32s,
     native_encoder_bind_compute_group, native_encoder_bind_compute_pipeline, native_encoder_dispatch,
     native_encoder_storage_host_barrier,
     native_encoder_copy_buffer, native_encoder_transfer_geometry_barrier, native_encoder_transfer_host_barrier,
@@ -604,6 +606,9 @@ impl for RenderPassEncoder {
     pub fn bind_group(self: Self, group: BindGroup) -> bool {
         ret self.available() && native_frame_bind_group(self.handle, group.handle)
     }
+    pub fn bind_pipeline(self: Self, pipeline: RenderPipeline) -> bool {
+        ret self.available() && native_frame_bind_pipeline(self.handle, pipeline.handle)
+    }
     pub fn bind_vertex_buffer(self: Self, buffer: GpuBuffer) -> bool {
         ret self.available() && native_frame_bind_vertex_buffer(self.handle, buffer.handle)
     }
@@ -626,6 +631,16 @@ impl for RenderPassEncoder {
     }
     pub fn end(self: Self) -> bool {
         ret self.available() && native_frame_end_render_pass(self.handle)
+    }
+}
+
+impl for GpuMesh {
+    pub fn draw_instanced(self: Self, pass: RenderPassEncoder,
+        instance_count: u32, first_instance: u32,) -> bool {
+        ret self.available() && pass.bind_vertex_buffer(self.vertex) &&
+        pass.bind_index_buffer(self.index) &&
+        pass.draw_indexed_instanced(self.index_count, instance_count,
+            0_u32, 0_i32, first_instance,)
     }
 }
 
@@ -887,27 +902,13 @@ impl for GpuBuffer {
         ret self.handle != 0_usize && native_buffer_write_u32(self.handle, offset, value)
     }
     pub fn write_u32s(self: Self, offset: u64, values: Vec[u32]) -> bool {
-        let mut current = offset
-        for value in values {
-            if !self.write_u32(current, value) {
-                ret false
-            }
-            current = current + 4_u64
-        }
-        ret true
+        ret self.handle != 0_usize && native_buffer_write_u32s(self.handle, offset, values)
     }
     pub fn write_f32(self: Self, offset: u64, value: f32) -> bool {
         ret self.handle != 0_usize && native_buffer_write_f32(self.handle, offset, value)
     }
     pub fn write_f32s(self: Self, offset: u64, values: Vec[f32]) -> bool {
-        let mut current = offset
-        for value in values {
-            if !self.write_f32(current, value) {
-                ret false
-            }
-            current = current + 4_u64
-        }
-        ret true
+        ret self.handle != 0_usize && native_buffer_write_f32s(self.handle, offset, values)
     }
     pub fn read_u32(self: Self, offset: u64) -> u32 {
         ret if self.handle == 0_usize {
@@ -1071,6 +1072,15 @@ impl for GraphicsDevice {
         offset: u64, range: u64,) -> BindGroup {
         ret BindGroup {
             native_storage_bind_group_create(self.handle, layout.handle, buffer.handle, offset, range)
+        }
+    }
+    pub fn create_scene_bind_group(self: Self, layout: BindGroupLayout,
+        uniform_binding: u32, uniform_buffer: GpuBuffer, uniform_range: u64,
+        storage_binding: u32, storage_buffer: GpuBuffer, storage_range: u64,) -> BindGroup {
+        ret BindGroup {
+            native_scene_bind_group_create(self.handle, layout.handle,
+                uniform_binding, uniform_buffer.handle, uniform_range,
+                storage_binding, storage_buffer.handle, storage_range,)
         }
     }
     pub fn create_compute_pipeline(self: Self, shader: ShaderModule, layout: BindGroupLayout) -> ComputePipeline

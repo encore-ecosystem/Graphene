@@ -1,8 +1,22 @@
+import core::option::Option
 import graphene::{cube_mesh, plane_mesh, sphere_mesh}
 
 fn main() -> u32 {
     let cube = cube_mesh(1.0_f32)
     if cube.vertex_count() != 24_usize || cube.index_count() != 36_usize { ret 1_u32 }
+    let cube_indices = cube.indices()
+    match cube_indices.get(0_usize) {
+        Option::Some(a) => { if a != 0_u32 { ret 5_u32 } }
+        Option::None => { ret 5_u32 }
+    }
+    match cube_indices.get(1_usize) {
+        Option::Some(b) => { if b != 1_u32 { ret 6_u32 } }
+        Option::None => { ret 6_u32 }
+    }
+    match cube_indices.get(2_usize) {
+        Option::Some(c) => { if c != 2_u32 { ret 7_u32 } }
+        Option::None => { ret 7_u32 }
+    }
     let plane = plane_mesh(2.0_f32)
     if plane.vertex_count() != 4_usize || plane.index_count() != 12_usize { ret 2_u32 }
     let sphere = sphere_mesh(1.0_f32, 8_u32, 12_u32)

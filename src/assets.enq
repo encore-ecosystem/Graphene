@@ -23,7 +23,7 @@ pub struct MaterialAssets {
     entries: Vec[MaterialAssetEntry] next_id: u64
 }
 pub struct StandardMaterial {
-    base_color: Vec3 metallic: f32 roughness: f32 unlit: bool
+    base_color: Vec3 metallic: f32 roughness: f32 unlit: bool double_sided: bool
 }
 
 fn saturate(value: f32) -> f32 {
@@ -41,7 +41,7 @@ fn saturate(value: f32) -> f32 {
 impl for StandardMaterial {
     pub fn new(base_color: Vec3, metallic: f32, roughness: f32) -> StandardMaterial {
         ret StandardMaterial {
-            base_color, saturate(metallic), saturate(roughness), false
+            base_color, saturate(metallic), saturate(roughness), false, false
         }
     }
     pub fn default() -> StandardMaterial {
@@ -62,28 +62,39 @@ impl for StandardMaterial {
     pub fn unlit(self: Self) -> bool {
         ret self.unlit
     }
+    pub fn double_sided(self: Self) -> bool {
+        ret self.double_sided
+    }
     pub fn with_base_color(self: Self, value: Vec3) -> StandardMaterial {
         ret StandardMaterial {
-            value, self.metallic, self.roughness, self.unlit
+            value, self.metallic, self.roughness, self.unlit, self.double_sided
         }
     }
     pub fn with_metallic(self: Self, value: f32) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, saturate(value), self.roughness, self.unlit
+            self.base_color, saturate(value), self.roughness, self.unlit, self.double_sided
         }
     }
     pub fn with_roughness(self: Self, value: f32) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, self.metallic, saturate(value), self.unlit
+            self.base_color, self.metallic, saturate(value), self.unlit, self.double_sided
         }
     }
     pub fn with_unlit_value(self: Self, value: bool) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, self.metallic, self.roughness, value
+            self.base_color, self.metallic, self.roughness, value, self.double_sided
         }
     }
     pub fn with_unlit(self: Self) -> StandardMaterial {
         ret self.with_unlit_value(true)
+    }
+    pub fn with_double_sided_value(self: Self, value: bool) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness, self.unlit, value
+        }
+    }
+    pub fn with_double_sided(self: Self) -> StandardMaterial {
+        ret self.with_double_sided_value(true)
     }
     pub fn uniform_values(self: Self) -> Vec[f32] {
         let mut values = Vec[f32]::new()
@@ -138,6 +149,15 @@ impl for MeshAssets {
         for entry in self.entries {
             if entry.id.value() == id.value() {
                 ret pass.draw_mesh(entry.mesh)
+            }
+        }
+        ret false
+    }
+    pub fn draw_instanced(self: Self, pass: RenderPassEncoder, id: MeshId,
+        instance_count: u32, first_instance: u32,) -> bool {
+        for entry in self.entries {
+            if entry.id.value() == id.value() {
+                ret entry.mesh.draw_instanced(pass, instance_count, first_instance)
             }
         }
         ret false

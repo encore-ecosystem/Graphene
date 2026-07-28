@@ -20,6 +20,8 @@ struct BenchmarkOptions {
     output: str
     warmup_ns: u64
     duration_ns: u64
+    repeat: u32
+    verify_target: u64
 }
 
 struct BenchmarkResult {
@@ -27,6 +29,8 @@ struct BenchmarkResult {
     width: u32
     height: u32
     objects: u32
+    run: u32
+    gpu: str
     statistics: FrameStatistics
 }
 
@@ -130,12 +134,15 @@ fn options() -> BenchmarkOptions {
         argument("--profile", "debug"),
         argument("--output", "target/benchmarks/latest.json"),
         parse_seconds(argument("--warmup-seconds", "3"), 3_u64) * 1000000000_u64,
-        parse_seconds(argument("--duration-seconds", "10"), 10_u64) * 1000000000_u64
+        parse_seconds(argument("--duration-seconds", "10"), 10_u64) * 1000000000_u64,
+        parse_seconds(argument("--repeat", "1"), 1_u64) as u32,
+        parse_seconds(argument("--verify-target", "0"), 0_u64)
     }
 }
 
 fn run_mode(name: str, width: u32, height: u32, object_count: u32,
-    warmup_ns: u64, duration_ns: u64,) -> Option[BenchmarkResult] {
+    run: u32, warmup_ns: u64, duration_ns: u64,) -> Option[BenchmarkResult] {
+    let presented = name != "throughput"
     let instance = GraphicsInstance::with_window_support(true)
     if !instance.available() {
         println("Benchmark Vulkan instance failed: " + instance.error())
@@ -153,9 +160,13 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
     match instance.preferred_adapter() {
         Option::Some(adapter) => {
             let device = instance.create_present_device(adapter, window)
-            let swapchain = device.create_swapchain(window)
+            let swapchain = if presented {
+                device.create_swapchain(window)
+            } else {
+                device.create_shared_offscreen_target(width, height)
+            }
             if !device.available() || !swapchain.available() ||
-            !swapchain.set_immediate_present(true) {
+            (presented && !swapchain.set_immediate_present(true)) {
                 println("Benchmark presentation failed: " + device.error() + " " + swapchain.error())
                 swapchain.destroy()
                 device.destroy()
@@ -168,6 +179,7 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
             let mut entries = Vec[BindGroupLayoutEntry]::new()
             entries.push(BindGroupLayoutEntry::uniform(
                     0_u32, shader_stage_vertex() | shader_stage_fragment(),))
+            entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_vertex()))
             let layout = device.create_bind_group_layout(entries)
             let mut attributes = Vec[VertexAttribute]::new()
             attributes.push(VertexAttribute::new(0_u32, vertex_format_float32x3(), 0_u32))
@@ -177,6 +189,10 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
                 swapchain, vertex_shader, fragment_shader,
                 VertexBufferLayout::new(36_u32, attributes), layout,
                 RenderPipelineOptions::depth().with_backface_culling(),)
+            let double_sided_pipeline = device.create_render_pipeline_with_options(
+                swapchain, vertex_shader, fragment_shader,
+                VertexBufferLayout::new(36_u32, attributes), layout,
+                RenderPipelineOptions::depth(),)
             let mut meshes = MeshAssets::new()
             let mesh = meshes.upload(device, cube_mesh(if object_count == 1_u32 {
                         1.2_f32
@@ -186,7 +202,8 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
                 ))
             let mut materials = MaterialAssets::new()
             let material = materials.add(StandardMaterial::editor_default())
-            let mut renderer = SceneRenderer::create(device, layout, swapchain.frames_in_flight())
+            let mut renderer = SceneRenderer::create(
+                device, layout, swapchain.frames_in_flight(), pipeline, double_sided_pipeline,)
             if !pipeline.available() || !renderer.available() || !meshes.contains(mesh) {
                 println("Benchmark pipeline initialization failed")
                 renderer.destroy()
@@ -232,11 +249,16 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
                 Vec3::new( - 0.45_f32, - 0.8_f32, - 0.35_f32),
                 Vec3::new(1.0_f32, 0.97_f32, 0.92_f32), 1.0_f32,)
             println("Warming " + name + " for " +
-                Debug::fmt(warmup_ns / 1000000000_u64) + " seconds on " + adapter.name())
+                Debug::fmt(warmup_ns / 1000000000_u64) + " seconds on " + adapter.name() +
+                " (run " + Debug::fmt(run) + ")")
             let warmup_started = performance_counter_ns()
             let mut running = true
             while running && performance_counter_ns() - warmup_started < warmup_ns {
-                running = window.poll()
+                running = if presented {
+                    window.poll()
+                } else {
+                    true
+                }
                 let frame = swapchain.acquire_frame()
                 if !frame.available() {
                     running = false
@@ -253,7 +275,11 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
             let mut samples = Vec[u64]::new()
             let measured_started = performance_counter_ns()
             while running && performance_counter_ns() - measured_started < duration_ns {
-                running = window.poll()
+                running = if presented {
+                    window.poll()
+                } else {
+                    true
+                }
                 if object_count > 1_u32 {
                     let seconds =(performance_counter_ns() - measured_started) as f32 *
                     0.000000001_f32
@@ -294,6 +320,7 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
             renderer.destroy()
             meshes.destroy()
             pipeline.destroy()
+            double_sided_pipeline.destroy()
             layout.destroy()
             vertex_shader.destroy()
             fragment_shader.destroy()
@@ -305,7 +332,7 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
                 ret Option[BenchmarkResult]::None
             }
             ret Option[BenchmarkResult]::Some(BenchmarkResult {
-                    name, width, height, object_count, statistics
+                    name, width, height, object_count, run, adapter.name(), statistics
                 }
                 ,)
         }
@@ -321,7 +348,13 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
 fn result_json(result: BenchmarkResult) -> str {
     let stats = result.statistics
     ret "{\"name\":\"" + result.name + "\",\"width\":" + Debug::fmt(result.width) +
-    ",\"height\":" + Debug::fmt(result.height) + ",\"objects\":" +
+    ",\"path\":\"" + if result.name == "throughput" {
+        "headless-submit"
+    } else {
+        "presented"
+    }
+    + "\",\"run\":" + Debug::fmt(result.run) + ",\"gpu\":\"" + result.gpu +
+    "\",\"height\":" + Debug::fmt(result.height) + ",\"objects\":" +
     Debug::fmt(result.objects) + ",\"frames\":" + Debug::fmt(stats.frames()) +
     ",\"elapsedNs\":" + Debug::fmt(stats.elapsed_ns()) + ",\"averageFps\":" +
     Debug::fmt(stats.average_fps()) + ",\"meanFrameNs\":" +
@@ -334,13 +367,34 @@ fn result_json(result: BenchmarkResult) -> str {
 
 fn main() -> u32 {
     let config = options()
-    if config.mode != "all" && config.mode != "peak" && config.mode != "representative" {
-        println("Expected --mode all, peak, or representative")
+    if config.mode != "all" && config.mode != "throughput" &&
+    config.mode != "peak" && config.mode != "representative" {
+        println("Expected --mode all, throughput, peak, or representative")
         ret 2_u32
     }
     let mut results = Vec[BenchmarkResult]::new()
+    if config.mode == "all" || config.mode == "throughput" {
+        let mut run = 1_u32
+        let runs = if config.mode == "throughput" {
+            config.repeat
+        } else {
+            1_u32
+        }
+        while run <= runs {
+            match run_mode("throughput", 320_u32, 180_u32, 1_u32, run,
+                config.warmup_ns, config.duration_ns,) {
+                Option::Some(result) => {
+                    results.push(result)
+                }
+                Option::None => {
+                    ret 3_u32
+                }
+            }
+            run = run + 1_u32
+        }
+    }
     if config.mode == "all" || config.mode == "peak" {
-        match run_mode("peak", 320_u32, 180_u32, 1_u32,
+        match run_mode("peak", 320_u32, 180_u32, 1_u32, 1_u32,
             config.warmup_ns, config.duration_ns,) {
             Option::Some(result) => {
                 results.push(result)
@@ -351,7 +405,7 @@ fn main() -> u32 {
         }
     }
     if config.mode == "all" || config.mode == "representative" {
-        match run_mode("representative", 1280_u32, 720_u32, 8_u32,
+        match run_mode("representative", 1280_u32, 720_u32, 64_u32, 1_u32,
             config.warmup_ns, config.duration_ns,) {
             Option::Some(result) => {
                 results.push(result)
@@ -361,7 +415,20 @@ fn main() -> u32 {
             }
         }
     }
-    let mut body = "{\"schemaVersion\":1,\"profile\":\"" + config.profile +
+    let mut verified_runs = 0_u32
+    let mut verification_passed = config.verify_target > 0_u64
+    for result in results {
+        if result.name == "throughput" {
+            verified_runs = verified_runs + 1_u32
+            if result.statistics.average_fps() < config.verify_target as f64 {
+                verification_passed = false
+            }
+        }
+    }
+    if verified_runs < config.repeat {
+        verification_passed = false
+    }
+    let mut body = "{\"schemaVersion\":2,\"profile\":\"" + config.profile +
     "\",\"modes\":["
     let mut index = 0_usize
     for result in results {
@@ -371,7 +438,14 @@ fn main() -> u32 {
         body = body + result_json(result)
         index = index + 1_usize
     }
-    body = body + "]}\n"
+    body = body + "],\"verification\":{\"targetAverageFps\":" +
+    Debug::fmt(config.verify_target) + ",\"requiredRuns\":" + Debug::fmt(config.repeat) +
+    ",\"passed\":" + if verification_passed {
+        "true"
+    } else {
+        "false"
+    }
+    + "}}\n"
     let output_directory = parent_directory(config.output)
     if output_directory != "" {
         mkdir_all(output_directory)
@@ -381,5 +455,9 @@ fn main() -> u32 {
         ret 5_u32
     }
     println("Benchmark report: " + config.output)
+    if config.verify_target > 0_u64 && !verification_passed {
+        println("Benchmark verification failed")
+        ret 6_u32
+    }
     ret 0_u32
 }

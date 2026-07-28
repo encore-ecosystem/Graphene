@@ -3171,6 +3171,8 @@ fn material_inspector(material: StandardMaterial, hovered: str, icons: EditorIco
     panel.push(material_scalar_control("Metallic", "metallic", material.metallic(), hovered, icons))
     panel.push(material_scalar_control("Roughness", "roughness", material.roughness(), hovered, icons))
     panel.push(popup_action("material-unlit", "Unlit", icons.lighting, hovered, false, material.unlit()))
+    panel.push(popup_action("material-double-sided", "Double Sided", icons.panels, hovered, false,
+            material.double_sided(),))
     panel.push(Widget::button("material-reset", "Reset Material").with_flex(30.0_f32, 0.0_f32).with_style(
             control_style(false, hovered == "material-reset").with_font_size(9.0_f32)))
     panel.push(Widget::spacer(1.0_f32))
