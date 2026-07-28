@@ -305,54 +305,104 @@ impl for OperationCompletionCommand {
 }
 
 impl for ProjectRequestCommand {
-    pub fn open(path: str) -> Self { ret Self { "open", path, "" } }
-    pub fn create(path: str, template_name: str) -> Self {
-        ret Self { "create", path, template_name }
+    pub fn open(path: str) -> Self {
+        ret Self {
+            "open", path, ""
+        }
     }
-    pub fn operation(self: Self) -> str { ret self.operation }
-    pub fn path(self: Self) -> str { ret self.path }
-    pub fn template_name(self: Self) -> str { ret self.template_name }
+    pub fn create(path: str, template_name: str) -> Self {
+        ret Self {
+            "create", path, template_name
+        }
+    }
+    pub fn operation(self: Self) -> str {
+        ret self.operation
+    }
+    pub fn path(self: Self) -> str {
+        ret self.path
+    }
+    pub fn template_name(self: Self) -> str {
+        ret self.template_name
+    }
 }
 
 impl for ProjectLoadedCommand {
     pub fn success(scene: Scene, actor_ids: Vec[u64], asset_names: Vec[str]) -> Self {
-        ret Self { Option[Scene]::Some(scene), actor_ids, asset_names, "" }
+        ret Self {
+            Option[Scene]::Some(scene), actor_ids, asset_names, ""
+        }
     }
     pub fn failure(message: str) -> Self {
         ret Self {
             Option[Scene]::None, Vec[u64]::new(), Vec[str]::new(), message
         }
     }
-    pub fn scene(self: Self) -> Option[Scene] { ret self.scene }
-    pub fn actor_ids(self: Self) -> Vec[u64] { ret self.actor_ids }
-    pub fn asset_names(self: Self) -> Vec[str] { ret self.asset_names }
-    pub fn message(self: Self) -> str { ret self.message }
+    pub fn scene(self: Self) -> Option[Scene] {
+        ret self.scene
+    }
+    pub fn actor_ids(self: Self) -> Vec[u64] {
+        ret self.actor_ids
+    }
+    pub fn asset_names(self: Self) -> Vec[str] {
+        ret self.asset_names
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
 }
 
 impl for AssetImportCommand {
-    pub fn new(source: str) -> Self { ret Self { source } }
-    pub fn source(self: Self) -> str { ret self.source }
+    pub fn new(source: str) -> Self {
+        ret Self {
+            source
+        }
+    }
+    pub fn source(self: Self) -> str {
+        ret self.source
+    }
 }
 
 impl for GrapheneTask {
     fn new(id: str, kind: str, state: str, message: str) -> Self {
-        ret Self { id, kind, state, message }
+        ret Self {
+            id, kind, state, message
+        }
     }
-    pub fn id(self: Self) -> str { ret self.id }
-    pub fn kind(self: Self) -> str { ret self.kind }
-    pub fn state(self: Self) -> str { ret self.state }
-    pub fn message(self: Self) -> str { ret self.message }
+    pub fn id(self: Self) -> str {
+        ret self.id
+    }
+    pub fn kind(self: Self) -> str {
+        ret self.kind
+    }
+    pub fn state(self: Self) -> str {
+        ret self.state
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
 }
 
 impl for GrapheneDiagnostic {
     pub fn new(severity: str, message: str, path: str, line: u32, column: u32) -> Self {
-        ret Self { severity, message, path, line, column }
+        ret Self {
+            severity, message, path, line, column
+        }
     }
-    pub fn severity(self: Self) -> str { ret self.severity }
-    pub fn message(self: Self) -> str { ret self.message }
-    pub fn path(self: Self) -> str { ret self.path }
-    pub fn line(self: Self) -> u32 { ret self.line }
-    pub fn column(self: Self) -> u32 { ret self.column }
+    pub fn severity(self: Self) -> str {
+        ret self.severity
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+    pub fn path(self: Self) -> str {
+        ret self.path
+    }
+    pub fn line(self: Self) -> u32 {
+        ret self.line
+    }
+    pub fn column(self: Self) -> u32 {
+        ret self.column
+    }
 }
 
 impl for GrapheneEvent {
@@ -468,15 +518,27 @@ impl for EditorState {
     pub fn building(self: Self) -> bool {
         ret self.building
     }
-    pub fn project_operation(self: Self) -> str { ret self.project_operation }
-    pub fn project_path(self: Self) -> str { ret self.project_path }
-    pub fn project_template(self: Self) -> str { ret self.project_template }
-    pub fn import_source(self: Self) -> str { ret self.import_source }
-    pub fn task(self: Self) -> Option[GrapheneTask] { ret self.task }
-    pub fn diagnostics(self: Self) -> Vec[GrapheneDiagnostic] { ret self.diagnostics }
+    pub fn project_operation(self: Self) -> str {
+        ret self.project_operation
+    }
+    pub fn project_path(self: Self) -> str {
+        ret self.project_path
+    }
+    pub fn project_template(self: Self) -> str {
+        ret self.project_template
+    }
+    pub fn import_source(self: Self) -> str {
+        ret self.import_source
+    }
+    pub fn task(self: Self) -> Option[GrapheneTask] {
+        ret self.task
+    }
+    pub fn diagnostics(self: Self) -> Vec[GrapheneDiagnostic] {
+        ret self.diagnostics
+    }
     /// Configures the project lifecycle boundary after a project is loaded or
     /// closed. Ordinary UI/API mutations remain commands.
-    pub fn configure_project(self: mut Self, loaded: bool) -> () {
+    pub fn configure_project(self: mut Self, loaded: bool) ->() {
         self.project_loaded = loaded
         if !loaded {
             self.simulation_mode = ""
@@ -488,7 +550,7 @@ impl for EditorState {
             self.import_source = ""
             self.task = Option[GrapheneTask]::None
         }
-        ret ()
+        ret()
     }
     pub fn asset_name(self: Self, actor: u64) -> str {
         for asset in self.assets {
@@ -740,7 +802,7 @@ impl for EditorState {
                 }
                 if value.mode() != "play" && value.mode() != "simulate" {
                     ret CommandResult::error(self.revision,
-                        "Simulation mode must be play or simulate")
+                        "Simulation mode must be play or simulate",)
                 }
                 self.simulation_mode = value.mode()
                 ret self.state_event("simulation.started")
@@ -772,7 +834,7 @@ impl for EditorState {
                 self.project_path = value.path()
                 self.project_template = value.template_name()
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "project", "project." + value.operation(), "running", value.path(),))
+                        "project", "project." + value.operation(), "running", value.path(),))
                 ret self.state_event("project." + value.operation() + "-requested")
             }
             GrapheneCommand::CompleteProjectLoad(value) => {
@@ -788,7 +850,7 @@ impl for EditorState {
                         self.project_loaded = true
                         self.selection = Option[u64]::None
                         self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                            "project", "project." + operation, "succeeded", self.project_path,))
+                                "project", "project." + operation, "succeeded", self.project_path,))
                         let event = self.replace_scene_with_assets(scene, value.actor_ids(),
                             value.asset_names(), false,)
                         let mut events = Vec[GrapheneEvent]::new()
@@ -797,7 +859,7 @@ impl for EditorState {
                     }
                     Option::None => {
                         self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                            "project", "project." + operation, "failed", value.message(),))
+                                "project", "project." + operation, "failed", value.message(),))
                         ret self.state_event("project." + operation + "-failed")
                     }
                 }
@@ -814,7 +876,7 @@ impl for EditorState {
                 }
                 self.import_source = value.source()
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "asset-import", "asset.import", "running", value.source(),))
+                        "asset-import", "asset.import", "running", value.source(),))
                 ret self.state_event("asset.import-requested")
             }
             GrapheneCommand::CompleteImport(value) => {
@@ -823,13 +885,19 @@ impl for EditorState {
                 }
                 self.import_source = ""
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "asset-import", "asset.import",
-                    if value.success() { "succeeded" } else { "failed" }, value.message(),))
+                        "asset-import", "asset.import",
+                        if value.success() {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        }
+                        , value.message(),))
                 ret self.state_event(if value.success() {
                         "asset.imported"
                     } else {
                         "asset.import-failed"
-                    },)
+                    }
+                    ,)
             }
             GrapheneCommand::RequestSave => {
                 if !self.project_loaded {
@@ -843,7 +911,7 @@ impl for EditorState {
                 }
                 self.save_pending = true
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "save", "project.save", "running", "",))
+                        "save", "project.save", "running", "",))
                 ret self.state_event("project.save-requested")
             }
             GrapheneCommand::CompleteSave(value) => {
@@ -855,11 +923,11 @@ impl for EditorState {
                     self.saved_history_position = self.history_position
                     self.dirty = false
                     self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                        "save", "project.save", "succeeded", value.message(),))
+                            "save", "project.save", "succeeded", value.message(),))
                     ret self.state_event("project.saved")
                 }
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "save", "project.save", "failed", value.message(),))
+                        "save", "project.save", "failed", value.message(),))
                 ret self.state_event("project.save-failed")
             }
             GrapheneCommand::RequestBuild => {
@@ -875,7 +943,7 @@ impl for EditorState {
                 self.building = true
                 self.diagnostics.clear()
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "build", "build", "running", "",))
+                        "build", "build", "running", "",))
                 ret self.state_event("build.requested")
             }
             GrapheneCommand::BuildPrepared => {
@@ -892,11 +960,16 @@ impl for EditorState {
                 }
                 self.building = false
                 self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
-                    "build", "build", if value.success() { "succeeded" } else { "failed" },
-                    value.message(),))
+                        "build", "build", if value.success() {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        }
+                        ,
+                        value.message(),))
                 if !value.success() && value.message() != "" {
                     self.diagnostics.push(GrapheneDiagnostic::new(
-                        "error", value.message(), "", 0_u32, 0_u32,))
+                            "error", value.message(), "", 0_u32, 0_u32,))
                 }
                 ret self.state_event(if value.success() {
                         "build.succeeded"

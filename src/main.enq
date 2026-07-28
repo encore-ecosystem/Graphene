@@ -305,11 +305,19 @@ fn vec3_differs(lhs: Vec3, rhs: Vec3) -> bool {
     ret lhs.x() != rhs.x() || lhs.y() != rhs.y() || lhs.z() != rhs.z()
 }
 
-fn compile_game(compiler: str, manifest: str, log_path: str, completion_path: str) -> i32 {
+fn compile_game(compiler: str, manifest: str, profile: str, run_after_build: bool,
+    log_path: str, completion_path: str,) -> i32 {
     let mut args = Vec[str]::new()
-    args.push("build")
+    args.push(if run_after_build { "run" } else { "build" })
+    args.push("--profile")
+    args.push(profile)
     args.push("--manifest-path")
     args.push(manifest)
+    if run_after_build {
+        args.push("--")
+        args.push("--profile")
+        args.push(profile)
+    }
     let code = run_args_capture(compiler, args, log_path)
     write_file(completion_path, Debug::fmt(code))
     ret code
@@ -3561,6 +3569,12 @@ fn tooltip_text(target: str) -> str {
     if target == "build-game" {
         ret "Build gameplay project"
     }
+    if target == "build-run" {
+        ret "Build and run gameplay project"
+    }
+    if target == "build-profile" {
+        ret "Select compiler optimization profile"
+    }
     if target == "play" {
         ret "Play in editor"
     }
@@ -3738,7 +3752,7 @@ fn editor_menu_bar(open_menu: str, hovered: str, project_loaded: bool,
 
 fn editor_toolbar(simulation_mode: str, project_loaded: bool, project_dirty: bool,
     can_undo: bool, can_redo: bool, selected_cube: u32, building: bool,
-    hovered: str, icons: EditorIcons,) -> Widget {
+    build_profile: str, build_profile_open: bool, hovered: str, icons: EditorIcons,) -> Widget {
     let simulating = simulation_mode_active(simulation_mode)
     let mut toolbar = Widget::panel("toolbar").with_direction(horizontal())
     .with_flex(42.0_f32, 0.0_f32).with_style(
@@ -3778,6 +3792,30 @@ fn editor_toolbar(simulation_mode: str, project_loaded: bool, project_dirty: boo
         .with_flex(88.0_f32, 0.0_f32)
         .with_disabled(!project_loaded || building || simulating)
         .with_style(build_style(building, hovered == "build-game")))
+    let mut profile_control = Widget::panel("build-profile-control").with_direction(vertical())
+        .with_flex(92.0_f32, 0.0_f32)
+    profile_control.push(Widget::select("build-profile", build_profile)
+        .with_flex(32.0_f32, 0.0_f32)
+        .with_disabled(!project_loaded || building || simulating))
+    if build_profile_open {
+        let mut profiles = Widget::panel("build-profile-menu").with_direction(vertical()).with_style(
+            Style::default().with_background(Color::rgb(25_u8, 25_u8, 28_u8))
+            .with_border(1.0_f32, Color::rgb(65_u8, 66_u8, 72_u8)).with_radius(2.0_f32)
+            .with_padding(Insets::all(3.0_f32)).with_gap(2.0_f32).with_width(92.0_f32)
+            .with_height(73.0_f32).with_absolute(true).with_top(34.0_f32).with_z_index(95_i32))
+        profiles.push(popup_action("build-profile-debug", "Debug", icons.build, hovered, false,
+                build_profile == "debug",))
+        profiles.push(popup_action("build-profile-release", "Release", icons.build, hovered, false,
+                build_profile == "release",))
+        profiles.push(popup_action("build-profile-extreme", "Extreme", icons.build, hovered, false,
+                build_profile == "extreme",))
+        profile_control.push(profiles)
+    }
+    toolbar.push(profile_control)
+    toolbar.push(Widget::icon_button("build-run", "Build & Run", icons.play)
+        .with_flex(112.0_f32, 0.0_f32)
+        .with_disabled(!project_loaded || building || simulating)
+        .with_style(build_style(false, hovered == "build-run")))
     toolbar.push(Widget::spacer(1.0_f32))
     toolbar.push(Widget::icon_button(if simulating {
                 "stop"
@@ -3992,7 +4030,7 @@ fn editor_view(simulation_mode: str, selected: str, selected_position: Vec3, sel
     project_dirty: bool, active_tool: str, camera_mode: str, shading_mode: str, camera_speed: str,
     grid_visible: bool, rotation_snap: bool,
     can_undo: bool, can_redo: bool,
-    building: bool, build_output: str, hovered: str,
+    building: bool, build_output: str, build_profile: str, build_profile_open: bool, hovered: str,
     pointer_x: f32, pointer_y: f32, compact: bool, open_menu: str, add_actor_open: bool, outliner_settings_open:
     bool,
     outliner_show_editor_actors: bool, outliner_show_hidden_actors: bool, show_outliner: bool, show_details:
@@ -4012,7 +4050,7 @@ fn editor_view(simulation_mode: str, selected: str, selected_position: Vec3, sel
     root.push(menu_bar)
     part_started = perf_counter_ms()
     let toolbar = editor_toolbar(simulation_mode, project_loaded, project_dirty,
-        can_undo, can_redo, selected_cube, building, hovered, icons,)
+        can_undo, can_redo, selected_cube, building, build_profile, build_profile_open, hovered, icons,)
     profile_view_part("toolbar", part_started)
     root.push(toolbar)
 
@@ -4455,6 +4493,9 @@ fn main() -> u32 {
     let mut project_dirty = false
     let mut building = false
     let mut build_output = "Gameplay project has not been built"
+    let mut build_profile = "debug"
+    let mut build_profile_open = false
+    let mut run_after_build = false
     let mut build_handle = Option[JoinHandle[i32]]::None
     let mut autobuild_pending = env("GRAPHENE_AUTOBUILD").is_some()
     let mut hovered = match env("GRAPHENE_HOVER_TARGET") {
@@ -4553,7 +4594,7 @@ fn main() -> u32 {
         console_editor, console_focused, console_output, status_message, project_loaded,
         project_dirty, active_tool, camera_mode,
         shading_mode, camera_speed, grid_visible, rotation_snap,
-        false, false, building, build_output, hovered,
+        false, false, building, build_output, build_profile, build_profile_open, hovered,
         pointer_x, pointer_y, compact, open_menu, add_actor_open, outliner_settings_open,
         outliner_show_editor_actors, outliner_show_hidden_actors, show_outliner, show_details, show_content,
         open_viewport_menu, project_root, project_dialog_mode, unsaved_action, project_path_editor, project_path_focused,
@@ -4752,6 +4793,8 @@ fn main() -> u32 {
         let previous_project_loaded = project_loaded
         let previous_project_dirty = project_dirty
         let previous_building = building
+        let previous_build_profile = build_profile
+        let previous_build_profile_open = build_profile_open
         let previous_simulation_mode = simulation_mode
         let previous_selected_cube = selected_cube
         let previous_selected = selected
@@ -4969,7 +5012,11 @@ fn main() -> u32 {
                     let code = handle.join()
                     build_succeeded = code == 0_i32
                     build_output = if code == 0_i32 {
-                        "Gameplay build succeeded"
+                        if run_after_build && file_exists(build_log_path) {
+                            read_file(build_log_path)
+                        } else {
+                            "Gameplay " + build_profile + " build succeeded"
+                        }
                     } else {
                         "Gameplay build failed; see " + build_log_path
                     }
@@ -4985,6 +5032,12 @@ fn main() -> u32 {
             building = command_state.building()
             remove_file(build_completion_path)
             dirty = true
+        } elif building && run_after_build && file_exists(build_log_path) {
+            let live_output = read_file(build_log_path)
+            if live_output != "" && live_output != build_output {
+                build_output = live_output
+                dirty = true
+            }
         }
         if event.kind() == event_pointer_down() {
             let target = reactive_ui.hit(event.x(), event.y())
@@ -5286,6 +5339,9 @@ fn main() -> u32 {
             target != "outliner-show-hidden-actors" {
                 outliner_settings_open = false
             }
+            if target != "build-profile" && !target.contains("build-profile-") {
+                build_profile_open = false
+            }
             if target != "parent-selector" && target != "parent-none" && !target.contains("parent-actor-")
             {
                 parent_menu_open = false
@@ -5308,6 +5364,19 @@ fn main() -> u32 {
                 } else {
                     target
                 }
+                dirty = true
+            } elif target == "build-profile" && project_loaded && !building && !simulating {
+                build_profile_open = !build_profile_open
+                dirty = true
+            } elif target == "build-profile-debug" || target == "build-profile-release" ||
+            target == "build-profile-extreme" {
+                build_profile = if target == "build-profile-release" {
+                    "release"
+                } else {
+                    if target == "build-profile-extreme" { "extreme" } else { "debug" }
+                }
+                build_profile_open = false
+                status_message = "Build profile: " + build_profile
                 dirty = true
             } elif target == "menu-new-project-action" || target == "menu-open-project-action" {
                 let action = if target == "menu-new-project-action" {
@@ -5335,6 +5404,7 @@ fn main() -> u32 {
                 request_save = true dirty = true
             } elif (target == "menu-build-action" || target == "menu-tools-build-action") && project_loaded
             {
+                run_after_build = false
                 request_build = true dirty = true
             } elif target == "menu-exit-action" {
                 let guarded = guard_editor_action("exit", project_dirty)
@@ -5463,6 +5533,10 @@ fn main() -> u32 {
             } elif target == "delete" && selected_cube > 0_u32 && !simulating {
                 request_delete = true
             } elif target == "build-game" && project_loaded && !building && !simulating {
+                run_after_build = false
+                request_build = true
+            } elif target == "build-run" && project_loaded && !building && !simulating {
+                run_after_build = true
                 request_build = true
             } elif project_loaded &&(target == "play" || target == "simulate") {
                 let started = command_state.execute(GrapheneCommand::StartSimulation(
@@ -6327,9 +6401,14 @@ fn main() -> u32 {
                     remove_file(build_completion_path)
                     remove_file(build_log_path)
                     build_handle = Option[JoinHandle[i32]]::Some(
-                        spawn compile_game(compiler, game_manifest, build_log_path, build_completion_path))
+                        spawn compile_game(compiler, game_manifest, build_profile, run_after_build,
+                            build_log_path, build_completion_path,))
                     building = command_state.building()
-                    build_output = "Compiling gameplay project..."
+                    build_output = if run_after_build {
+                        "Building and running gameplay project (" + build_profile + ")..."
+                    } else {
+                        "Compiling gameplay project (" + build_profile + ")..."
+                    }
                     status_message = build_output
                 } else {
                     build_output = "Unable to save gameplay project"
@@ -7347,6 +7426,8 @@ fn main() -> u32 {
             previous_project_loaded != project_loaded
             let toolbar_changed = previous_project_loaded != project_loaded ||
             previous_project_dirty != project_dirty || previous_building != building ||
+            previous_build_profile != build_profile ||
+            previous_build_profile_open != build_profile_open ||
             previous_simulation_mode != simulation_mode ||
             previous_selected_cube != selected_cube ||
             previous_command_can_undo != command_state.can_undo() ||
@@ -7366,7 +7447,8 @@ fn main() -> u32 {
                 chrome_updated = reactive_ui.replace_subtree("toolbar",
                     editor_toolbar(simulation_mode, project_loaded, project_dirty,
                         command_state.can_undo(), command_state.can_redo(),
-                        selected_cube, building, hovered, icons,),) || chrome_updated
+                        selected_cube, building, build_profile, build_profile_open, hovered, icons,),) ||
+                chrome_updated
             }
             if status_changed {
                 chrome_updated = reactive_ui.replace_subtree("status",

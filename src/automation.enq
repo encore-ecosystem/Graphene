@@ -38,7 +38,7 @@ impl for AutomationServer {
         }
     }
     pub fn with_security(state: EditorState, token: str, scopes: AutomationScopes,
-        approvals: ApprovalBroker) -> Self {
+        approvals: ApprovalBroker,) -> Self {
         ret Self {
             state, token, scopes, approvals
         }
@@ -49,8 +49,8 @@ impl for AutomationServer {
     pub fn approvals(self: Self) -> ApprovalBroker {
         ret self.approvals
     }
-    pub fn into_parts(self: Self) -> (EditorState, ApprovalBroker) {
-        ret (self.state, self.approvals)
+    pub fn into_parts(self: Self) ->(EditorState, ApprovalBroker) {
+        ret(self.state, self.approvals)
     }
 
     /// Handles one JSON request. Framing and transport ownership remain with
@@ -328,7 +328,7 @@ impl for AutomationScopes {
 
 fn required_scope(method: str) -> str {
     if method == "graphene.handshake" || method == "graphene.snapshot" ||
-        method == "graphene.events" || method == "graphene.approval_status" {
+    method == "graphene.events" || method == "graphene.approval_status" {
         ret "read"
     }
     if method == "project.save" {
@@ -348,7 +348,7 @@ fn required_scope(method: str) -> str {
 
 fn approval_required(method: str) -> bool {
     ret method == "scene.delete" || method == "project.save" ||
-        method == "build.start"
+    method == "build.start"
 }
 
 fn parse_u64(value: str) -> Option[u64] {

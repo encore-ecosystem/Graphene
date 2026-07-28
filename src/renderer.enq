@@ -150,6 +150,7 @@ impl for SceneRenderer {
             ret false
         }
         let items = scene.visible_render_items()
+        let mut render_index = 0_usize
         for item in items {
             let mut material = StandardMaterial::default()
             let mut material_found = false
@@ -165,11 +166,22 @@ impl for SceneRenderer {
             }
             let mut object_index = 0_usize
             let mut object_found = false
-            match self.ensure_object(item.entity()) {
-                Option::Some(value) => {
-                    object_index = value object_found = true
+            match self.objects.get(render_index) {
+                Option::Some(resources) => {
+                    if resources.entity == item.entity() {
+                        object_index = render_index object_found = true
+                    }
                 }
                 Option::None => {
+                }
+            }
+            if !object_found {
+                match self.ensure_object(item.entity()) {
+                    Option::Some(value) => {
+                        object_index = value object_found = true
+                    }
+                    Option::None => {
+                    }
                 }
             }
             if !object_found {
@@ -187,6 +199,7 @@ impl for SceneRenderer {
                     ret false
                 }
             }
+            render_index = render_index + 1_usize
         }
         ret true
     }

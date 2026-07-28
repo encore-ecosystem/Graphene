@@ -1,0 +1,34 @@
+import core::time::sleep_ms
+import core::vec::Vec
+import graphene::{frame_statistics, performance_counter_ns}
+
+fn performance_statistics_contract() -> u32 {
+    let mut samples = Vec[u64]::new()
+    samples.push(1000000_u64)
+    samples.push(2000000_u64)
+    samples.push(3000000_u64)
+    samples.push(4000000_u64)
+    let result = frame_statistics(samples, 10000000_u64)
+    if result.frames() != 4_u64 || result.average_fps() != 400.0_f64 ||
+        result.mean_frame_ns() != 2500000_u64 ||
+        result.p50_frame_ns() != 2000000_u64 ||
+        result.p95_frame_ns() != 3000000_u64 ||
+        result.p99_frame_ns() != 3000000_u64 ||
+        result.one_percent_low_fps() != 250.0_f64 {
+        ret 1_u32
+    }
+    ret 0_u32
+}
+
+fn performance_counter_contract() -> u32 {
+    let before = performance_counter_ns()
+    sleep_ms(2_u64)
+    let after = performance_counter_ns()
+    ret if before > 0_u64 && after > before { 0_u32 } else { 1_u32 }
+}
+
+fn main() -> u32 {
+    let statistics = performance_statistics_contract()
+    if statistics != 0_u32 { ret statistics }
+    ret performance_counter_contract()
+}

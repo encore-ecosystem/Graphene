@@ -1,8 +1,12 @@
 pub import mod::assets:: {
     MaterialAssets, MeshAssets, StandardMaterial
 }
-pub import mod::approval::{ApprovalBroker, ApprovalRequest}
-pub import mod::automation::{AutomationScopes, AutomationServer}
+pub import mod::approval:: {
+    ApprovalBroker, ApprovalRequest
+}
+pub import mod::automation:: {
+    AutomationScopes, AutomationServer
+}
 pub import mod::automation_transport:: {
     AutomationListener, automation_capability_token, automation_request, automation_secure_file
 }
@@ -16,7 +20,9 @@ pub import mod::command_bus:: {
     GrapheneEvent, GrapheneTask, OperationCompletionCommand, ProjectLoadedCommand,
     ProjectRequestCommand, SimulationCommand
 }
-pub import mod::command_console::{console_help, decode_console_command}
+pub import mod::command_console:: {
+    console_help, decode_console_command
+}
 pub import mod::command_protocol:: {
     CommandEnvelope, ProtocolError, command_registry_json, decode_command_request, encode_command_response
 }
@@ -34,6 +40,9 @@ pub import mod::material_asset:: {
     edit_default_material, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color
 }
 pub import mod::mcp_gateway::GrapheneMcpGateway
+pub import mod::performance:: {
+    FrameStatistics, frame_statistics, performance_counter_ns
+}
 pub import mod::preview::ViewportRenderer
 pub import mod::project_assets:: {
     ImportedMeshAsset, add_actor_mesh_name, discover_obj_assets, import_obj_asset, load_obj_asset, project_mesh_directory

@@ -175,7 +175,7 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
 impl for ViewportRenderer {
     pub fn resize_shared(self: mut Self, width: u32, height: u32) -> bool {
         if width == 0_u32 || height == 0_u32 ||
-            (self.swapchain.width() == width && self.swapchain.height() == height) {
+        (self.swapchain.width() == width && self.swapchain.height() == height) {
             ret width > 0_u32 && height > 0_u32
         }
         let next = self.device.create_shared_offscreen_target(width, height)
@@ -923,7 +923,7 @@ impl for ViewportRenderer {
         }
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
-        let aspect = (viewport_width as f32) / (viewport_height as f32)
+        let aspect =(viewport_width as f32) /(viewport_height as f32)
         let camera = PerspectiveCamera::new(
             target.add(Vec3::from_spherical(yaw, pitch).scale(distance)),
             target, 1.0471976_f32, 0.1_f32, 100.0_f32,)
@@ -931,8 +931,8 @@ impl for ViewportRenderer {
         let viewport_set = frame.set_viewport(viewport_x, viewport_y,
             viewport_width, viewport_height,)
         ret viewport_set &&
-            self.renderer.render_scene(self.scene, camera, self.light,
-                self.meshes, self.materials, pass, frame_slot, aspect,)
+        self.renderer.render_scene(self.scene, camera, self.light,
+            self.meshes, self.materials, pass, frame_slot, aspect,)
     }
 
     pub fn render_editor(self: mut Self, yaw: f32, pitch: f32, distance: f32,

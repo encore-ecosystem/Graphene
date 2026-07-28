@@ -84,7 +84,9 @@ impl for ApprovalBroker {
             let mut retained_index = self.requests.len() - 63_usize
             while retained_index < self.requests.len() {
                 match self.requests.get(retained_index) {
-                    Option::Some(request) => { retained.push(request) }
+                    Option::Some(request) => {
+                        retained.push(request)
+                    }
                     Option::None => {
                     }
                 }

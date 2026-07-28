@@ -37,6 +37,7 @@ import vulkan_native:: {
     native_window_mouse_x, native_window_mouse_y,
     native_swapchain_available, native_swapchain_clear, native_swapchain_create, native_offscreen_create,
     native_shared_offscreen_create,
+    native_swapchain_set_present_mode,
     native_swapchain_destroy, native_swapchain_destroy_retired,
     native_swapchain_last_frame_complete,
     native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound,
@@ -662,7 +663,7 @@ impl for RenderFrame {
     /// Continues Luma's active compatible render pass with another pipeline.
     pub fn continue_render_pass(self: Self, pipeline: RenderPipeline) -> RenderPassEncoder {
         let begun = self.handle != 0_usize &&
-            native_frame_bind_pipeline(self.handle, pipeline.handle)
+        native_frame_bind_pipeline(self.handle, pipeline.handle)
         ret RenderPassEncoder {
             self.handle, begun
         }
@@ -684,6 +685,9 @@ impl for RenderFrame {
 }
 
 impl for Swapchain {
+    pub fn set_immediate_present(self: Self, immediate: bool) -> bool {
+        ret self.handle != 0_usize && native_swapchain_set_present_mode(self.handle, immediate)
+    }
     pub fn borrow(handle: usize) -> Self {
         ret Self {
             handle
