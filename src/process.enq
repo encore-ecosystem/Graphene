@@ -1,0 +1,7 @@
+//! Process-level escape hatch for compiler-bug workarounds.
+
+extern fn encore_proc_exit(code: i32) -> i32
+
+pub fn graphene_process_exit(code: i32) -> i32 {
+    ret encore_proc_exit(code)
+}

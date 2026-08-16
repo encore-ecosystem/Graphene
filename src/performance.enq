@@ -1,0 +1,234 @@
+//! High-resolution timing and deterministic frame-time statistics.
+
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+
+extern fn graphene_perf_counter_ns() -> u64
+
+pub struct FrameStatistics {
+    frames: u64
+    elapsed_ns: u64
+    average_fps: f64
+    mean_frame_ns: u64
+    p50_frame_ns: u64
+    p95_frame_ns: u64
+    p99_frame_ns: u64
+    one_percent_low_fps: f64
+}
+
+pub fn performance_counter_ns() -> u64 {
+    unsafe {
+        ret graphene_perf_counter_ns()
+    }
+}
+
+/// Returns a bounded frame delta for direct editor-camera integration.
+/// Bounding is deliberately one 60 Hz step: a blocked window must not turn
+/// into a catch-up teleport on the next interactive tick.
+pub fn navigation_delta_seconds(elapsed_ns: u64) -> f32 {
+    let bounded = if elapsed_ns > 16666666_u64 {
+        16666666_u64
+    } else {
+        elapsed_ns
+    }
+    ret(bounded as f32) * 0.000000001_f32
+}
+
+/// Direct UE-style camera step. There is no retained velocity or inertial
+/// tail: an empty input direction produces exactly zero displacement.
+pub fn camera_step(direction: Vec3, speed: f32, elapsed_ns: u64) -> Vec3 {
+    if direction.x() == 0.0_f32 && direction.y() == 0.0_f32 && direction.z() == 0.0_f32 {
+        ret Vec3::zero()
+    }
+    ret direction.normalized().scale(speed * navigation_delta_seconds(elapsed_ns))
+}
+
+/// UE-style wheel dolly. It translates both the camera and its orbit target,
+/// so repeated wheel input can travel through the world without approaching a
+/// minimum distance clamp or stopping at the current pivot.
+pub fn camera_wheel_dolly(forward: Vec3, wheel: f32, reference_distance: f32,
+    speed: f32,) -> Vec3 {
+    if wheel == 0.0_f32 || forward.length() < 0.000001_f32 {
+        ret Vec3::zero()
+    }
+    let distance_scale = if reference_distance < 1.0_f32 {
+        1.0_f32
+    } else {
+        reference_distance
+    }
+    ret forward.normalized().scale(wheel * distance_scale * 0.12_f32 * speed)
+}
+
+fn sort_samples(values: mut Vec[u64], low: usize, high: usize) ->() {
+    if low >= high {
+        ret()
+    }
+    let pivot = match values.get(low +(high - low) / 2_usize) {
+        Option::Some(value) => value
+        Option::None => 0_u64
+    }
+    let mut left = low
+    let mut right = high
+    loop {
+        loop {
+            match values.get(left) {
+                Option::Some(value) => {
+                    if value < pivot {
+                        left = left + 1_usize
+                    } else {
+                        break
+                    }
+                }
+                Option::None => {
+                    break
+                }
+            }
+        }
+        loop {
+            match values.get(right) {
+                Option::Some(value) => {
+                    if value > pivot && right > 0_usize {
+                        right = right - 1_usize
+                    } else {
+                        break
+                    }
+                }
+                Option::None => {
+                    break
+                }
+            }
+        }
+        if left > right {
+            break
+        }
+        let left_value = match values.get(left) {
+            Option::Some(value) => value
+            Option::None => 0_u64
+        }
+        let right_value = match values.get(right) {
+            Option::Some(value) => value
+            Option::None => 0_u64
+        }
+        values.set(left, right_value)
+        values.set(right, left_value)
+        left = left + 1_usize
+        if right == 0_usize {
+            break
+        }
+        right = right - 1_usize
+        if left > right {
+            break
+        }
+    }
+    if low < right {
+        sort_samples(values, low, right)
+    }
+    if left < high {
+        sort_samples(values, left, high)
+    }
+    ret()
+}
+
+fn sample_at(values: Vec[u64], numerator: usize, denominator: usize) -> u64 {
+    if values.len() == 0_usize || denominator == 0_usize {
+        ret 0_u64
+    }
+    let rank =((values.len() - 1_usize) * numerator) / denominator
+    match values.get(rank) {
+        Option::Some(value) => {
+            ret value
+        }
+        Option::None => {
+            ret 0_u64
+        }
+    }
+}
+
+pub fn frame_statistics(samples: mut Vec[u64], elapsed_ns: u64) -> FrameStatistics {
+    let frames = samples.len() as u64
+    if samples.len() > 1_usize {
+        sort_samples(samples, 0_usize, samples.len() - 1_usize)
+    }
+    let mut total_ns = 0_u64
+    for sample in samples {
+        total_ns = total_ns + sample
+    }
+    let slow_count = if frames < 100_u64 {
+        if frames > 0_u64 {
+            1_usize
+        } else {
+            0_usize
+        }
+    } else {
+        (frames / 100_u64) as usize
+    }
+    let mut slow_total = 0_u64
+    let mut slow_index = samples.len() - slow_count
+    while slow_index < samples.len() {
+        match samples.get(slow_index) {
+            Option::Some(value) => {
+                slow_total = slow_total + value
+            }
+            Option::None => {
+            }
+        }
+        slow_index = slow_index + 1_usize
+    }
+    let slow_mean = if slow_count > 0_usize {
+        slow_total / slow_count as u64
+    } else {
+        0_u64
+    }
+    ret FrameStatistics {
+        frames,
+        elapsed_ns,
+        if elapsed_ns > 0_u64 {
+            (frames as f64) * 1000000000.0_f64 / elapsed_ns as f64
+        } else {
+            0.0_f64
+        }
+        ,
+        if frames > 0_u64 {
+            total_ns / frames
+        } else {
+            0_u64
+        }
+        ,
+        sample_at(samples, 50_usize, 100_usize),
+        sample_at(samples, 95_usize, 100_usize),
+        sample_at(samples, 99_usize, 100_usize),
+        if slow_mean > 0_u64 {
+            1000000000.0_f64 / slow_mean as f64
+        } else {
+            0.0_f64
+        }
+    }
+}
+
+impl for FrameStatistics {
+    pub fn frames(self: Self) -> u64 {
+        ret self.frames
+    }
+    pub fn elapsed_ns(self: Self) -> u64 {
+        ret self.elapsed_ns
+    }
+    pub fn average_fps(self: Self) -> f64 {
+        ret self.average_fps
+    }
+    pub fn mean_frame_ns(self: Self) -> u64 {
+        ret self.mean_frame_ns
+    }
+    pub fn p50_frame_ns(self: Self) -> u64 {
+        ret self.p50_frame_ns
+    }
+    pub fn p95_frame_ns(self: Self) -> u64 {
+        ret self.p95_frame_ns
+    }
+    pub fn p99_frame_ns(self: Self) -> u64 {
+        ret self.p99_frame_ns
+    }
+    pub fn one_percent_low_fps(self: Self) -> f64 {
+        ret self.one_percent_low_fps
+    }
+}

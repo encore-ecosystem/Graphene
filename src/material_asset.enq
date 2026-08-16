@@ -2,9 +2,7 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import json:: {
-    Json, field, parse, stringify
-}
+import json::{Json, field, parse, stringify}
 import linalg::Vec3
 import mod::assets::StandardMaterial
 
@@ -97,7 +95,8 @@ pub fn material_edit_action(action: str) -> bool {
     action == "material-color-jade" || action == "material-color-cobalt" || action == "material-color-gold"
     ||
     action == "material-metallic-minus" || action == "material-metallic-plus" ||
-    action == "material-roughness-minus" || action == "material-roughness-plus" || action == "material-unlit"
+    action == "material-roughness-minus" || action == "material-roughness-plus" ||
+    action == "material-unlit" || action == "material-double-sided"
 }
 
 pub fn edit_default_material(material: StandardMaterial, action: str) -> StandardMaterial {
@@ -124,6 +123,9 @@ pub fn edit_default_material(material: StandardMaterial, action: str) -> Standar
     if action == "material-unlit" {
         ret material.with_unlit_value(!material.unlit())
     }
+    if action == "material-double-sided" {
+        ret material.with_double_sided_value(!material.double_sided())
+    }
     ret material
 }
 
@@ -133,11 +135,12 @@ pub fn material_asset_stringify(material: StandardMaterial) -> str {
     color_values.push(number(color.x())) color_values.push(number(color.y())) color_values.push(number(color.z()))
     let mut fields = Vec[(str, Json)]::new()
     fields.push(field("format", Json::String("graphene-material")))
-    fields.push(field("version", Json::Number("1")))
+    fields.push(field("version", Json::Number("2")))
     fields.push(field("base_color", Json::Array(color_values)))
     fields.push(field("metallic", number(material.metallic())))
     fields.push(field("roughness", number(material.roughness())))
     fields.push(field("unlit", Json::Bool(material.unlit())))
+    fields.push(field("double_sided", Json::Bool(material.double_sided())))
     ret stringify(Json::Object(fields))
 }
 
@@ -163,7 +166,7 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                 Option::Some(value) => {
                     match value.as_number() {
                         Option::Some(text) => {
-                            text == "1"
+                            text == "1" || text == "2"
                         }
                         Option::None => {
                             false
@@ -236,13 +239,22 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                 }
                 Option::None => false
             }
+            let double_sided = match root.get("double_sided") {
+                Option::Some(value) => {
+                    match value.as_bool() {
+                        Option::Some(flag) => flag Option::None => false
+                    }
+                }
+                Option::None => false
+            }
             if valid_color {
                 match metallic {
                     Option::Some(metal) => {
                         match roughness {
                             Option::Some(rough) => {
                                 ret Option[StandardMaterial]::Some(StandardMaterial::new(color, metal,
-                                        rough,).with_unlit_value(unlit))
+                                        rough,).with_unlit_value(unlit)
+                                    .with_double_sided_value(double_sided))
                             }
                             Option::None => {
                             }

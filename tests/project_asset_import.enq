@@ -1,7 +1,11 @@
-import core::os::{file_exists, write_file}
+import std::os::{file_exists, write_file}
 import core::result::Result
-import core::time::perf_counter_ms
-import graphene::{add_actor_mesh_name, discover_obj_assets, import_obj_asset, project_mesh_directory}
+import std::time::perf_counter_ms
+import graphene::{
+    add_actor_mesh_name, discover_obj_assets, import_obj_asset,
+    project_mesh_autolod_enabled, project_mesh_directory,
+    set_project_mesh_autolod
+}
 
 fn main() -> u32 {
     let suffix = perf_counter_ms().fmt()
@@ -19,6 +23,13 @@ fn main() -> u32 {
     }
     let discovered = discover_obj_assets(root)
     if discovered.len() != 1_usize { ret 6_u32 }
+    let imported_path = project_mesh_directory(root) +
+        "/graphene-source-" + suffix + ".obj"
+    if !project_mesh_autolod_enabled(imported_path) { ret 19_u32 }
+    if !set_project_mesh_autolod(imported_path, false) ||
+    project_mesh_autolod_enabled(imported_path) { ret 20_u32 }
+    if !set_project_mesh_autolod(imported_path, true) ||
+    !project_mesh_autolod_enabled(imported_path) { ret 21_u32 }
     match discovered.get(0_usize) {
         Some(asset) => {
             if asset.mesh().vertex_count() != 3_usize { ret 7_u32 }

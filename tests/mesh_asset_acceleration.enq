@@ -1,0 +1,59 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    AccelerationStructure, DeviceFeatures, GraphicsInstance, MeshAssets,
+    cube_mesh, sphere_mesh
+}
+import linalg:: {
+    Mat4, Vec3
+}
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let required = DeviceFeatures::from_mask(
+                DeviceFeatures::buffer_device_address().mask() |
+                DeviceFeatures::ray_query().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, required, DeviceFeatures::none(),)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            let mut meshes = MeshAssets::new()
+            let cube = meshes.upload(device, cube_mesh(1.0_f32))
+            let sphere = meshes.upload(device, sphere_mesh(0.5_f32, 12_u32, 16_u32))
+            let cube_blas = meshes.acceleration(cube)
+            let sphere_blas = meshes.acceleration(sphere)
+            let mut structures = Vec[AccelerationStructure]::new()
+            structures.push(cube_blas)
+            structures.push(sphere_blas)
+            let mut transforms = Vec[Mat4]::new()
+            transforms.push(Mat4::identity())
+            transforms.push(Mat4::translation(Vec3::new(
+                        2.0_f32, 0.0_f32, 0.0_f32,)))
+            let tlas = device.create_tlas(structures, transforms)
+            let valid = cube.valid() && sphere.valid() &&
+            cube_blas.available() && sphere_blas.available() && tlas.available()
+            if tlas.available() {
+                tlas.destroy()
+            }
+            meshes.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if valid {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

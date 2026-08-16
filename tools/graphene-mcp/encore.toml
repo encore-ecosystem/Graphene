@@ -1,0 +1,14 @@
+[project]
+name = "graphene-mcp"
+version = "0.1.0"
+description = "Local stdio MCP proxy for the Graphene Automation API"
+licence = "MIT"
+dependencies = ["path@../..", "index@json", "index@std"]
+
+[lint]
+default = "warn"
+dependencies = "allow"
+
+[lint.rules]
+unused-mut = "allow"
+missing-public-docstring = "allow"

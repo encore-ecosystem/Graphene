@@ -1,6 +1,20 @@
 import core::option::Option
 import linalg::Vec3
 
+/// Gives interactive retained controls layered over the viewport priority over
+/// its render surface. Both occupy the same screen rectangle, so geometry
+/// alone cannot determine the pointer target.
+pub fn resolve_editor_pointer_target(
+    over_viewport: bool, retained_target: str,) -> str {
+    if !over_viewport {
+        ret retained_target
+    }
+    if retained_target == "" || retained_target == "viewport-surface" {
+        ret "viewport-surface"
+    }
+    ret retained_target
+}
+
 pub struct EditorTransform {
     position: Vec3 rotation: Vec3 scale: Vec3
 }
@@ -126,4 +140,85 @@ Option[EditorTransform] {
         }
     }
     ret Option[EditorTransform]::None
+}
+
+/// Converts a pointer delta into a world-space single-axis gizmo delta.
+/// X/Z use horizontal drag; Y uses the inverted screen vertical drag.
+pub fn gizmo_move_delta(axis: u32, pointer_dx: f32, pointer_dy: f32, camera_distance: f32) -> Vec3 {
+    let amount = if axis == 2_u32 {
+        - pointer_dy
+    } else {
+        pointer_dx
+    }
+    let distance = amount * camera_distance * 0.012_f32
+    if axis == 1_u32 {
+        ret Vec3::new(distance, 0.0_f32, 0.0_f32)
+    }
+    if axis == 2_u32 {
+        ret Vec3::new(0.0_f32, distance, 0.0_f32)
+    }
+    if axis == 3_u32 {
+        ret Vec3::new(0.0_f32, 0.0_f32, distance)
+    }
+    ret Vec3::zero()
+}
+
+/// Projects a world-space drag onto one gizmo axis.
+pub fn gizmo_axis_drag_scalar(axis: u32, start: Vec3, current: Vec3) -> f32 {
+    let delta = current.sub(start)
+    if axis == 1_u32 {
+        ret delta.x()
+    }
+    if axis == 2_u32 {
+        ret delta.y()
+    }
+    if axis == 3_u32 {
+        ret delta.z()
+    }
+    ret 0.0_f32
+}
+
+pub fn gizmo_rotation_from_drag(axis: u32, initial: Vec3, pointer_dx: f32, pointer_dy: f32) -> Vec3 {
+    if axis == 1_u32 {
+        ret Vec3::new(initial.x() - pointer_dy * 0.01_f32, initial.y(), initial.z())
+    }
+    if axis == 2_u32 {
+        ret Vec3::new(initial.x(), initial.y() + pointer_dx * 0.01_f32, initial.z())
+    }
+    if axis == 3_u32 {
+        ret Vec3::new(initial.x(), initial.y(), initial.z() + pointer_dy * 0.01_f32)
+    }
+    ret initial
+}
+
+pub fn gizmo_scale_from_drag(axis: u32, initial: Vec3, pointer_dx: f32, pointer_dy: f32) -> Vec3 {
+    let amount = if axis == 2_u32 {
+        - pointer_dy
+    } else {
+        pointer_dx
+    }
+    let value = if axis == 1_u32 {
+        initial.x() + amount * 0.01_f32
+    } elif axis == 2_u32 {
+        initial.y() + amount * 0.01_f32
+    } elif axis == 3_u32 {
+        initial.z() + amount * 0.01_f32
+    } else {
+        initial.x() + amount * 0.01_f32
+    }
+    let clamped = if value < 0.1_f32 {
+        0.1_f32
+    } else {
+        value
+    }
+    if axis == 1_u32 {
+        ret Vec3::new(clamped, initial.y(), initial.z())
+    }
+    if axis == 2_u32 {
+        ret Vec3::new(initial.x(), clamped, initial.z())
+    }
+    if axis == 3_u32 {
+        ret Vec3::new(initial.x(), initial.y(), clamped)
+    }
+    ret Vec3::new(clamped, clamped, clamped)
 }

@@ -1,23 +1,23 @@
+import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
-import linalg::Mat4
-import mod::assets:: {
-    MaterialAssets, MeshAssets, StandardMaterial
-}
+import linalg::{Mat4, Vec3}
+import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
 import mod::rhi:: *
 import mod::scene::camera::PerspectiveCamera
 import mod::scene::light::DirectionalLight
+import mod::scene::renderable::RenderItem
 import mod::scene::world::Scene
+import std::io::println
 
 pub struct ObjectUniforms {
     buffers: Vec[GpuBuffer] groups: Vec[BindGroup] frame_count: u32 available: bool
 }
-struct SceneObjectResources {
-    entity: u64 uniforms: ObjectUniforms
-}
 pub struct SceneRenderer {
-    device: GraphicsDevice layout: BindGroupLayout frame_count: u32 objects: Vec[SceneObjectResources]
-    available: bool
+    device: GraphicsDevice layout: BindGroupLayout frame_count: u32
+    frame_buffers: Vec[GpuBuffer] instance_buffers: Vec[GpuBuffer] groups: Vec[BindGroup]
+    solid_pipeline: RenderPipeline double_sided_pipeline: RenderPipeline
+    rendered_objects: usize available: bool indirect_ambient: Vec3
 }
 
 impl for ObjectUniforms {
@@ -94,93 +94,135 @@ impl for ObjectUniforms {
 }
 
 impl for SceneRenderer {
-    pub fn create(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32) -> SceneRenderer
+    pub fn create(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32,
+        solid_pipeline: RenderPipeline, double_sided_pipeline: RenderPipeline,) -> SceneRenderer
     {
+        let mut frame_buffers = Vec[GpuBuffer]::new()
+        let mut instance_buffers = Vec[GpuBuffer]::new()
+        let mut groups = Vec[BindGroup]::new()
+        let mut available = device.available() && layout.available() && frame_count > 0_u32 &&
+        solid_pipeline.available() && double_sided_pipeline.available()
+        let mut slot = 0_u32
+        while slot < frame_count {
+            let frame_buffer = device.create_buffer(128_u64, buffer_uniform(), true)
+            let instance_buffer = device.create_buffer(98304_u64, buffer_storage(), true)
+            let group = device.create_scene_bind_group(
+                layout, 0_u32, frame_buffer, 128_u64, 1_u32, instance_buffer, 98304_u64,)
+            if !frame_buffer.available() || !instance_buffer.available() || !group.available() {
+                available = false
+            }
+            frame_buffers.push(frame_buffer)
+            instance_buffers.push(instance_buffer)
+            groups.push(group)
+            slot = slot + 1_u32
+        }
         ret SceneRenderer {
-            device, layout, frame_count, Vec[SceneObjectResources]::new(),
-            device.available() && layout.available() && frame_count > 0_u32
+            device, layout, frame_count, frame_buffers, instance_buffers, groups,
+            solid_pipeline, double_sided_pipeline, 0_usize, available,
+            Vec3::new(0.28_f32, 0.28_f32, 0.28_f32)
+        }
+    }
+    pub fn create_with_gi(device: GraphicsDevice, layout: BindGroupLayout,
+        frame_count: u32, solid_pipeline: RenderPipeline,
+        double_sided_pipeline: RenderPipeline,
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,) ->
+    SceneRenderer {
+        let mut frame_buffers = Vec[GpuBuffer]::new()
+        let mut instance_buffers = Vec[GpuBuffer]::new()
+        let mut groups = Vec[BindGroup]::new()
+        let mut available = device.available() && layout.available() &&
+        frame_count > 0_u32 && solid_pipeline.available() &&
+        double_sided_pipeline.available() && gi_scene.available() &&
+        gi_surfaces.available() && gi_history.available()
+        let mut slot = 0_u32
+        while slot < frame_count {
+            let frame_buffer = device.create_buffer(128_u64, buffer_uniform(), true)
+            let instance_buffer = device.create_buffer(98304_u64, buffer_storage(), true)
+            let mut bindings = Vec[u32]::new()
+            bindings.push(0_u32) bindings.push(1_u32) bindings.push(2_u32)
+            bindings.push(3_u32) bindings.push(4_u32)
+            let mut buffers = Vec[GpuBuffer]::new()
+            buffers.push(frame_buffer) buffers.push(instance_buffer)
+            buffers.push(gi_scene) buffers.push(gi_surfaces) buffers.push(gi_history)
+            let mut offsets = Vec[u64]::new()
+            offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
+            offsets.push(0_u64) offsets.push(0_u64)
+            let mut ranges = Vec[u64]::new()
+            ranges.push(128_u64) ranges.push(98304_u64)
+            ranges.push(gi_scene.size()) ranges.push(gi_surfaces.size())
+            ranges.push(gi_history.size())
+            let group = device.create_buffer_bind_group_many(
+                layout, bindings, buffers, offsets, ranges,)
+            if !frame_buffer.available() || !instance_buffer.available() ||
+            !group.available() {
+                available = false
+            }
+            frame_buffers.push(frame_buffer)
+            instance_buffers.push(instance_buffer)
+            groups.push(group)
+            slot += 1_u32
+        }
+        ret SceneRenderer {
+            device, layout, frame_count, frame_buffers, instance_buffers, groups,
+            solid_pipeline, double_sided_pipeline, 0_usize, available,
+            Vec3::new(0.28_f32, 0.28_f32, 0.28_f32)
         }
     }
     pub fn available(self: Self) -> bool {
         ret self.available
     }
     pub fn object_count(self: Self) -> usize {
-        ret self.objects.len()
+        ret self.rendered_objects
     }
-    fn object_index(self: Self, entity: u64) -> Option[usize] {
-        let mut index = 0_usize
-        while index < self.objects.len() {
-            match self.objects.get(index) {
-                Option::Some(resources) => {
-                    if resources.entity == entity {
-                        ret Option[usize]::Some(index)
-                    }
-                }
-                Option::None => {
-                }
-            }
-            index = index + 1_usize
-        }
-        ret Option[usize]::None
-    }
-    fn ensure_object(self: mut Self, entity: u64) -> Option[usize] {
-        match self.object_index(entity) {
-            Option::Some(index) => {
-                ret Option[usize]::Some(index)
-            }
-            Option::None => {
-            }
-        }
-        let uniforms = ObjectUniforms::create(self.device, self.layout, self.frame_count)
-        if !uniforms.available() {
-            uniforms.destroy() ret Option[usize]::None
-        }
-        let index = self.objects.len()
-        self.objects.push(SceneObjectResources {
-                entity, uniforms
-            }
-            ,
-        )
-        ret Option[usize]::Some(index)
+    pub fn set_indirect_ambient(self: mut Self, value: Vec3) ->() {
+        self.indirect_ambient = value
+        ret()
     }
     pub fn render_scene(self: mut Self, scene: Scene, camera: PerspectiveCamera, light: DirectionalLight,
         meshes: MeshAssets, materials: MaterialAssets, pass: RenderPassEncoder,
         frame_slot: u32, aspect: f32,) -> bool {
+        ret self.render_items(scene.visible_render_items(), camera, light,
+            meshes, materials, pass, frame_slot, aspect,)
+    }
+    pub fn render_items(self: mut Self, items: Vec[RenderItem],
+        camera: PerspectiveCamera, light: DirectionalLight,
+        meshes: MeshAssets, materials: MaterialAssets, pass: RenderPassEncoder,
+        frame_slot: u32, aspect: f32,) -> bool {
         if !self.available || !pass.available() || frame_slot >= self.frame_count {
+            println("Graphene scene render: unavailable renderer, pass, or frame slot")
             ret false
         }
-        let items = scene.visible_render_items()
+        if items.len() == 0_usize {
+            ret true
+        }
+        if items.len() > 1024_usize {
+            ret false
+        }
+        self.rendered_objects = items.len()
+        let mut frame_values = Vec[f32]::with_capacity(24_usize)
+        for value in camera.view_projection(aspect).values() {
+            frame_values.push(value)
+        }
+        for value in light.uniform_values() {
+            frame_values.push(value)
+        }
+        frame_values.push(self.indirect_ambient.x())
+        frame_values.push(self.indirect_ambient.y())
+        frame_values.push(self.indirect_ambient.z())
+        frame_values.push(1.0_f32)
+        frame_values.push(camera.position().x())
+        frame_values.push(camera.position().y())
+        frame_values.push(camera.position().z())
+        frame_values.push(1.0_f32)
+        let mut instance_values = Vec[f32]::with_capacity(items.len() * 24_usize)
         for item in items {
-            let mut material = StandardMaterial::default()
-            let mut material_found = false
             match materials.get(item.material()) {
-                Option::Some(value) => {
-                    material = value material_found = true
-                }
-                Option::None => {
-                }
-            }
-            if !material_found {
-                ret false
-            }
-            let mut object_index = 0_usize
-            let mut object_found = false
-            match self.ensure_object(item.entity()) {
-                Option::Some(value) => {
-                    object_index = value object_found = true
-                }
-                Option::None => {
-                }
-            }
-            if !object_found {
-                ret false
-            }
-            match self.objects.get(object_index) {
-                Option::Some(resources) => {
-                    if !resources.uniforms.update(frame_slot, camera, item.world(), aspect, light, material)
-                    ||
-                    !resources.uniforms.bind(pass, frame_slot) || !meshes.draw(pass, item.mesh()) {
-                        ret false
+                Option::Some(material) => {
+                    for value in item.world().values() {
+                        instance_values.push(value)
+                    }
+                    for value in material.uniform_values() {
+                        instance_values.push(value)
                     }
                 }
                 Option::None => {
@@ -188,12 +230,109 @@ impl for SceneRenderer {
                 }
             }
         }
+        let mut uploaded = false
+        match self.frame_buffers.get(frame_slot as usize) {
+            Option::Some(frame_buffer) => {
+                match self.instance_buffers.get(frame_slot as usize) {
+                    Option::Some(instance_buffer) => {
+                        let frame_uploaded = frame_buffer.write_f32s(0_u64, frame_values)
+                        let instances_uploaded = instance_buffer.write_f32s(0_u64, instance_values)
+                        if !frame_uploaded {
+                            println("Graphene scene render: frame uniform write failed")
+                        }
+                        if !instances_uploaded {
+                            println("Graphene scene render: instance storage write failed values=" +
+                                Debug::fmt(instance_values.len()) + " bytes=" +
+                                Debug::fmt(instance_buffer.size()))
+                        }
+                        uploaded = frame_uploaded && instances_uploaded
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        if !uploaded {
+            println("Graphene scene render: frame or instance upload failed")
+            ret false
+        }
+        match self.groups.get(frame_slot as usize) {
+            Option::Some(group) => {
+                if !pass.bind_group(group) {
+                    println("Graphene scene render: scene bind group failed")
+                    ret false
+                }
+            }
+            Option::None => {
+                ret false
+            }
+        }
+        let mut batch_mesh = MeshId::new(0_u64)
+        let mut batch_double_sided = false
+        let mut batch_first = 0_u32
+        let mut batch_count = 0_u32
+        let mut item_index = 0_u32
+        for item in items {
+            let material = match materials.get(item.material()) {
+                Option::Some(value) => value
+                Option::None => {
+                    ret false
+                }
+            }
+            let changes = batch_count >= 64_u32 ||
+            (batch_count > 0_u32 &&(item.mesh().value() != batch_mesh.value() ||
+                    material.double_sided() != batch_double_sided)
+            )
+            if changes {
+                if !pass.bind_pipeline(if batch_double_sided {
+                        self.double_sided_pipeline
+                    } else {
+                        self.solid_pipeline
+                    }
+                ) ||
+                !meshes.draw_instanced(pass, batch_mesh, batch_count, batch_first) {
+                    println("Graphene scene render: instanced batch draw failed")
+                    ret false
+                }
+                batch_first = item_index
+                batch_count = 0_u32
+            }
+            if batch_count == 0_u32 {
+                batch_mesh = item.mesh()
+                batch_double_sided = material.double_sided()
+            }
+            batch_count = batch_count + 1_u32
+            item_index = item_index + 1_u32
+        }
+        if batch_count > 0_u32 &&
+        (!pass.bind_pipeline(if batch_double_sided {
+                    self.double_sided_pipeline
+                } else {
+                    self.solid_pipeline
+                }
+            ) ||
+            !meshes.draw_instanced(pass, batch_mesh, batch_count, batch_first)) {
+            println("Graphene scene render: final instanced batch draw failed")
+            ret false
+        }
         ret true
     }
     pub fn destroy(self: Self) -> bool {
         let mut destroyed = true
-        for resources in self.objects {
-            if !resources.uniforms.destroy() {
+        for group in self.groups {
+            if !group.destroy() {
+                destroyed = false
+            }
+        }
+        for buffer in self.frame_buffers {
+            if !buffer.destroy() {
+                destroyed = false
+            }
+        }
+        for buffer in self.instance_buffers {
+            if !buffer.destroy() {
                 destroyed = false
             }
         }

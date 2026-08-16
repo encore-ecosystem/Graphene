@@ -1,0 +1,72 @@
+import core::option::Option
+import core::vec::Vec
+import graphene::build_virtual_geometry
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut positions = Vec[Vec3]::new()
+    positions.push(Vec3::new(0.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(1.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32))
+    positions.push(Vec3::new(2.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(3.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(2.0_f32, 1.0_f32, 0.0_f32))
+    positions.push(Vec3::new(4.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(5.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(4.0_f32, 1.0_f32, 0.0_f32))
+    let mut indices = Vec[u32]::new()
+    let mut index = 0_u32
+    while index < 9_u32 {
+        indices.push(index)
+        index += 1_u32
+    }
+    let geometry = build_virtual_geometry(positions, indices, 3_usize, 1_usize)
+    if !geometry.valid() || geometry.clusters().len() != 3_usize ||
+    geometry.triangle_indices().len() != 9_usize ||
+    geometry.hierarchy().len() != 5_usize ||
+    geometry.root_node() != 4_u32 {
+        ret 1_u32
+    }
+    for cluster in geometry.clusters() {
+        if cluster.vertex_count() > 3_usize ||
+        cluster.triangle_count() > 1_usize ||
+        cluster.radius() <= 0.0_f32 ||
+        cluster.cone_cutoff() < - 1.0_f32 ||
+        cluster.cone_cutoff() > 1.0_f32 {
+            ret 2_u32
+        }
+    }
+    let mut invalid_indices = indices
+    invalid_indices.push(9999_u32)
+    invalid_indices.push(0_u32)
+    invalid_indices.push(1_u32)
+    let invalid = build_virtual_geometry(
+        positions, invalid_indices, 64_usize, 126_usize,)
+    if invalid.valid() {
+        ret 3_u32
+    }
+    match geometry.clusters().get(0_usize) {
+        Option::Some(first) => {
+            if first.vertex_offset() != 0_usize ||
+            first.triangle_offset() != 0_usize {
+                ret 4_u32
+            }
+        }
+        Option::None => {
+            ret 5_u32
+        }
+    }
+    match geometry.hierarchy().get(geometry.root_node() as usize) {
+        Option::Some(root) => {
+            if root.leaf() || root.cluster_count() != 3_usize ||
+            root.first_cluster() != 0_usize || root.radius() < 2.5_f32 ||
+            root.geometric_error() <= 0.0_f32 {
+                ret 6_u32
+            }
+        }
+        Option::None => {
+            ret 7_u32
+        }
+    }
+    ret 0_u32
+}

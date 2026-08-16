@@ -1,0 +1,58 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    GraphAccess, RenderGraph, graph_access_color_attachment,
+    graph_access_sampled, graph_access_storage_write,
+    graph_queue_compute, graph_queue_graphics
+}
+
+fn main() -> u32 {
+    let mut graph = RenderGraph::new()
+    let created_a = graph.transient("visibility", 1_u32, 4096_u64)
+    let mut graph = created_a.0
+    let visibility = created_a.1
+    let created_b = graph.transient("lighting", 1_u32, 4096_u64)
+    let mut graph = created_b.0
+    let lighting = created_b.1
+    let created_output = graph.external("swapchain", 1_u32, 8192_u64)
+    let mut graph = created_output.0
+    let output = created_output.1
+
+    let mut cull_access = Vec[GraphAccess]::new()
+    cull_access.push(GraphAccess::write(visibility, graph_access_storage_write()))
+    let mut graph = graph.pass("cluster-cull", graph_queue_compute(), cull_access)
+    let mut shade_access = Vec[GraphAccess]::new()
+    shade_access.push(GraphAccess::read(visibility, graph_access_sampled()))
+    shade_access.push(GraphAccess::write(output, graph_access_color_attachment()))
+    let mut graph = graph.pass("material-shade", graph_queue_graphics(), shade_access)
+    let mut light_access = Vec[GraphAccess]::new()
+    light_access.push(GraphAccess::write(lighting, graph_access_storage_write()))
+    let graph = graph.pass("gi-history", graph_queue_compute(), light_access)
+    let compiled = graph.compile()
+    let queue_transfer = match compiled.barriers().get(0_usize) {
+        Option::Some(barrier) => {
+            barrier.queue_transfer()
+        }
+        Option::None => {
+            false
+        }
+    }
+    if !compiled.valid() || compiled.passes().len() != 3_usize ||
+    compiled.barriers().len() != 1_usize ||
+    !queue_transfer ||
+    compiled.alias_slots() != 1_usize {
+        ret 1_u32
+    }
+
+    let mut invalid = RenderGraph::new()
+    let transient = invalid.transient("uninitialized", 1_u32, 64_u64)
+    let mut invalid = transient.0
+    let mut access = Vec[GraphAccess]::new()
+    access.push(GraphAccess::read(transient.1, graph_access_sampled()))
+    let invalid = invalid.pass("bad-read", graph_queue_graphics(), access).compile()
+    ret if invalid.valid() {
+        2_u32
+    } else {
+        0_u32
+    }
+}

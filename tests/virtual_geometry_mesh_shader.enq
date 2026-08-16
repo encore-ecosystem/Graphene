@@ -1,0 +1,117 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    BindGroupLayoutEntry, DeviceFeatures, GpuBuffer, GraphicsInstance,
+    build_virtual_geometry, buffer_storage, gpu_cull_clusters,
+    shader_stage_fragment, shader_stage_mesh, triangle_fragment_spirv,
+    virtual_geometry_mesh_spirv
+}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let requested = DeviceFeatures::from_mask(
+                DeviceFeatures::mesh_shader().mask() |
+                DeviceFeatures::draw_indirect_count().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, DeviceFeatures::none(), requested,)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            if !device.enabled_features().contains(requested) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+
+            let mut positions = Vec[Vec3]::new()
+            positions.push(Vec3::new( - 0.8_f32, - 0.8_f32, 0.0_f32))
+            positions.push(Vec3::new(0.8_f32, - 0.8_f32, 0.0_f32))
+            positions.push(Vec3::new(0.0_f32, 0.8_f32, 0.0_f32))
+            let mut indices = Vec[u32]::new()
+            indices.push(0_u32) indices.push(1_u32) indices.push(2_u32)
+            let geometry = build_virtual_geometry(positions, indices, 64_usize, 126_usize)
+            let geometry_valid = geometry.valid()
+            let packed_indices = geometry.triangle_indices()
+            let cull = gpu_cull_clusters(device, geometry.clusters(), 100.0_f32)
+            let visible_count = cull.visible_count()
+            let cull_buffer = cull.storage_buffer()
+
+            let mut vertices = Vec[f32]::new()
+            vertices.push( - 0.8_f32) vertices.push( - 0.8_f32) vertices.push(0.0_f32)
+            vertices.push(0.0_f32) vertices.push(0.0_f32) vertices.push(1.0_f32)
+            vertices.push(1.0_f32) vertices.push(0.0_f32) vertices.push(0.0_f32)
+            vertices.push(0.8_f32) vertices.push( - 0.8_f32) vertices.push(0.0_f32)
+            vertices.push(0.0_f32) vertices.push(0.0_f32) vertices.push(1.0_f32)
+            vertices.push(0.0_f32) vertices.push(1.0_f32) vertices.push(0.0_f32)
+            vertices.push(0.0_f32) vertices.push(0.8_f32) vertices.push(0.0_f32)
+            vertices.push(0.0_f32) vertices.push(0.0_f32) vertices.push(1.0_f32)
+            vertices.push(0.0_f32) vertices.push(0.0_f32) vertices.push(1.0_f32)
+            let vertex_bytes =(vertices.len() as u64) * 4_u64
+            let index_bytes =(packed_indices.len() as u64) * 4_u64
+            let vertex_buffer = device.create_buffer(vertex_bytes, buffer_storage(), true)
+            let index_buffer = device.create_buffer(index_bytes, buffer_storage(), true)
+            let mut layout_entries = Vec[BindGroupLayoutEntry]::new()
+            layout_entries.push(BindGroupLayoutEntry::storage(0_u32, shader_stage_mesh()))
+            layout_entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_mesh()))
+            layout_entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_mesh()))
+            let layout = device.create_bind_group_layout(layout_entries)
+            let mut bindings = Vec[u32]::new()
+            bindings.push(0_u32) bindings.push(1_u32) bindings.push(2_u32)
+            let mut buffers = Vec[GpuBuffer]::new()
+            buffers.push(cull_buffer) buffers.push(vertex_buffer) buffers.push(index_buffer)
+            let mut offsets = Vec[u64]::new()
+            offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
+            let mut ranges = Vec[u64]::new()
+            ranges.push(cull_buffer.size()) ranges.push(vertex_bytes) ranges.push(index_bytes)
+            let group = device.create_storage_bind_group_many(
+                layout, bindings, buffers, offsets, ranges,)
+            let target = device.create_offscreen_target(64_u32, 64_u32)
+            let mesh_shader = device.create_shader_module(
+                virtual_geometry_mesh_spirv(), shader_stage_mesh(),)
+            let fragment_shader = device.create_shader_module(
+                triangle_fragment_spirv(), shader_stage_fragment(),)
+            let pipeline = device.create_mesh_pipeline_with_bind_group(
+                target, mesh_shader, fragment_shader, layout,)
+            let initialized = geometry_valid && cull.valid() && visible_count == 1_u32 &&
+            vertex_buffer.available() && vertex_buffer.write_f32s(0_u64, vertices) &&
+            index_buffer.available() && index_buffer.write_u32s(0_u64, packed_indices) &&
+            layout.available() && group.available() && target.available() &&
+            mesh_shader.available() && fragment_shader.available() && pipeline.available()
+            let frame = target.acquire_frame()
+            let pass = frame.begin_render_pass(pipeline, 0.02_f32, 0.02_f32, 0.02_f32, 1.0_f32)
+            let rendered = initialized && frame.available() && pass.available() &&
+            pass.bind_group(group) &&
+            pass.draw_mesh_tasks(visible_count, 1_u32, 1_u32) &&
+            pass.end() && frame.present()
+
+            frame.destroy()
+            pipeline.destroy()
+            fragment_shader.destroy()
+            mesh_shader.destroy()
+            target.destroy()
+            group.destroy()
+            layout.destroy()
+            index_buffer.destroy()
+            vertex_buffer.destroy()
+            cull.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if rendered {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

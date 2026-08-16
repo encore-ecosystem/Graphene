@@ -1,0 +1,5 @@
+[project]
+format = 1
+scene = "scene.graphene.json"
+game = "game/encore.toml"
+kind = "benchmark"

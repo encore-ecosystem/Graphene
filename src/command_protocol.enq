@@ -1,0 +1,510 @@
+//! Stable JSON command envelopes shared by Automation API and MCP adapters.
+
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import linalg::Vec3
+import mod::command_bus::{ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand, ActorVisibilityCommand, AddActorCommand, CommandResult, DuplicateActorCommand, GrapheneCommand, SimulationCommand}
+import mod::editor_values::parse_editor_scalar
+import mod::scene::transform::Transform
+
+pub struct CommandEnvelope {
+    id: str command: GrapheneCommand
+}
+
+pub struct ProtocolError {
+    message: str
+}
+
+impl for CommandEnvelope {
+    pub fn new(id: str, command: GrapheneCommand) -> Self {
+        ret Self {
+            id, command
+        }
+    }
+    pub fn id(self: Self) -> str {
+        ret self.id
+    }
+    pub fn command(self: Self) -> GrapheneCommand {
+        ret self.command
+    }
+}
+
+impl for ProtocolError {
+    fn new(message: str) -> Self {
+        ret Self {
+            message
+        }
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+}
+
+fn string_field(value: Json, name: str) -> Option[str] {
+    match value.get(name) {
+        Option::Some(field_value) => {
+            ret field_value.as_str()
+        }
+        Option::None => {
+        }
+    }
+    ret Option[str]::None
+}
+
+fn bool_field(value: Json, name: str) -> Option[bool] {
+    match value.get(name) {
+        Option::Some(field_value) => {
+            ret field_value.as_bool()
+        }
+        Option::None => {
+        }
+    }
+    ret Option[bool]::None
+}
+
+fn parse_u64(value: str) -> Option[u64] {
+    if value == "" {
+        ret Option[u64]::None
+    }
+    let mut result = 0_u64
+    let mut index = 0_usize
+    while index < value.char_len() {
+        let digit = value.slice(index, 1_usize)
+        let parsed = if digit == "0" {
+            Option[u64]::Some(0_u64)
+        } else {
+            if digit == "1" {
+                Option[u64]::Some(1_u64)
+            } else {
+                if digit == "2" {
+                    Option[u64]::Some(2_u64)
+                } else {
+                    if digit == "3" {
+                        Option[u64]::Some(3_u64)
+                    } else {
+                        if digit == "4" {
+                            Option[u64]::Some(4_u64)
+                        } else {
+                            if digit == "5" {
+                                Option[u64]::Some(5_u64)
+                            } else {
+                                if digit == "6" {
+                                    Option[u64]::Some(6_u64)
+                                } else {
+                                    if digit == "7" {
+                                        Option[u64]::Some(7_u64)
+                                    } else {
+                                        if digit == "8" {
+                                            Option[u64]::Some(8_u64)
+                                        } else {
+                                            if digit == "9" {
+                                                Option[u64]::Some(9_u64)
+                                            } else {
+                                                Option[u64]::None
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let value_digit = match parsed {
+            Option::Some(found) => {
+                found
+            }
+            Option::None => {
+                ret Option[u64]::None
+            }
+        }
+        let next = result * 10_u64 + value_digit
+        if next < result {
+            ret Option[u64]::None
+        }
+        result = next
+        index = index + 1_usize
+    }
+    ret Option[u64]::Some(result)
+}
+
+fn actor_field(value: Json) -> Option[u64] {
+    match value.get("actor") {
+        Option::Some(actor) => {
+            match actor.as_number() {
+                Option::Some(number) => {
+                    ret parse_u64(number)
+                }
+                Option::None => {
+                }
+            }
+        }
+        Option::None => {
+        }
+    }
+    ret Option[u64]::None
+}
+
+fn vector_field(value: Json, name: str) -> Option[Vec3] {
+    match value.get(name) {
+        Option::Some(raw) => {
+            match raw.as_array() {
+                Option::Some(items) => {
+                    if items.len() != 3_usize {
+                        ret Option[Vec3]::None
+                    }
+                    let mut values = Vec[f32]::new()
+                    for item in items {
+                        match item.as_number() {
+                            Option::Some(number) => {
+                                match parse_editor_scalar(number) {
+                                    Option::Some(parsed) => {
+                                        values.push(parsed)
+                                    }
+                                    Option::None => {
+                                        ret Option[Vec3]::None
+                                    }
+                                }
+                            }
+                            Option::None => {
+                                ret Option[Vec3]::None
+                            }
+                        }
+                    }
+                    match values.get(0_usize) {
+                        Option::Some(x) => {
+                            match values.get(1_usize) {
+                                Option::Some(y) => {
+                                    match values.get(2_usize) {
+                                        Option::Some(z) => {
+                                            ret Option[Vec3]::Some(Vec3::new(x, y, z))
+                                        }
+                                        Option::None => {
+                                        }
+                                    }
+                                }
+                                Option::None => {
+                                }
+                            }
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+        }
+        Option::None => {
+        }
+    }
+    ret Option[Vec3]::None
+}
+
+fn decode_payload(method: str, params: Json) -> Result[GrapheneCommand, ProtocolError] {
+    if method == "scene.add" {
+        match string_field(params, "name") {
+            Option::Some(name) => {
+                match decode_transform(params) {
+                    Option::Some(transform) => {
+                        if name != "" {
+                            ret Result[GrapheneCommand, ProtocolError]::Ok(
+                                GrapheneCommand::AddActor(AddActorCommand::new(name, transform)))
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.add requires name and valid position, rotation, and scale"))
+    }
+    if method == "scene.delete" {
+        match actor_field(params) {
+            Option::Some(actor) => {
+                ret Result[GrapheneCommand, ProtocolError]::Ok(
+                    GrapheneCommand::DeleteActor(ActorCommand::new(actor)))
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.delete requires actor"))
+    }
+    if method == "scene.duplicate" {
+        match actor_field(params) {
+            Option::Some(actor) => {
+                match string_field(params, "name") {
+                    Option::Some(name) => {
+                        match decode_transform(params) {
+                            Option::Some(transform) => {
+                                if name != "" {
+                                    ret Result[GrapheneCommand, ProtocolError]::Ok(
+                                        GrapheneCommand::DuplicateActor(
+                                            DuplicateActorCommand::new(actor, name, transform)))
+                                }
+                            }
+                            Option::None => {
+                            }
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.duplicate requires actor, name, and a valid transform"))
+    }
+    if method == "scene.set_parent" {
+        match actor_field(params) {
+            Option::Some(actor) => {
+                let parent = params.get("parent").unwrap_or(Json::Null)
+                if parent.is_null() {
+                    ret Result[GrapheneCommand, ProtocolError]::Ok(
+                        GrapheneCommand::SetParent(ActorParentCommand::new(actor, Option[u64]::None)))
+                }
+                match parent.as_number() {
+                    Option::Some(number) => {
+                        match parse_u64(number) {
+                            Option::Some(parent_id) => {
+                                ret Result[GrapheneCommand, ProtocolError]::Ok(
+                                    GrapheneCommand::SetParent(ActorParentCommand::new(actor,
+                                            Option[u64]::Some(parent_id),)))
+                            }
+                            Option::None => {
+                            }
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.set_parent requires actor and parent or null"))
+    }
+    if method == "scene.rename" {
+        match actor_field(params) {
+            Option::Some(actor) => {
+                match string_field(params, "name") {
+                    Option::Some(name) => {
+                        if name != "" {
+                            ret Result[GrapheneCommand, ProtocolError]::Ok(
+                                GrapheneCommand::Rename(ActorNameCommand::new(actor, name)))
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.rename requires actor and non-empty name"))
+    }
+    if method == "scene.set_visibility" {
+        match actor_field(params) {
+            Option::Some(actor) => {
+                match bool_field(params, "visible") {
+                    Option::Some(visible) => {
+                        ret Result[GrapheneCommand, ProtocolError]::Ok(
+                            GrapheneCommand::SetVisibility(ActorVisibilityCommand::new(actor, visible)))
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.set_visibility requires actor and visible"))
+    }
+    if method == "scene.select" {
+        if params.get("actor").unwrap_or(Json::Null).is_null() {
+            ret Result[GrapheneCommand, ProtocolError]::Ok(
+                GrapheneCommand::Select(ActorSelectionCommand::new(Option[u64]::None)))
+        }
+        match actor_field(params) {
+            Option::Some(actor) => {
+                ret Result[GrapheneCommand, ProtocolError]::Ok(
+                    GrapheneCommand::Select(ActorSelectionCommand::new(Option[u64]::Some(actor))))
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.select requires an actor or null"))
+    }
+    if method == "scene.set_transform" {
+        match actor_field(params) {
+            Option::Some(actor) => {
+                match decode_transform(params) {
+                    Option::Some(transform) => {
+                        ret Result[GrapheneCommand, ProtocolError]::Ok(
+                            GrapheneCommand::SetTransform(ActorTransformCommand::new(actor, transform)))
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("scene.set_transform requires actor and valid position, rotation, and scale"))
+    }
+    if method == "history.undo" {
+        ret Result[GrapheneCommand, ProtocolError]::Ok(GrapheneCommand::Undo)
+    }
+    if method == "history.redo" {
+        ret Result[GrapheneCommand, ProtocolError]::Ok(GrapheneCommand::Redo)
+    }
+    if method == "simulation.start" {
+        match string_field(params, "mode") {
+            Option::Some(mode) => {
+                if mode == "play" || mode == "simulate" {
+                    ret Result[GrapheneCommand, ProtocolError]::Ok(
+                        GrapheneCommand::StartSimulation(SimulationCommand::new(mode)))
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(
+            ProtocolError::new("simulation.start requires mode play or simulate"))
+    }
+    if method == "simulation.stop" {
+        ret Result[GrapheneCommand, ProtocolError]::Ok(GrapheneCommand::StopSimulation)
+    }
+    if method == "project.save" {
+        ret Result[GrapheneCommand, ProtocolError]::Ok(GrapheneCommand::RequestSave)
+    }
+    if method == "build.start" {
+        ret Result[GrapheneCommand, ProtocolError]::Ok(GrapheneCommand::RequestBuild)
+    }
+    ret Result[GrapheneCommand, ProtocolError]::Err(ProtocolError::new("Unknown command method: " + method))
+}
+
+fn decode_transform(params: Json) -> Option[Transform] {
+    match vector_field(params, "position") {
+        Option::Some(position) => {
+            match vector_field(params, "rotation") {
+                Option::Some(rotation) => {
+                    match vector_field(params, "scale") {
+                        Option::Some(scale) => {
+                            if scale.x() > 0.0_f32 && scale.y() > 0.0_f32 && scale.z() > 0.0_f32 {
+                                ret Option[Transform]::Some(Transform::new(position, rotation, scale))
+                            }
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+        }
+        Option::None => {
+        }
+    }
+    ret Option[Transform]::None
+}
+
+/// Decodes the stable Automation API request envelope.
+pub fn decode_command_request(source: str) -> Result[CommandEnvelope, ProtocolError] {
+    match parse(source) {
+        Result::Ok(root) => {
+            match string_field(root, "id") {
+                Option::Some(id) => {
+                    match string_field(root, "method") {
+                        Option::Some(method) => {
+                            match root.get("params") {
+                                Option::Some(params) => {
+                                    match decode_payload(method, params) {
+                                        Result::Ok(command) => {
+                                            ret Result[CommandEnvelope, ProtocolError]::Ok(
+                                                CommandEnvelope::new(id, command))
+                                        }
+                                        Result::Err(error) => {
+                                            ret Result[CommandEnvelope, ProtocolError]::Err(error)
+                                        }
+                                    }
+                                }
+                                Option::None => {
+                                    if method == "history.undo" || method == "history.redo" ||
+                                    method == "simulation.stop" || method == "project.save" ||
+                                    method == "build.start" {
+                                        match decode_payload(method, Json::Object(Vec[(str, Json)]::new()))
+                                        {
+                                            Result::Ok(command) => {
+                                                ret Result[CommandEnvelope, ProtocolError]::Ok(
+                                                    CommandEnvelope::new(id, command))
+                                            }
+                                            Result::Err(error) => {
+                                                ret Result[CommandEnvelope, ProtocolError]::Err(error)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+        }
+        Result::Err(error) => {
+            ret Result[CommandEnvelope, ProtocolError]::Err(
+                ProtocolError::new("Invalid JSON at " + error.position().fmt() + ": " + error.message()))
+        }
+    }
+    ret Result[CommandEnvelope, ProtocolError]::Err(
+        ProtocolError::new("Command request requires string id, method, and params"))
+}
+
+/// Encodes a command result without losing its request correlation ID.
+pub fn encode_command_response(id: str, result: CommandResult) -> str {
+    let mut events = Vec[Json]::new()
+    for event in result.events() {
+        let mut event_fields = Vec[(str, Json)]::new()
+        event_fields.push(field("kind", Json::String(event.kind())))
+        event_fields.push(field("revision", Json::Number(event.revision().fmt())))
+        match event.actor() {
+            Option::Some(actor) => {
+                event_fields.push(field("actor", Json::Number(actor.fmt())))
+            }
+            Option::None => {
+                event_fields.push(field("actor", Json::Null))
+            }
+        }
+        events.push(Json::Object(event_fields))
+    }
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("id", Json::String(id)))
+    fields.push(field("ok", Json::Bool(result.success())))
+    fields.push(field("revision", Json::Number(result.revision().fmt())))
+    fields.push(field("message", Json::String(result.message())))
+    fields.push(field("events", Json::Array(events)))
+    ret stringify(Json::Object(fields))
+}
+
+/// Machine-readable command registry used by console completion and MCP tools.
+pub fn command_registry_json() -> str {
+    ret "{\"version\":1,\"commands\":[\"scene.add\",\"scene.duplicate\",\"scene.delete\",\"scene.set_parent\",\"scene.rename\",\"scene.set_visibility\",\"scene.set_transform\",\"scene.select\",\"project.save\",\"build.start\",\"simulation.start\",\"simulation.stop\",\"history.undo\",\"history.redo\"]}"
+}

@@ -1,0 +1,463 @@
+import core::fmt::Debug
+import std::io::println
+import core::option::Option
+import std::os:: {
+    argc, argv, mkdir_all, write_file
+}
+import core::vec::Vec
+import graphene:: {
+    BindGroupLayoutEntry, DirectionalLight, FrameStatistics, GraphicsInstance,
+    MaterialAssets, MeshAssets, PerspectiveCamera, RenderPipelineOptions, Renderable, Scene,
+    SceneRenderer, StandardMaterial, Transform, VertexAttribute, VertexBufferLayout,
+    cube_fragment_spirv, cube_mesh, cube_vertex_spirv, frame_statistics,
+    performance_counter_ns, shader_stage_fragment, shader_stage_vertex, vertex_format_float32x3
+}
+import linalg::Vec3
+
+struct BenchmarkOptions {
+    mode: str
+    profile: str
+    output: str
+    warmup_ns: u64
+    duration_ns: u64
+    repeat: u32
+    verify_target: u64
+}
+
+struct BenchmarkResult {
+    name: str
+    width: u32
+    height: u32
+    objects: u32
+    run: u32
+    gpu: str
+    statistics: FrameStatistics
+}
+
+fn argument(name: str, fallback: str) -> str {
+    let mut index = 1_usize
+    while index + 1_usize < argc() {
+        match argv(index) {
+            Option::Some(value) => {
+                if value == name {
+                    match argv(index + 1_usize) {
+                        Option::Some(found) => {
+                            ret found
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        index = index + 1_usize
+    }
+    ret fallback
+}
+
+fn parse_seconds(value: str, fallback: u64) -> u64 {
+    let mut result = 0_u64
+    let mut index = 0_usize
+    if value == "" {
+        ret fallback
+    }
+    while index < value.char_len() {
+        let token = value.slice(index, 1_usize)
+        let digit = if token == "0" {
+            0_u64
+        } else {
+            if token == "1" {
+                1_u64
+            } else {
+                if token == "2" {
+                    2_u64
+                } else {
+                    if token == "3" {
+                        3_u64
+                    } else {
+                        if token == "4" {
+                            4_u64
+                        } else {
+                            if token == "5" {
+                                5_u64
+                            } else {
+                                if token == "6" {
+                                    6_u64
+                                } else {
+                                    if token == "7" {
+                                        7_u64
+                                    } else {
+                                        if token == "8" {
+                                            8_u64
+                                        } else {
+                                            if token == "9" {
+                                                9_u64
+                                            } else {
+                                                ret fallback
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result = result * 10_u64 + digit
+        index = index + 1_usize
+    }
+    ret if result > 0_u64 {
+        result
+    } else {
+        fallback
+    }
+}
+
+fn parent_directory(path: str) -> str {
+    let mut index = path.char_len()
+    while index > 0_usize {
+        if path.slice(index - 1_usize, 1_usize) == "/" ||
+        path.slice(index - 1_usize, 1_usize) == "\\" {
+            ret path.slice(0_usize, index - 1_usize)
+        }
+        index = index - 1_usize
+    }
+    ret ""
+}
+
+fn options() -> BenchmarkOptions {
+    ret BenchmarkOptions {
+        argument("--mode", "all"),
+        argument("--profile", "debug"),
+        argument("--output", "target/benchmarks/latest.json"),
+        parse_seconds(argument("--warmup-seconds", "3"), 3_u64) * 1000000000_u64,
+        parse_seconds(argument("--duration-seconds", "10"), 10_u64) * 1000000000_u64,
+        parse_seconds(argument("--repeat", "1"), 1_u64) as u32,
+        parse_seconds(argument("--verify-target", "0"), 0_u64)
+    }
+}
+
+fn run_mode(name: str, width: u32, height: u32, object_count: u32,
+    run: u32, warmup_ns: u64, duration_ns: u64,) -> Option[BenchmarkResult] {
+    let presented = name != "throughput"
+    let instance = GraphicsInstance::with_window_support(true)
+    if !instance.available() {
+        println("Benchmark Vulkan instance failed: " + instance.error())
+        instance.destroy()
+        ret Option[BenchыmarkResult]::None
+    }
+    let window = instance.create_window("Graphene Benchmark — " + name, width, height)
+    if !window.available() {
+        println("Benchmark window failed: " + window.error())
+        window.destroy()
+        instance.destroy()
+        ret Option[BenchmarkResult]::None
+    }
+    window.poll()
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let device = instance.create_present_device(adapter, window)
+            let swapchain = if presented {
+                device.create_swapchain(window)
+            } else {
+                device.create_shared_offscreen_target(width, height)
+            }
+            if !device.available() || !swapchain.available() ||
+            (presented && !swapchain.set_immediate_present(true)) {
+                println("Benchmark presentation failed: " + device.error() + " " + swapchain.error())
+                swapchain.destroy()
+                device.destroy()
+                window.destroy()
+                instance.destroy()
+                ret Option[BenchmarkResult]::None
+            }
+            let vertex_shader = device.create_shader_module(cube_vertex_spirv(), shader_stage_vertex())
+            let fragment_shader = device.create_shader_module(cube_fragment_spirv(), shader_stage_fragment())
+            let mut entries = Vec[BindGroupLayoutEntry]::new()
+            entries.push(BindGroupLayoutEntry::uniform(
+                    0_u32, shader_stage_vertex() | shader_stage_fragment(),))
+            entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_vertex()))
+            let layout = device.create_bind_group_layout(entries)
+            let mut attributes = Vec[VertexAttribute]::new()
+            attributes.push(VertexAttribute::new(0_u32, vertex_format_float32x3(), 0_u32))
+            attributes.push(VertexAttribute::new(1_u32, vertex_format_float32x3(), 12_u32))
+            attributes.push(VertexAttribute::new(2_u32, vertex_format_float32x3(), 24_u32))
+            let pipeline = device.create_render_pipeline_with_options(
+                swapchain, vertex_shader, fragment_shader,
+                VertexBufferLayout::new(36_u32, attributes), layout,
+                RenderPipelineOptions::depth().with_backface_culling(),)
+            let double_sided_pipeline = device.create_render_pipeline_with_options(
+                swapchain, vertex_shader, fragment_shader,
+                VertexBufferLayout::new(36_u32, attributes), layout,
+                RenderPipelineOptions::depth(),)
+            let mut meshes = MeshAssets::new()
+            let mesh = meshes.upload(device, cube_mesh(if object_count == 1_u32 {
+                        1.2_f32
+                    } else {
+                        0.32_f32
+                    }
+                ))
+            let mut materials = MaterialAssets::new()
+            let material = materials.add(StandardMaterial::editor_default())
+            let mut renderer = SceneRenderer::create(
+                device, layout, swapchain.frames_in_flight(), pipeline, double_sided_pipeline,)
+            if !pipeline.available() || !renderer.available() || !meshes.contains(mesh) {
+                println("Benchmark pipeline initialization failed")
+                renderer.destroy()
+                meshes.destroy()
+                pipeline.destroy()
+                layout.destroy()
+                vertex_shader.destroy()
+                fragment_shader.destroy()
+                swapchain.destroy()
+                device.destroy()
+                window.destroy()
+                instance.destroy()
+                ret Option[BenchmarkResult]::None
+            }
+            let mut scene = Scene::new()
+            let mut entities = Vec[u64]::new()
+            let side = 16_u32
+            let mut index = 0_u32
+            while index < object_count {
+                let x =(index % side) as f32 - 7.5_f32
+                let z =(index / side) as f32 - 7.5_f32
+                let entity = scene.create_entity("Benchmark " + Debug::fmt(index),
+                    Transform::identity().with_position(if object_count == 1_u32 {
+                            Vec3::zero()
+                        } else {
+                            Vec3::new(x * 0.52_f32, 0.0_f32, z * 0.52_f32)
+                        }
+                    ),)
+                scene.set_renderable(entity,
+                    Option[Renderable]::Some(Renderable::new(mesh, material)),)
+                entities.push(entity)
+                index = index + 1_u32
+            }
+            let camera = PerspectiveCamera::new(
+                if object_count == 1_u32 {
+                    Vec3::new(0.0_f32, 0.4_f32, 3.6_f32)
+                } else {
+                    Vec3::new(7.0_f32, 8.5_f32, 10.0_f32)
+                }
+                ,
+                Vec3::zero(), 1.0471976_f32, 0.1_f32, 100.0_f32,)
+            let light = DirectionalLight::new(
+                Vec3::new( - 0.45_f32, - 0.8_f32, - 0.35_f32),
+                Vec3::new(1.0_f32, 0.97_f32, 0.92_f32), 1.0_f32,)
+            println("Warming " + name + " for " +
+                Debug::fmt(warmup_ns / 1000000000_u64) + " seconds on " + adapter.name() +
+                " (run " + Debug::fmt(run) + ")")
+            let warmup_started = performance_counter_ns()
+            let mut running = true
+            while running && performance_counter_ns() - warmup_started < warmup_ns {
+                running = if presented {
+                    window.poll()
+                } else {
+                    true
+                }
+                let frame = swapchain.acquire_frame()
+                if !frame.available() {
+                    running = false
+                } else {
+                    let pass = frame.begin_render_pass(
+                        pipeline, 0.012_f32, 0.018_f32, 0.028_f32, 1.0_f32,)
+                    let recorded = renderer.render_scene(
+                        scene, camera, light, meshes, materials,
+                        pass, frame.slot(), width as f32 / height as f32,) && pass.end()
+                    running = recorded && frame.present()
+                }
+                frame.destroy()
+            }
+            let mut samples = Vec[u64]::new()
+            let measured_started = performance_counter_ns()
+            while running && performance_counter_ns() - measured_started < duration_ns {
+                running = if presented {
+                    window.poll()
+                } else {
+                    true
+                }
+                if object_count > 1_u32 {
+                    let seconds =(performance_counter_ns() - measured_started) as f32 *
+                    0.000000001_f32
+                    let mut entity_index = 0_usize
+                    for entity in entities {
+                        let column =(entity_index as u32 % side) as f32 - 7.5_f32
+                        let row =(entity_index as u32 / side) as f32 - 7.5_f32
+                        scene.set_transform(entity, Transform::identity()
+                            .with_position(Vec3::new(
+                                    column * 0.52_f32, 0.0_f32, row * 0.52_f32,))
+                            .with_rotation(Vec3::new(0.0_f32,
+                                    seconds +(entity_index as f32) * 0.03_f32, 0.0_f32,)),)
+                        entity_index = entity_index + 1_usize
+                    }
+                }
+                let frame_started = performance_counter_ns()
+                let frame = swapchain.acquire_frame()
+                if !frame.available() {
+                    running = false
+                } else {
+                    let pass = frame.begin_render_pass(
+                        pipeline, 0.012_f32, 0.018_f32, 0.028_f32, 1.0_f32,)
+                    let recorded = renderer.render_scene(
+                        scene, camera, light, meshes, materials,
+                        pass, frame.slot(), width as f32 / height as f32,) && pass.end()
+                    running = recorded && frame.present()
+                }
+                frame.destroy()
+                if running {
+                    samples.push(performance_counter_ns() - frame_started)
+                }
+            }
+            let elapsed = performance_counter_ns() - measured_started
+            let statistics = frame_statistics(samples, elapsed)
+            println(name + ": " + Debug::fmt(statistics.average_fps()) +
+                " average FPS, " + Debug::fmt(statistics.one_percent_low_fps()) +
+                " 1% low, p99 " + Debug::fmt(statistics.p99_frame_ns() / 1000_u64) + " us")
+            renderer.destroy()
+            meshes.destroy()
+            pipeline.destroy()
+            double_sided_pipeline.destroy()
+            layout.destroy()
+            vertex_shader.destroy()
+            fragment_shader.destroy()
+            swapchain.destroy()
+            device.destroy()
+            window.destroy()
+            instance.destroy()
+            if statistics.frames() == 0_u64 {
+                ret Option[BenchmarkResult]::None
+            }
+            ret Option[BenchmarkResult]::Some(BenchmarkResult {
+                    name, width, height, object_count, run, adapter.name(), statistics
+                }
+                ,)
+        }
+        Option::None => {
+            println("Benchmark found no Vulkan adapter")
+        }
+    }
+    window.destroy()
+    instance.destroy()
+    ret Option[BenchmarkResult]::None
+}
+
+fn result_json(result: BenchmarkResult) -> str {
+    let stats = result.statistics
+    ret "{\"name\":\"" + result.name + "\",\"width\":" + Debug::fmt(result.width) +
+    ",\"path\":\"" + if result.name == "throughput" {
+        "headless-submit"
+    } else {
+        "presented"
+    }
+    + "\",\"run\":" + Debug::fmt(result.run) + ",\"gpu\":\"" + result.gpu +
+    "\",\"height\":" + Debug::fmt(result.height) + ",\"objects\":" +
+    Debug::fmt(result.objects) + ",\"frames\":" + Debug::fmt(stats.frames()) +
+    ",\"elapsedNs\":" + Debug::fmt(stats.elapsed_ns()) + ",\"averageFps\":" +
+    Debug::fmt(stats.average_fps()) + ",\"meanFrameNs\":" +
+    Debug::fmt(stats.mean_frame_ns()) + ",\"p50FrameNs\":" +
+    Debug::fmt(stats.p50_frame_ns()) + ",\"p95FrameNs\":" +
+    Debug::fmt(stats.p95_frame_ns()) + ",\"p99FrameNs\":" +
+    Debug::fmt(stats.p99_frame_ns()) + ",\"onePercentLowFps\":" +
+    Debug::fmt(stats.one_percent_low_fps()) + "}"
+}
+
+fn main() -> u32 {
+    let config = options()
+    if config.mode != "all" && config.mode != "throughput" &&
+    config.mode != "peak" && config.mode != "representative" {
+        println("Expected --mode all, throughput, peak, or representative")
+        ret 2_u32
+    }
+    let mut results = Vec[BenchmarkResult]::new()
+    if config.mode == "all" || config.mode == "throughput" {
+        let mut run = 1_u32
+        let runs = if config.mode == "throughput" {
+            config.repeat
+        } else {
+            1_u32
+        }
+        while run <= runs {
+            match run_mode("throughput", 320_u32, 180_u32, 1_u32, run,
+                config.warmup_ns, config.duration_ns,) {
+                Option::Some(result) => {
+                    results.push(result)
+                }
+                Option::None => {
+                    ret 3_u32
+                }
+            }
+            run = run + 1_u32
+        }
+    }
+    if config.mode == "all" || config.mode == "peak" {
+        match run_mode("peak", 320_u32, 180_u32, 1_u32, 1_u32,
+            config.warmup_ns, config.duration_ns,) {
+            Option::Some(result) => {
+                results.push(result)
+            }
+            Option::None => {
+                ret 3_u32
+            }
+        }
+    }
+    if config.mode == "all" || config.mode == "representative" {
+        match run_mode("representative", 1280_u32, 720_u32, 64_u32, 1_u32,
+            config.warmup_ns, config.duration_ns,) {
+            Option::Some(result) => {
+                results.push(result)
+            }
+            Option::None => {
+                ret 4_u32
+            }
+        }
+    }
+    let mut verified_runs = 0_u32
+    let mut verification_passed = config.verify_target > 0_u64
+    for result in results {
+        if result.name == "throughput" {
+            verified_runs = verified_runs + 1_u32
+            if result.statistics.average_fps() < config.verify_target as f64 {
+                verification_passed = false
+            }
+        }
+    }
+    if verified_runs < config.repeat {
+        verification_passed = false
+    }
+    let mut body = "{\"schemaVersion\":2,\"profile\":\"" + config.profile +
+    "\",\"modes\":["
+    let mut index = 0_usize
+    for result in results {
+        if index > 0_usize {
+            body = body + ","
+        }
+        body = body + result_json(result)
+        index = index + 1_usize
+    }
+    body = body + "],\"verification\":{\"targetAverageFps\":" +
+    Debug::fmt(config.verify_target) + ",\"requiredRuns\":" + Debug::fmt(config.repeat) +
+    ",\"passed\":" + if verification_passed {
+        "true"
+    } else {
+        "false"
+    }
+    + "}}\n"
+    let output_directory = parent_directory(config.output)
+    if output_directory != "" {
+        mkdir_all(output_directory)
+    }
+    if write_file(config.output, body) != 0_i32 {
+        println("Unable to write benchmark report: " + config.output)
+        ret 5_u32
+    }
+    println("Benchmark report: " + config.output)
+    if config.verify_target > 0_u64 && !verification_passed {
+        println("Benchmark verification failed")
+        ret 6_u32
+    }
+    ret 0_u32
+}

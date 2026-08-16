@@ -1,0 +1,24 @@
+//! Adapters between the gameplay runtime world and the editor/render scene.
+
+import mod::runtime::{RuntimeTransform, World}
+import mod::scene::transform::Transform
+import mod::scene::world::Scene
+
+pub fn runtime_transform_to_scene(value: RuntimeTransform) -> Transform {
+    ret Transform::new(value.position(), value.rotation(), value.scale())
+}
+
+/// Copies gameplay transforms into a render scene without exposing editor
+/// state to the gameplay process.
+pub fn sync_runtime_world(runtime: World, scene: mut Scene) ->() {
+    for id in runtime.actor_ids() {
+        match runtime.transform(id) {
+            Option[RuntimeTransform]::Some(transform) => {
+                scene.set_transform(id, runtime_transform_to_scene(transform))
+            }
+            Option[RuntimeTransform]::None => {
+            }
+        }
+    }
+    ret()
+}

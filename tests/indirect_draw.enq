@@ -1,0 +1,104 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    BindGroupLayoutEntry, DeviceFeatures, GraphicsInstance, VertexAttribute,
+    VertexBufferLayout, build_virtual_geometry, buffer_uniform, gpu_cull_clusters, shader_stage_fragment,
+    shader_stage_vertex, triangle_fragment_spirv, triangle_vertex_spirv,
+    vertex_format_float32x2, vertex_format_float32x3
+}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let device = instance.create_device_with_features(adapter,
+                DeviceFeatures::none(), DeviceFeatures::draw_indirect_count(),)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            if !device.enabled_features().contains(DeviceFeatures::draw_indirect_count()) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+
+            let target = device.create_offscreen_target(64_u32, 64_u32)
+            let layout = device.create_uniform_bind_group_layout(0_u32, shader_stage_vertex())
+            let uniform = device.create_buffer(16_u64, buffer_uniform(), true)
+            let mut transform = Vec[f32]::new()
+            transform.push(1.0_f32)
+            transform.push(0.0_f32)
+            transform.push(0.0_f32)
+            transform.push(0.0_f32)
+            let group = device.create_uniform_bind_group(layout, uniform, 0_u64, 16_u64)
+            let vertex_shader = device.create_shader_module(triangle_vertex_spirv(), shader_stage_vertex())
+            let fragment_shader = device.create_shader_module(triangle_fragment_spirv(), shader_stage_fragment())
+            let mut attributes = Vec[VertexAttribute]::new()
+            attributes.push(VertexAttribute::new(0_u32, vertex_format_float32x2(), 0_u32))
+            attributes.push(VertexAttribute::new(1_u32, vertex_format_float32x3(), 8_u32))
+            let pipeline = device.create_render_pipeline_with_bind_group(target,
+                vertex_shader, fragment_shader, VertexBufferLayout::new(20_u32, attributes), layout,)
+
+            let mut vertices = Vec[f32]::new()
+            vertices.push( - 0.8_f32) vertices.push( - 0.8_f32)
+            vertices.push(1.0_f32) vertices.push(0.0_f32) vertices.push(0.0_f32)
+            vertices.push(0.8_f32) vertices.push( - 0.8_f32)
+            vertices.push(0.0_f32) vertices.push(1.0_f32) vertices.push(0.0_f32)
+            vertices.push(0.0_f32) vertices.push(0.8_f32)
+            vertices.push(0.0_f32) vertices.push(0.0_f32) vertices.push(1.0_f32)
+            let mut indices = Vec[u32]::new()
+            indices.push(0_u32) indices.push(1_u32) indices.push(2_u32)
+            let mesh = device.create_mesh(vertices, indices)
+
+            let mut positions = Vec[Vec3]::new()
+            positions.push(Vec3::new( - 0.8_f32, - 0.8_f32, 0.0_f32))
+            positions.push(Vec3::new(0.8_f32, - 0.8_f32, 0.0_f32))
+            positions.push(Vec3::new(0.0_f32, 0.8_f32, 0.0_f32))
+            let mut geometry_indices = Vec[u32]::new()
+            geometry_indices.push(0_u32)
+            geometry_indices.push(1_u32)
+            geometry_indices.push(2_u32)
+            let geometry = build_virtual_geometry(positions, geometry_indices, 64_usize, 64_usize)
+            let geometry_valid = geometry.valid()
+            let cull = gpu_cull_clusters(device, geometry.clusters(), 100.0_f32)
+            let initialized = target.available() && layout.available() && uniform.available() &&
+            uniform.write_f32s(0_u64, transform) && group.available() &&
+            vertex_shader.available() && fragment_shader.available() && pipeline.available() &&
+            mesh.available() && geometry_valid && cull.valid()
+            let frame = target.acquire_frame()
+            let pass = frame.begin_render_pass(pipeline, 0.02_f32, 0.02_f32, 0.02_f32, 1.0_f32)
+            let rendered = initialized && frame.available() && pass.available() &&
+            pass.bind_group(group) && pass.bind_vertex_buffer(mesh.vertex_buffer()) &&
+            pass.bind_index_buffer(mesh.index_buffer()) &&
+            cull.draw(pass) &&
+            pass.end() && frame.present()
+
+            frame.destroy()
+            cull.destroy()
+            mesh.destroy()
+            pipeline.destroy()
+            fragment_shader.destroy()
+            vertex_shader.destroy()
+            group.destroy()
+            uniform.destroy()
+            layout.destroy()
+            target.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if rendered {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

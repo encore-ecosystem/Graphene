@@ -1,49 +1,7 @@
 import core::option::Option
 import core::vec::Vec
-import vulkan_native:: {
-    native_adapter_api_version, native_adapter_count, native_adapter_device, native_adapter_kind,
-    native_adapter_mesh_shader, native_adapter_name, native_adapter_ray_pipeline, native_adapter_ray_query,
-    native_adapter_tier, native_adapter_vendor, native_api_version, native_available, native_create,
-    native_destroy, native_error, native_device_available, native_device_compute, native_device_create,
-    native_device_destroy, native_device_error, native_device_graphics, native_device_queue_family,
-    native_present_device_create,
-    native_shader_available, native_shader_create, native_shader_destroy, native_shader_error, native_shader_stage,
-    native_bind_group_available, native_bind_group_create, native_bind_group_destroy, native_bind_group_error,
-    native_storage_bind_group_create,
-    native_bind_group_layout_available, native_bind_group_layout_create, native_bind_group_layout_destroy,
-    native_bind_group_layout_create_entries, native_bind_group_layout_error,
-    native_material_bind_group_create, native_sampler_available, native_sampler_create,
-    native_sampler_destroy, native_sampler_error,
-    native_pipeline_available, native_pipeline_create, native_pipeline_destroy, native_pipeline_error,
-    native_compute_pipeline_available, native_compute_pipeline_create, native_compute_pipeline_destroy,
-    native_compute_pipeline_error,
-    native_encoder_available, native_encoder_create, native_encoder_destroy, native_encoder_error,
-    native_encoder_submit_wait, native_buffer_available, native_buffer_create, native_buffer_destroy,
-    native_buffer_error, native_buffer_host_visible, native_buffer_size, native_buffer_write_f32,
-    native_buffer_read_u32, native_buffer_write_u32,
-    native_encoder_bind_compute_group, native_encoder_bind_compute_pipeline, native_encoder_dispatch,
-    native_encoder_storage_host_barrier,
-    native_encoder_copy_buffer, native_encoder_transfer_geometry_barrier, native_encoder_transfer_host_barrier,
-    native_encoder_submit, native_submission_available, native_submission_complete, native_submission_destroy,
-    native_submission_error, native_submission_wait,
-    native_texture_available, native_texture_create, native_texture_destroy, native_texture_error,
-    native_texture_format, native_texture_height, native_texture_mip_levels, native_texture_width,
-    native_texture_layout, native_encoder_copy_buffer_to_texture, native_encoder_transition_texture,
-    native_window_available, native_window_create, native_window_attach, native_window_destroy, native_window_error,
-    native_window_height, native_window_open, native_window_poll, native_window_width,
-    native_window_key_down, native_window_mouse_down, native_window_mouse_dx, native_window_mouse_dy,
-    native_window_mouse_x, native_window_mouse_y,
-    native_swapchain_available, native_swapchain_clear, native_swapchain_create, native_offscreen_create,
-    native_swapchain_destroy, native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound,
-    native_swapchain_draw_pipeline,
-    native_swapchain_error,
-    native_swapchain_frames_in_flight, native_swapchain_height, native_swapchain_width,
-    native_swapchain_pixels, native_swapchain_pitch,
-    native_frame_acquire, native_frame_available, native_frame_begin_render_pass, native_frame_slot,
-    native_frame_bind_group, native_frame_bind_index_buffer, native_frame_bind_vertex_buffer,
-    native_frame_destroy, native_frame_draw_indexed, native_frame_end_render_pass,
-    native_frame_error, native_frame_present, native_frame_set_viewport, native_frame_upload_ui
-}
+import linalg::Mat4
+import vulkan_native::{native_adapter_api_version, native_adapter_count, native_adapter_device, native_adapter_kind, native_adapter_mesh_shader, native_adapter_name, native_adapter_ray_pipeline, native_adapter_ray_query, native_adapter_tier, native_adapter_vendor, native_api_version, native_available, native_create, native_borrow, native_destroy, native_error, native_device_available, native_device_compute, native_device_create, native_device_create_features, native_device_destroy, native_device_error, native_device_graphics, native_device_queue_family, native_device_borrow, native_device_requested_features, native_device_enabled_features, native_present_device_create, native_shader_available, native_shader_create, native_shader_destroy, native_shader_error, native_shader_stage, native_bind_group_available, native_bind_group_create, native_bind_group_destroy, native_bind_group_error, native_bind_group_update_buffer, native_storage_bind_group_create, native_storage_bind_group_create_many, native_buffer_bind_group_create_many, native_buffer_texture_bind_group_create_many, native_ray_query_bind_group_create, native_scene_bind_group_create, native_bind_group_layout_available, native_bind_group_layout_create, native_bind_group_layout_destroy, native_bind_group_layout_create_entries, native_bind_group_layout_error, native_material_bind_group_create, native_sampler_available, native_sampler_create, native_sampler_create_repeat, native_sampler_destroy, native_sampler_error, native_pipeline_available, native_pipeline_create, native_pipeline_create_configured, native_pipeline_create_depth_state, native_pipeline_destroy, native_pipeline_error, native_compute_pipeline_available, native_compute_pipeline_create, native_compute_pipeline_destroy, native_compute_pipeline_error, native_encoder_available, native_encoder_create, native_encoder_destroy, native_encoder_error, native_encoder_submit_wait, native_buffer_available, native_buffer_create, native_buffer_destroy, native_buffer_error, native_buffer_host_visible, native_buffer_size, native_buffer_write_f32, native_buffer_read_f32, native_buffer_read_u32, native_buffer_write_u32, native_buffer_write_f32s, native_buffer_write_u32s, native_blas_create_triangles, native_tlas_create_instances, native_acceleration_structure_available, native_acceleration_structure_error, native_acceleration_structure_destroy, native_encoder_bind_compute_group, native_encoder_bind_compute_pipeline, native_encoder_dispatch, native_encoder_storage_host_barrier, native_encoder_copy_buffer, native_encoder_transfer_geometry_barrier, native_encoder_transfer_host_barrier, native_encoder_submit, native_submission_available, native_submission_complete, native_submission_destroy, native_submission_error, native_submission_wait, native_texture_available, native_texture_create, native_texture_destroy, native_texture_error, native_texture_format, native_texture_height, native_texture_mip_levels, native_texture_width, native_texture_layout, native_encoder_copy_buffer_to_texture, native_encoder_transition_texture, native_window_available, native_window_create, native_window_attach, native_window_destroy, native_window_error, native_window_height, native_window_open, native_window_poll, native_window_width, native_window_key_down, native_window_mouse_down, native_window_mouse_dx, native_window_mouse_dy, native_window_mouse_x, native_window_mouse_y, native_swapchain_available, native_swapchain_clear, native_swapchain_create, native_offscreen_create, native_shared_offscreen_create, native_swapchain_set_present_mode, native_swapchain_destroy, native_swapchain_destroy_retired, native_swapchain_last_frame_complete, native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound, native_swapchain_draw_pipeline, native_swapchain_error, native_swapchain_frames_in_flight, native_swapchain_height, native_swapchain_width, native_swapchain_pixels, native_swapchain_pitch, native_swapchain_external_image, native_swapchain_external_layout, native_frame_acquire, native_frame_available, native_frame_begin_render_pass, native_frame_dispatch_compute, native_frame_compute_barrier, native_frame_fill_buffer, native_frame_transfer_storage_barrier, native_frame_fragment_storage_barrier, native_frame_copy_buffer, native_frame_slot, native_frame_bind_group, native_frame_bind_index_buffer, native_frame_bind_vertex_buffer, native_frame_bind_pipeline, native_frame_destroy, native_frame_draw_indexed, native_frame_draw_indexed_indirect_count, native_frame_draw_mesh_tasks, native_frame_draw_mesh_tasks_indirect, native_frame_end_render_pass, native_frame_error, native_frame_present, native_frame_set_viewport, native_frame_upload_ui}
 
 pub fn adapter_other() -> u32 {
     ret 0_u32
@@ -77,6 +35,18 @@ pub fn buffer_index() -> u32 {
 }
 pub fn buffer_vertex() -> u32 {
     ret 128_u32
+}
+pub fn buffer_indirect() -> u32 {
+    ret 256_u32
+}
+pub fn buffer_shader_device_address() -> u32 {
+    ret 131072_u32
+}
+pub fn buffer_acceleration_structure_input() -> u32 {
+    ret 524288_u32
+}
+pub fn buffer_acceleration_structure_storage() -> u32 {
+    ret 1048576_u32
 }
 pub fn texture_transfer_source() -> u32 {
     ret 1_u32
@@ -135,6 +105,12 @@ pub fn shader_stage_fragment() -> u32 {
 pub fn shader_stage_compute() -> u32 {
     ret 32_u32
 }
+pub fn shader_stage_task() -> u32 {
+    ret 64_u32
+}
+pub fn shader_stage_mesh() -> u32 {
+    ret 128_u32
+}
 pub fn vertex_format_float32x2() -> u32 {
     ret 103_u32
 }
@@ -149,6 +125,9 @@ pub fn binding_texture_sampler() -> u32 {
 }
 pub fn binding_storage_buffer() -> u32 {
     ret 7_u32
+}
+pub fn binding_acceleration_structure() -> u32 {
+    ret 1000150000_u32
 }
 pub fn key_a() -> u32 {
     ret 4_u32
@@ -213,6 +192,61 @@ pub struct RenderCapabilities {
     ray_query: bool
     ray_pipeline: bool
     mesh_shader: bool
+}
+
+/// Vulkan features actually requested or enabled on the logical device.
+/// Adapter capabilities alone are insufficient for selecting a render path.
+pub struct DeviceFeatures {
+    mask: u32
+}
+
+impl for DeviceFeatures {
+    pub fn from_mask(mask: u32) -> Self {
+        ret Self {
+            mask
+        }
+    }
+    pub fn none() -> Self {
+        ret Self::from_mask(0_u32)
+    }
+    pub fn mask(self: Self) -> u32 {
+        ret self.mask
+    }
+    pub fn contains(self: Self, feature: DeviceFeatures) -> bool {
+        ret(self.mask & feature.mask) == feature.mask
+    }
+    pub fn descriptor_indexing() -> Self {
+        ret Self::from_mask(1_u32)
+    }
+    pub fn buffer_device_address() -> Self {
+        ret Self::from_mask(2_u32)
+    }
+    pub fn timeline_semaphore() -> Self {
+        ret Self::from_mask(4_u32)
+    }
+    pub fn synchronization_2() -> Self {
+        ret Self::from_mask(8_u32)
+    }
+    pub fn dynamic_rendering() -> Self {
+        ret Self::from_mask(16_u32)
+    }
+    pub fn mesh_shader() -> Self {
+        ret Self::from_mask(32_u32)
+    }
+    pub fn ray_query() -> Self {
+        ret Self::from_mask(64_u32)
+    }
+    pub fn draw_indirect_count() -> Self {
+        ret Self::from_mask(128_u32)
+    }
+    pub fn shader_int64_atomics() -> Self {
+        ret Self::from_mask(256_u32)
+    }
+    /// Fragment barycentric coordinates used by diagnostic triangle-edge
+    /// overlays. This is optional and may be absent on older adapters.
+    pub fn fragment_shader_barycentric() -> Self {
+        ret Self::from_mask(512_u32)
+    }
 }
 
 impl for RenderCapabilities {
@@ -378,48 +412,99 @@ pub struct VertexBufferLayout {
     stride: u32 attributes: Vec[VertexAttribute]
 }
 pub struct RenderPipelineOptions {
-    depth_test: bool cull_mode: u32 alpha_blend: bool
+    depth_attachment: bool depth_test: bool depth_write: bool
+    cull_mode: u32 alpha_blend: bool additive_blend: bool
+    load_color: bool
 }
 
 impl for RenderPipelineOptions {
     pub fn opaque() -> RenderPipelineOptions {
         ret RenderPipelineOptions {
-            false, 0_u32, false
+            false, false, false, 0_u32, false, false, false
         }
     }
     pub fn depth() -> RenderPipelineOptions {
         ret RenderPipelineOptions {
-            true, 0_u32, false
+            true, true, true, 0_u32, false, false, false
         }
     }
     pub fn with_depth(self: Self, enabled: bool) -> RenderPipelineOptions {
         ret RenderPipelineOptions {
-            enabled, self.cull_mode, self.alpha_blend
+            enabled, enabled, enabled, self.cull_mode, self.alpha_blend,
+            self.additive_blend, self.load_color
+        }
+    }
+    pub fn with_depth_attachment(self: Self, enabled: bool) -> RenderPipelineOptions {
+        ret RenderPipelineOptions {
+            enabled, self.depth_test, self.depth_write,
+            self.cull_mode, self.alpha_blend,
+            self.additive_blend, self.load_color
+        }
+    }
+    pub fn with_depth_test(self: Self, enabled: bool) -> RenderPipelineOptions {
+        ret RenderPipelineOptions {
+            self.depth_attachment, enabled, self.depth_write,
+            self.cull_mode, self.alpha_blend,
+            self.additive_blend, self.load_color
+        }
+    }
+    pub fn with_depth_write(self: Self, enabled: bool) -> RenderPipelineOptions {
+        ret RenderPipelineOptions {
+            self.depth_attachment, self.depth_test, enabled,
+            self.cull_mode, self.alpha_blend,
+            self.additive_blend, self.load_color
         }
     }
     pub fn with_backface_culling(self: Self) -> RenderPipelineOptions {
         ret RenderPipelineOptions {
-            self.depth_test, 2_u32, self.alpha_blend
+            self.depth_attachment, self.depth_test, self.depth_write,
+            2_u32, self.alpha_blend, self.additive_blend, self.load_color
         }
     }
     pub fn with_frontface_culling(self: Self) -> RenderPipelineOptions {
         ret RenderPipelineOptions {
-            self.depth_test, 1_u32, self.alpha_blend
+            self.depth_attachment, self.depth_test, self.depth_write,
+            1_u32, self.alpha_blend, self.additive_blend, self.load_color
         }
     }
     pub fn with_alpha_blending(self: Self) -> RenderPipelineOptions {
         ret RenderPipelineOptions {
-            self.depth_test, self.cull_mode, true
+            self.depth_attachment, self.depth_test, self.depth_write,
+            self.cull_mode, true, false, self.load_color
         }
+    }
+    pub fn with_additive_blending(self: Self) -> RenderPipelineOptions {
+        ret RenderPipelineOptions {
+            self.depth_attachment, self.depth_test, self.depth_write,
+            self.cull_mode, false, true, self.load_color
+        }
+    }
+    pub fn with_color_load(self: Self, enabled: bool) -> RenderPipelineOptions {
+        ret RenderPipelineOptions {
+            self.depth_attachment, self.depth_test, self.depth_write,
+            self.cull_mode, self.alpha_blend, self.additive_blend, enabled
+        }
+    }
+    pub fn depth_attachment(self: Self) -> bool {
+        ret self.depth_attachment
     }
     pub fn depth_test(self: Self) -> bool {
         ret self.depth_test
+    }
+    pub fn depth_write(self: Self) -> bool {
+        ret self.depth_write
     }
     pub fn cull_mode(self: Self) -> u32 {
         ret self.cull_mode
     }
     pub fn alpha_blend(self: Self) -> bool {
         ret self.alpha_blend
+    }
+    pub fn additive_blend(self: Self) -> bool {
+        ret self.additive_blend
+    }
+    pub fn load_color(self: Self) -> bool {
+        ret self.load_color
     }
 }
 
@@ -461,6 +546,11 @@ impl for BindGroupLayout {
 }
 
 impl for BindGroup {
+    pub fn unavailable() -> Self {
+        ret Self {
+            0_usize
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_bind_group_available(self.handle)
     }
@@ -473,6 +563,11 @@ impl for BindGroup {
     }
     pub fn destroy(self: Self) -> bool {
         ret self.handle != 0_usize && native_bind_group_destroy(self.handle)
+    }
+    pub fn update_buffer(self: Self, binding: u32, buffer: GpuBuffer) -> bool {
+        ret self.handle != 0_usize && buffer.handle != 0_usize &&
+        native_bind_group_update_buffer(
+            self.handle, binding, buffer.handle, 0_u64, buffer.size(),)
     }
 }
 
@@ -490,6 +585,11 @@ impl for BindGroupLayoutEntry {
     pub fn storage(binding: u32, stage: u32) -> BindGroupLayoutEntry {
         ret BindGroupLayoutEntry {
             binding, binding_storage_buffer(), stage
+        }
+    }
+    pub fn acceleration_structure(binding: u32, stage: u32) -> BindGroupLayoutEntry {
+        ret BindGroupLayoutEntry {
+            binding, binding_acceleration_structure(), stage
         }
     }
 }
@@ -570,6 +670,9 @@ pub struct CommandEncoder {
 pub struct GpuBuffer {
     handle: usize size: u64 host_visible: bool
 }
+pub struct AccelerationStructure {
+    handle: usize
+}
 pub struct GpuMesh {
     vertex: GpuBuffer index: GpuBuffer index_count: u32 uploaded: bool
 }
@@ -596,6 +699,9 @@ impl for RenderPassEncoder {
     pub fn bind_group(self: Self, group: BindGroup) -> bool {
         ret self.available() && native_frame_bind_group(self.handle, group.handle)
     }
+    pub fn bind_pipeline(self: Self, pipeline: RenderPipeline) -> bool {
+        ret self.available() && native_frame_bind_pipeline(self.handle, pipeline.handle)
+    }
     pub fn bind_vertex_buffer(self: Self, buffer: GpuBuffer) -> bool {
         ret self.available() && native_frame_bind_vertex_buffer(self.handle, buffer.handle)
     }
@@ -616,12 +722,45 @@ impl for RenderPassEncoder {
         ret self.available() && native_frame_draw_indexed(self.handle, index_count, instance_count,
             first_index, vertex_offset, first_instance,)
     }
+    pub fn draw_indexed_indirect_count(self: Self,
+        commands: GpuBuffer, commands_offset: u64,
+        count: GpuBuffer, count_offset: u64,
+        maximum_draw_count: u32,) -> bool {
+        ret self.available() && native_frame_draw_indexed_indirect_count(
+            self.handle, commands.handle, commands_offset,
+            count.handle, count_offset, maximum_draw_count, 20_u32,)
+    }
+    pub fn draw_mesh_tasks(self: Self,
+        group_count_x: u32, group_count_y: u32, group_count_z: u32,) -> bool {
+        ret self.available() && native_frame_draw_mesh_tasks(
+            self.handle, group_count_x, group_count_y, group_count_z,)
+    }
+    pub fn draw_mesh_tasks_indirect(self: Self,
+        commands: GpuBuffer, offset: u64,) -> bool {
+        ret self.available() && native_frame_draw_mesh_tasks_indirect(
+            self.handle, commands.handle, offset,)
+    }
     pub fn end(self: Self) -> bool {
         ret self.available() && native_frame_end_render_pass(self.handle)
     }
 }
 
+impl for GpuMesh {
+    pub fn draw_instanced(self: Self, pass: RenderPassEncoder,
+        instance_count: u32, first_instance: u32,) -> bool {
+        ret self.available() && pass.bind_vertex_buffer(self.vertex) &&
+        pass.bind_index_buffer(self.index) &&
+        pass.draw_indexed_instanced(self.index_count, instance_count,
+            0_u32, 0_i32, first_instance,)
+    }
+}
+
 impl for RenderFrame {
+    pub fn borrow(handle: usize) -> Self {
+        ret Self {
+            handle
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_frame_available(self.handle)
     }
@@ -639,10 +778,47 @@ impl for RenderFrame {
             native_frame_error(self.handle)
         }
     }
+    pub fn dispatch_compute(self: Self, pipeline: ComputePipeline,
+        group: BindGroup, x: u32, y: u32, z: u32,) -> bool {
+        ret self.handle != 0_usize &&
+        native_frame_dispatch_compute(self.handle, pipeline.handle,
+            group.handle, x, y, z,)
+    }
+    pub fn compute_barrier(self: Self) -> bool {
+        ret self.handle != 0_usize && native_frame_compute_barrier(self.handle)
+    }
+    pub fn fill_buffer(self: Self, buffer: GpuBuffer,
+        offset: u64, size: u64, value: u32,) -> bool {
+        ret self.handle != 0_usize && buffer.handle != 0_usize &&
+        native_frame_fill_buffer(self.handle, buffer.handle,
+            offset, size, value,)
+    }
+    pub fn transfer_storage_barrier(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_frame_transfer_storage_barrier(self.handle)
+    }
+    pub fn fragment_storage_barrier(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_frame_fragment_storage_barrier(self.handle)
+    }
+    pub fn copy_buffer(self: Self, source: GpuBuffer, destination: GpuBuffer,
+        source_offset: u64, destination_offset: u64, size: u64,) -> bool {
+        ret self.handle != 0_usize && native_frame_copy_buffer(
+            self.handle, source.handle, destination.handle,
+            source_offset, destination_offset, size,)
+    }
     pub fn begin_render_pass(self: Self, pipeline: RenderPipeline,
         red: f32, green: f32, blue: f32, alpha: f32,) -> RenderPassEncoder {
         let begun = self.handle != 0_usize && native_frame_begin_render_pass(self.handle, pipeline.handle,
             red, green, blue, alpha,)
+        ret RenderPassEncoder {
+            self.handle, begun
+        }
+    }
+    /// Continues Luma's active compatible render pass with another pipeline.
+    pub fn continue_render_pass(self: Self, pipeline: RenderPipeline) -> RenderPassEncoder {
+        let begun = self.handle != 0_usize &&
+        native_frame_bind_pipeline(self.handle, pipeline.handle)
         ret RenderPassEncoder {
             self.handle, begun
         }
@@ -664,6 +840,14 @@ impl for RenderFrame {
 }
 
 impl for Swapchain {
+    pub fn set_immediate_present(self: Self, immediate: bool) -> bool {
+        ret self.handle != 0_usize && native_swapchain_set_present_mode(self.handle, immediate)
+    }
+    pub fn borrow(handle: usize) -> Self {
+        ret Self {
+            handle
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_swapchain_available(self.handle)
     }
@@ -709,6 +893,20 @@ impl for Swapchain {
             native_swapchain_pitch(self.handle)
         }
     }
+    pub fn external_image(self: Self) -> usize {
+        ret if self.handle == 0_usize {
+            0_usize
+        } else {
+            native_swapchain_external_image(self.handle)
+        }
+    }
+    pub fn external_layout(self: Self) -> u32 {
+        ret if self.handle == 0_usize {
+            0_u32
+        } else {
+            native_swapchain_external_layout(self.handle)
+        }
+    }
     pub fn clear(self: Self, red: f32, green: f32, blue: f32, alpha: f32) -> bool {
         ret self.handle != 0_usize && native_swapchain_clear(self.handle, red, green, blue, alpha)
     }
@@ -735,6 +933,14 @@ impl for Swapchain {
     }
     pub fn destroy(self: Self) -> bool {
         ret self.handle != 0_usize && native_swapchain_destroy(self.handle)
+    }
+    pub fn last_frame_complete(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_swapchain_last_frame_complete(self.handle)
+    }
+    pub fn destroy_retired(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_swapchain_destroy_retired(self.handle)
     }
 }
 
@@ -811,7 +1017,35 @@ impl for GpuSubmission {
     }
 }
 
+impl for AccelerationStructure {
+    pub fn unavailable() -> Self {
+        ret Self {
+            0_usize
+        }
+    }
+    pub fn available(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_acceleration_structure_available(self.handle)
+    }
+    pub fn error(self: Self) -> str {
+        ret if self.handle == 0_usize {
+            "Invalid acceleration structure"
+        } else {
+            native_acceleration_structure_error(self.handle)
+        }
+    }
+    pub fn destroy(self: Self) -> bool {
+        ret self.handle != 0_usize &&
+        native_acceleration_structure_destroy(self.handle)
+    }
+}
+
 impl for GpuBuffer {
+    pub fn unavailable() -> Self {
+        ret Self {
+            0_usize, 0_u64, false
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_buffer_available(self.handle)
     }
@@ -836,33 +1070,26 @@ impl for GpuBuffer {
         ret self.handle != 0_usize && native_buffer_write_u32(self.handle, offset, value)
     }
     pub fn write_u32s(self: Self, offset: u64, values: Vec[u32]) -> bool {
-        let mut current = offset
-        for value in values {
-            if !self.write_u32(current, value) {
-                ret false
-            }
-            current = current + 4_u64
-        }
-        ret true
+        ret self.handle != 0_usize && native_buffer_write_u32s(self.handle, offset, values)
     }
     pub fn write_f32(self: Self, offset: u64, value: f32) -> bool {
         ret self.handle != 0_usize && native_buffer_write_f32(self.handle, offset, value)
     }
     pub fn write_f32s(self: Self, offset: u64, values: Vec[f32]) -> bool {
-        let mut current = offset
-        for value in values {
-            if !self.write_f32(current, value) {
-                ret false
-            }
-            current = current + 4_u64
-        }
-        ret true
+        ret self.handle != 0_usize && native_buffer_write_f32s(self.handle, offset, values)
     }
     pub fn read_u32(self: Self, offset: u64) -> u32 {
         ret if self.handle == 0_usize {
             0_u32
         } else {
             native_buffer_read_u32(self.handle, offset)
+        }
+    }
+    pub fn read_f32(self: Self, offset: u64) -> f32 {
+        ret if self.handle == 0_usize {
+            0.0_f32
+        } else {
+            native_buffer_read_f32(self.handle, offset)
         }
     }
     pub fn destroy(self: Self) -> bool {
@@ -948,6 +1175,12 @@ impl for CommandEncoder {
 }
 
 impl for GraphicsDevice {
+    /// Borrows the exact backend device object owned by Luma.
+    pub fn borrow_backend(handle: usize, adapter: AdapterInfo) -> Self {
+        ret Self {
+            handle, adapter
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_device_available(self.handle)
     }
@@ -960,6 +1193,20 @@ impl for GraphicsDevice {
     }
     pub fn adapter(self: Self) -> AdapterInfo {
         ret self.adapter
+    }
+    pub fn requested_features(self: Self) -> DeviceFeatures {
+        ret if self.handle == 0_usize {
+            DeviceFeatures::none()
+        } else {
+            DeviceFeatures::from_mask(native_device_requested_features(self.handle))
+        }
+    }
+    pub fn enabled_features(self: Self) -> DeviceFeatures {
+        ret if self.handle == 0_usize {
+            DeviceFeatures::none()
+        } else {
+            DeviceFeatures::from_mask(native_device_enabled_features(self.handle))
+        }
     }
     pub fn queue_family(self: Self) -> u32 {
         ret if self.handle == 0_usize {
@@ -1016,6 +1263,66 @@ impl for GraphicsDevice {
             native_storage_bind_group_create(self.handle, layout.handle, buffer.handle, offset, range)
         }
     }
+    pub fn create_storage_bind_group_many(self: Self, layout: BindGroupLayout,
+        bindings: Vec[u32], buffers: Vec[GpuBuffer],
+        offsets: Vec[u64], ranges: Vec[u64],) -> BindGroup {
+        let mut handles = Vec[usize]::new()
+        for buffer in buffers {
+            handles.push(buffer.handle)
+        }
+        ret BindGroup {
+            native_storage_bind_group_create_many(
+                self.handle, layout.handle, bindings, handles, offsets, ranges,)
+        }
+    }
+    pub fn create_buffer_bind_group_many(self: Self, layout: BindGroupLayout,
+        bindings: Vec[u32], buffers: Vec[GpuBuffer],
+        offsets: Vec[u64], ranges: Vec[u64],) -> BindGroup {
+        let mut handles = Vec[usize]::new()
+        for buffer in buffers {
+            handles.push(buffer.handle)
+        }
+        ret BindGroup {
+            native_buffer_bind_group_create_many(
+                self.handle, layout.handle, bindings, handles, offsets, ranges,)
+        }
+    }
+    pub fn create_buffer_texture_bind_group_many(self: Self, layout: BindGroupLayout,
+        bindings: Vec[u32], buffers: Vec[GpuBuffer], offsets: Vec[u64], ranges: Vec[u64],
+        texture_binding: u32, texture: GpuTexture, sampler: GpuSampler,) -> BindGroup {
+        let mut handles = Vec[usize]::new()
+        for buffer in buffers {
+            handles.push(buffer.handle)
+        }
+        ret BindGroup {
+            native_buffer_texture_bind_group_create_many(
+                self.handle, layout.handle, bindings, handles, offsets, ranges,
+                texture_binding, texture.handle, sampler.handle,)
+        }
+    }
+    pub fn create_ray_query_bind_group(self: Self, layout: BindGroupLayout,
+        acceleration_binding: u32, acceleration: AccelerationStructure,
+        bindings: Vec[u32], buffers: Vec[GpuBuffer],
+        offsets: Vec[u64], ranges: Vec[u64],) -> BindGroup {
+        let mut handles = Vec[usize]::new()
+        for buffer in buffers {
+            handles.push(buffer.handle)
+        }
+        ret BindGroup {
+            native_ray_query_bind_group_create(
+                self.handle, layout.handle, acceleration_binding,
+                acceleration.handle, bindings, handles, offsets, ranges,)
+        }
+    }
+    pub fn create_scene_bind_group(self: Self, layout: BindGroupLayout,
+        uniform_binding: u32, uniform_buffer: GpuBuffer, uniform_range: u64,
+        storage_binding: u32, storage_buffer: GpuBuffer, storage_range: u64,) -> BindGroup {
+        ret BindGroup {
+            native_scene_bind_group_create(self.handle, layout.handle,
+                uniform_binding, uniform_buffer.handle, uniform_range,
+                storage_binding, storage_buffer.handle, storage_range,)
+        }
+    }
     pub fn create_compute_pipeline(self: Self, shader: ShaderModule, layout: BindGroupLayout) -> ComputePipeline
     {
         ret ComputePipeline {
@@ -1025,6 +1332,11 @@ impl for GraphicsDevice {
     pub fn create_sampler(self: Self) -> GpuSampler {
         ret GpuSampler {
             native_sampler_create(self.handle)
+        }
+    }
+    pub fn create_repeat_sampler(self: Self) -> GpuSampler {
+        ret GpuSampler {
+            native_sampler_create_repeat(self.handle)
         }
     }
     pub fn create_material_bind_group(self: Self, layout: BindGroupLayout,
@@ -1054,6 +1366,19 @@ impl for GraphicsDevice {
         bind_group_layout: BindGroupLayout,) -> RenderPipeline {
         ret self.create_render_pipeline_configured(swapchain, vertex, fragment, layout, bind_group_layout,
             RenderPipelineOptions::opaque(),)
+    }
+    pub fn create_mesh_pipeline_with_bind_group(self: Self, swapchain: Swapchain,
+        mesh: ShaderModule, fragment: ShaderModule,
+        bind_group_layout: BindGroupLayout,) -> RenderPipeline {
+        ret self.create_render_pipeline_configured(swapchain, mesh, fragment,
+            VertexBufferLayout::empty(), bind_group_layout, RenderPipelineOptions::depth(),)
+    }
+    pub fn create_mesh_pipeline_with_options(self: Self, swapchain: Swapchain,
+        mesh: ShaderModule, fragment: ShaderModule,
+        bind_group_layout: BindGroupLayout,
+        options: RenderPipelineOptions,) -> RenderPipeline {
+        ret self.create_render_pipeline_configured(swapchain, mesh, fragment,
+            VertexBufferLayout::empty(), bind_group_layout, options,)
     }
     pub fn create_depth_render_pipeline(self: Self, swapchain: Swapchain,
         vertex: ShaderModule, fragment: ShaderModule, layout: VertexBufferLayout,) -> RenderPipeline
@@ -1089,14 +1414,48 @@ impl for GraphicsDevice {
             offsets.push(attribute.offset)
         }
         ret RenderPipeline {
-            native_pipeline_create(self.handle, swapchain.handle, vertex.handle, fragment.handle,
-                bind_group_layout.handle, options.depth_test, options.cull_mode, options.alpha_blend,
+            native_pipeline_create_configured(
+                self.handle, swapchain.handle, vertex.handle, fragment.handle,
+                bind_group_layout.handle, options.depth_attachment,
+                options.depth_test, options.depth_write,
+                options.cull_mode, options.alpha_blend,
+                options.additive_blend, options.load_color,
                 layout.stride, locations, formats, offsets,)
         }
     }
     pub fn create_buffer(self: Self, size: u64, usage: u32, host_visible: bool) -> GpuBuffer {
         ret GpuBuffer {
             native_buffer_create(self.handle, size, usage, host_visible), size, host_visible
+        }
+    }
+    pub fn create_triangle_blas(self: Self,
+        vertices: GpuBuffer, vertex_stride: u64, vertex_count: u32,
+        indices: GpuBuffer, index_count: u32,) -> AccelerationStructure {
+        ret AccelerationStructure {
+            native_blas_create_triangles(self.handle,
+                vertices.handle, vertex_stride, vertex_count,
+                indices.handle, index_count,)
+        }
+    }
+    pub fn create_tlas(self: Self, structures: Vec[AccelerationStructure],
+        transforms: Vec[Mat4],) -> AccelerationStructure {
+        if structures.len() != transforms.len() {
+            ret AccelerationStructure {
+                0_usize
+            }
+        }
+        let mut handles = Vec[usize]::new()
+        for structure in structures {
+            handles.push(structure.handle)
+        }
+        let mut values = Vec[f32]::new()
+        for transform in transforms {
+            for value in transform.values() {
+                values.push(value)
+            }
+        }
+        ret AccelerationStructure {
+            native_tlas_create_instances(self.handle, handles, values)
         }
     }
     pub fn create_mesh(self: Self, vertices: Vec[f32], indices: Vec[u32]) -> GpuMesh {
@@ -1149,6 +1508,11 @@ impl for GraphicsDevice {
             native_offscreen_create(self.handle, width, height)
         }
     }
+    pub fn create_shared_offscreen_target(self: Self, width: u32, height: u32) -> Swapchain {
+        ret Swapchain {
+            native_shared_offscreen_create(self.handle, width, height)
+        }
+    }
     pub fn destroy(self: Self) -> bool {
         ret self.handle != 0_usize && native_device_destroy(self.handle)
     }
@@ -1171,6 +1535,11 @@ impl for GraphicsInstance {
     pub fn with_external_window_support(debug: bool) -> GraphicsInstance {
         ret GraphicsInstance {
             native_create(debug, true, true), debug, true
+        }
+    }
+    pub fn borrow(instance: usize, physical_device: usize) -> GraphicsInstance {
+        ret GraphicsInstance {
+            native_borrow(instance, physical_device), false, false
         }
     }
     pub fn available(self: Self) -> bool {
@@ -1248,6 +1617,35 @@ impl for GraphicsInstance {
     pub fn create_device(self: Self, adapter: AdapterInfo) -> GraphicsDevice {
         ret GraphicsDevice {
             native_device_create(self.handle, adapter.index()), adapter
+        }
+    }
+    pub fn create_device_with_features(self: Self, adapter: AdapterInfo,
+        required: DeviceFeatures, optional: DeviceFeatures,) -> GraphicsDevice {
+        ret GraphicsDevice {
+            native_device_create_features(self.handle, adapter.index(),
+                required.mask(), optional.mask(),), adapter
+        }
+    }
+    pub fn borrow_device(self: Self, device: usize, queue_family: u32) -> GraphicsDevice {
+        let adapters = self.adapters()
+        match adapters.get(0_usize) {
+            Option::Some(adapter) => {
+                ret GraphicsDevice {
+                    native_device_borrow(self.handle, device, queue_family), adapter
+                }
+            }
+            Option::None => {
+                ret GraphicsDevice {
+                    0_usize,
+                    AdapterInfo {
+                        0_usize, "Unavailable borrowed Vulkan device", 0_u32, 0_u32,
+                        adapter_other(), ApiVersion::from_raw(0_u32),
+                        RenderCapabilities {
+                            0_u32, false, false, false
+                        }
+                    }
+                }
+            }
         }
     }
     pub fn create_present_device(self: Self, adapter: AdapterInfo, window: GrapheneWindow) -> GraphicsDevice

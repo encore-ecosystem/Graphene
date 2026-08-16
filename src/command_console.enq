@@ -1,0 +1,99 @@
+//! Text command frontend for the in-process Graphene command bus.
+
+import core::result::Result
+import mod::command_bus::GrapheneCommand
+import mod::command_protocol::{ProtocolError, command_registry_json, decode_command_request}
+
+fn command_from_request(request: str) -> Result[GrapheneCommand, ProtocolError] {
+    match decode_command_request(request) {
+        Result::Ok(envelope) => {
+            ret Result[GrapheneCommand, ProtocolError]::Ok(envelope.command())
+        }
+        Result::Err(error) => {
+            ret Result[GrapheneCommand, ProtocolError]::Err(error)
+        }
+    }
+}
+
+fn trim(value: str) -> str {
+    let mut start = 0_usize
+    let mut end = value.char_len()
+    while start < end {
+        let character = value.slice(start, 1_usize)
+        if character == " " || character == "\t" || character == "\n" || character == "\r" {
+            start = start + 1_usize
+        } else {
+            break
+        }
+    }
+    while end > start {
+        let character = value.slice(end - 1_usize, 1_usize)
+        if character == " " || character == "\t" || character == "\n" || character == "\r" {
+            end = end - 1_usize
+        } else {
+            break
+        }
+    }
+    ret value.slice(start, end - start)
+}
+
+fn valid_method(value: str) -> bool {
+    if value == "" {
+        ret false
+    }
+    let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    let mut index = 0_usize
+    while index < value.char_len() {
+        let character = value.slice(index, 1_usize)
+        let mut found = false
+        let mut allowed_index = 0_usize
+        while allowed_index < allowed.char_len() {
+            if character == allowed.slice(allowed_index, 1_usize) {
+                found = true
+                break
+            }
+            allowed_index = allowed_index + 1_usize
+        }
+        if !found {
+            ret false
+        }
+        index = index + 1_usize
+    }
+    ret true
+}
+
+/// Parses `<method> <JSON params>`. History commands may omit params.
+pub fn decode_console_command(source: str) -> Result[GrapheneCommand, ProtocolError] {
+    let line = trim(source)
+    let mut split = line.char_len()
+    let mut index = 0_usize
+    while index < line.char_len() {
+        if line.slice(index, 1_usize) == " " || line.slice(index, 1_usize) == "\t" {
+            split = index
+            break
+        }
+        index = index + 1_usize
+    }
+    let method = line.slice(0_usize, split)
+    if !valid_method(method) {
+        ret command_from_request(
+            "{\"id\":\"console\",\"method\":\"invalid console method\",\"params\":{}}")
+    }
+    let params = if split < line.char_len() {
+        trim(line.slice(split + 1_usize, line.char_len() - split - 1_usize))
+    } else {
+        "{}"
+    }
+    let request = "{\"id\":\"console\",\"method\":\"" + method + "\",\"params\":" +
+    if params == "" {
+        "{}"
+    } else {
+        params
+    }
+    + "}"
+    ret command_from_request(request)
+}
+
+pub fn console_help() -> str {
+    ret "Enter <method> <JSON params>. Registry: " + command_registry_json()
+}

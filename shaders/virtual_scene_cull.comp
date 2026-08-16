@@ -1,0 +1,269 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer SceneStream {
+    uint values[];
+} scene;
+
+float valuef(uint index) {
+    return uintBitsToFloat(scene.values[index]);
+}
+
+mat4 instanceModel(uint base) {
+    return mat4(
+        vec4(valuef(base), valuef(base + 1), valuef(base + 2), valuef(base + 3)),
+        vec4(valuef(base + 4), valuef(base + 5), valuef(base + 6), valuef(base + 7)),
+        vec4(valuef(base + 8), valuef(base + 9), valuef(base + 10), valuef(base + 11)),
+        vec4(valuef(base + 12), valuef(base + 13), valuef(base + 14), valuef(base + 15)));
+}
+
+uint hizWidth(uint level) {
+    return max(64u >> level, 1u);
+}
+
+uint hizHeight(uint level) {
+    return max(36u >> level, 1u);
+}
+
+uint hizLevelOffset(uint level) {
+    uint result = 0u;
+    for (uint current = 0u; current < level; ++current) {
+        result += hizWidth(current) * hizHeight(current);
+    }
+    return result;
+}
+
+uint hizStorageBase(uint clusterCount, uint maximumInstances) {
+    uint hierarchyCount = scene.values[2];
+    uint maximumCandidates = clusterCount * maximumInstances;
+    uint feedbackBase = 64u + clusterCount * 16u +
+        hierarchyCount * 12u +
+        maximumInstances * 24u + maximumCandidates * 4u;
+    return feedbackBase + clusterCount;
+}
+
+uint selectHizLevel(float projectedRadius) {
+    float diameterInTiles = projectedRadius * 2.0 * 64.0;
+    uint level = 0u;
+    while (level < 6u && diameterInTiles > 2.0) {
+        diameterInTiles *= 0.5;
+        level += 1u;
+    }
+    return level;
+}
+
+bool hiddenByPreviousHiz(uint pyramidBase, vec2 screen,
+    float projectedRadius, float nearestDepth) {
+    uint level = selectHizLevel(projectedRadius);
+    uint width = hizWidth(level);
+    uint height = hizHeight(level);
+    vec2 minimum = clamp(screen - vec2(projectedRadius), vec2(0.0), vec2(0.99999));
+    vec2 maximum = clamp(screen + vec2(projectedRadius), vec2(0.0), vec2(0.99999));
+    uvec2 first = uvec2(minimum * vec2(width, height));
+    uvec2 last = uvec2(maximum * vec2(width, height));
+    bool covered = true;
+    for (uint y = first.y; y <= last.y; ++y) {
+        for (uint x = first.x; x <= last.x; ++x) {
+            uint encoded = scene.values[pyramidBase + hizLevelOffset(level) +
+                y * width + x];
+            covered = covered && encoded != 0xffffffffu &&
+                uintBitsToFloat(encoded) + 0.0005 < nearestDepth;
+        }
+    }
+    return covered;
+}
+
+void writeCurrentHiz(uint pyramidBase, vec2 screen,
+    float projectedRadius, float farthestDepth) {
+    uint encoded = floatBitsToUint(clamp(farthestDepth, 0.0, 1.0));
+    for (uint level = 0u; level <= 6u; ++level) {
+        uint width = hizWidth(level);
+        uint height = hizHeight(level);
+        vec2 tileScale = vec2(width, height);
+        ivec2 center = ivec2(clamp(screen, vec2(0.0), vec2(0.99999)) * tileScale);
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                ivec2 tile = center + ivec2(ox, oy);
+                if (tile.x < 0 || tile.y < 0 ||
+                    tile.x >= int(width) || tile.y >= int(height)) continue;
+                vec2 tileMinimum = vec2(tile) / tileScale;
+                vec2 tileMaximum = vec2(tile + ivec2(1)) / tileScale;
+                vec2 farCorner = max(abs(tileMinimum - screen),
+                    abs(tileMaximum - screen));
+                if (length(farCorner) <= projectedRadius) {
+                    atomicMin(scene.values[pyramidBase + hizLevelOffset(level) +
+                        uint(tile.y) * width + uint(tile.x)], encoded);
+                }
+            }
+        }
+    }
+}
+
+void main() {
+    uint clusterCount = scene.values[0];
+    uint instanceCount = scene.values[1];
+    uint hierarchyCount = scene.values[2];
+    uint instanceIndex = gl_GlobalInvocationID.x;
+    if (instanceIndex >= instanceCount) return;
+
+    uint clusterStorageBase = 64u;
+    uint hierarchyBase = clusterStorageBase + clusterCount * 16u;
+    uint instanceStorageBase = hierarchyBase + hierarchyCount * 12u;
+    uint instanceBase = instanceStorageBase + instanceIndex * 24u;
+    mat4 model = instanceModel(instanceBase);
+    float scale = max(length(model[0].xyz),
+        max(length(model[1].xyz), length(model[2].xyz)));
+
+    mat4 viewProjection = mat4(
+        vec4(valuef(4), valuef(5), valuef(6), valuef(7)),
+        vec4(valuef(8), valuef(9), valuef(10), valuef(11)),
+        vec4(valuef(12), valuef(13), valuef(14), valuef(15)),
+        vec4(valuef(16), valuef(17), valuef(18), valuef(19)));
+    vec3 camera = vec3(valuef(20), valuef(21), valuef(22));
+    float maximumDistance = valuef(23);
+    float viewportHeight = valuef(36);
+    uint maximumLod = uint(valuef(37));
+    uint rootNode = uint(valuef(40));
+    float targetPixelError = max(valuef(41), 0.125);
+    bool diagnosticMode = scene.values[3] > 1u && scene.values[3] != 11u;
+    uint maximumInstances = uint(valuef(39));
+    uint maximumCandidates = clusterCount * maximumInstances;
+    uint visibleBase = instanceStorageBase + maximumInstances * 24u;
+    uint postCandidateBase = visibleBase + maximumCandidates * 2u;
+    uint feedbackBase = instanceStorageBase +
+        maximumInstances * 24u + maximumCandidates * 4u;
+    uint hizBase = hizStorageBase(clusterCount, maximumInstances);
+    uint indirectBase = hizBase + 3067u * 2u;
+    uint currentPyramid = uint(valuef(35));
+    uint currentHiz = hizBase + currentPyramid * 3067u;
+    uint previousHiz = hizBase + (1u - currentPyramid) * 3067u;
+
+    // Traverse a continuous cut of the cluster DAG. Each node owns renderable
+    // parent clusters. We descend only when its screen-space error exceeds the
+    // target and every direct child page is resident; otherwise the parent is
+    // a crack-free fallback while child pages are requested.
+    uint stack[64];
+    uint stackSize = 0u;
+    if (rootNode < hierarchyCount) stack[stackSize++] = rootNode;
+    while (stackSize > 0u) {
+        uint nodeIndex = stack[--stackSize];
+        uint nodeBase = hierarchyBase + nodeIndex * 12u;
+        vec3 localCenter = vec3(valuef(nodeBase), valuef(nodeBase + 1u),
+            valuef(nodeBase + 2u));
+        float worldRadius = valuef(nodeBase + 3u) * scale;
+        vec3 worldCenter = (model * vec4(localCenter, 1.0)).xyz;
+        vec4 clip = viewProjection * vec4(worldCenter, 1.0);
+        float clipRadius = max(worldRadius * abs(viewProjection[1][1]), 0.001);
+        float depthRadius = worldRadius * length(vec3(
+            viewProjection[0][2], viewProjection[1][2], viewProjection[2][2]));
+        float wRadius = worldRadius * length(vec3(
+            viewProjection[0][3], viewProjection[1][3], viewProjection[2][3]));
+        bool inFrustum = diagnosticMode || (clip.w > 0.0 &&
+            clip.x >= -clip.w - clipRadius && clip.x <= clip.w + clipRadius &&
+            clip.y >= -clip.w - clipRadius && clip.y <= clip.w + clipRadius &&
+            clip.z >= -clipRadius && clip.z <= clip.w + clipRadius);
+        bool inRange = diagnosticMode || maximumDistance <= 0.0 ||
+            distance(camera, worldCenter) <= maximumDistance + worldRadius;
+        if (!inFrustum || !inRange) continue;
+        vec2 screen = clip.xy / max(clip.w, 0.0001) * 0.5 + 0.5;
+        float screenRadius = clipRadius /
+            max(clip.w - wRadius, 0.0001) * 0.5;
+        float nearestDepth = (clip.z - depthRadius) /
+            max(clip.w - wRadius, 0.0001);
+        bool occluded = !diagnosticMode && hiddenByPreviousHiz(
+            previousHiz, screen, screenRadius, nearestDepth);
+        if (occluded) {
+            uint postIndex = atomicAdd(scene.values[indirectBase + 3u], 1u);
+            if (postIndex < maximumCandidates) {
+                scene.values[postCandidateBase + postIndex * 2u] = nodeIndex;
+                scene.values[postCandidateBase + postIndex * 2u + 1u] = instanceIndex;
+            }
+            continue;
+        }
+
+        float leftValue = valuef(nodeBase + 6u);
+        float rightValue = valuef(nodeBase + 7u);
+        bool hasChildren = leftValue >= 0.0;
+        float projectedError = valuef(nodeBase + 9u) * scale * viewportHeight /
+            max(distance(camera, worldCenter), 0.001);
+        bool wantsRefinement = hasChildren && projectedError > targetPixelError;
+        bool childrenResident = wantsRefinement;
+        if (wantsRefinement) {
+            uint childCount = rightValue >= 0.0 ? 2u : 1u;
+            for (uint childOffset = 0u; childOffset < childCount; ++childOffset) {
+                uint childNode = childOffset == 0u ? uint(leftValue) : uint(rightValue);
+                if (childNode >= hierarchyCount) {
+                    childrenResident = false;
+                    continue;
+                }
+                uint childBase = hierarchyBase + childNode * 12u;
+                uint firstChildCluster = uint(valuef(childBase + 4u));
+                uint childClusterCount = uint(valuef(childBase + 5u));
+                for (uint childClusterOffset = 0u;
+                    childClusterOffset < childClusterCount; ++childClusterOffset) {
+                    uint childCluster = firstChildCluster + childClusterOffset;
+                    if (childCluster >= clusterCount) {
+                        childrenResident = false;
+                        continue;
+                    }
+                    uint childMetadata = clusterStorageBase + childCluster * 16u;
+                    bool childResident = valuef(childMetadata + 12u) > 0.5;
+                    childrenResident = childrenResident && childResident;
+                    uint pagePriority = 1u + uint(clamp(projectedError * 1024.0,
+                        0.0, 1000000.0));
+                    atomicMax(scene.values[feedbackBase + childCluster], pagePriority);
+                }
+            }
+        }
+        if (wantsRefinement && childrenResident) {
+            if (stackSize + 2u <= 64u) {
+                stack[stackSize++] = uint(leftValue);
+                if (rightValue >= 0.0) stack[stackSize++] = uint(rightValue);
+            }
+            continue;
+        }
+
+        uint selectedLevel = uint(valuef(nodeBase + 8u));
+        uint desiredLevel = wantsRefinement && selectedLevel > 0u ?
+            selectedLevel - 1u : selectedLevel;
+        atomicMax(scene.values[indirectBase + 6u], selectedLevel);
+        uint firstCluster = uint(valuef(nodeBase + 4u));
+        uint nodeClusterCount = uint(valuef(nodeBase + 5u));
+        bool wroteDepth = false;
+        for (uint clusterOffset = 0u; clusterOffset < nodeClusterCount; ++clusterOffset) {
+            uint clusterIndex = firstCluster + clusterOffset;
+            if (clusterIndex >= clusterCount) continue;
+            uint clusterBase = clusterStorageBase + clusterIndex * 16u;
+            bool resident = valuef(clusterBase + 12u) > 0.5;
+            if (!resident) {
+                atomicMax(scene.values[feedbackBase + clusterIndex], 1u);
+                continue;
+            }
+            vec3 localCone = vec3(valuef(clusterBase + 4u),
+                valuef(clusterBase + 5u), valuef(clusterBase + 6u));
+            float coneCutoff = valuef(clusterBase + 7u);
+            vec3 worldCone = normalize(mat3(model) * localCone);
+            bool coneVisible = coneCutoff < -1.0 ||
+                dot(worldCone, normalize(camera - worldCenter)) >= coneCutoff;
+            if (!coneVisible) continue;
+            if (!wroteDepth) {
+                float farthestDepth = (clip.z + depthRadius) /
+                    max(clip.w + wRadius, 0.0001);
+                writeCurrentHiz(currentHiz, screen, screenRadius, farthestDepth);
+                wroteDepth = true;
+            }
+            uint outputIndex = atomicAdd(scene.values[indirectBase], 1u);
+            atomicAdd(scene.values[indirectBase + 4u], 1u);
+            uint maximumVisible = clusterCount * instanceCount;
+            if (outputIndex < maximumVisible) {
+                uint outputBase = visibleBase + outputIndex * 2u;
+                scene.values[outputBase] = clusterIndex;
+                scene.values[outputBase + 1u] =
+                    (instanceIndex & 0x0007ffffu) |
+                    ((desiredLevel & 0x3fu) << 20u) |
+                    ((selectedLevel & 0x3fu) << 26u);
+            }
+        }
+    }
+}

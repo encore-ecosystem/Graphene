@@ -1,0 +1,1 @@
+{"format":"graphene-scene","version":2,"actors":[{"id":1,"parent":null,"name":"Front Occluder","kind":"cube","visible":true,"transform":{"position":[0,0,0],"rotation":[0,0,0],"scale":[1.5,1.5,1.5]}},{"id":2,"parent":null,"name":"Disocclusion Candidate","kind":"cube","visible":true,"transform":{"position":[-2.18,-1.63,-2.93],"rotation":[0,0,0],"scale":[0.3,0.3,0.3]}}]}

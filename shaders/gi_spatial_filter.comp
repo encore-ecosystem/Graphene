@@ -1,0 +1,68 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer GiScene {
+    float values[];
+} scene;
+layout(set = 0, binding = 1, std430) readonly buffer SurfaceCache {
+    float values[];
+} surfaces;
+layout(set = 0, binding = 2, std430) readonly buffer RawRadianceHistory {
+    float values[];
+} raw_history;
+layout(set = 0, binding = 3, std430) buffer FilteredRadianceCache {
+    float values[];
+} filtered;
+
+void main() {
+    uint sampleIndex = gl_GlobalInvocationID.x;
+    uint sampleCount = uint(scene.values[0]);
+    if (sampleIndex >= sampleCount) return;
+    uint surfaceBase = sampleIndex * 12;
+    vec3 position = vec3(surfaces.values[surfaceBase],
+        surfaces.values[surfaceBase + 1], surfaces.values[surfaceBase + 2]);
+    vec3 normal = normalize(vec3(surfaces.values[surfaceBase + 4],
+        surfaces.values[surfaceBase + 5], surfaces.values[surfaceBase + 6]));
+    bool worldProbe = surfaces.values[surfaceBase + 3] < 0.5;
+    vec3 radiance = vec3(0.0);
+    float totalWeight = 0.0;
+    for (uint neighbor = 0; neighbor < sampleCount; ++neighbor) {
+        uint neighborSurface = neighbor * 12;
+        uint neighborHistory = neighbor * 4;
+        float frames = raw_history.values[neighborHistory + 3];
+        if (frames <= 0.0) continue;
+        vec3 neighborPosition = vec3(surfaces.values[neighborSurface],
+            surfaces.values[neighborSurface + 1],
+            surfaces.values[neighborSurface + 2]);
+        vec3 neighborNormal = normalize(vec3(
+            surfaces.values[neighborSurface + 4],
+            surfaces.values[neighborSurface + 5],
+            surfaces.values[neighborSurface + 6]));
+        bool neighborWorldProbe =
+            surfaces.values[neighborSurface + 3] < 0.5;
+        vec3 delta = neighborPosition - position;
+        float distanceSquared = dot(delta, delta);
+        float normalWeight = worldProbe || neighborWorldProbe
+            ? 0.35 : pow(max(dot(normal, neighborNormal), 0.0), 8.0);
+        float distanceWeight = exp(-distanceSquared *
+            (worldProbe || neighborWorldProbe ? 0.08 : 0.45));
+        float confidence = min(frames / 8.0, 1.0);
+        float selfWeight = neighbor == sampleIndex ? 1.0 : 0.0;
+        float weight = max(selfWeight,
+            normalWeight * distanceWeight * confidence);
+        radiance += vec3(raw_history.values[neighborHistory],
+            raw_history.values[neighborHistory + 1],
+            raw_history.values[neighborHistory + 2]) * weight;
+        totalWeight += weight;
+    }
+    uint outputBase = sampleIndex * 4;
+    vec3 result = totalWeight > 0.0001 ? radiance / totalWeight :
+        vec3(raw_history.values[outputBase],
+            raw_history.values[outputBase + 1],
+            raw_history.values[outputBase + 2]);
+    filtered.values[outputBase] = result.x;
+    filtered.values[outputBase + 1] = result.y;
+    filtered.values[outputBase + 2] = result.z;
+    filtered.values[outputBase + 3] = raw_history.values[outputBase + 3];
+}

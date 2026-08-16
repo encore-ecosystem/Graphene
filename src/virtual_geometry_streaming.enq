@@ -1,0 +1,452 @@
+//! Fixed-budget residency for Virtual Geometry cluster pages.
+
+import core::option::Option
+import core::vec::Vec
+
+pub struct GeometryPageAllocation {
+    resident: bool
+    slot: u32
+    evicted_asset: u64
+    evicted_page: u32
+}
+
+impl for GeometryPageAllocation {
+    pub fn new(resident: bool, slot: u32,
+        evicted_asset: u64, evicted_page: u32,) -> Self {
+        ret Self {
+            resident, slot, evicted_asset, evicted_page
+        }
+    }
+    pub fn resident(self: Self) -> bool {
+        ret self.resident
+    }
+    pub fn slot(self: Self) -> u32 {
+        ret self.slot
+    }
+    pub fn evicted(self: Self) -> bool {
+        ret self.evicted_asset != 0_u64
+    }
+    pub fn evicted_asset(self: Self) -> u64 {
+        ret self.evicted_asset
+    }
+    pub fn evicted_page(self: Self) -> u32 {
+        ret self.evicted_page
+    }
+}
+
+struct GeometryPageEntry {
+    occupied: bool
+    asset: u64
+    page: u32
+    last_used_frame: u64
+    priority: u32
+}
+
+pub struct GeometryPageCache {
+    capacity: usize
+    resident_count: usize
+    entries: Vec[GeometryPageEntry]
+}
+
+#attr(safe)
+fn __geometry_cache_len(cache: GeometryPageCache &) -> usize {
+    unsafe {
+        unsafe ehir {
+            len_ptr: usize * = getfieldptr cache: GeometryPageCache & > 0
+            len: usize = load len_ptr: usize *
+        }
+        ret len
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_resident_count(cache: GeometryPageCache &) -> usize {
+    unsafe {
+        unsafe ehir {
+            cache_words: usize * = pcast cache: GeometryPageCache &, usize *
+            count_index: usize = lcpos 1_usize
+            count_ptr: usize * = gep cache_words: usize *, count_index: usize
+            count: usize = load count_ptr: usize *
+        }
+        ret count
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_increment_resident(cache: GeometryPageCache &) -> bool {
+    unsafe {
+        unsafe ehir {
+            cache_words: usize * = pcast cache: GeometryPageCache &, usize *
+            count_index: usize = lcpos 1_usize
+            count_ptr: usize * = gep cache_words: usize *, count_index: usize
+            count: usize = load count_ptr: usize *
+            one: usize = lcpos 1_usize
+            next: usize = add count: usize, one: usize
+            store next: usize, count_ptr: usize *
+        }
+        ret true
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_store(cache: GeometryPageCache &,
+    index: usize, occupied: bool, asset: u64, page: u32,
+    frame: u64, priority: u32,) -> bool {
+    unsafe {
+        unsafe ehir {
+            entries_ptr: Vec[GeometryPageEntry] * = getfieldptr cache: GeometryPageCache & > 2
+            data_slot: usize * = pcast entries_ptr: Vec[GeometryPageEntry] *, usize *
+            data_address: usize = load data_slot: usize *
+            data: GeometryPageEntry * = pcast data_address: usize, GeometryPageEntry *
+            item_ptr: GeometryPageEntry * = gep data: GeometryPageEntry *, index: usize
+            occupied_ptr: bool * = getfieldptr item_ptr: GeometryPageEntry * > 0
+            asset_ptr: u64 * = getfieldptr item_ptr: GeometryPageEntry * > 1
+            page_ptr: u32 * = getfieldptr item_ptr: GeometryPageEntry * > 2
+            frame_ptr: u64 * = getfieldptr item_ptr: GeometryPageEntry * > 3
+            priority_ptr: u32 * = getfieldptr item_ptr: GeometryPageEntry * > 4
+            store occupied: bool, occupied_ptr: bool *
+            store asset: u64, asset_ptr: u64 *
+            store page: u32, page_ptr: u32 *
+            store frame: u64, frame_ptr: u64 *
+            store priority: u32, priority_ptr: u32 *
+        }
+        ret true
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_occupied(cache: GeometryPageCache &,
+    index: usize,) -> bool {
+    unsafe {
+        unsafe ehir {
+            entries_ptr: Vec[GeometryPageEntry] * = getfieldptr cache: GeometryPageCache & > 2
+            data_slot: usize * = pcast entries_ptr: Vec[GeometryPageEntry] *, usize *
+            data_address: usize = load data_slot: usize *
+            data: GeometryPageEntry * = pcast data_address: usize, GeometryPageEntry *
+            item_ptr: GeometryPageEntry * = gep data: GeometryPageEntry *, index: usize
+            field_ptr: bool * = getfieldptr item_ptr: GeometryPageEntry * > 0
+            value: bool = load field_ptr: bool *
+        }
+        ret value
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_asset(cache: GeometryPageCache &,
+    index: usize,) -> u64 {
+    unsafe {
+        unsafe ehir {
+            entries_ptr: Vec[GeometryPageEntry] * = getfieldptr cache: GeometryPageCache & > 2
+            data_slot: usize * = pcast entries_ptr: Vec[GeometryPageEntry] *, usize *
+            data_address: usize = load data_slot: usize *
+            data: GeometryPageEntry * = pcast data_address: usize, GeometryPageEntry *
+            item_ptr: GeometryPageEntry * = gep data: GeometryPageEntry *, index: usize
+            field_ptr: u64 * = getfieldptr item_ptr: GeometryPageEntry * > 1
+            value: u64 = load field_ptr: u64 *
+        }
+        ret value
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_page(cache: GeometryPageCache &,
+    index: usize,) -> u32 {
+    unsafe {
+        unsafe ehir {
+            entries_ptr: Vec[GeometryPageEntry] * = getfieldptr cache: GeometryPageCache & > 2
+            data_slot: usize * = pcast entries_ptr: Vec[GeometryPageEntry] *, usize *
+            data_address: usize = load data_slot: usize *
+            data: GeometryPageEntry * = pcast data_address: usize, GeometryPageEntry *
+            item_ptr: GeometryPageEntry * = gep data: GeometryPageEntry *, index: usize
+            field_ptr: u32 * = getfieldptr item_ptr: GeometryPageEntry * > 2
+            value: u32 = load field_ptr: u32 *
+        }
+        ret value
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_frame(cache: GeometryPageCache &,
+    index: usize,) -> u64 {
+    unsafe {
+        unsafe ehir {
+            entries_ptr: Vec[GeometryPageEntry] * = getfieldptr cache: GeometryPageCache & > 2
+            data_slot: usize * = pcast entries_ptr: Vec[GeometryPageEntry] *, usize *
+            data_address: usize = load data_slot: usize *
+            data: GeometryPageEntry * = pcast data_address: usize, GeometryPageEntry *
+            item_ptr: GeometryPageEntry * = gep data: GeometryPageEntry *, index: usize
+            field_ptr: u64 * = getfieldptr item_ptr: GeometryPageEntry * > 3
+            value: u64 = load field_ptr: u64 *
+        }
+        ret value
+    }
+}
+
+#attr(safe)
+fn __geometry_cache_priority(cache: GeometryPageCache &,
+    index: usize,) -> u32 {
+    unsafe {
+        unsafe ehir {
+            entries_ptr: Vec[GeometryPageEntry] * = getfieldptr cache: GeometryPageCache & > 2
+            data_slot: usize * = pcast entries_ptr: Vec[GeometryPageEntry] *, usize *
+            data_address: usize = load data_slot: usize *
+            data: GeometryPageEntry * = pcast data_address: usize, GeometryPageEntry *
+            item_ptr: GeometryPageEntry * = gep data: GeometryPageEntry *, index: usize
+            field_ptr: u32 * = getfieldptr item_ptr: GeometryPageEntry * > 4
+            value: u32 = load field_ptr: u32 *
+        }
+        ret value
+    }
+}
+
+impl for GeometryPageCache {
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut entries = Vec[GeometryPageEntry]::new()
+        let mut index = 0_usize
+        while index < capacity {
+            entries.push(GeometryPageEntry {
+                    false, 0_u64, 0_u32, 0_u64, 0_u32
+                }
+                ,)
+            index += 1_usize
+        }
+        ret Self {
+            capacity, 0_usize, entries
+        }
+    }
+    pub fn with_capacity_heap(capacity: usize) -> GeometryPageCache < H > {
+        let mut entries = Vec[GeometryPageEntry]::new()
+        let mut index = 0_usize
+        while index < capacity {
+            entries.push(GeometryPageEntry {
+                    false, 0_u64, 0_u32, 0_u64, 0_u32
+                }
+                ,)
+            index += 1_usize
+        }
+        ret GeometryPageCache < H > {
+            capacity, 0_usize, entries
+        }
+    }
+    pub fn capacity(self: mut Self) -> usize {
+        ret self.entries.len()
+    }
+    pub fn resident_count(self: mut Self) -> usize {
+        ret self.resident_count
+    }
+    pub fn resident(self: mut Self, asset: u64, page: u32) -> bool {
+        for entry in self.entries {
+            if entry.occupied && entry.asset == asset && entry.page == page {
+                ret true
+            }
+        }
+        ret false
+    }
+    /// Requests a page in a fixed physical slot budget.
+    ///
+    /// Empty slots win first. Otherwise the lowest-priority page is evicted;
+    /// age breaks ties so active camera-visible pages remain resident.
+    pub fn request(self: mut Self, asset: u64, page: u32,
+        frame: u64, priority: u32,) -> GeometryPageAllocation {
+        if asset == 0_u64 || self.entries.len() == 0_usize {
+            ret GeometryPageAllocation {
+                false, 0_u32, 0_u64, 0_u32
+            }
+        }
+        let mut index = 0_usize
+        let mut empty = self.entries.len()
+        let mut victim = self.entries.len()
+        let mut victim_priority = 4294967295_u32
+        let mut victim_frame = 18446744073709551615_u64
+        while index < self.entries.len() {
+            match self.entries.get(index) {
+                Option::Some(entry) => {
+                    if entry.occupied && entry.asset == asset && entry.page == page {
+                        self.entries.set(index, GeometryPageEntry {
+                                true, asset, page, frame,
+                                if priority > entry.priority {
+                                    priority
+                                } else {
+                                    entry.priority
+                                }
+                            }
+                            ,)
+                        ret GeometryPageAllocation {
+                            true, index as u32, 0_u64, 0_u32
+                        }
+                    }
+                    if !entry.occupied && empty == self.entries.len() {
+                        empty = index
+                    }
+                    if entry.occupied &&
+                    (entry.priority < victim_priority ||
+                        (entry.priority == victim_priority && entry.last_used_frame < victim_frame))
+                    {
+                        victim = index
+                        victim_priority = entry.priority
+                        victim_frame = entry.last_used_frame
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index += 1_usize
+        }
+
+        let slot = if empty < self.entries.len() {
+            empty
+        } else {
+            victim
+        }
+        if slot >= self.entries.len() {
+            ret GeometryPageAllocation {
+                false, 0_u32, 0_u64, 0_u32
+            }
+        }
+        let previous = match self.entries.get(slot) {
+            Option::Some(entry) => {
+                entry
+            }
+            Option::None => {
+                GeometryPageEntry {
+                    false, 0_u64, 0_u32, 0_u64, 0_u32
+                }
+            }
+        }
+        if !previous.occupied {
+            self.resident_count += 1_usize
+        }
+        self.entries.set(slot, GeometryPageEntry {
+                true, asset, page, frame, priority
+            }
+            ,)
+        ret GeometryPageAllocation {
+            true, slot as u32,
+            if previous.occupied {
+                previous.asset
+            } else {
+                0_u64
+            }
+            ,
+            if previous.occupied {
+                previous.page
+            } else {
+                0_u32
+            }
+        }
+    }
+    pub fn release_asset(self: mut Self, asset: u64) -> usize {
+        let mut released = 0_usize
+        let mut index = 0_usize
+        while index < self.entries.len() {
+            match self.entries.get(index) {
+                Option::Some(entry) => {
+                    if entry.occupied && entry.asset == asset {
+                        self.entries.set(index, GeometryPageEntry {
+                                false, 0_u64, 0_u32, 0_u64, 0_u32
+                            }
+                            ,)
+                        released += 1_usize
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index += 1_usize
+        }
+        self.resident_count -= released
+        ret released
+    }
+}
+
+pub fn geometry_page_cache_capacity(
+    cache: GeometryPageCache &,) -> usize {
+    ret __geometry_cache_len(cache)
+}
+
+pub fn geometry_page_cache_resident_count(
+    cache: GeometryPageCache &,) -> usize {
+    ret __geometry_cache_resident_count(cache)
+}
+
+pub fn geometry_page_cache_request(cache: GeometryPageCache &,
+    asset: u64, page: u32, frame: u64,
+    priority: u32,) -> GeometryPageAllocation {
+    let capacity = __geometry_cache_len(cache)
+    if asset == 0_u64 || capacity == 0_usize {
+        ret GeometryPageAllocation {
+            false, 0_u32, 0_u64, 0_u32
+        }
+    }
+    let mut index = 0_usize
+    let mut empty = capacity
+    let mut victim = capacity
+    let mut victim_priority = 4294967295_u32
+    let mut victim_frame = 18446744073709551615_u64
+    while index < capacity {
+        let entry_occupied = __geometry_cache_occupied(cache, index)
+        let entry_asset = __geometry_cache_asset(cache, index)
+        let entry_page = __geometry_cache_page(cache, index)
+        let entry_priority = __geometry_cache_priority(cache, index)
+        let entry_frame = __geometry_cache_frame(cache, index)
+        if entry_occupied && entry_asset == asset &&
+        entry_page == page {
+            __geometry_cache_store(
+                cache, index, true, asset, page, frame,
+                if priority > entry_priority {
+                    priority
+                } else {
+                    entry_priority
+                }
+                ,)
+            ret GeometryPageAllocation {
+                true, index as u32, 0_u64, 0_u32
+            }
+        }
+        if !entry_occupied && empty == capacity {
+            empty = index
+        }
+        if entry_occupied &&
+        (entry_priority < victim_priority ||
+            (entry_priority == victim_priority &&
+                entry_frame < victim_frame)) {
+            victim = index
+            victim_priority = entry_priority
+            victim_frame = entry_frame
+        }
+        index += 1_usize
+    }
+    let slot = if empty < capacity {
+        empty
+    } else {
+        victim
+    }
+    if slot >= capacity {
+        ret GeometryPageAllocation {
+            false, 0_u32, 0_u64, 0_u32
+        }
+    }
+    let previous_occupied = __geometry_cache_occupied(cache, slot)
+    let previous_asset = __geometry_cache_asset(cache, slot)
+    let previous_page = __geometry_cache_page(cache, slot)
+    if !previous_occupied {
+        __geometry_cache_increment_resident(cache)
+    }
+    __geometry_cache_store(
+        cache, slot, true, asset, page, frame, priority,)
+    ret GeometryPageAllocation {
+        true, slot as u32,
+        if previous_occupied {
+            previous_asset
+        } else {
+            0_u64
+        }
+        ,
+        if previous_occupied {
+            previous_page
+        } else {
+            0_u32
+        }
+    }
+}
+// Virtual-geometry residency and page replacement policy.

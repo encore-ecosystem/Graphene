@@ -1,0 +1,965 @@
+//! Runtime primitives for Encore gameplay projects.
+//!
+//! The editor and a standalone game process use the same typed runtime
+//! contracts.  Gameplay code owns the World and calls RuntimeClock once per
+//! rendered frame, then runs its systems for the returned fixed-step count.
+
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+
+extern fn graphene_physics_floor_position(position: f32, velocity: f32, gravity: f32,
+    delta_seconds: f32, radius: f32,) -> f32
+extern fn graphene_physics_floor_velocity(position: f32, velocity: f32, gravity: f32,
+    delta_seconds: f32, radius: f32, restitution: f32,) -> f32
+
+pub struct RuntimeTransform {
+    position: Vec3
+    rotation: Vec3
+    scale: Vec3
+}
+
+impl for RuntimeTransform {
+    pub fn identity() -> RuntimeTransform {
+        ret RuntimeTransform {
+            Vec3::zero(), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)
+        }
+    }
+    pub fn new(position: Vec3, rotation: Vec3, scale: Vec3) -> RuntimeTransform {
+        ret RuntimeTransform {
+            position, rotation, scale
+        }
+    }
+    pub fn position(self: Self) -> Vec3 {
+        ret self.position
+    }
+    pub fn rotation(self: Self) -> Vec3 {
+        ret self.rotation
+    }
+    pub fn scale(self: Self) -> Vec3 {
+        ret self.scale
+    }
+    pub fn with_position(self: Self, value: Vec3) -> RuntimeTransform {
+        ret RuntimeTransform {
+            value, self.rotation, self.scale
+        }
+    }
+    pub fn with_rotation(self: Self, value: Vec3) -> RuntimeTransform {
+        ret RuntimeTransform {
+            self.position, value, self.scale
+        }
+    }
+    pub fn with_scale(self: Self, value: Vec3) -> RuntimeTransform {
+        ret RuntimeTransform {
+            self.position, self.rotation, value
+        }
+    }
+}
+
+pub struct RuntimeConfig {
+    fixed_delta_seconds: f32
+    max_frame_delta_seconds: f32
+    gravity: Vec3
+}
+
+pub enum TickGroup {
+    PrePhysics
+    Physics
+    PostPhysics
+    PostUpdate
+}
+
+impl for TickGroup {
+    pub fn order(self: Self) -> u32 {
+        match self {
+            TickGroup::PrePhysics => {
+                ret 0_u32
+            }
+            TickGroup::Physics => {
+                ret 1_u32
+            }
+            TickGroup::PostPhysics => {
+                ret 2_u32
+            }
+            TickGroup::PostUpdate => {
+                ret 3_u32
+            }
+        }
+    }
+}
+
+pub struct TickContext {
+    group: TickGroup
+    delta_seconds: f32
+    fixed_delta_seconds: f32
+    frame_index: u64
+    fixed_frame_index: u64
+}
+
+impl for TickContext {
+    pub fn for_frame(frame: RuntimeFrame, group: TickGroup) -> TickContext {
+        ret TickContext {
+            group, frame.delta_seconds(), frame.fixed_delta_seconds(),
+            frame.frame_index(), frame.fixed_frame_index()
+        }
+    }
+    pub fn group(self: Self) -> TickGroup {
+        ret self.group
+    }
+    pub fn delta_seconds(self: Self) -> f32 {
+        ret self.delta_seconds
+    }
+    pub fn fixed_delta_seconds(self: Self) -> f32 {
+        ret self.fixed_delta_seconds
+    }
+    pub fn frame_index(self: Self) -> u64 {
+        ret self.frame_index
+    }
+    pub fn fixed_frame_index(self: Self) -> u64 {
+        ret self.fixed_frame_index
+    }
+}
+
+pub struct Subsystem {
+    name: str
+    group: TickGroup
+    enabled: bool
+}
+
+impl for Subsystem {
+    pub fn new(name: str, group: TickGroup) -> Subsystem {
+        ret Subsystem {
+            name, group, true
+        }
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+    pub fn group(self: Self) -> TickGroup {
+        ret self.group
+    }
+    pub fn enabled(self: Self) -> bool {
+        ret self.enabled
+    }
+    pub fn set_enabled(self: mut Self, value: bool) ->() {
+        self.enabled = value
+        ret()
+    }
+}
+
+impl for RuntimeConfig {
+    pub fn defaults() -> RuntimeConfig {
+        ret RuntimeConfig {
+            1.0_f32 / 60.0_f32, 0.25_f32, Vec3::new(0.0_f32, - 9.81_f32, 0.0_f32)
+        }
+    }
+    pub fn with_fixed_delta(self: Self, value: f32) -> RuntimeConfig {
+        ret RuntimeConfig {
+            if value > 0.000001_f32 {
+                value
+            } else {
+                self.fixed_delta_seconds
+            }
+            ,
+            self.max_frame_delta_seconds, self.gravity
+        }
+    }
+    pub fn with_max_frame_delta(self: Self, value: f32) -> RuntimeConfig {
+        ret RuntimeConfig {
+            self.fixed_delta_seconds,
+            if value > 0.0_f32 {
+                value
+            } else {
+                self.max_frame_delta_seconds
+            }
+            ,
+            self.gravity
+        }
+    }
+    pub fn with_gravity(self: Self, value: Vec3) -> RuntimeConfig {
+        ret RuntimeConfig {
+            self.fixed_delta_seconds, self.max_frame_delta_seconds, value
+        }
+    }
+    pub fn fixed_delta_seconds(self: Self) -> f32 {
+        ret self.fixed_delta_seconds
+    }
+    pub fn max_frame_delta_seconds(self: Self) -> f32 {
+        ret self.max_frame_delta_seconds
+    }
+    pub fn gravity(self: Self) -> Vec3 {
+        ret self.gravity
+    }
+}
+
+pub struct RuntimeFrame {
+    delta_seconds: f32
+    fixed_delta_seconds: f32
+    fixed_steps: u32
+    frame_index: u64
+    fixed_frame_index: u64
+    input: InputSnapshot
+}
+
+impl for RuntimeFrame {
+    pub fn delta_seconds(self: Self) -> f32 {
+        ret self.delta_seconds
+    }
+    pub fn fixed_delta_seconds(self: Self) -> f32 {
+        ret self.fixed_delta_seconds
+    }
+    pub fn fixed_steps(self: Self) -> u32 {
+        ret self.fixed_steps
+    }
+    pub fn frame_index(self: Self) -> u64 {
+        ret self.frame_index
+    }
+    pub fn fixed_frame_index(self: Self) -> u64 {
+        ret self.fixed_frame_index
+    }
+    pub fn input(self: Self) -> InputSnapshot {
+        ret self.input
+    }
+}
+
+pub struct RuntimeClock {
+    config: RuntimeConfig
+    accumulator: f32
+    frame_index: u64
+    fixed_frame_index: u64
+}
+
+impl for RuntimeClock {
+    pub fn new(config: RuntimeConfig) -> RuntimeClock {
+        ret RuntimeClock {
+            config, 0.0_f32, 0_u64, 0_u64
+        }
+    }
+    pub fn config(self: Self) -> RuntimeConfig {
+        ret self.config
+    }
+    pub fn begin_frame(self: mut Self, elapsed_seconds: f32, input: InputSnapshot) -> RuntimeFrame {
+        let mut delta = elapsed_seconds
+        if delta < 0.0_f32 {
+            delta = 0.0_f32
+        }
+        if delta > self.config.max_frame_delta_seconds() {
+            delta = self.config.max_frame_delta_seconds()
+        }
+        self.accumulator = self.accumulator + delta
+        let fixed_delta = self.config.fixed_delta_seconds()
+        let mut steps = 0_u32
+        // A frame can never consume an unbounded backlog.  The max-step cap
+        // keeps a stalled window from turning recovery into a second stall.
+        while self.accumulator >= fixed_delta && steps < 8_u32 {
+            self.accumulator = self.accumulator - fixed_delta
+            steps = steps + 1_u32
+            self.fixed_frame_index = self.fixed_frame_index + 1_u64
+        }
+        self.frame_index = self.frame_index + 1_u64
+        ret RuntimeFrame {
+            delta, fixed_delta, steps, self.frame_index, self.fixed_frame_index, input
+        }
+    }
+    pub fn accumulator(self: Self) -> f32 {
+        ret self.accumulator
+    }
+}
+
+pub struct InputBinding {
+    action: str
+    key: u32
+    scale: f32
+}
+
+impl for InputBinding {
+    pub fn new(action: str, key: u32, scale: f32) -> InputBinding {
+        ret InputBinding {
+            action, key, scale
+        }
+    }
+    pub fn action(self: Self) -> str {
+        ret self.action
+    }
+    pub fn key(self: Self) -> u32 {
+        ret self.key
+    }
+    pub fn scale(self: Self) -> f32 {
+        ret self.scale
+    }
+}
+
+pub struct InputSnapshot {
+    down: Vec[u32]
+    pressed: Vec[u32]
+    released: Vec[u32]
+}
+
+fn contains_key(values: Vec[u32], key: u32) -> bool {
+    for value in values {
+        if value == key {
+            ret true
+        }
+    }
+    ret false
+}
+
+impl for InputSnapshot {
+    pub fn empty() -> InputSnapshot {
+        ret InputSnapshot {
+            Vec[u32]::new(), Vec[u32]::new(), Vec[u32]::new()
+        }
+    }
+    pub fn with_down(self: Self, key: u32) -> InputSnapshot {
+        let mut next = self
+        if !contains_key(next.down, key) {
+            next.down.push(key)
+        }
+        ret next
+    }
+    pub fn with_pressed(self: Self, key: u32) -> InputSnapshot {
+        let mut next = self
+        if !contains_key(next.pressed, key) {
+            next.pressed.push(key)
+        }
+        ret next.with_down(key)
+    }
+    pub fn with_released(self: Self, key: u32) -> InputSnapshot {
+        let mut next = self
+        if !contains_key(next.released, key) {
+            next.released.push(key)
+        }
+        ret next
+    }
+    pub fn key_down(self: Self, key: u32) -> bool {
+        ret contains_key(self.down, key)
+    }
+    pub fn key_pressed(self: Self, key: u32) -> bool {
+        ret contains_key(self.pressed, key)
+    }
+    pub fn key_released(self: Self, key: u32) -> bool {
+        ret contains_key(self.released, key)
+    }
+}
+
+pub struct InputMap {
+    bindings: Vec[InputBinding]
+}
+
+impl for InputMap {
+    pub fn new() -> InputMap {
+        ret InputMap {
+            Vec[InputBinding]::new()
+        }
+    }
+    pub fn bind_key(self: mut Self, action: str, key: u32) ->() {
+        self.bindings.push(InputBinding::new(action, key, 1.0_f32))
+        ret()
+    }
+    pub fn bind_axis_key(self: mut Self, action: str, key: u32, scale: f32) ->() {
+        self.bindings.push(InputBinding::new(action, key, scale))
+        ret()
+    }
+    pub fn value(self: Self, action: str, input: InputSnapshot) -> f32 {
+        let mut result = 0.0_f32
+        for binding in self.bindings {
+            if binding.action() == action && input.key_down(binding.key()) {
+                result = result + binding.scale()
+            }
+        }
+        if result < - 1.0_f32 {
+            ret - 1.0_f32
+        }
+        if result > 1.0_f32 {
+            ret 1.0_f32
+        }
+        ret result
+    }
+    pub fn pressed(self: Self, action: str, input: InputSnapshot) -> bool {
+        for binding in self.bindings {
+            if binding.action() == action && input.key_pressed(binding.key()) {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn released(self: Self, action: str, input: InputSnapshot) -> bool {
+        for binding in self.bindings {
+            if binding.action() == action && input.key_released(binding.key()) {
+                ret true
+            }
+        }
+        ret false
+    }
+}
+
+pub struct ActorComponent {
+    actor: u64
+    kind: str
+    enabled: bool
+}
+
+impl for ActorComponent {
+    pub fn new(actor: u64, kind: str) -> ActorComponent {
+        ret ActorComponent {
+            actor, kind, true
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn kind(self: Self) -> str {
+        ret self.kind
+    }
+    pub fn enabled(self: Self) -> bool {
+        ret self.enabled
+    }
+    pub fn set_enabled(self: mut Self, value: bool) ->() {
+        self.enabled = value ret()
+    }
+}
+
+pub struct Actor {
+    id: u64
+    name: str
+    transform: RuntimeTransform
+    parent: Option[u64]
+    active: bool
+}
+
+impl for Actor {
+    pub fn id(self: Self) -> u64 {
+        ret self.id
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+    pub fn transform(self: Self) -> RuntimeTransform {
+        ret self.transform
+    }
+    pub fn parent(self: Self) -> Option[u64] {
+        ret self.parent
+    }
+    pub fn active(self: Self) -> bool {
+        ret self.active
+    }
+}
+
+pub struct World {
+    actors: Vec[Actor]
+    next_id: u64
+}
+
+fn actor_index(actors: Vec[Actor], id: u64) -> usize {
+    let mut index = 0_usize
+    while index < actors.len() {
+        match actors.get(index) {
+            Option[Actor]::Some(actor) => {
+                if actor.id() == id {
+                    ret index
+                }
+            }
+            Option[Actor]::None => {
+            }
+        }
+        index = index + 1_usize
+    }
+    ret actors.len()
+}
+
+impl for World {
+    pub fn new() -> World {
+        ret World {
+            Vec[Actor]::new(), 1_u64
+        }
+    }
+    pub fn actor_count(self: Self) -> usize {
+        ret self.actors.len()
+    }
+    pub fn actor_ids(self: Self) -> Vec[u64] {
+        let mut ids = Vec[u64]::new()
+        for actor in self.actors {
+            ids.push(actor.id())
+        }
+        ret ids
+    }
+    pub fn spawn_actor(self: mut Self, name: str, transform: RuntimeTransform) -> u64 {
+        let id = self.next_id
+        self.next_id = self.next_id + 1_u64
+        self.actors.push(Actor {
+                id, name, transform, Option[u64]::None, true
+            }
+            ,
+        )
+        ret id
+    }
+    pub fn despawn_actor(self: mut Self, id: u64) -> bool {
+        let index = actor_index(self.actors, id)
+        if index >= self.actors.len() {
+            ret false
+        }
+        let mut remaining = Vec[Actor]::new()
+        let mut cursor = 0_usize
+        for actor in self.actors {
+            if cursor != index {
+                remaining.push(actor)
+            }
+            cursor = cursor + 1_usize
+        }
+        self.actors = remaining
+        ret true
+    }
+    pub fn contains(self: Self, id: u64) -> bool {
+        ret actor_index(self.actors, id) < self.actors.len()
+    }
+    pub fn actor(self: Self, id: u64) -> Option[Actor] {
+        match self.actors.get(actor_index(self.actors, id)) {
+            Option[Actor]::Some(actor) => {
+                ret Option[Actor]::Some(actor)
+            }
+            Option[Actor]::None => {
+            }
+        }
+        ret Option[Actor]::None
+    }
+    pub fn transform(self: Self, id: u64) -> Option[RuntimeTransform] {
+        match self.actor(id) {
+            Option[Actor]::Some(actor) => {
+                ret Option[RuntimeTransform]::Some(actor.transform())
+            }
+            Option[Actor]::None => {
+            }
+        }
+        ret Option[RuntimeTransform]::None
+    }
+    pub fn set_transform(self: mut Self, id: u64, transform: RuntimeTransform) -> bool {
+        let index = actor_index(self.actors, id)
+        if index >= self.actors.len() {
+            ret false
+        }
+        match self.actors.get(index) {
+            Option[Actor]::Some(actor) => {
+                self.actors.set(index, Actor {
+                        actor.id(), actor.name(), transform, actor.parent(), actor.active()
+                    }
+                    ,
+                )
+            }
+            Option[Actor]::None => {
+                ret false
+            }
+        }
+        ret true
+    }
+    pub fn translate(self: mut Self, id: u64, delta: Vec3) -> bool {
+        match self.transform(id) {
+            Option[RuntimeTransform]::Some(transform) => {
+                ret self.set_transform(id, transform.with_position(transform.position().add(delta)))
+            }
+            Option[RuntimeTransform]::None => {
+            }
+        }
+        ret false
+    }
+    pub fn set_parent(self: mut Self, id: u64, parent: Option[u64]) -> bool {
+        let index = actor_index(self.actors, id)
+        if index >= self.actors.len() {
+            ret false
+        }
+        match self.actors.get(index) {
+            Option[Actor]::Some(actor) => {
+                self.actors.set(index, Actor {
+                        actor.id(), actor.name(), actor.transform(), parent, actor.active()
+                    }
+                    ,
+                )
+            }
+            Option[Actor]::None => {
+                ret false
+            }
+        }
+        ret true
+    }
+}
+
+/// Deterministic rigid-body state owned by the gameplay runtime.
+/// The first solver slice is intentionally small: sphere bounds, gravity and
+/// a y=0 static floor.  The data model is stable so a native broadphase can
+/// replace the solver without changing gameplay scripts.
+pub struct RigidBody {
+    actor: u64
+    velocity: Vec3
+    mass: f32
+    radius: f32
+    gravity_scale: f32
+    restitution: f32
+    dynamic: bool
+    enabled: bool
+}
+
+impl for RigidBody {
+    pub fn dynamic(actor: u64, mass: f32, radius: f32) -> RigidBody {
+        ret RigidBody {
+            actor, Vec3::zero(), if mass > 0.000001_f32 {
+                mass
+            } else {
+                1.0_f32
+            }
+            ,
+            if radius > 0.0_f32 {
+                radius
+            } else {
+                0.5_f32
+            }
+            , 1.0_f32, 0.0_f32, true, true
+        }
+    }
+    pub fn static(actor: u64, radius: f32) -> RigidBody {
+        ret RigidBody {
+            actor, Vec3::zero(), 0.0_f32,
+            if radius > 0.0_f32 {
+                radius
+            } else {
+                0.5_f32
+            }
+            , 0.0_f32, 0.0_f32, false, true
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn velocity(self: Self) -> Vec3 {
+        ret self.velocity
+    }
+    pub fn mass(self: Self) -> f32 {
+        ret self.mass
+    }
+    pub fn radius(self: Self) -> f32 {
+        ret self.radius
+    }
+    pub fn gravity_scale(self: Self) -> f32 {
+        ret self.gravity_scale
+    }
+    pub fn restitution(self: Self) -> f32 {
+        ret self.restitution
+    }
+    pub fn dynamic_body(self: Self) -> bool {
+        ret self.dynamic
+    }
+    pub fn enabled(self: Self) -> bool {
+        ret self.enabled
+    }
+    pub fn with_velocity(self: Self, velocity: Vec3) -> RigidBody {
+        ret RigidBody {
+            self.actor, velocity, self.mass, self.radius, self.gravity_scale,
+            self.restitution, self.dynamic, self.enabled
+        }
+    }
+    pub fn with_gravity_scale(self: Self, value: f32) -> RigidBody {
+        ret RigidBody {
+            self.actor, self.velocity, self.mass, self.radius,
+            value, self.restitution, self.dynamic, self.enabled
+        }
+    }
+    pub fn with_restitution(self: Self, value: f32) -> RigidBody {
+        ret RigidBody {
+            self.actor, self.velocity, self.mass, self.radius, self.gravity_scale,
+            if value < 0.0_f32 {
+                0.0_f32
+            } else {
+                value
+            }
+            , self.dynamic, self.enabled
+        }
+    }
+    pub fn set_enabled(self: Self, value: bool) -> RigidBody {
+        ret RigidBody {
+            self.actor, self.velocity, self.mass, self.radius, self.gravity_scale,
+            self.restitution, self.dynamic, value
+        }
+    }
+}
+
+pub struct CollisionEvent {
+    first: u64
+    second: u64
+    normal: Vec3
+    penetration: f32
+}
+
+impl for CollisionEvent {
+    pub fn first(self: Self) -> u64 {
+        ret self.first
+    }
+    pub fn second(self: Self) -> u64 {
+        ret self.second
+    }
+    pub fn normal(self: Self) -> Vec3 {
+        ret self.normal
+    }
+    pub fn penetration(self: Self) -> f32 {
+        ret self.penetration
+    }
+}
+
+pub struct PhysicsWorld {
+    gravity: Vec3
+    bodies: Vec[RigidBody]
+    events: Vec[CollisionEvent]
+}
+
+fn physics_body_index(bodies: Vec[RigidBody], actor: u64) -> usize {
+    let mut index = 0_usize
+    while index < bodies.len() {
+        match bodies.get(index) {
+            Option[RigidBody]::Some(body) => {
+                if body.actor() == actor {
+                    ret index
+                }
+            }
+            Option[RigidBody]::None => {
+            }
+        }
+        index = index + 1_usize
+    }
+    ret bodies.len()
+}
+
+impl for PhysicsWorld {
+    pub fn new(gravity: Vec3) -> PhysicsWorld {
+        ret PhysicsWorld {
+            gravity, Vec[RigidBody]::new(), Vec[CollisionEvent]::new()
+        }
+    }
+    pub fn gravity(self: Self) -> Vec3 {
+        ret self.gravity
+    }
+    pub fn body_count(self: Self) -> usize {
+        ret self.bodies.len()
+    }
+    pub fn add_body(self: mut Self, body: RigidBody) -> bool {
+        if physics_body_index(self.bodies, body.actor()) < self.bodies.len() {
+            ret false
+        }
+        self.bodies.push(body)
+        ret true
+    }
+    pub fn body(self: Self, actor: u64) -> Option[RigidBody] {
+        match self.bodies.get(physics_body_index(self.bodies, actor)) {
+            Option[RigidBody]::Some(body) => {
+                ret Option[RigidBody]::Some(body)
+            }
+            Option[RigidBody]::None => {
+                ret Option[RigidBody]::None
+            }
+        }
+    }
+    pub fn events(self: Self) -> Vec[CollisionEvent] {
+        ret self.events
+    }
+    pub fn clear_events(self: mut Self) ->() {
+        self.events = Vec[CollisionEvent]::new()
+        ret()
+    }
+    pub fn step(self: mut Self, world: mut World, delta_seconds: f32) ->() {
+        if delta_seconds <= 0.0_f32 {
+            ret()
+        }
+        self.clear_events()
+        let mut index = 0_usize
+        while index < self.bodies.len() {
+            match self.bodies.get(index) {
+                Option[RigidBody]::Some(body) => {
+                    if body.enabled() && body.dynamic_body() {
+                        match world.transform(body.actor()) {
+                            Option[RuntimeTransform]::Some(transform) => {
+                                let velocity = body.velocity().add(self.gravity.scale(body.gravity_scale()
+                                        * delta_seconds))
+                                let mut position = transform.position().add(velocity.scale(delta_seconds))
+                                let floor = body.radius()
+                                let mut next_velocity = velocity
+                                if position.y() < floor {
+                                    let penetration = floor - position.y()
+                                    let native_position_y = graphene_physics_floor_position(
+                                        transform.position().y(), body.velocity().y(),
+                                        self.gravity.y() * body.gravity_scale(), delta_seconds, floor,)
+                                    let native_velocity_y = graphene_physics_floor_velocity(
+                                        transform.position().y(), body.velocity().y(),
+                                        self.gravity.y() * body.gravity_scale(), delta_seconds, floor,
+                                        body.restitution(),)
+                                    position = Vec3::new(position.x(), native_position_y, position.z())
+                                    if velocity.y() < 0.0_f32 {
+                                        next_velocity = Vec3::new(velocity.x(), native_velocity_y,
+                                            velocity.z(),)
+                                        self.events.push(CollisionEvent {
+                                                body.actor(), 0_u64, Vec3::new(0.0_f32, 1.0_f32, 0.0_f32),
+                                                penetration
+                                            }
+                                            ,)
+                                    }
+                                }
+                                world.set_transform(body.actor(), transform.with_position(position))
+                                self.bodies.set(index, body.with_velocity(next_velocity))
+                            }
+                            Option[RuntimeTransform]::None => {
+                            }
+                        }
+                    }
+                }
+                Option[RigidBody]::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        // Deterministic sphere-pair narrow phase. Bodies are visited in
+        // insertion order, which keeps equal inputs reproducible across runs.
+        let mut first = 0_usize
+        while first < self.bodies.len() {
+            let first_body = match self.bodies.get(first) {
+                Option[RigidBody]::Some(body) => body
+                Option[RigidBody]::None => {
+                    first = first + 1_usize
+                    RigidBody::static(0_u64, 0.0_f32)
+                }
+            }
+            if first_body.actor() == 0_u64 {
+                first = first + 1_usize
+            } else {
+                let mut second = first + 1_usize
+                while second < self.bodies.len() {
+                    let second_body = match self.bodies.get(second) {
+                        Option[RigidBody]::Some(body) => body
+                        Option[RigidBody]::None => {
+                            RigidBody::static(0_u64, 0.0_f32)
+                        }
+                    }
+                    if second_body.actor() != 0_u64 &&
+                    (first_body.dynamic_body() || second_body.dynamic_body()) &&
+                    first_body.enabled() && second_body.enabled() {
+                        match world.transform(first_body.actor()) {
+                            Option[RuntimeTransform]::Some(first_transform) => {
+                                match world.transform(second_body.actor()) {
+                                    Option[RuntimeTransform]::Some(second_transform) => {
+                                        let offset = second_transform.position().sub(first_transform.position())
+                                        let distance = offset.length()
+                                        let minimum = first_body.radius() + second_body.radius()
+                                        if distance < minimum {
+                                            let normal = if distance > 0.000001_f32 {
+                                                offset.scale(1.0_f32 / distance)
+                                            } else {
+                                                Vec3::new(1.0_f32, 0.0_f32, 0.0_f32)
+                                            }
+                                            let penetration = minimum - distance
+                                            let first_inverse_mass = if first_body.dynamic_body() {
+                                                1.0_f32 / first_body.mass()
+                                            } else {
+                                                0.0_f32
+                                            }
+                                            let second_inverse_mass = if second_body.dynamic_body() {
+                                                1.0_f32 / second_body.mass()
+                                            } else {
+                                                0.0_f32
+                                            }
+                                            let inverse_mass = first_inverse_mass + second_inverse_mass
+                                            if inverse_mass > 0.0_f32 {
+                                                let correction = normal.scale(penetration / inverse_mass)
+                                                if first_body.dynamic_body() {
+                                                    world.set_transform(first_body.actor(), first_transform.with_position(
+                                                            first_transform.position().sub(correction.scale(first_inverse_mass))))
+                                                }
+                                                if second_body.dynamic_body() {
+                                                    world.set_transform(second_body.actor(), second_transform.with_position(
+                                                            second_transform.position().add(correction.scale(second_inverse_mass))))
+                                                }
+                                                let relative_velocity = second_body.velocity().sub(first_body.velocity()).dot(normal)
+                                                if relative_velocity < 0.0_f32 {
+                                                    let restitution = if first_body.restitution() < second_body.restitution()
+                                                    {
+                                                        first_body.restitution()
+                                                    } else {
+                                                        second_body.restitution()
+                                                    }
+                                                    let impulse = normal.scale( -(1.0_f32 + restitution)
+                                                        * relative_velocity / inverse_mass)
+                                                    let first_velocity = if first_body.dynamic_body()
+                                                    {
+                                                        first_body.velocity().sub(impulse.scale(first_inverse_mass))
+                                                    } else {
+                                                        first_body.velocity()
+                                                    }
+                                                    let second_velocity = if second_body.dynamic_body()
+                                                    {
+                                                        second_body.velocity().add(impulse.scale(second_inverse_mass))
+                                                    } else {
+                                                        second_body.velocity()
+                                                    }
+                                                    self.bodies.set(first, first_body.with_velocity(first_velocity))
+                                                    self.bodies.set(second, second_body.with_velocity(second_velocity))
+                                                }
+                                                self.events.push(CollisionEvent {
+                                                        first_body.actor(), second_body.actor(), normal,
+                                                        penetration
+                                                    }
+                                                    ,)
+                                            }
+                                        }
+                                    }
+                                    Option[RuntimeTransform]::None => {
+                                    }
+                                }
+                            }
+                            Option[RuntimeTransform]::None => {
+                            }
+                        }
+                    }
+                    second = second + 1_usize
+                }
+                first = first + 1_usize
+            }
+        }
+        ret()
+    }
+}
+
+/// Owns the complete gameplay frame pipeline: input sampling, fixed-step
+/// clocking and physics. A child Encore process can keep one session for its
+/// whole lifetime and expose only its World to gameplay systems.
+pub struct RuntimeSession {
+    clock: RuntimeClock
+    world: World
+    physics: PhysicsWorld
+}
+
+impl for RuntimeSession {
+    pub fn new(config: RuntimeConfig, world: World, physics: PhysicsWorld) -> RuntimeSession {
+        ret RuntimeSession {
+            RuntimeClock::new(config), world, physics
+        }
+    }
+    pub fn clock(self: Self) -> RuntimeClock {
+        ret self.clock
+    }
+    pub fn world(self: Self) -> World {
+        ret self.world
+    }
+    pub fn physics(self: Self) -> PhysicsWorld {
+        ret self.physics
+    }
+    pub fn set_world(self: mut Self, world: World) ->() {
+        self.world = world
+        ret()
+    }
+    pub fn tick(self: mut Self, elapsed_seconds: f32, input: InputSnapshot) -> RuntimeFrame {
+        let frame = self.clock.begin_frame(elapsed_seconds, input)
+        let mut runtime_world = self.world
+        let mut simulation = self.physics
+        let mut fixed_step = 0_u32
+        while fixed_step < frame.fixed_steps() {
+            simulation.step(runtime_world, frame.fixed_delta_seconds())
+            fixed_step = fixed_step + 1_u32
+        }
+        self.world = runtime_world
+        self.physics = simulation
+        ret frame
+    }
+}

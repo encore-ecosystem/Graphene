@@ -1,6 +1,7 @@
 import core::option::Option
 import core::vec::Vec
 import linalg::Vec3
+import mod::scene::world::Scene
 
 pub struct TransformEdit {
     actor: u32
@@ -388,4 +389,51 @@ impl for EditorActors {
     pub fn scales(self: Self) -> Vec[Vec3] {
         ret self.scales
     }
+}
+
+/// Builds the legacy editor projection from the authoritative scene while
+/// preserving mesh metadata for stable actor IDs.
+pub fn editor_actors_from_scene(scene: Scene, previous_ids: Vec[u64],
+    previous_mesh_names: Vec[str],) -> EditorActors {
+    let mut ids = Vec[u64]::new()
+    let mut parents = Vec[Option[u64]]::new()
+    let mut names = Vec[str]::new()
+    let mut mesh_names = Vec[str]::new()
+    let mut visibilities = Vec[bool]::new()
+    let mut positions = Vec[Vec3]::new()
+    let mut rotations = Vec[Vec3]::new()
+    let mut scales = Vec[Vec3]::new()
+    for entity in scene.entities() {
+        if entity.renderable().is_some() {
+            ids.push(entity.id())
+            parents.push(entity.parent())
+            names.push(entity.name())
+            let mut mesh_name = ""
+            let mut index = 0_usize
+            while index < previous_ids.len() {
+                match previous_ids.get(index) {
+                    Option::Some(id) => {
+                        if id == entity.id() {
+                            match previous_mesh_names.get(index) {
+                                Option::Some(value) => {
+                                    mesh_name = value
+                                }
+                                Option::None => {
+                                }
+                            }
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+                index = index + 1_usize
+            }
+            mesh_names.push(mesh_name)
+            visibilities.push(entity.visible())
+            positions.push(entity.transform().position())
+            rotations.push(entity.transform().rotation())
+            scales.push(entity.transform().scale())
+        }
+    }
+    ret EditorActors::new(ids, parents, names, mesh_names, visibilities, positions, rotations, scales)
 }

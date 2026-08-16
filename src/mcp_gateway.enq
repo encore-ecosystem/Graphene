@@ -1,0 +1,329 @@
+//! MCP protocol adapter backed exclusively by the Graphene Automation API.
+
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import mod::automation::AutomationServer
+import mod::automation_transport::automation_request
+
+pub struct GrapheneMcpGateway {
+    api: Option[AutomationServer]
+    endpoint: str
+    token: str
+}
+
+impl for GrapheneMcpGateway {
+    pub fn new(api: AutomationServer, token: str) -> Self {
+        ret Self {
+            Option[AutomationServer]::Some(api), "", token
+        }
+    }
+    pub fn proxy(endpoint: str, token: str) -> Self {
+        ret Self {
+            Option[AutomationServer]::None, endpoint, token
+        }
+    }
+    pub fn api(self: Self) -> Option[AutomationServer] {
+        ret self.api
+    }
+    fn call_api(self: mut Self, request: str) -> str {
+        match self.api {
+            Option::Some(api) => {
+                let mut active = api
+                let response = active.handle(request)
+                self.api = Option[AutomationServer]::Some(active)
+                ret response
+            }
+            Option::None => {
+                ret automation_request(self.endpoint, request)
+            }
+        }
+    }
+
+    /// Handles one MCP JSON-RPC message. A stdio sidecar supplies framing;
+    /// every stateful operation is forwarded through AutomationServer.
+    pub fn handle(self: mut Self, source: str) -> str {
+        match parse(source) {
+            Result::Ok(root) => {
+                let id = root.get("id").unwrap_or(Json::Null)
+                let method = root.get("method").unwrap_or(Json::String("")).as_str().unwrap_or("")
+                if method == "initialize" {
+                    let mut capabilities = Vec[(str, Json)]::new()
+                    capabilities.push(field("tools", Json::Object(Vec[(str, Json)]::new())))
+                    capabilities.push(field("resources", Json::Object(Vec[(str, Json)]::new())))
+                    let mut info = Vec[(str, Json)]::new()
+                    info.push(field("name", Json::String("graphene-mcp")))
+                    info.push(field("version", Json::String("0.1.0")))
+                    let mut result = Vec[(str, Json)]::new()
+                    result.push(field("protocolVersion", Json::String("2025-11-25")))
+                    result.push(field("capabilities", Json::Object(capabilities)))
+                    result.push(field("serverInfo", Json::Object(info)))
+                    ret mcp_result(id, Json::Object(result))
+                }
+                if method == "notifications/initialized" {
+                    ret ""
+                }
+                if method == "tools/list" {
+                    let mut result = Vec[(str, Json)]::new()
+                    result.push(field("tools", Json::Array(mcp_tools())))
+                    ret mcp_result(id, Json::Object(result))
+                }
+                if method == "resources/list" {
+                    let mut result = Vec[(str, Json)]::new()
+                    result.push(field("resources", Json::Array(mcp_resources())))
+                    ret mcp_result(id, Json::Object(result))
+                }
+                if method == "resources/read" {
+                    let params = root.get("params").unwrap_or(Json::Null)
+                    let uri = params.get("uri").unwrap_or(Json::String("")).as_str().unwrap_or("")
+                    if uri == "graphene://scene" {
+                        let response = self.call_api(api_request("mcp-resource", self.token,
+                                "graphene.snapshot", Json::Object(Vec[(str, Json)]::new()),))
+                        let mut content = Vec[(str, Json)]::new()
+                        content.push(field("uri", Json::String(uri)))
+                        content.push(field("mimeType", Json::String("application/json")))
+                        content.push(field("text", Json::String(response)))
+                        let mut contents = Vec[Json]::new()
+                        contents.push(Json::Object(content))
+                        let mut result = Vec[(str, Json)]::new()
+                        result.push(field("contents", Json::Array(contents)))
+                        ret mcp_result(id, Json::Object(result))
+                    }
+                    ret mcp_error(id, - 32002_i32, "Resource was not found")
+                }
+                if method == "tools/call" {
+                    let params = root.get("params").unwrap_or(Json::Null)
+                    let name = params.get("name").unwrap_or(Json::String("")).as_str().unwrap_or("")
+                    let arguments = params.get("arguments").unwrap_or(Json::Object(Vec[(str, Json)]::new()))
+                    let api_method = tool_method(name)
+                    if api_method == "" {
+                        ret mcp_error(id, - 32602_i32, "Unknown Graphene tool")
+                    }
+                    let response = self.call_api(api_request("mcp-tool", self.token, api_method, arguments))
+                    let mut content_item = Vec[(str, Json)]::new()
+                    content_item.push(field("type", Json::String("text")))
+                    content_item.push(field("text", Json::String(response)))
+                    let mut content = Vec[Json]::new()
+                    content.push(Json::Object(content_item))
+                    let mut result = Vec[(str, Json)]::new()
+                    result.push(field("content", Json::Array(content)))
+                    result.push(field("isError", Json::Bool(response.contains("\"ok\":false"))))
+                    ret mcp_result(id, Json::Object(result))
+                }
+                ret mcp_error(id, - 32601_i32, "Method was not found")
+            }
+            Result::Err(_) => {
+                ret mcp_error(Json::Null, - 32700_i32, "Invalid JSON")
+            }
+        }
+    }
+}
+
+fn api_request(id: str, token: str, method: str, params: Json) -> str {
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("id", Json::String(id)))
+    fields.push(field("token", Json::String(token)))
+    fields.push(field("method", Json::String(method)))
+    fields.push(field("params", params))
+    match params.get("approval").unwrap_or(Json::Null).as_str() {
+        Option::Some(approval) => {
+            fields.push(field("approval", Json::String(approval)))
+        }
+        Option::None => {
+        }
+    }
+    ret stringify(Json::Object(fields))
+}
+
+fn tool_method(name: str) -> str {
+    if name == "add_actor" {
+        ret "scene.add"
+    }
+    if name == "delete_actor" {
+        ret "scene.delete"
+    }
+    if name == "duplicate_actor" {
+        ret "scene.duplicate"
+    }
+    if name == "set_actor_parent" {
+        ret "scene.set_parent"
+    }
+    if name == "rename_actor" {
+        ret "scene.rename"
+    }
+    if name == "set_actor_visibility" {
+        ret "scene.set_visibility"
+    }
+    if name == "set_actor_transform" {
+        ret "scene.set_transform"
+    }
+    if name == "select_actor" {
+        ret "scene.select"
+    }
+    if name == "undo" {
+        ret "history.undo"
+    }
+    if name == "redo" {
+        ret "history.redo"
+    }
+    if name == "save_project" {
+        ret "project.save"
+    }
+    if name == "build_project" {
+        ret "build.start"
+    }
+    if name == "approval_status" {
+        ret "graphene.approval_status"
+    }
+    ret ""
+}
+
+fn schema(properties: Vec[(str, Json)], required: Vec[Json]) -> Json {
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("type", Json::String("object")))
+    fields.push(field("properties", Json::Object(properties)))
+    fields.push(field("required", Json::Array(required)))
+    fields.push(field("additionalProperties", Json::Bool(false)))
+    ret Json::Object(fields)
+}
+
+fn type_property(kind: str) -> Json {
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("type", Json::String(kind)))
+    ret Json::Object(fields)
+}
+
+fn tool(name: str, description: str, input: Json) -> Json {
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("name", Json::String(name)))
+    fields.push(field("description", Json::String(description)))
+    fields.push(field("inputSchema", input))
+    ret Json::Object(fields)
+}
+
+fn actor_required(extra_name: str, extra: Json) -> Json {
+    let mut properties = Vec[(str, Json)]::new()
+    properties.push(field("actor", type_property("integer")))
+    properties.push(field(extra_name, extra))
+    let mut required = Vec[Json]::new()
+    required.push(Json::String("actor"))
+    required.push(Json::String(extra_name))
+    ret schema(properties, required)
+}
+
+fn vector_property() -> Json {
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("type", Json::String("array")))
+    fields.push(field("items", type_property("number")))
+    fields.push(field("minItems", Json::Number("3")))
+    fields.push(field("maxItems", Json::Number("3")))
+    ret Json::Object(fields)
+}
+
+fn mcp_tools() -> Vec[Json] {
+    let mut result = Vec[Json]::new()
+    let mut add = Vec[(str, Json)]::new()
+    add.push(field("name", type_property("string")))
+    add.push(field("position", vector_property()))
+    add.push(field("rotation", vector_property()))
+    add.push(field("scale", vector_property()))
+    let mut add_required = Vec[Json]::new()
+    add_required.push(Json::String("name"))
+    add_required.push(Json::String("position"))
+    add_required.push(Json::String("rotation"))
+    add_required.push(Json::String("scale"))
+    result.push(tool("add_actor", "Add one Graphene scene actor", schema(add, add_required)))
+    let mut actor_only = Vec[(str, Json)]::new()
+    actor_only.push(field("actor", type_property("integer")))
+    actor_only.push(field("approval", type_property("string")))
+    let mut actor_only_required = Vec[Json]::new()
+    actor_only_required.push(Json::String("actor"))
+    result.push(tool("delete_actor", "Delete one Graphene scene actor",
+            schema(actor_only, actor_only_required),))
+    let mut duplicate = Vec[(str, Json)]::new()
+    duplicate.push(field("actor", type_property("integer")))
+    duplicate.push(field("name", type_property("string")))
+    duplicate.push(field("position", vector_property()))
+    duplicate.push(field("rotation", vector_property()))
+    duplicate.push(field("scale", vector_property()))
+    let mut duplicate_required = Vec[Json]::new()
+    duplicate_required.push(Json::String("actor"))
+    duplicate_required.push(Json::String("name"))
+    duplicate_required.push(Json::String("position"))
+    duplicate_required.push(Json::String("rotation"))
+    duplicate_required.push(Json::String("scale"))
+    result.push(tool("duplicate_actor", "Duplicate one Graphene scene actor",
+            schema(duplicate, duplicate_required),))
+    result.push(tool("set_actor_parent", "Parent an actor while preserving its world transform",
+            actor_required("parent", type_property("integer")),))
+    result.push(tool("rename_actor", "Rename one Graphene scene actor",
+            actor_required("name", type_property("string")),))
+    result.push(tool("set_actor_visibility", "Show or hide one Graphene scene actor",
+            actor_required("visible", type_property("boolean")),))
+    let mut transform = Vec[(str, Json)]::new()
+    transform.push(field("actor", type_property("integer")))
+    transform.push(field("position", vector_property()))
+    transform.push(field("rotation", vector_property()))
+    transform.push(field("scale", vector_property()))
+    let mut transform_required = Vec[Json]::new()
+    transform_required.push(Json::String("actor"))
+    transform_required.push(Json::String("position"))
+    transform_required.push(Json::String("rotation"))
+    transform_required.push(Json::String("scale"))
+    result.push(tool("set_actor_transform", "Set an actor transform",
+            schema(transform, transform_required),))
+    let mut select = Vec[(str, Json)]::new()
+    select.push(field("actor", type_property("integer")))
+    let mut select_required = Vec[Json]::new()
+    select_required.push(Json::String("actor"))
+    result.push(tool("select_actor", "Select one Graphene scene actor",
+            schema(select, select_required),))
+    result.push(tool("undo", "Undo the latest Graphene transaction",
+            schema(Vec[(str, Json)]::new(), Vec[Json]::new()),))
+    result.push(tool("redo", "Redo the latest Graphene transaction",
+            schema(Vec[(str, Json)]::new(), Vec[Json]::new()),))
+    let mut approval_only = Vec[(str, Json)]::new()
+    approval_only.push(field("approval", type_property("string")))
+    result.push(tool("save_project", "Save the current Graphene project after user approval",
+            schema(approval_only, Vec[Json]::new()),))
+    result.push(tool("build_project", "Build the current Graphene project after user approval",
+            schema(approval_only, Vec[Json]::new()),))
+    let mut approval_status = Vec[(str, Json)]::new()
+    approval_status.push(field("approvalId", type_property("string")))
+    let mut approval_status_required = Vec[Json]::new()
+    approval_status_required.push(Json::String("approvalId"))
+    result.push(tool("approval_status", "Poll a Graphene user approval request",
+            schema(approval_status, approval_status_required),))
+    ret result
+}
+
+fn mcp_resources() -> Vec[Json] {
+    let mut scene = Vec[(str, Json)]::new()
+    scene.push(field("uri", Json::String("graphene://scene")))
+    scene.push(field("name", Json::String("Graphene scene snapshot")))
+    scene.push(field("description", Json::String("Revisioned scene, selection, and dirty state")))
+    scene.push(field("mimeType", Json::String("application/json")))
+    let mut result = Vec[Json]::new()
+    result.push(Json::Object(scene))
+    ret result
+}
+
+fn mcp_result(id: Json, result: Json) -> str {
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("jsonrpc", Json::String("2.0")))
+    fields.push(field("id", id))
+    fields.push(field("result", result))
+    ret stringify(Json::Object(fields))
+}
+
+fn mcp_error(id: Json, code: i32, message: str) -> str {
+    let mut error = Vec[(str, Json)]::new()
+    error.push(field("code", Json::Number(code.fmt())))
+    error.push(field("message", Json::String(message)))
+    let mut fields = Vec[(str, Json)]::new()
+    fields.push(field("jsonrpc", Json::String("2.0")))
+    fields.push(field("id", id))
+    fields.push(field("error", Json::Object(error)))
+    ret stringify(Json::Object(fields))
+}

@@ -1,0 +1,26 @@
+import graphene::GeometryPageCache
+
+fn main() -> u32 {
+    let mut cache = GeometryPageCache::with_capacity(2_usize)
+    let first = cache.request(1_u64, 0_u32, 1_u64, 10_u32)
+    let second = cache.request(1_u64, 1_u32, 2_u64, 2_u32)
+    if !first.resident() || !second.resident() ||
+    cache.resident_count() != 2_usize {
+        ret 1_u32
+    }
+    let touched = cache.request(1_u64, 0_u32, 3_u64, 12_u32)
+    if touched.slot() != first.slot() || touched.evicted() {
+        ret 2_u32
+    }
+    let replacement = cache.request(2_u64, 7_u32, 4_u64, 5_u32)
+    if !replacement.evicted() || replacement.evicted_asset() != 1_u64 ||
+    replacement.evicted_page() != 1_u32 ||
+    !cache.resident(1_u64, 0_u32) || !cache.resident(2_u64, 7_u32) {
+        ret 3_u32
+    }
+    if cache.release_asset(1_u64) != 1_usize ||
+    cache.resident_count() != 1_usize || cache.resident(1_u64, 0_u32) {
+        ret 4_u32
+    }
+    ret 0_u32
+}

@@ -1,45 +1,50 @@
 version = 2
 
 [[packages]]
+name = "std"
+ref = "index@std@^1.0.1"
+version = "1.0.1"
+archive = "https://github.com/encore-ecosystem/encore-index/releases/download/std-v1.0.1/std-1.0.1.tar.gz"
+checksum = "fd9ff75770e3472d889b07661681011e64a88092181b55656546314b073a786c"
+
+[[packages]]
 name = "json"
-ref = "index@json"
+ref = "index@json@^1.0.0"
 version = "1.0.0"
 archive = "https://github.com/encore-ecosystem/encore-index/releases/download/packages-v0.1.4/json-1.0.0.tar.gz"
 checksum = "74f32edb64067e32f2d410e87632d9ad020a47cb9fd85de7aa95fd9a9ee59c74"
 
 [[packages]]
 name = "linalg"
-ref = "index@linalg"
-version = "0.1.0"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/packages-v0.1.4/linalg-0.1.0.tar.gz"
-checksum = "4e5aaaddd6976eaa9995f48e289749f739e569bf2b16c11cc3d07236374279f7"
+ref = "index@linalg@^0.1.1"
+version = "0.1.1"
+archive = "https://github.com/encore-ecosystem/encore-index/releases/download/linalg-v0.1.1/linalg-0.1.1.tar.gz"
+checksum = "6da0e67aaf161889e05a72804dce04bbf155d1016231fe4062f4ab95a1ea66e8"
 
 [[packages]]
 name = "vulkan_native"
-ref = "workspace@vulkan_native"
+ref = "index@vulkan_native@^0.1.0"
 version = "0.1.0"
-source = "embedded@graphene"
-path = "workspace/vulkan_native"
+archive = "https://github.com/encore-ecosystem/Luma/releases/download/vulkan_native-v0.1.0/vulkan_native-0.1.0.tar.gz"
+checksum = "f7afc3e810c43d899a6b69c032c3df3b88413186fb59d9ff4af56aa5d663ae53"
 
 [[packages]]
 name = "luma"
-ref = "index@luma"
-version = "0.1.1"
+ref = "index@luma@^0.2.1"
+version = "0.2.1"
 features = ["fonts"]
-archive = "https://github.com/encore-ecosystem/Luma/releases/download/v0.1.1/luma-0.1.1.tar.gz"
-checksum = "6963dcbeed7371083f27c2c43aa651c9e0996b063652cddab5fc5bfe4a15feb4"
+archive = "https://github.com/encore-ecosystem/Luma/releases/download/luma-v0.2.1/luma-0.2.1.tar.gz"
+checksum = "7fa5a7fec2fb02b58f8fb2f643710e6b5e49e3d72705a07e0828d1a09ba76685"
 
 [[packages]]
 name = "core"
 ref = "sys@core"
-version = "0.0.0"
+version = "0.1.0"
 
 [[packages]]
-name = "std"
-ref = "index@std@1.0.0"
-version = "1.0.0"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/packages-v0.1.4/std-1.0.0.tar.gz"
-checksum = "7890121f5a8c56a65fa37aecd1a4884d54e8e1cd86e9ee6e744bf0a78577d01b"
+name = "platform"
+ref = "sys@platform"
+version = "0.1.0"
 
 [[packages]]
 name = "color"
@@ -61,4 +66,9 @@ ref = "workspace@ui_native"
 version = "0.1.0"
 source = "embedded@luma"
 path = "workspace/ui_native"
-distribution-checksum = "6963dcbeed7371083f27c2c43aa651c9e0996b063652cddab5fc5bfe4a15feb4"
+distribution-checksum = "7fa5a7fec2fb02b58f8fb2f643710e6b5e49e3d72705a07e0828d1a09ba76685"
+
+[[packages]]
+name = "core"
+ref = "path@../core"
+version = "0.1.0"

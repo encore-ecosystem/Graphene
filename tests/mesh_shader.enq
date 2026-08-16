@@ -1,0 +1,54 @@
+import core::option::Option
+import graphene:: {
+    DeviceFeatures, GraphicsInstance, mesh_triangle_spirv,
+    shader_stage_fragment, shader_stage_mesh, triangle_fragment_spirv
+}
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let device = instance.create_device_with_features(adapter,
+                DeviceFeatures::none(), DeviceFeatures::mesh_shader(),)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            if !device.enabled_features().contains(DeviceFeatures::mesh_shader()) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+            let target = device.create_offscreen_target(64_u32, 64_u32)
+            let mesh = device.create_shader_module(mesh_triangle_spirv(), shader_stage_mesh())
+            let fragment = device.create_shader_module(
+                triangle_fragment_spirv(), shader_stage_fragment(),)
+            let pipeline = device.create_render_pipeline(target, mesh, fragment)
+            let frame = target.acquire_frame()
+            let pass = frame.begin_render_pass(pipeline, 0.02_f32, 0.02_f32, 0.02_f32, 1.0_f32)
+            let rendered = target.available() && mesh.available() && fragment.available() &&
+            pipeline.available() && frame.available() && pass.available() &&
+            pass.draw_mesh_tasks(1_u32, 1_u32, 1_u32) &&
+            pass.end() && frame.present()
+            frame.destroy()
+            pipeline.destroy()
+            fragment.destroy()
+            mesh.destroy()
+            target.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if rendered {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

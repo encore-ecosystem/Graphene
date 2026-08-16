@@ -1,0 +1,8 @@
+[project]
+name = "graphene_benchmark"
+version = "0.1.0"
+description = "Deterministic peak and representative Graphene performance benchmark"
+dependencies = [
+    "path@../../..",
+    "index@linalg",
+]

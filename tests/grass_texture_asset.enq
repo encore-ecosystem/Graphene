@@ -1,0 +1,13 @@
+import core::result::Result
+import graphene::load_obj_asset
+
+fn main() -> u32 {
+    match load_obj_asset("examples/fox_grass/Content/Meshes/GrassGround.obj") {
+        Result::Ok(asset) => {
+            if asset.texture_width() != 512_u32 || asset.texture_height() != 512_u32 { ret 1_u32 }
+            if asset.texture_pixels().len() != 262144_usize { ret 2_u32 }
+        }
+        Result::Err(_) => { ret 3_u32 }
+    }
+    ret 0_u32
+}

@@ -1,0 +1,1544 @@
+//! Typed editor commands, transactional history, and ordered state events.
+
+import core::option::Option
+import core::vec::Vec
+import mod::scene::renderable::{MaterialId, MeshId, Renderable}
+import mod::scene::transform::Transform
+import mod::scene::world::{Entity, Scene}
+
+pub struct AddActorCommand {
+    name: str value: Transform asset_name: str
+}
+pub struct ActorCommand {
+    actor: u64
+}
+pub struct DuplicateActorCommand {
+    actor: u64
+    name: str
+    value: Transform
+}
+pub struct ActorParentCommand {
+    actor: u64 parent: Option[u64]
+}
+
+pub struct ActorNameCommand {
+    actor: u64 value: str
+}
+pub struct ActorVisibilityCommand {
+    actor: u64 value: bool
+}
+pub struct ActorTransformCommand {
+    actor: u64 value: Transform
+}
+pub struct ActorSelectionCommand {
+    actor: Option[u64]
+}
+pub struct ActorSelectionSetCommand {
+    actors: Vec[u64]
+    primary: Option[u64]
+}
+pub struct ActorTransformsCommand {
+    values: Vec[ActorTransformCommand]
+}
+pub struct SimulationCommand {
+    mode: str
+}
+pub struct OperationCompletionCommand {
+    success: bool
+    message: str
+}
+pub struct ProjectRequestCommand {
+    operation: str
+    path: str
+    template_name: str
+}
+pub struct ProjectLoadedCommand {
+    scene: Option[Scene]
+    actor_ids: Vec[u64]
+    asset_names: Vec[str]
+    message: str
+}
+pub struct AssetImportCommand {
+    source: str
+}
+
+pub struct GrapheneTask {
+    id: str
+    kind: str
+    state: str
+    message: str
+}
+
+pub struct GrapheneDiagnostic {
+    severity: str
+    message: str
+    path: str
+    line: u32
+    column: u32
+}
+
+pub enum GrapheneCommand {
+    AddActor(AddActorCommand)
+    DuplicateActor(DuplicateActorCommand)
+    DeleteActor(ActorCommand)
+    SetParent(ActorParentCommand)
+    Rename(ActorNameCommand)
+    SetVisibility(ActorVisibilityCommand)
+    SetTransform(ActorTransformCommand)
+    Select(ActorSelectionCommand)
+    SelectSet(ActorSelectionSetCommand)
+    SetTransforms(ActorTransformsCommand)
+    StartSimulation(SimulationCommand)
+    StopSimulation
+    RequestProject(ProjectRequestCommand)
+    CompleteProjectLoad(ProjectLoadedCommand)
+    RequestImportAsset(AssetImportCommand)
+    CompleteImport(OperationCompletionCommand)
+    RequestSave
+    CompleteSave(OperationCompletionCommand)
+    RequestBuild
+    BuildPrepared
+    CompleteBuild(OperationCompletionCommand)
+    Undo
+    Redo
+}
+
+pub struct GrapheneEvent {
+    kind: str actor: Option[u64] revision: u64
+}
+
+pub struct CommandResult {
+    success: bool message: str revision: u64 events: Vec[GrapheneEvent]
+}
+
+enum CommandEdit {
+    RemoveActor(ActorCommand)
+    RestoreActor(ActorSnapshot)
+    Parent(ActorParentEdit)
+    Rename(ActorNameCommand)
+    Visibility(ActorVisibilityCommand)
+    Transform(ActorTransformCommand)
+    Transforms(ActorTransformsCommand)
+}
+
+struct ActorSnapshot {
+    entity: Entity
+    children: Vec[u64]
+    asset_name: str
+}
+struct ActorParentEdit {
+    actor: u64
+    parent: Option[u64]
+    transform: Transform
+}
+struct InteractiveEdit {
+    inverse: CommandEdit
+    actor: u64
+    kind: str
+    event_kind: str
+}
+struct ActorAsset {
+    actor: u64
+    name: str
+}
+
+/// Owns editor state and is the only mutation boundary exposed to UI, API,
+/// console, and agent frontends.
+pub struct EditorState {
+    scene: Scene
+    selection: Option[u64]
+    selection_ids: Vec[u64]
+    revision: u64
+    dirty: bool
+    undo: Vec[CommandEdit]
+    redo: Vec[CommandEdit]
+    interactive: Option[InteractiveEdit]
+    assets: Vec[ActorAsset]
+    history_position: i64
+    saved_history_position: i64
+    event_log: Vec[GrapheneEvent]
+    project_loaded: bool
+    simulation_mode: str
+    save_pending: bool
+    building: bool
+    project_operation: str
+    project_path: str
+    project_template: str
+    import_source: str
+    task: Option[GrapheneTask]
+    diagnostics: Vec[GrapheneDiagnostic]
+}
+
+impl for ActorNameCommand {
+    pub fn new(actor: u64, value: str) -> Self {
+        ret Self {
+            actor, value
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn value(self: Self) -> str {
+        ret self.value
+    }
+}
+
+impl for AddActorCommand {
+    pub fn new(name: str, value: Transform) -> Self {
+        ret Self {
+            name, value, ""
+        }
+    }
+    pub fn with_asset(name: str, value: Transform, asset_name: str) -> Self {
+        ret Self {
+            name, value, asset_name
+        }
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+    pub fn value(self: Self) -> Transform {
+        ret self.value
+    }
+    pub fn asset_name(self: Self) -> str {
+        ret self.asset_name
+    }
+}
+
+impl for ActorCommand {
+    pub fn new(actor: u64) -> Self {
+        ret Self {
+            actor
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+}
+
+impl for DuplicateActorCommand {
+    pub fn new(actor: u64, name: str, value: Transform) -> Self {
+        ret Self {
+            actor, name, value
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+    pub fn value(self: Self) -> Transform {
+        ret self.value
+    }
+}
+
+impl for ActorParentCommand {
+    pub fn new(actor: u64, parent: Option[u64]) -> Self {
+        ret Self {
+            actor, parent
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn parent(self: Self) -> Option[u64] {
+        ret self.parent
+    }
+}
+
+impl for ActorVisibilityCommand {
+    pub fn new(actor: u64, value: bool) -> Self {
+        ret Self {
+            actor, value
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn value(self: Self) -> bool {
+        ret self.value
+    }
+}
+
+impl for ActorTransformCommand {
+    pub fn new(actor: u64, value: Transform) -> Self {
+        ret Self {
+            actor, value
+        }
+    }
+    pub fn actor(self: Self) -> u64 {
+        ret self.actor
+    }
+    pub fn value(self: Self) -> Transform {
+        ret self.value
+    }
+}
+
+impl for ActorSelectionCommand {
+    pub fn new(actor: Option[u64]) -> Self {
+        ret Self {
+            actor
+        }
+    }
+    pub fn actor(self: Self) -> Option[u64] {
+        ret self.actor
+    }
+}
+
+impl for ActorSelectionSetCommand {
+    pub fn new(actors: Vec[u64], primary: Option[u64]) -> Self {
+        ret Self {
+            actors, primary
+        }
+    }
+    pub fn actors(self: Self) -> Vec[u64] {
+        ret self.actors
+    }
+    pub fn primary(self: Self) -> Option[u64] {
+        ret self.primary
+    }
+}
+
+impl for ActorTransformsCommand {
+    pub fn new(values: Vec[ActorTransformCommand]) -> Self {
+        ret Self {
+            values
+        }
+    }
+    pub fn values(self: Self) -> Vec[ActorTransformCommand] {
+        ret self.values
+    }
+}
+
+impl for SimulationCommand {
+    pub fn new(mode: str) -> Self {
+        ret Self {
+            mode
+        }
+    }
+    pub fn mode(self: Self) -> str {
+        ret self.mode
+    }
+}
+
+impl for OperationCompletionCommand {
+    pub fn new(success: bool, message: str) -> Self {
+        ret Self {
+            success, message
+        }
+    }
+    pub fn success(self: Self) -> bool {
+        ret self.success
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+}
+
+impl for ProjectRequestCommand {
+    pub fn open(path: str) -> Self {
+        ret Self {
+            "open", path, ""
+        }
+    }
+    pub fn create(path: str, template_name: str) -> Self {
+        ret Self {
+            "create", path, template_name
+        }
+    }
+    pub fn operation(self: Self) -> str {
+        ret self.operation
+    }
+    pub fn path(self: Self) -> str {
+        ret self.path
+    }
+    pub fn template_name(self: Self) -> str {
+        ret self.template_name
+    }
+}
+
+impl for ProjectLoadedCommand {
+    pub fn success(scene: Scene, actor_ids: Vec[u64], asset_names: Vec[str]) -> Self {
+        ret Self {
+            Option[Scene]::Some(scene), actor_ids, asset_names, ""
+        }
+    }
+    pub fn failure(message: str) -> Self {
+        ret Self {
+            Option[Scene]::None, Vec[u64]::new(), Vec[str]::new(), message
+        }
+    }
+    pub fn scene(self: Self) -> Option[Scene] {
+        ret self.scene
+    }
+    pub fn actor_ids(self: Self) -> Vec[u64] {
+        ret self.actor_ids
+    }
+    pub fn asset_names(self: Self) -> Vec[str] {
+        ret self.asset_names
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+}
+
+impl for AssetImportCommand {
+    pub fn new(source: str) -> Self {
+        ret Self {
+            source
+        }
+    }
+    pub fn source(self: Self) -> str {
+        ret self.source
+    }
+}
+
+impl for GrapheneTask {
+    fn new(id: str, kind: str, state: str, message: str) -> Self {
+        ret Self {
+            id, kind, state, message
+        }
+    }
+    pub fn id(self: Self) -> str {
+        ret self.id
+    }
+    pub fn kind(self: Self) -> str {
+        ret self.kind
+    }
+    pub fn state(self: Self) -> str {
+        ret self.state
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+}
+
+impl for GrapheneDiagnostic {
+    pub fn new(severity: str, message: str, path: str, line: u32, column: u32) -> Self {
+        ret Self {
+            severity, message, path, line, column
+        }
+    }
+    pub fn severity(self: Self) -> str {
+        ret self.severity
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+    pub fn path(self: Self) -> str {
+        ret self.path
+    }
+    pub fn line(self: Self) -> u32 {
+        ret self.line
+    }
+    pub fn column(self: Self) -> u32 {
+        ret self.column
+    }
+}
+
+impl for GrapheneEvent {
+    fn new(kind: str, actor: Option[u64], revision: u64) -> Self {
+        ret Self {
+            kind, actor, revision
+        }
+    }
+    pub fn kind(self: Self) -> str {
+        ret self.kind
+    }
+    pub fn actor(self: Self) -> Option[u64] {
+        ret self.actor
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+}
+
+impl for CommandResult {
+    fn ok(revision: u64, events: Vec[GrapheneEvent]) -> Self {
+        ret Self {
+            true, "", revision, events
+        }
+    }
+    fn error(revision: u64, message: str) -> Self {
+        ret Self {
+            false, message, revision, Vec[GrapheneEvent]::new()
+        }
+    }
+    pub fn success(self: Self) -> bool {
+        ret self.success
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn events(self: Self) -> Vec[GrapheneEvent] {
+        ret self.events
+    }
+}
+
+impl for EditorState {
+    pub fn new(scene: Scene) -> Self {
+        let mut state = Self {
+            scene, Option[u64]::None, Vec[u64]::new(), 0_u64, false,
+            Vec[CommandEdit]::new(), Vec[CommandEdit]::new(), Option[InteractiveEdit]::None,
+            Vec[ActorAsset]::new(), 0_i64, 0_i64, Vec[GrapheneEvent]::new(),
+            false, "", false, false,
+            "", "", "", "", Option[GrapheneTask]::None,
+            Vec[GrapheneDiagnostic]::new()
+        }
+        for entity in scene.entities() {
+            if entity.renderable().is_some() {
+                state.set_asset_name(entity.id(), "")
+            }
+        }
+        ret state
+    }
+    pub fn with_assets(scene: Scene, actor_ids: Vec[u64], asset_names: Vec[str]) -> Self {
+        let mut state = Self::new(scene)
+        let mut index = 0_usize
+        while index < actor_ids.len() {
+            match actor_ids.get(index) {
+                Option::Some(actor) => {
+                    match asset_names.get(index) {
+                        Option::Some(name) => {
+                            state.set_asset_name(actor, name)
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        ret state
+    }
+    pub fn scene(self: Self) -> Scene {
+        ret self.scene
+    }
+    pub fn selection(self: Self) -> Option[u64] {
+        ret self.selection
+    }
+    pub fn selection_ids(self: Self) -> Vec[u64] {
+        ret self.selection_ids
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn dirty(self: Self) -> bool {
+        ret self.dirty
+    }
+    pub fn can_undo(self: Self) -> bool {
+        ret self.undo.len() > 0_usize
+    }
+    pub fn can_redo(self: Self) -> bool {
+        ret self.redo.len() > 0_usize
+    }
+    pub fn interactive_active(self: Self) -> bool {
+        ret self.interactive.is_some()
+    }
+    pub fn project_loaded(self: Self) -> bool {
+        ret self.project_loaded
+    }
+    pub fn simulation_mode(self: Self) -> str {
+        ret self.simulation_mode
+    }
+    pub fn save_pending(self: Self) -> bool {
+        ret self.save_pending
+    }
+    pub fn building(self: Self) -> bool {
+        ret self.building
+    }
+    pub fn project_operation(self: Self) -> str {
+        ret self.project_operation
+    }
+    pub fn project_path(self: Self) -> str {
+        ret self.project_path
+    }
+    pub fn project_template(self: Self) -> str {
+        ret self.project_template
+    }
+    pub fn import_source(self: Self) -> str {
+        ret self.import_source
+    }
+    pub fn task(self: Self) -> Option[GrapheneTask] {
+        ret self.task
+    }
+    pub fn diagnostics(self: Self) -> Vec[GrapheneDiagnostic] {
+        ret self.diagnostics
+    }
+    /// Configures the project lifecycle boundary after a project is loaded or
+    /// closed. Ordinary UI/API mutations remain commands.
+    pub fn configure_project(self: mut Self, loaded: bool) ->() {
+        self.project_loaded = loaded
+        if !loaded {
+            self.simulation_mode = ""
+            self.save_pending = false
+            self.building = false
+            self.project_operation = ""
+            self.project_path = ""
+            self.project_template = ""
+            self.import_source = ""
+            self.task = Option[GrapheneTask]::None
+        }
+        ret()
+    }
+    pub fn asset_name(self: Self, actor: u64) -> str {
+        for asset in self.assets {
+            if asset.actor == actor {
+                ret asset.name
+            }
+        }
+        ret ""
+    }
+    pub fn asset_names(self: Self, actors: Vec[u64]) -> Vec[str] {
+        let mut names = Vec[str]::new()
+        for actor in actors {
+            names.push(self.asset_name(actor))
+        }
+        ret names
+    }
+    pub fn events_after(self: Self, revision: u64) -> Vec[GrapheneEvent] {
+        let mut events = Vec[GrapheneEvent]::new()
+        for event in self.event_log {
+            if event.revision() > revision {
+                events.push(event)
+            }
+        }
+        ret events
+    }
+    /// Returns the first revision still represented by the bounded event
+    /// window. A client asking for an older revision must fetch a snapshot.
+    pub fn oldest_event_revision(self: Self) -> u64 {
+        match self.event_log.first() {
+            Option::Some(event) => {
+                ret event.revision()
+            }
+            Option::None => {
+                ret self.revision + 1_u64
+            }
+        }
+    }
+    pub fn mark_saved(self: mut Self) ->() {
+        self.saved_history_position = self.history_position
+        self.dirty = false
+        ret()
+    }
+    /// Replaces a complete imported project scene. Normal editor mutations
+    /// must use `execute`; this boundary clears history that references the
+    /// previous scene while keeping the revision monotonic.
+    pub fn replace_scene(self: mut Self, scene: Scene, dirty: bool) -> GrapheneEvent {
+        self.scene = scene
+        self.dirty = dirty
+        self.history_position = 0_i64
+        self.saved_history_position = if dirty {
+            - 1_i64
+        } else {
+            0_i64
+        }
+        self.undo.clear()
+        self.redo.clear()
+        self.interactive = Option[InteractiveEdit]::None
+        match self.selection {
+            Option::Some(actor) => {
+                if self.scene.get(actor).is_none() {
+                    self.selection = Option[u64]::None
+                }
+            }
+            Option::None => {
+            }
+        }
+        let mut valid_selection = Vec[u64]::new()
+        for actor in self.selection_ids {
+            if self.scene.get(actor).is_some() {
+                valid_selection.push(actor)
+            }
+        }
+        self.selection_ids = valid_selection
+        self.revision = self.revision + 1_u64
+        let event = GrapheneEvent::new("scene.replaced", Option[u64]::None, self.revision)
+        self.record_event(event)
+        ret event
+    }
+    pub fn replace_scene_with_assets(self: mut Self, scene: Scene, actor_ids: Vec[u64],
+        asset_names: Vec[str], dirty: bool,) -> GrapheneEvent {
+        let event = self.replace_scene(scene, dirty)
+        self.assets.clear()
+        let mut index = 0_usize
+        while index < actor_ids.len() {
+            match actor_ids.get(index) {
+                Option::Some(actor) => {
+                    match asset_names.get(index) {
+                        Option::Some(name) => {
+                            self.set_asset_name(actor, name)
+                        }
+                        Option::None => {
+                            self.set_asset_name(actor, "")
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        ret event
+    }
+
+    pub fn execute(self: mut Self, command: GrapheneCommand) -> CommandResult {
+        if self.interactive.is_some() {
+            ret CommandResult::error(self.revision,
+                "Commit or cancel the active interactive edit first",)
+        }
+        match command {
+            GrapheneCommand::AddActor(value) => {
+                if value.name() == "" {
+                    ret CommandResult::error(self.revision, "Actor name must not be empty")
+                }
+                let actor = self.scene.create_entity(value.name(), value.value())
+                self.scene.set_renderable(actor,
+                    Option[Renderable]::Some(Renderable::new(MeshId::new(1_u64), MaterialId::new(1_u64))),)
+                self.set_asset_name(actor, value.asset_name())
+                ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
+                    "scene.actor.added", actor,)
+            }
+            GrapheneCommand::DuplicateActor(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(source) => {
+                        if value.name() == "" {
+                            ret CommandResult::error(self.revision,
+                                "Duplicate actor name must not be empty",)
+                        }
+                        let actor = self.scene.create_entity(value.name(), value.value())
+                        self.scene.set_renderable(actor, source.renderable())
+                        self.scene.set_visible(actor, source.visible())
+                        self.scene.set_parent(actor, source.parent())
+                        self.set_asset_name(actor, self.asset_name(value.actor()))
+                        ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
+                            "scene.actor.duplicated", actor,)
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::DeleteActor(value) => {
+                match self.snapshot(value.actor()) {
+                    Option::Some(snapshot) => {
+                        if !self.scene.remove(value.actor()) {
+                            ret CommandResult::error(self.revision, "Unable to delete actor")
+                        }
+                        if self.selection == Option[u64]::Some(value.actor()) {
+                            self.selection = Option[u64]::None
+                        }
+                        let mut remaining_selection = Vec[u64]::new()
+                        for actor in self.selection_ids {
+                            if actor != value.actor() {
+                                remaining_selection.push(actor)
+                            }
+                        }
+                        self.selection_ids = remaining_selection
+                        ret self.commit(CommandEdit::RestoreActor(snapshot),
+                            "scene.actor.deleted", value.actor(),)
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetParent(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        if actor.parent() == value.parent() {
+                            ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+                        }
+                        let inverse = CommandEdit::Parent(ActorParentEdit {
+                                value.actor(), actor.parent(), actor.transform()
+                            }
+                            ,)
+                        if !self.scene.set_parent_keep_world(value.actor(), value.parent()) {
+                            ret CommandResult::error(self.revision,
+                                "Unable to reparent actor while preserving its world transform",)
+                        }
+                        ret self.commit(inverse, "scene.actor.parent-changed", value.actor())
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::Rename(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        if actor.name() == value.value() {
+                            ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+                        }
+                        let inverse = CommandEdit::Rename(ActorNameCommand::new(value.actor(), actor.name()))
+                        if !self.scene.rename(value.actor(), value.value()) {
+                            ret CommandResult::error(self.revision, "Actor name must not be empty")
+                        }
+                        ret self.commit(inverse, "scene.actor.renamed", value.actor())
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetVisibility(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        if actor.visible() == value.value() {
+                            ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+                        }
+                        let inverse = CommandEdit::Visibility(
+                            ActorVisibilityCommand::new(value.actor(), actor.visible()))
+                        if !self.scene.set_visible(value.actor(), value.value()) {
+                            ret CommandResult::error(self.revision, "Unable to change actor visibility")
+                        }
+                        ret self.commit(inverse, "scene.actor.visibility-changed", value.actor())
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetTransform(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        let inverse = CommandEdit::Transform(
+                            ActorTransformCommand::new(value.actor(), actor.transform()))
+                        if !self.scene.set_transform(value.actor(), value.value()) {
+                            ret CommandResult::error(self.revision, "Unable to transform actor")
+                        }
+                        ret self.commit(inverse, "scene.actor.transform-changed", value.actor())
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetTransforms(value) => {
+                let mut inverse = Vec[ActorTransformCommand]::new()
+                let mut primary = 0_u64
+                for transform in value.values() {
+                    match self.scene.get(transform.actor()) {
+                        Option::Some(actor) => {
+                            if primary == 0_u64 {
+                                primary = transform.actor()
+                            }
+                            inverse.push(ActorTransformCommand::new(transform.actor(), actor.transform()))
+                        }
+                        Option::None => {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                }
+                if inverse.len() == 0_usize {
+                    ret CommandResult::error(self.revision, "Transform set must not be empty")
+                }
+                for transform in value.values() {
+                    if !self.scene.set_transform(transform.actor(), transform.value()) {
+                        ret CommandResult::error(self.revision, "Unable to transform actor")
+                    }
+                }
+                ret self.commit(CommandEdit::Transforms(ActorTransformsCommand::new(inverse)),
+                    "scene.actors.transform-changed", primary,)
+            }
+            GrapheneCommand::Select(value) => {
+                match value.actor() {
+                    Option::Some(id) => {
+                        if self.scene.get(id).is_none() {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+                if self.selection == value.actor() {
+                    ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+                }
+                self.selection = value.actor()
+                self.selection_ids.clear()
+                match self.selection {
+                    Option::Some(actor) => {
+                        self.selection_ids.push(actor)
+                    }
+                    Option::None => {
+                    }
+                }
+                self.revision = self.revision + 1_u64
+                let mut events = Vec[GrapheneEvent]::new()
+                let event = GrapheneEvent::new("selection.changed", self.selection, self.revision)
+                self.record_event(event)
+                events.push(event)
+                ret CommandResult::ok(self.revision, events)
+            }
+            GrapheneCommand::SelectSet(value) => {
+                match value.primary() {
+                    Option::Some(primary) => {
+                        if self.scene.get(primary).is_none() {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+                let mut next = Vec[u64]::new()
+                for actor in value.actors() {
+                    if self.scene.get(actor).is_none() {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                    let mut duplicate = false
+                    for existing in next {
+                        if existing == actor {
+                            duplicate = true
+                        }
+                    }
+                    if !duplicate {
+                        next.push(actor)
+                    }
+                }
+                if self.selection == value.primary() && self.selection_ids.len() == next.len() {
+                    let mut same = true
+                    let mut index = 0_usize
+                    while index < next.len() {
+                        match self.selection_ids.get(index) {
+                            Option::Some(existing) => {
+                                match next.get(index) {
+                                    Option::Some(expected) => {
+                                        if existing != expected {
+                                            same = false
+                                        }
+                                    }
+                                    Option::None => {
+                                        same = false
+                                    }
+                                }
+                            }
+                            Option::None => {
+                                same = false
+                            }
+                        }
+                        index = index + 1_usize
+                    }
+                    if same {
+                        ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+                    }
+                }
+                self.selection = value.primary()
+                self.selection_ids = next
+                self.revision = self.revision + 1_u64
+                let mut events = Vec[GrapheneEvent]::new()
+                let event = GrapheneEvent::new("selection.changed", self.selection, self.revision)
+                self.record_event(event)
+                events.push(event)
+                ret CommandResult::ok(self.revision, events)
+            }
+            GrapheneCommand::StartSimulation(value) => {
+                if !self.project_loaded {
+                    ret CommandResult::error(self.revision, "No project is loaded")
+                }
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Simulation is already running")
+                }
+                if value.mode() != "play" && value.mode() != "simulate" {
+                    ret CommandResult::error(self.revision,
+                        "Simulation mode must be play or simulate",)
+                }
+                self.simulation_mode = value.mode()
+                ret self.state_event("simulation.started")
+            }
+            GrapheneCommand::StopSimulation => {
+                if self.simulation_mode == "" {
+                    ret CommandResult::error(self.revision, "Simulation is not running")
+                }
+                self.simulation_mode = ""
+                ret self.state_event("simulation.stopped")
+            }
+            GrapheneCommand::RequestProject(value) => {
+                if value.path() == "" {
+                    ret CommandResult::error(self.revision, "Project path must not be empty")
+                }
+                if value.operation() != "open" && value.operation() != "create" {
+                    ret CommandResult::error(self.revision,
+                        "Project operation must be open or create",)
+                }
+                if self.project_operation != "" {
+                    ret CommandResult::error(self.revision,
+                        "A project operation is already pending",)
+                }
+                if self.simulation_mode != "" || self.save_pending || self.building {
+                    ret CommandResult::error(self.revision,
+                        "Stop active project operations before switching projects",)
+                }
+                self.project_operation = value.operation()
+                self.project_path = value.path()
+                self.project_template = value.template_name()
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "project", "project." + value.operation(), "running", value.path(),))
+                ret self.state_event("project." + value.operation() + "-requested")
+            }
+            GrapheneCommand::CompleteProjectLoad(value) => {
+                if self.project_operation == "" {
+                    ret CommandResult::error(self.revision,
+                        "No project operation is pending",)
+                }
+                let operation = self.project_operation
+                self.project_operation = ""
+                self.project_template = ""
+                match value.scene() {
+                    Option::Some(scene) => {
+                        self.project_loaded = true
+                        self.selection = Option[u64]::None
+                        self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                                "project", "project." + operation, "succeeded", self.project_path,))
+                        let event = self.replace_scene_with_assets(scene, value.actor_ids(),
+                            value.asset_names(), false,)
+                        let mut events = Vec[GrapheneEvent]::new()
+                        events.push(event)
+                        ret CommandResult::ok(self.revision, events)
+                    }
+                    Option::None => {
+                        self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                                "project", "project." + operation, "failed", value.message(),))
+                        ret self.state_event("project." + operation + "-failed")
+                    }
+                }
+            }
+            GrapheneCommand::RequestImportAsset(value) => {
+                if !self.project_loaded {
+                    ret CommandResult::error(self.revision, "No project is loaded")
+                }
+                if value.source() == "" {
+                    ret CommandResult::error(self.revision, "Import source must not be empty")
+                }
+                if self.import_source != "" {
+                    ret CommandResult::error(self.revision, "An asset import is already pending")
+                }
+                self.import_source = value.source()
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "asset-import", "asset.import", "running", value.source(),))
+                ret self.state_event("asset.import-requested")
+            }
+            GrapheneCommand::CompleteImport(value) => {
+                if self.import_source == "" {
+                    ret CommandResult::error(self.revision, "No asset import is pending")
+                }
+                self.import_source = ""
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "asset-import", "asset.import",
+                        if value.success() {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        }
+                        , value.message(),))
+                ret self.state_event(if value.success() {
+                        "asset.imported"
+                    } else {
+                        "asset.import-failed"
+                    }
+                    ,)
+            }
+            GrapheneCommand::RequestSave => {
+                if !self.project_loaded {
+                    ret CommandResult::error(self.revision, "No project is loaded")
+                }
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop simulation before saving")
+                }
+                if self.save_pending {
+                    ret CommandResult::error(self.revision, "A save is already pending")
+                }
+                self.save_pending = true
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "save", "project.save", "running", "",))
+                ret self.state_event("project.save-requested")
+            }
+            GrapheneCommand::CompleteSave(value) => {
+                if !self.save_pending {
+                    ret CommandResult::error(self.revision, "No save is pending")
+                }
+                self.save_pending = false
+                if value.success() {
+                    self.saved_history_position = self.history_position
+                    self.dirty = false
+                    self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                            "save", "project.save", "succeeded", value.message(),))
+                    ret self.state_event("project.saved")
+                }
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "save", "project.save", "failed", value.message(),))
+                ret self.state_event("project.save-failed")
+            }
+            GrapheneCommand::RequestBuild => {
+                if !self.project_loaded {
+                    ret CommandResult::error(self.revision, "No project is loaded")
+                }
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop simulation before building")
+                }
+                if self.building {
+                    ret CommandResult::error(self.revision, "A build is already running")
+                }
+                self.building = true
+                self.diagnostics.clear()
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "build", "build", "running", "",))
+                ret self.state_event("build.requested")
+            }
+            GrapheneCommand::BuildPrepared => {
+                if !self.building {
+                    ret CommandResult::error(self.revision, "No build is pending")
+                }
+                self.saved_history_position = self.history_position
+                self.dirty = false
+                ret self.state_event("build.compiling")
+            }
+            GrapheneCommand::CompleteBuild(value) => {
+                if !self.building {
+                    ret CommandResult::error(self.revision, "No build is running")
+                }
+                self.building = false
+                self.task = Option[GrapheneTask]::Some(GrapheneTask::new(
+                        "build", "build", if value.success() {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        }
+                        ,
+                        value.message(),))
+                if !value.success() && value.message() != "" {
+                    self.diagnostics.push(GrapheneDiagnostic::new(
+                            "error", value.message(), "", 0_u32, 0_u32,))
+                }
+                ret self.state_event(if value.success() {
+                        "build.succeeded"
+                    } else {
+                        "build.failed"
+                    }
+                    ,
+                )
+            }
+            GrapheneCommand::Undo => {
+                ret self.history(false)
+            }
+            GrapheneCommand::Redo => {
+                ret self.history(true)
+            }
+        }
+    }
+
+    /// Starts an interactive rename or transform. The first value is applied
+    /// as a preview but history is not changed until `commit_interactive`.
+    pub fn begin_interactive(self: mut Self, command: GrapheneCommand) -> CommandResult {
+        if self.interactive.is_some() {
+            ret CommandResult::error(self.revision, "An interactive edit is already active")
+        }
+        match command {
+            GrapheneCommand::Rename(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        self.interactive = Option[InteractiveEdit]::Some(InteractiveEdit {
+                                CommandEdit::Rename(ActorNameCommand::new(value.actor(), actor.name())),
+                                value.actor(), "rename", "scene.actor.renamed"
+                            }
+                            ,)
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetTransform(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        self.interactive = Option[InteractiveEdit]::Some(InteractiveEdit {
+                                CommandEdit::Transform(ActorTransformCommand::new(
+                                        value.actor(), actor.transform(),)),
+                                value.actor(), "transform", "scene.actor.transform-changed"
+                            }
+                            ,)
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetTransforms(value) => {
+                let mut inverse = Vec[ActorTransformCommand]::new()
+                let mut primary = 0_u64
+                for transform in value.values() {
+                    match self.scene.get(transform.actor()) {
+                        Option::Some(actor) => {
+                            if primary == 0_u64 {
+                                primary = transform.actor()
+                            }
+                            inverse.push(ActorTransformCommand::new(transform.actor(), actor.transform()))
+                        }
+                        Option::None => {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                }
+                if inverse.len() == 0_usize {
+                    ret CommandResult::error(self.revision, "Transform set must not be empty")
+                }
+                self.interactive = Option[InteractiveEdit]::Some(InteractiveEdit {
+                        CommandEdit::Transforms(ActorTransformsCommand::new(inverse)),
+                        primary, "transforms", "scene.actors.transform-changed"
+                    }
+                    ,)
+            }
+            _ => {
+                ret CommandResult::error(self.revision,
+                    "Only rename and transform commands support interactive editing",)
+            }
+        }
+        ret self.preview_interactive(command)
+    }
+
+    /// Applies a transient value for the active edit. Every preview advances
+    /// the state revision for observers, but does not create an undo entry or
+    /// mark the project dirty.
+    pub fn preview_interactive(self: mut Self, command: GrapheneCommand) -> CommandResult {
+        let edit = match self.interactive {
+            Option::Some(value) => {
+                value
+            }
+            Option::None => {
+                ret CommandResult::error(self.revision, "No interactive edit is active")
+            }
+        }
+        let applied = match command {
+            GrapheneCommand::Rename(value) => {
+                edit.kind == "rename" && edit.actor == value.actor() &&
+                self.scene.rename(value.actor(), value.value())
+            }
+            GrapheneCommand::SetTransform(value) => {
+                edit.kind == "transform" && edit.actor == value.actor() &&
+                self.scene.set_transform(value.actor(), value.value())
+            }
+            GrapheneCommand::SetTransforms(value) => {
+                if edit.kind != "transforms" {
+                    false
+                } else {
+                    let mut applied = true
+                    let transforms = value.values()
+                    let mut index = 0_usize
+                    while index < transforms.len() {
+                        match transforms.get(index) {
+                            Option::Some(transform) => {
+                                if !self.scene.set_transform(transform.actor(), transform.value()) {
+                                    applied = false
+                                }
+                            }
+                            Option::None => {
+                            }
+                        }
+                        index = index + 1_usize
+                    }
+                    applied
+                }
+            }
+            _ => {
+                false
+            }
+        }
+        if !applied {
+            ret CommandResult::error(self.revision,
+                "Preview command does not match the active interactive edit",)
+        }
+        self.revision = self.revision + 1_u64
+        let mut events = Vec[GrapheneEvent]::new()
+        let event = GrapheneEvent::new("interactive.preview", Option[u64]::Some(edit.actor),
+            self.revision,)
+        self.record_event(event)
+        events.push(event)
+        ret CommandResult::ok(self.revision, events)
+    }
+
+    /// Commits all previews as one undoable history entry.
+    pub fn commit_interactive(self: mut Self) -> CommandResult {
+        let edit = match self.interactive {
+            Option::Some(value) => {
+                value
+            }
+            Option::None => {
+                ret CommandResult::error(self.revision, "No interactive edit is active")
+            }
+        }
+        self.interactive = Option[InteractiveEdit]::None
+        ret self.commit(edit.inverse, edit.event_kind, edit.actor)
+    }
+
+    /// Restores the value captured by `begin_interactive` without changing
+    /// undo or redo history.
+    pub fn cancel_interactive(self: mut Self) -> CommandResult {
+        let edit = match self.interactive {
+            Option::Some(value) => {
+                value
+            }
+            Option::None => {
+                ret CommandResult::error(self.revision, "No interactive edit is active")
+            }
+        }
+        self.interactive = Option[InteractiveEdit]::None
+        if self.apply_edit(edit.inverse).is_none() {
+            ret CommandResult::error(self.revision, "Unable to restore interactive edit")
+        }
+        self.revision = self.revision + 1_u64
+        let mut events = Vec[GrapheneEvent]::new()
+        let event = GrapheneEvent::new("interactive.cancelled", Option[u64]::Some(edit.actor),
+            self.revision,)
+        self.record_event(event)
+        events.push(event)
+        ret CommandResult::ok(self.revision, events)
+    }
+
+    fn commit(self: mut Self, inverse: CommandEdit, kind: str, actor: u64) -> CommandResult {
+        self.undo.push(inverse)
+        self.redo.clear()
+        self.history_position = self.history_position + 1_i64
+        self.revision = self.revision + 1_u64
+        self.dirty = self.history_position != self.saved_history_position
+        let mut events = Vec[GrapheneEvent]::new()
+        let event = GrapheneEvent::new(kind, Option[u64]::Some(actor), self.revision)
+        self.record_event(event)
+        events.push(event)
+        ret CommandResult::ok(self.revision, events)
+    }
+
+    fn apply_edit(self: mut Self, edit: CommandEdit) -> Option[CommandEdit] {
+        match edit {
+            CommandEdit::RemoveActor(value) => {
+                match self.snapshot(value.actor()) {
+                    Option::Some(snapshot) => {
+                        if self.scene.remove(value.actor()) {
+                            if self.selection == Option[u64]::Some(value.actor()) {
+                                self.selection = Option[u64]::None
+                            }
+                            ret Option[CommandEdit]::Some(CommandEdit::RestoreActor(snapshot))
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            CommandEdit::RestoreActor(value) => {
+                let entity = value.entity
+                if self.scene.create_entity_with_id(entity.id(), entity.name(), entity.transform()) {
+                    self.scene.set_visible(entity.id(), entity.visible())
+                    self.scene.set_renderable(entity.id(), entity.renderable())
+                    self.set_asset_name(entity.id(), value.asset_name)
+                    self.scene.set_parent(entity.id(), entity.parent())
+                    for child in value.children {
+                        self.scene.set_parent(child, Option[u64]::Some(entity.id()))
+                    }
+                    ret Option[CommandEdit]::Some(CommandEdit::RemoveActor(
+                            ActorCommand::new(entity.id())))
+                }
+            }
+            CommandEdit::Parent(value) => {
+                match self.scene.get(value.actor) {
+                    Option::Some(actor) => {
+                        let inverse = CommandEdit::Parent(ActorParentEdit {
+                                value.actor, actor.parent(), actor.transform()
+                            }
+                            ,)
+                        if self.scene.set_parent(value.actor, value.parent) &&
+                        self.scene.set_transform(value.actor, value.transform) {
+                            ret Option[CommandEdit]::Some(inverse)
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Rename(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        if self.scene.rename(value.actor(), value.value()) {
+                            ret Option[CommandEdit]::Some(CommandEdit::Rename(
+                                    ActorNameCommand::new(value.actor(), actor.name())))
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Visibility(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        if self.scene.set_visible(value.actor(), value.value()) {
+                            ret Option[CommandEdit]::Some(CommandEdit::Visibility(
+                                    ActorVisibilityCommand::new(value.actor(), actor.visible())))
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Transform(value) => {
+                match self.scene.get(value.actor()) {
+                    Option::Some(actor) => {
+                        if self.scene.set_transform(value.actor(), value.value()) {
+                            ret Option[CommandEdit]::Some(CommandEdit::Transform(
+                                    ActorTransformCommand::new(value.actor(), actor.transform())))
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Transforms(value) => {
+                let mut inverse = Vec[ActorTransformCommand]::new()
+                for transform in value.values() {
+                    match self.scene.get(transform.actor()) {
+                        Option::Some(actor) => {
+                            inverse.push(ActorTransformCommand::new(transform.actor(), actor.transform()))
+                            if !self.scene.set_transform(transform.actor(), transform.value()) {
+                                ret Option[CommandEdit]::None
+                            }
+                        }
+                        Option::None => {
+                            ret Option[CommandEdit]::None
+                        }
+                    }
+                }
+                ret Option[CommandEdit]::Some(CommandEdit::Transforms(ActorTransformsCommand::new(inverse)))
+            }
+        }
+        ret Option[CommandEdit]::None
+    }
+
+    fn snapshot(self: Self, actor: u64) -> Option[ActorSnapshot] {
+        match self.scene.get(actor) {
+            Option::Some(entity) => {
+                let mut children = Vec[u64]::new()
+                for candidate in self.scene.entities() {
+                    if candidate.parent() == Option[u64]::Some(actor) {
+                        children.push(candidate.id())
+                    }
+                }
+                ret Option[ActorSnapshot]::Some(ActorSnapshot {
+                        entity, children, self.asset_name(actor)
+                    }
+                    ,
+                )
+            }
+            Option::None => {
+            }
+        }
+        ret Option[ActorSnapshot]::None
+    }
+
+    fn history(self: mut Self, redo: bool) -> CommandResult {
+        let edit = if redo {
+            self.redo.pop()
+        } else {
+            self.undo.pop()
+        }
+        match edit {
+            Option::Some(value) => {
+                match self.apply_edit(value) {
+                    Option::Some(inverse) => {
+                        if redo {
+                            self.undo.push(inverse)
+                            self.history_position = self.history_position + 1_i64
+                        } else {
+                            self.redo.push(inverse)
+                            self.history_position = self.history_position - 1_i64
+                        }
+                        self.revision = self.revision + 1_u64
+                        self.dirty = self.history_position != self.saved_history_position
+                        let mut events = Vec[GrapheneEvent]::new()
+                        let event = GrapheneEvent::new(if redo {
+                                "history.redone"
+                            } else {
+                                "history.undone"
+                            }
+                            , Option[u64]::None, self.revision,)
+                        self.record_event(event)
+                        events.push(event)
+                        ret CommandResult::ok(self.revision, events)
+                    }
+                    Option::None => {
+                        ret CommandResult::error(self.revision, "History entry is no longer valid")
+                    }
+                }
+            }
+            Option::None => {
+                ret CommandResult::error(self.revision, if redo {
+                        "Nothing to redo"
+                    } else {
+                        "Nothing to undo"
+                    }
+                    ,
+                )
+            }
+        }
+    }
+
+    /// Keeps enough recent changes for responsive incremental observers while
+    /// preventing a long-running editor session from retaining an unbounded
+    /// event history.
+    fn record_event(self: mut Self, event: GrapheneEvent) ->() {
+        let limit = 256_usize
+        if self.event_log.len() >= limit {
+            let mut next = Vec[GrapheneEvent]::with_capacity(limit)
+            let mut index = self.event_log.len() - limit + 1_usize
+            while index < self.event_log.len() {
+                match self.event_log.get(index) {
+                    Option::Some(value) => {
+                        next.push(value)
+                    }
+                    Option::None => {
+                    }
+                }
+                index = index + 1_usize
+            }
+            self.event_log = next
+        }
+        self.event_log.push(event)
+        ret()
+    }
+
+    fn state_event(self: mut Self, kind: str) -> CommandResult {
+        self.revision = self.revision + 1_u64
+        let mut events = Vec[GrapheneEvent]::new()
+        let event = GrapheneEvent::new(kind, Option[u64]::None, self.revision)
+        self.record_event(event)
+        events.push(event)
+        ret CommandResult::ok(self.revision, events)
+    }
+
+    fn set_asset_name(self: mut Self, actor: u64, name: str) ->() {
+        let mut index = 0_usize
+        while index < self.assets.len() {
+            match self.assets.get(index) {
+                Option::Some(asset) => {
+                    if asset.actor == actor {
+                        self.assets.set(index, ActorAsset {
+                                actor, name
+                            }
+                            ,)
+                        ret()
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index = index + 1_usize
+        }
+        self.assets.push(ActorAsset {
+                actor, name
+            }
+            ,)
+        ret()
+    }
+}

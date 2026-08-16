@@ -1,0 +1,304 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand,
+    ActorTransformCommand, ActorTransformsCommand,
+    ActorVisibilityCommand, AddActorCommand,
+    DuplicateActorCommand, EditorState, GrapheneCommand, OperationCompletionCommand, Scene,
+    SimulationCommand, Transform
+}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let actor = scene.create_entity("Cube", Transform::identity())
+    let mut state = EditorState::new(scene)
+
+    let added = state.execute(GrapheneCommand::AddActor(AddActorCommand::new(
+                "Child", Transform::identity().with_position(Vec3::new(1.0_f32, 0.0_f32, 0.0_f32)),)))
+    if !added.success() || state.scene().len() != 2_usize {
+        ret 18_u32
+    }
+    let child = match added.events().get(0_usize) {
+        Option::Some(event) => {
+            event.actor().unwrap_or(0_u64)
+        }
+        Option::None => {
+            ret 19_u32
+        }
+    }
+    if !state.execute(GrapheneCommand::SetParent(
+            ActorParentCommand::new(child, Option[u64]::Some(actor)))).success() {
+        ret 20_u32
+    }
+    if !state.execute(GrapheneCommand::DeleteActor(ActorCommand::new(actor))).success() {
+        ret 21_u32
+    }
+    match state.scene().get(child) {
+        Option::Some(entity) => {
+            if entity.parent().is_some() {
+                ret 22_u32
+            }
+        }
+        Option::None => {
+            ret 23_u32
+        }
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 24_u32
+    }
+    match state.scene().get(child) {
+        Option::Some(entity) => {
+            if entity.parent() != Option[u64]::Some(actor) {
+                ret 25_u32
+            }
+        }
+        Option::None => {
+            ret 26_u32
+        }
+    }
+
+    let mut fresh_scene = Scene::new()
+    fresh_scene.create_entity_with_id(actor, "Cube", Transform::identity())
+    state = EditorState::new(fresh_scene)
+    let selected = state.execute(GrapheneCommand::Select(
+            ActorSelectionCommand::new(Option[u64]::Some(actor))))
+    if !selected.success() || state.selection() != Option[u64]::Some(actor) ||
+    state.dirty() || state.revision() != 1_u64 {
+        ret 1_u32
+    }
+
+    let renamed = state.execute(GrapheneCommand::Rename(ActorNameCommand::new(actor, "Player")))
+    if !renamed.success() || !state.dirty() || !state.can_undo() {
+        ret 2_u32
+    }
+    match state.scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.name() != "Player" {
+                ret 3_u32
+            }
+        }
+        Option::None => {
+            ret 4_u32
+        }
+    }
+
+    if !state.execute(GrapheneCommand::SetVisibility(
+            ActorVisibilityCommand::new(actor, false))).success() {
+        ret 5_u32
+    }
+    if !state.execute(GrapheneCommand::SetTransform(ActorTransformCommand::new(actor,
+                Transform::identity().with_position(Vec3::new(4.0_f32, 2.0_f32, 1.0_f32)),))).success()
+    {
+        ret 6_u32
+    }
+    match state.scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.visible() || entity.transform().position().x() != 4.0_f32 {
+                ret 7_u32
+            }
+        }
+        Option::None => {
+            ret 8_u32
+        }
+    }
+
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 9_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 10_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 11_u32
+    }
+    match state.scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.name() != "Cube" || !entity.visible() ||
+            entity.transform().position().x() != 0.0_f32 {
+                ret 12_u32
+            }
+        }
+        Option::None => {
+            ret 13_u32
+        }
+    }
+    if !state.can_redo() || !state.execute(GrapheneCommand::Redo).success() {
+        ret 14_u32
+    }
+    match state.scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.name() != "Player" {
+                ret 15_u32
+            }
+        }
+        Option::None => {
+            ret 16_u32
+        }
+    }
+
+    let missing = state.execute(GrapheneCommand::Rename(ActorNameCommand::new(999_u64, "Missing")))
+    if missing.success() || missing.message() == "" {
+        ret 17_u32
+    }
+
+    let undo_before_preview = state.can_undo()
+    let preview_one = state.begin_interactive(GrapheneCommand::Rename(
+            ActorNameCommand::new(actor, "Player preview")))
+    let preview_two = state.preview_interactive(GrapheneCommand::Rename(
+            ActorNameCommand::new(actor, "Player final")))
+    if !preview_one.success() || !preview_two.success() || !state.interactive_active() ||
+    state.can_undo() != undo_before_preview {
+        ret 27_u32
+    }
+    if !state.commit_interactive().success() || state.interactive_active() {
+        ret 28_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 29_u32
+    }
+    match state.scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.name() != "Player" {
+                ret 30_u32
+            }
+        }
+        Option::None => {
+            ret 31_u32
+        }
+    }
+
+    if !state.begin_interactive(GrapheneCommand::SetTransform(
+            ActorTransformCommand::new(actor, Transform::identity()
+                .with_position(Vec3::new(9.0_f32, 0.0_f32, 0.0_f32)),))).success() {
+        ret 32_u32
+    }
+    if !state.cancel_interactive().success() {
+        ret 33_u32
+    }
+    match state.scene().get(actor) {
+        Option::Some(entity) => {
+            if entity.transform().position().x() != 0.0_f32 {
+                ret 34_u32
+            }
+        }
+        Option::None => {
+            ret 35_u32
+        }
+    }
+
+    let mut asset_scene = Scene::new()
+    let source = asset_scene.create_entity("Plane", Transform::identity())
+    let mut asset_ids = Vec[u64]::new()
+    asset_ids.push(source)
+    let mut asset_names = Vec[str]::new()
+    asset_names.push("plane")
+    let mut asset_state = EditorState::with_assets(asset_scene, asset_ids, asset_names)
+    let duplicated = asset_state.execute(GrapheneCommand::DuplicateActor(
+            DuplicateActorCommand::new(source, "Plane Copy",
+                Transform::identity().with_position(Vec3::new(2.0_f32, 0.0_f32, 0.0_f32)),)))
+    let duplicate = match duplicated.events().get(0_usize) {
+        Option::Some(event) => {
+            event.actor().unwrap_or(0_u64)
+        }
+        Option::None => {
+            ret 36_u32
+        }
+    }
+    if asset_state.asset_name(duplicate) != "plane" {
+        ret 37_u32
+    }
+    asset_state.mark_saved()
+    if !asset_state.execute(GrapheneCommand::DeleteActor(ActorCommand::new(duplicate))).success() ||
+    !asset_state.execute(GrapheneCommand::Undo).success() ||
+    asset_state.asset_name(duplicate) != "plane" || asset_state.dirty() {
+        ret 38_u32
+    }
+
+    let mut event_scene = Scene::new()
+    let event_actor = event_scene.create_entity("Event source", Transform::identity())
+    let mut event_state = EditorState::new(event_scene)
+    let mut event_index = 0_usize
+    while event_index < 300_usize {
+        let selection = if event_index % 2_usize == 0_usize {
+            Option[u64]::Some(event_actor)
+        } else {
+            Option[u64]::None
+        }
+        if !event_state.execute(GrapheneCommand::Select(
+                ActorSelectionCommand::new(selection))).success() {
+            ret 39_u32
+        }
+        event_index = event_index + 1_usize
+    }
+    if event_state.revision() != 300_u64 ||
+    event_state.events_after(0_u64).len() != 256_usize ||
+    event_state.oldest_event_revision() != 45_u64 {
+        ret 40_u32
+    }
+
+    let mut workflow_state = EditorState::new(Scene::new())
+    if workflow_state.execute(GrapheneCommand::StartSimulation(
+            SimulationCommand::new("play"))).success() {
+        ret 41_u32
+    }
+    workflow_state.configure_project(true)
+    if !workflow_state.execute(GrapheneCommand::StartSimulation(
+            SimulationCommand::new("play"))).success() ||
+    workflow_state.simulation_mode() != "play" || workflow_state.dirty() {
+        ret 42_u32
+    }
+    if workflow_state.execute(GrapheneCommand::StartSimulation(
+            SimulationCommand::new("simulate"))).success() {
+        ret 43_u32
+    }
+    if !workflow_state.execute(GrapheneCommand::StopSimulation).success() ||
+    workflow_state.simulation_mode() != "" {
+        ret 44_u32
+    }
+    if !workflow_state.execute(GrapheneCommand::RequestSave).success() ||
+    !workflow_state.save_pending() {
+        ret 45_u32
+    }
+    if !workflow_state.execute(GrapheneCommand::CompleteSave(
+            OperationCompletionCommand::new(true, "saved"))).success() ||
+    workflow_state.save_pending() || workflow_state.dirty() {
+        ret 46_u32
+    }
+    if !workflow_state.execute(GrapheneCommand::RequestBuild).success() ||
+    !workflow_state.building() {
+        ret 47_u32
+    }
+    if !workflow_state.execute(GrapheneCommand::BuildPrepared).success() ||
+    !workflow_state.execute(GrapheneCommand::CompleteBuild(
+            OperationCompletionCommand::new(true, "built"))).success() ||
+    workflow_state.building() {
+        ret 48_u32
+    }
+    let mut group_scene = Scene::new()
+    let group_a = group_scene.create_entity("Group A", Transform::identity())
+    let group_b = group_scene.create_entity("Group B", Transform::identity().with_position(
+            Vec3::new(2.0_f32, 0.0_f32, 0.0_f32)))
+    let mut group_state = EditorState::new(group_scene)
+    let mut group_ids = Vec[u64]::new()
+    group_ids.push(group_a) group_ids.push(group_b)
+    if !group_state.execute(GrapheneCommand::SelectSet(ActorSelectionSetCommand::new(group_ids,
+                Option[u64]::Some(group_b)))).success() ||
+    group_state.selection() != Option[u64]::Some(group_b) || group_state.selection_ids().len() != 2_usize {
+        ret 49_u32
+    }
+    let mut group_transforms = Vec[ActorTransformCommand]::new()
+    group_transforms.push(ActorTransformCommand::new(group_a,
+            Transform::identity().with_position(Vec3::new(1.0_f32, 0.0_f32, 0.0_f32))))
+    group_transforms.push(ActorTransformCommand::new(group_b,
+            Transform::identity().with_position(Vec3::new(3.0_f32, 0.0_f32, 0.0_f32))))
+    if !group_state.execute(GrapheneCommand::SetTransforms(ActorTransformsCommand::new(group_transforms))).success() ||
+    !group_state.execute(GrapheneCommand::Undo).success() {
+        ret 50_u32
+    }
+    match group_state.scene().get(group_a) {
+        Option::Some(entity) => { if entity.transform().position().x() != 0.0_f32 { ret 51_u32 } }
+        Option::None => { ret 52_u32 }
+    }
+    ret 0_u32
+}

@@ -1,5 +1,7 @@
 target/
 **/target/
+artifacts/
+bundles/
 
 .DS_Store
 Thumbs.db

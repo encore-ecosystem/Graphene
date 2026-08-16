@@ -1,0 +1,417 @@
+//! Transport-independent Graphene Automation API session.
+
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import mod::approval::ApprovalBroker
+import mod::command_bus::EditorState
+import mod::command_protocol::{command_registry_json, decode_command_request, encode_command_response}
+
+pub struct AutomationServer {
+    state: EditorState
+    token: str
+    scopes: AutomationScopes
+    approvals: ApprovalBroker
+}
+
+pub struct AutomationScopes {
+    scene_write: bool
+    project_write: bool
+    build_execute: bool
+    simulation_control: bool
+}
+
+impl for AutomationServer {
+    pub fn new(state: EditorState, token: str) -> Self {
+        ret Self {
+            state, token, AutomationScopes::all(), ApprovalBroker::new()
+        }
+    }
+    pub fn with_scopes(state: EditorState, token: str, scopes: AutomationScopes) -> Self {
+        ret Self {
+            state, token, scopes, ApprovalBroker::new()
+        }
+    }
+    pub fn with_security(state: EditorState, token: str, scopes: AutomationScopes,
+        approvals: ApprovalBroker,) -> Self {
+        ret Self {
+            state, token, scopes, approvals
+        }
+    }
+    pub fn state(self: Self) -> EditorState {
+        ret self.state
+    }
+    pub fn approvals(self: Self) -> ApprovalBroker {
+        ret self.approvals
+    }
+    pub fn into_parts(self: Self) ->(EditorState, ApprovalBroker) {
+        ret(self.state, self.approvals)
+    }
+
+    /// Handles one JSON request. Framing and transport ownership remain with
+    /// Unix-socket, named-pipe, or test adapters.
+    pub fn handle(self: mut Self, source: str) -> str {
+        match parse(source) {
+            Result::Ok(root) => {
+                let id = root.get("id").unwrap_or(Json::String("")).as_str().unwrap_or("")
+                let supplied_token = root.get("token").unwrap_or(Json::String("")).as_str().unwrap_or("")
+                if self.token != "" && supplied_token != self.token {
+                    ret automation_error(id, "unauthorized", "Invalid Automation API capability token")
+                }
+                let method = root.get("method").unwrap_or(Json::String("")).as_str().unwrap_or("")
+                if !self.scopes.allows(method) {
+                    ret automation_error(id, "forbidden",
+                        "Automation capability does not grant scope " +
+                        required_scope(method),)
+                }
+                if method == "graphene.approval_status" {
+                    let approval_id = root.get("params").unwrap_or(Json::Null)
+                    .get("approvalId").unwrap_or(Json::String(""))
+                    .as_str().unwrap_or("")
+                    ret self.approval_status(id, approval_id)
+                }
+                let scope = required_scope(method)
+                if approval_required(method) {
+                    let approval = root.get("approval").unwrap_or(Json::String(""))
+                    .as_str().unwrap_or("")
+                    if !self.approvals.consume(approval, scope, method) {
+                        let approval_id = self.approvals.request(id, scope, method)
+                        ret approval_required_error(id, approval_id, scope, method)
+                    }
+                }
+                if method == "graphene.handshake" {
+                    ret self.handshake(id)
+                }
+                if method == "graphene.snapshot" {
+                    ret self.snapshot(id)
+                }
+                if method == "graphene.events" {
+                    let after = parse_u64(root.get("params").unwrap_or(Json::Null)
+                        .get("after").unwrap_or(Json::Number("0"))
+                        .as_number().unwrap_or("0")).unwrap_or(0_u64)
+                    ret self.events(id, after)
+                }
+                match decode_command_request(source) {
+                    Result::Ok(envelope) => {
+                        let result = self.state.execute(envelope.command())
+                        ret encode_command_response(envelope.id(), result)
+                    }
+                    Result::Err(error) => {
+                        ret automation_error(id, "invalid_request", error.message())
+                    }
+                }
+            }
+            Result::Err(error) => {
+                ret automation_error("", "invalid_json",
+                    "Invalid JSON at " + error.position().fmt() + ": " + error.message(),)
+            }
+        }
+    }
+
+    fn handshake(self: Self, id: str) -> str {
+        let mut capabilities = Vec[Json]::new()
+        capabilities.push(Json::String("commands"))
+        capabilities.push(Json::String("snapshots"))
+        capabilities.push(Json::String("revisions"))
+        capabilities.push(Json::String("events"))
+        capabilities.push(Json::String("approvals"))
+        for scope in self.scopes.names() {
+            capabilities.push(Json::String("scope:" + scope))
+        }
+        let mut fields = Vec[(str, Json)]::new()
+        fields.push(field("id", Json::String(id)))
+        fields.push(field("ok", Json::Bool(true)))
+        fields.push(field("protocol", Json::String("graphene-automation")))
+        fields.push(field("version", Json::Number("1")))
+        fields.push(field("revision", Json::Number(self.state.revision().fmt())))
+        fields.push(field("capabilities", Json::Array(capabilities)))
+        match parse(command_registry_json()) {
+            Result::Ok(registry) => {
+                fields.push(field("registry", registry))
+            }
+            Result::Err(_) => {
+                fields.push(field("registry", Json::Null))
+            }
+        }
+        ret stringify(Json::Object(fields))
+    }
+
+    fn snapshot(self: Self, id: str) -> str {
+        let mut actors = Vec[Json]::new()
+        for entity in self.state.scene().entities() {
+            let transform = entity.transform()
+            let mut actor = Vec[(str, Json)]::new()
+            actor.push(field("id", Json::Number(entity.id().fmt())))
+            actor.push(field("name", Json::String(entity.name())))
+            actor.push(field("asset", Json::String(self.state.asset_name(entity.id()))))
+            actor.push(field("visible", Json::Bool(entity.visible())))
+            match entity.parent() {
+                Option::Some(parent) => {
+                    actor.push(field("parent", Json::Number(parent.fmt())))
+                }
+                Option::None => {
+                    actor.push(field("parent", Json::Null))
+                }
+            }
+            actor.push(field("position", vector_json(transform.position().x(), transform.position().y(),
+                        transform.position().z(),)))
+            actor.push(field("rotation", vector_json(transform.rotation().x(), transform.rotation().y(),
+                        transform.rotation().z(),)))
+            actor.push(field("scale", vector_json(transform.scale().x(), transform.scale().y(),
+                        transform.scale().z(),)))
+            actors.push(Json::Object(actor))
+        }
+        let mut state = Vec[(str, Json)]::new()
+        state.push(field("revision", Json::Number(self.state.revision().fmt())))
+        state.push(field("dirty", Json::Bool(self.state.dirty())))
+        state.push(field("projectLoaded", Json::Bool(self.state.project_loaded())))
+        state.push(field("simulationMode", Json::String(self.state.simulation_mode())))
+        state.push(field("savePending", Json::Bool(self.state.save_pending())))
+        state.push(field("building", Json::Bool(self.state.building())))
+        match self.state.task() {
+            Option::Some(task) => {
+                let mut fields = Vec[(str, Json)]::new()
+                fields.push(field("id", Json::String(task.id())))
+                fields.push(field("kind", Json::String(task.kind())))
+                fields.push(field("state", Json::String(task.state())))
+                fields.push(field("message", Json::String(task.message())))
+                state.push(field("task", Json::Object(fields)))
+            }
+            Option::None => {
+                state.push(field("task", Json::Null))
+            }
+        }
+        let mut diagnostics = Vec[Json]::new()
+        for diagnostic in self.state.diagnostics() {
+            let mut fields = Vec[(str, Json)]::new()
+            fields.push(field("severity", Json::String(diagnostic.severity())))
+            fields.push(field("message", Json::String(diagnostic.message())))
+            fields.push(field("path", Json::String(diagnostic.path())))
+            fields.push(field("line", Json::Number(diagnostic.line().fmt())))
+            fields.push(field("column", Json::Number(diagnostic.column().fmt())))
+            diagnostics.push(Json::Object(fields))
+        }
+        state.push(field("diagnostics", Json::Array(diagnostics)))
+        match self.state.selection() {
+            Option::Some(actor) => {
+                state.push(field("selection", Json::Number(actor.fmt())))
+            }
+            Option::None => {
+                state.push(field("selection", Json::Null))
+            }
+        }
+        let mut selection_ids = Vec[Json]::new()
+        for actor in self.state.selection_ids() {
+            selection_ids.push(Json::Number(actor.fmt()))
+        }
+        state.push(field("selection_ids", Json::Array(selection_ids)))
+        state.push(field("actors", Json::Array(actors)))
+        let mut response = Vec[(str, Json)]::new()
+        response.push(field("id", Json::String(id)))
+        response.push(field("ok", Json::Bool(true)))
+        response.push(field("state", Json::Object(state)))
+        ret stringify(Json::Object(response))
+    }
+
+    fn events(self: Self, id: str, after: u64) -> str {
+        let oldest_revision = self.state.oldest_event_revision()
+        let reset_required = after < oldest_revision &&
+        oldest_revision - after > 1_u64
+        let mut values = Vec[Json]::new()
+        if !reset_required {
+            for event in self.state.events_after(after) {
+                let mut fields = Vec[(str, Json)]::new()
+                fields.push(field("kind", Json::String(event.kind())))
+                fields.push(field("revision", Json::Number(event.revision().fmt())))
+                match event.actor() {
+                    Option::Some(actor) => {
+                        fields.push(field("actor", Json::Number(actor.fmt())))
+                    }
+                    Option::None => {
+                        fields.push(field("actor", Json::Null))
+                    }
+                }
+                values.push(Json::Object(fields))
+            }
+        }
+        let mut response = Vec[(str, Json)]::new()
+        response.push(field("id", Json::String(id)))
+        response.push(field("ok", Json::Bool(true)))
+        response.push(field("revision", Json::Number(self.state.revision().fmt())))
+        response.push(field("oldestRevision", Json::Number(oldest_revision.fmt())))
+        response.push(field("resetRequired", Json::Bool(reset_required)))
+        response.push(field("events", Json::Array(values)))
+        ret stringify(Json::Object(response))
+    }
+
+    fn approval_status(self: Self, id: str, approval_id: str) -> str {
+        let mut response = Vec[(str, Json)]::new()
+        response.push(field("id", Json::String(id)))
+        match self.approvals.find(approval_id) {
+            Option::Some(request) => {
+                response.push(field("ok", Json::Bool(true)))
+                response.push(field("approvalId", Json::String(request.id())))
+                response.push(field("status", Json::String(request.status())))
+                response.push(field("scope", Json::String(request.scope())))
+                if request.status() == "approved" {
+                    response.push(field("approval", Json::String(request.token())))
+                }
+            }
+            Option::None => {
+                response.push(field("ok", Json::Bool(false)))
+                let mut error = Vec[(str, Json)]::new()
+                error.push(field("code", Json::String("approval_not_found")))
+                error.push(field("message", Json::String("Approval request was not found")))
+                response.push(field("error", Json::Object(error)))
+            }
+        }
+        ret stringify(Json::Object(response))
+    }
+}
+
+impl for AutomationScopes {
+    pub fn all() -> Self {
+        ret Self {
+            true, true, true, true
+        }
+    }
+    pub fn read_only() -> Self {
+        ret Self {
+            false, false, false, false
+        }
+    }
+    pub fn new(scene_write: bool, project_write: bool, build_execute: bool,
+        simulation_control: bool,) -> Self {
+        ret Self {
+            scene_write, project_write, build_execute, simulation_control
+        }
+    }
+    pub fn allows(self: Self, method: str) -> bool {
+        let scope = required_scope(method)
+        if scope == "read" {
+            ret true
+        }
+        if scope == "scene.write" {
+            ret self.scene_write
+        }
+        if scope == "project.write" {
+            ret self.project_write
+        }
+        if scope == "build.execute" {
+            ret self.build_execute
+        }
+        if scope == "simulation.control" {
+            ret self.simulation_control
+        }
+        // Unknown methods still pass to the decoder, which returns a
+        // structured invalid-request error without executing anything.
+        ret scope == "unknown"
+    }
+    pub fn names(self: Self) -> Vec[str] {
+        let mut scopes = Vec[str]::new()
+        scopes.push("read")
+        if self.scene_write {
+            scopes.push("scene.write")
+        }
+        if self.project_write {
+            scopes.push("project.write")
+        }
+        if self.build_execute {
+            scopes.push("build.execute")
+        }
+        if self.simulation_control {
+            scopes.push("simulation.control")
+        }
+        ret scopes
+    }
+}
+
+fn required_scope(method: str) -> str {
+    if method == "graphene.handshake" || method == "graphene.snapshot" ||
+    method == "graphene.events" || method == "graphene.approval_status" {
+        ret "read"
+    }
+    if method == "project.save" {
+        ret "project.write"
+    }
+    if method == "build.start" {
+        ret "build.execute"
+    }
+    if method == "simulation.start" || method == "simulation.stop" {
+        ret "simulation.control"
+    }
+    if method.contains("scene.") || method.contains("history.") {
+        ret "scene.write"
+    }
+    ret "unknown"
+}
+
+fn approval_required(method: str) -> bool {
+    ret method == "scene.delete" || method == "project.save" ||
+    method == "build.start"
+}
+
+fn parse_u64(value: str) -> Option[u64] {
+    if value == "" {
+        ret Option[u64]::None
+    }
+    let digits = "0123456789"
+    let mut result = 0_u64
+    let mut index = 0_usize
+    while index < value.char_len() {
+        let character = value.slice(index, 1_usize)
+        let mut digit = 0_usize
+        let mut found = false
+        while digit < 10_usize {
+            if character == digits.slice(digit, 1_usize) {
+                found = true
+                break
+            }
+            digit = digit + 1_usize
+        }
+        if !found {
+            ret Option[u64]::None
+        }
+        let next = result * 10_u64 + digit as u64
+        if next < result {
+            ret Option[u64]::None
+        }
+        result = next
+        index = index + 1_usize
+    }
+    ret Option[u64]::Some(result)
+}
+
+fn vector_json(x: f32, y: f32, z: f32) -> Json {
+    let mut values = Vec[Json]::new()
+    values.push(Json::Number(x.fmt()))
+    values.push(Json::Number(y.fmt()))
+    values.push(Json::Number(z.fmt()))
+    ret Json::Array(values)
+}
+
+fn automation_error(id: str, code: str, message: str) -> str {
+    let mut error = Vec[(str, Json)]::new()
+    error.push(field("code", Json::String(code)))
+    error.push(field("message", Json::String(message)))
+    let mut response = Vec[(str, Json)]::new()
+    response.push(field("id", Json::String(id)))
+    response.push(field("ok", Json::Bool(false)))
+    response.push(field("error", Json::Object(error)))
+    ret stringify(Json::Object(response))
+}
+
+fn approval_required_error(id: str, approval_id: str, scope: str, method: str) -> str {
+    let mut error = Vec[(str, Json)]::new()
+    error.push(field("code", Json::String("approval_required")))
+    error.push(field("message", Json::String(
+                "User approval is required before executing " + method)))
+    error.push(field("approvalId", Json::String(approval_id)))
+    error.push(field("scope", Json::String(scope)))
+    let mut response = Vec[(str, Json)]::new()
+    response.push(field("id", Json::String(id)))
+    response.push(field("ok", Json::Bool(false)))
+    response.push(field("error", Json::Object(error)))
+    ret stringify(Json::Object(response))
+}

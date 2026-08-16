@@ -1,0 +1,330 @@
+:root {
+    --graphene-bg: #0d0d0f;
+    --graphene-surface: #151518;
+    --graphene-raised: #19191c;
+    --graphene-control: #222327;
+    --graphene-control-hover: #32343a;
+    --graphene-border: #2b2c31;
+    --graphene-border-hover: #555963;
+    --graphene-text: #cacccf;
+    --graphene-text-strong: #e8e9ec;
+    --graphene-muted: #898c94;
+    --graphene-accent: #208fcf;
+    --graphene-accent-hover: #2ea9ee;
+    --graphene-focus: #f0c65d;
+    --graphene-danger: #b64b50;
+    --graphene-success: #2d8b58;
+}
+
+html,
+body,
+.graphene-editor {
+    width: 100%;
+    height: 100%;
+    min-width: 0px;
+    min-height: 0px;
+    padding: 0;
+    gap: 1px;
+    flex-direction: column;
+    background: var(--graphene-bg);
+    color: var(--graphene-text);
+    font-family: "Roboto";
+    font-size: 11px;
+}
+
+.editor-menu-bar,
+.editor-toolbar,
+.workspace-tabs,
+.editor-status {
+    flex-direction: row;
+    align-items: center;
+    border: 1px solid var(--graphene-border);
+}
+
+.editor-menu-bar {
+    flex: 0 0 25px;
+    padding: 3px 8px;
+    gap: 8px;
+    background: #0f0f11;
+}
+
+.menu-item {
+    background: #0f0f11;
+    color: #bcbec4;
+    border: 0px solid transparent;
+    border-radius: 2px;
+    padding: 3px 6px;
+    font-size: 10px;
+}
+
+.menu-item:hover,
+.menu-item.active {
+    background: #2b2c31;
+    color: #f2f3f5;
+}
+
+.menu-item:active {
+    background: #202126;
+    color: #ffffff;
+}
+
+.menu-item:focus,
+.toolbar-icon:focus,
+.toolbar-button:focus,
+.popup-action:focus,
+select:focus,
+input:focus {
+    outline: 2px solid var(--graphene-focus);
+    outline-offset: -2px;
+}
+
+.viewport-surface {
+    border: 1px solid transparent;
+    transition: border-color 90ms ease-out;
+}
+
+.viewport-surface:focus {
+    border-color: var(--graphene-accent);
+}
+
+.menu-popup {
+    background: var(--graphene-raised);
+    color: var(--graphene-text);
+    border: 1px solid #414248;
+    border-radius: 3px;
+    padding: 4px;
+    gap: 2px;
+    box-shadow: 0px 5px 14px #000000aa;
+}
+
+.popup-action {
+    background: var(--graphene-raised);
+    color: #dadce0;
+    border: 0px solid transparent;
+    border-radius: 1px;
+    padding: 2px 7px;
+    font-size: 9px;
+}
+
+.popup-action:hover {
+    background: #303136;
+    color: #ffffff;
+}
+
+.popup-action.active {
+    background: #1e4259;
+    color: #effaff;
+}
+
+.popup-action.active:hover {
+    background: #285a78;
+}
+
+.editor-toolbar {
+    flex: 0 0 42px;
+    padding: 4px 7px;
+    gap: 5px;
+    background: var(--graphene-surface);
+}
+
+.toolbar-icon,
+.toolbar-button {
+    background: var(--graphene-control);
+    color: #dee0e4;
+    border: 1px solid var(--graphene-border);
+    border-radius: 2px;
+    padding: 5px;
+    font-size: 11px;
+}
+
+.toolbar-button {
+    padding: 5px 9px;
+}
+
+.toolbar-icon:hover,
+.toolbar-button:hover {
+    background: var(--graphene-control-hover);
+    color: #ffffff;
+    border-color: var(--graphene-border-hover);
+}
+
+.toolbar-icon:active,
+.toolbar-button:active {
+    background: #15161a;
+    border-color: var(--graphene-accent);
+}
+
+.toolbar-icon.danger:hover {
+    background: #4b292c;
+    border-color: var(--graphene-danger);
+}
+
+.toolbar-button.play-button {
+    background: #22392d;
+    border-color: #374b40;
+}
+
+.toolbar-button.play-button:hover {
+    background: #2a5b3e;
+    border-color: #4d9368;
+}
+
+.toolbar-button.play-button.active {
+    background: #1f6f43;
+    border-color: #33945c;
+}
+
+.toolbar-button.build-button.active {
+    background: #69491d;
+    color: #f6e5c3;
+    border-color: #976927;
+}
+
+.toolbar-icon:disabled,
+.toolbar-button:disabled,
+.popup-action:disabled,
+.menu-item:disabled {
+    opacity: 0.42;
+    pointer-events: none;
+}
+
+.workspace-tabs {
+    flex: 0 0 28px;
+    padding: 2px 6px;
+    gap: 4px;
+    background: #101013;
+}
+
+.upper-workspace,
+.lower-workspace {
+    min-width: 0px;
+    min-height: 0px;
+    padding: 0;
+    gap: 1px;
+    background: var(--graphene-bg);
+}
+
+.upper-workspace {
+    flex: 4 1 0px;
+    flex-direction: row;
+}
+
+.viewport {
+    min-width: 0px;
+    min-height: 0px;
+    padding: 0;
+    gap: 0;
+    flex-direction: column;
+    background: #0d0e10;
+    border: 1px solid var(--graphene-border);
+    position: relative;
+}
+
+.viewport.active {
+    border: 2px solid var(--graphene-accent);
+}
+
+.viewport-bar,
+.viewport-status {
+    flex-direction: row;
+    align-items: center;
+    border: 1px solid var(--graphene-border);
+}
+
+.viewport-bar {
+    flex: 0 0 30px;
+    padding: 3px 6px;
+    gap: 5px;
+    background: #141417;
+}
+
+.viewport-status {
+    flex: 0 0 22px;
+    padding: 3px 7px;
+    gap: 8px;
+    background: #111114;
+}
+
+.selector-control,
+.viewport-tool,
+.viewport-option {
+    background: var(--graphene-control);
+    color: var(--graphene-text-strong);
+    border: 1px solid var(--graphene-border);
+    border-radius: 2px;
+    padding: 4px 6px;
+}
+
+.viewport-tool {
+    padding: 5px;
+    border-width: 0px;
+    border-radius: 0px;
+}
+
+.selector-control:hover,
+.viewport-tool:hover,
+.viewport-option:hover {
+    background: var(--graphene-control-hover);
+    border-color: var(--graphene-border-hover);
+}
+
+.selector-control.active,
+.viewport-tool.active,
+.viewport-option.active {
+    background: #0070b8;
+    border-color: #1688d4;
+    color: #ffffff;
+}
+
+.selector-control.active:hover,
+.viewport-tool.active:hover,
+.viewport-option.active:hover {
+    background: #148bd6;
+    border-color: #46b0e8;
+}
+
+.selector-control:active,
+.viewport-tool:active,
+.viewport-option:active {
+    background: #10547d;
+}
+
+.selector-control:focus,
+.viewport-tool:focus,
+.viewport-option:focus {
+    outline: 2px solid var(--graphene-focus);
+    outline-offset: -2px;
+}
+
+.lower-workspace {
+    flex: 1.55 1 0px;
+    flex-direction: row;
+}
+
+.editor-status {
+    flex: 0 0 23px;
+    padding: 3px 8px;
+    background: #121215;
+}
+
+.project-browser {
+    width: 100%;
+    height: 100%;
+    padding: 24px;
+    gap: 14px;
+    flex-direction: column;
+    background: #0d0e11;
+    color: #dcdee2;
+    font-family: "Roboto";
+}
+
+.project-browser-brand,
+.browser-footer {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+}
+
+.browser-footer {
+    gap: 8px;
+}

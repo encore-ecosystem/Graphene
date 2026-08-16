@@ -1,0 +1,204 @@
+import core::option::Option
+import core::vec::Vec
+import core::fmt::Debug
+import graphene:: {
+    DeviceFeatures, GpuVirtualGeometry, GraphicsInstance,
+    VirtualGeometryInstance, buffer_storage, build_virtual_geometry_lods,
+    gpu_virtual_geometry_archive_bytes,
+    gpu_virtual_geometry_staging_bytes,
+    gpu_virtual_geometry_traversal_instances
+}
+import linalg:: {
+    Mat4, Vec3
+}
+
+struct OwnedVirtualScene {
+    geometry: GpuVirtualGeometry<H>
+}
+
+fn scene_instances() -> Vec[VirtualGeometryInstance] {
+    let mut result = Vec[VirtualGeometryInstance]::new()
+    result.push(VirtualGeometryInstance::new(
+            Mat4::identity(), Vec3::new(0.8_f32, 0.8_f32, 0.8_f32),
+            0.0_f32, 0.5_f32, false,))
+    ret result
+}
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let requested = DeviceFeatures::from_mask(
+                DeviceFeatures::mesh_shader().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, DeviceFeatures::none(), requested,)
+            if !device.available() ||
+            !device.enabled_features().contains(requested) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+            let side = 40_usize
+            let mut positions = Vec[Vec3]::new()
+            let mut y = 0_usize
+            while y < side {
+                let mut x = 0_usize
+                while x < side {
+                    positions.push(Vec3::new(
+                            (x as f32) / 39.0_f32 * 2.0_f32 - 1.0_f32,
+                            (y as f32) / 39.0_f32 * 2.0_f32 - 1.0_f32,
+                            if (x + y) % 3_usize == 0_usize {
+                                0.54_f32
+                            } else {
+                                0.5_f32
+                            }
+                            ,))
+                    x += 1_usize
+                }
+                y += 1_usize
+            }
+            let mut indices = Vec[u32]::new()
+            y = 0_usize
+            while y + 1_usize < side {
+                let mut x = 0_usize
+                while x + 1_usize < side {
+                    let a =(y * side + x) as u32
+                    let b = a + 1_u32
+                    let c = a + side as u32
+                    let d = c + 1_u32
+                    indices.push(a) indices.push(b) indices.push(d)
+                    indices.push(a) indices.push(d) indices.push(c)
+                    x += 1_usize
+                }
+                y += 1_usize
+            }
+            let geometry = build_virtual_geometry_lods(
+                positions, indices, 64_usize, 126_usize,)
+            let mut vertices = Vec[f32]::new()
+            for source_index in geometry.vertex_indices() {
+                let source = source_index as usize
+                let source_x = source % side
+                let source_y = source / side
+                let point = Vec3::new(
+                    (source_x as f32) / 39.0_f32 * 2.0_f32 - 1.0_f32,
+                    (source_y as f32) / 39.0_f32 * 2.0_f32 - 1.0_f32,
+                    if (source_x + source_y) % 3_usize == 0_usize {
+                        0.54_f32
+                    } else {
+                        0.5_f32
+                    }
+                    ,)
+                vertices.push(point.x()) vertices.push(point.y()) vertices.push(point.z())
+                vertices.push(0.0_f32) vertices.push(0.0_f32) vertices.push(1.0_f32)
+                vertices.push(0.8_f32) vertices.push(0.8_f32) vertices.push(0.8_f32)
+            }
+            let target = device.create_offscreen_target(64_u32, 64_u32)
+            let gi_scene = device.create_buffer(32_u64, buffer_storage(), true)
+            let gi_surfaces = device.create_buffer(48_u64, buffer_storage(), true)
+            let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
+            gi_scene.write_f32(0_u64, 0.0_f32)
+            gi_history.write_f32(12_u64, 0.0_f32)
+            let source_archive_bytes =
+            (vertices.len() / 9_usize) * 11_usize * 4_usize +
+            geometry.triangle_indices().len() * 4_usize
+            let virtual_scene = OwnedVirtualScene<H> {
+                GpuVirtualGeometry::create(
+                    device, target, geometry, vertices, 1_usize,
+                    gi_scene, gi_surfaces, gi_history,)
+            }
+            let initial_resident =
+                gpu_virtual_geometry_resident_pages(virtual_scene.geometry)
+            if gpu_virtual_geometry_staging_bytes(virtual_scene.geometry) !=
+            8_u64 *(64_u64 * 11_u64 + 126_u64 * 3_u64) * 4_u64 {
+                gpu_virtual_geometry_destroy(virtual_scene.geometry)
+                gi_history.destroy() gi_surfaces.destroy() gi_scene.destroy()
+                target.destroy() device.destroy() instance.destroy()
+                ret 11_u32
+            }
+            if gpu_virtual_geometry_archive_bytes(virtual_scene.geometry) !=
+            source_archive_bytes {
+                gpu_virtual_geometry_destroy(virtual_scene.geometry)
+                gi_history.destroy() gi_surfaces.destroy() gi_scene.destroy()
+                target.destroy() device.destroy() instance.destroy()
+                ret 12_u32
+            }
+            println("Virtual Geometry residency: initial=" + Debug::fmt(initial_resident) +
+                ", capacity=" + Debug::fmt(
+                    gpu_virtual_geometry_page_capacity(virtual_scene.geometry),))
+            let page_capacity =
+            gpu_virtual_geometry_page_capacity(virtual_scene.geometry)
+            if initial_resident > page_capacity {
+                gpu_virtual_geometry_destroy(virtual_scene.geometry)
+                gi_history.destroy() gi_surfaces.destroy() gi_scene.destroy()
+                target.destroy() device.destroy() instance.destroy()
+                ret 5_u32
+            }
+            let mut all_done = true
+            let mut frame_number = 0_u32
+            while frame_number <= target.frames_in_flight() {
+                let frame = target.acquire_frame()
+                let culled = gpu_virtual_geometry_record(virtual_scene.geometry,
+                    frame, Mat4::identity(),
+                    Vec3::new(0.0_f32, 0.0_f32, - 2.0_f32),
+                    scene_instances(), 100.0_f32,
+                    Vec3::new(0.0_f32, - 1.0_f32, 0.0_f32),
+                    Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 1.0_f32,
+                    Vec3::new(0.1_f32, 0.1_f32, 0.1_f32), 1024.0_f32,)
+                let traversal_instances =
+                gpu_virtual_geometry_traversal_instances(
+                    virtual_scene.geometry,)
+                if culled && traversal_instances != 1_u32 {
+                    println("Virtual Geometry frame " + Debug::fmt(frame_number) +
+                        ": traversal_instances=" +
+                        Debug::fmt(traversal_instances),)
+                    all_done = false
+                }
+                let pass = frame.begin_render_pass(
+                    gpu_virtual_geometry_pipeline(virtual_scene.geometry),
+                    0.0_f32, 0.0_f32, 0.0_f32, 1.0_f32,)
+                let pass_available = pass.available()
+                let drew = gpu_virtual_geometry_draw(virtual_scene.geometry, pass)
+                let ended = pass.end()
+                let presented = frame.present()
+                if !culled || !pass_available || !drew || !ended || !presented {
+                    println("Virtual Geometry frame " + Debug::fmt(frame_number) +
+                        ": culled=" + Debug::fmt(culled) +
+                        ", pass=" + Debug::fmt(pass_available) +
+                        ", draw=" + Debug::fmt(drew) +
+                        ", end=" + Debug::fmt(ended) +
+                        ", present=" + Debug::fmt(presented),)
+                }
+                all_done = culled && pass_available && drew && ended &&
+                presented && all_done
+                frame.destroy()
+                frame_number += 1_u32
+            }
+            // Assets that fit in the 512 MiB physical budget are deliberately
+            // preloaded; larger assets begin at their coarse cut and stream.
+            // Both are valid residency states, but neither may exceed the
+            // fixed physical capacity.
+            let final_resident = gpu_virtual_geometry_resident_pages(
+                virtual_scene.geometry,)
+            let residency_ready = if initial_resident == page_capacity {
+                final_resident == page_capacity
+            } else {
+                final_resident > initial_resident && final_resident <= page_capacity
+            }
+            gpu_virtual_geometry_destroy(virtual_scene.geometry)
+            gi_history.destroy() gi_surfaces.destroy() gi_scene.destroy()
+            target.destroy() device.destroy() instance.destroy()
+            if !all_done {
+                ret 1_u32
+            }
+            ret if residency_ready {
+                0_u32
+            } else {
+                2_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 0_u32
+        }
+    }
+}

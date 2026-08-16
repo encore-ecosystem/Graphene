@@ -1,0 +1,132 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene_tlas;
+layout(set = 0, binding = 1, std430) readonly buffer RayScene {
+    float values[];
+} scene;
+layout(set = 0, binding = 2, std430) readonly buffer SurfaceCache {
+    float values[];
+} surfaces;
+layout(set = 0, binding = 3, std430) buffer RadianceHistory {
+    float values[];
+} history;
+layout(set = 0, binding = 4, std430) readonly buffer PreviousRadianceCache {
+    float values[];
+} previous_cache;
+layout(set = 0, binding = 5, std430) buffer TemporalProbePosition {
+    float values[];
+} temporal_position;
+
+vec3 hemisphereDirection(vec3 normal, uint ray) {
+    vec3 seed;
+    if (ray == 0) seed = vec3(0.65, 0.22, 0.71);
+    else if (ray == 1) seed = vec3(-0.48, 0.81, 0.33);
+    else if (ray == 2) seed = vec3(0.18, -0.73, 0.66);
+    else if (ray == 3) seed = vec3(-0.76, -0.18, 0.62);
+    else if (ray == 4) seed = vec3(0.91, -0.37, 0.17);
+    else seed = vec3(-0.24, 0.51, 0.83);
+    if (dot(seed, normal) < 0.0) seed = -seed;
+    return normalize(seed + normal * 0.55);
+}
+
+vec3 probeDirection(uint ray) {
+    if (ray == 0) return vec3(1.0, 0.0, 0.0);
+    if (ray == 1) return vec3(-1.0, 0.0, 0.0);
+    if (ray == 2) return vec3(0.0, 1.0, 0.0);
+    if (ray == 3) return vec3(0.0, -1.0, 0.0);
+    if (ray == 4) return vec3(0.0, 0.0, 1.0);
+    return vec3(0.0, 0.0, -1.0);
+}
+
+vec3 traceRadiance(vec3 origin, vec3 direction,
+    float maximumDistance, vec3 sky) {
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene_tlas,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0xff, origin, 0.015, direction, maximumDistance);
+    while (rayQueryProceedEXT(query)) {
+    }
+    if (rayQueryGetIntersectionTypeEXT(query, true) ==
+        gl_RayQueryCommittedIntersectionNoneEXT) {
+        return sky;
+    }
+    float hitDistance = rayQueryGetIntersectionTEXT(query, true);
+    vec3 hitPosition = origin + direction * hitDistance;
+    // Screen-probe records place the persistent card count in word 9. Other
+    // ray-query entry points set it to the complete sample count.
+    uint sampleCount = min(uint(scene.values[9]), uint(scene.values[0]));
+    float nearestDistance = 1e20;
+    uint nearestSample = 0u;
+    bool found = false;
+    for (uint cacheIndex = 0u; cacheIndex < sampleCount; ++cacheIndex) {
+        uint surface = cacheIndex * 12u;
+        float kind = surfaces.values[surface + 3u];
+        if (kind < 0.5 || kind > 1.5) continue;
+        vec3 cachedPosition = vec3(surfaces.values[surface],
+            surfaces.values[surface + 1u],
+            surfaces.values[surface + 2u]);
+        float candidate = dot(hitPosition - cachedPosition,
+            hitPosition - cachedPosition);
+        if (candidate < nearestDistance) {
+            nearestDistance = candidate;
+            nearestSample = cacheIndex;
+            found = true;
+        }
+    }
+    if (!found) return vec3(0.0);
+    uint surface = nearestSample * 12u;
+    uint cached = nearestSample * 4u;
+    vec3 albedo = vec3(surfaces.values[surface + 8u],
+        surfaces.values[surface + 9u],
+        surfaces.values[surface + 10u]);
+    vec3 bounced = vec3(previous_cache.values[cached],
+        previous_cache.values[cached + 1u],
+        previous_cache.values[cached + 2u]);
+    return albedo * (vec3(0.035) + bounced * 0.82);
+}
+
+void main() {
+    uint sampleIndex = gl_GlobalInvocationID.x;
+    uint sampleCount = uint(scene.values[0]);
+    if (sampleIndex >= sampleCount) return;
+    uint surface = sampleIndex * 12;
+    vec3 position = vec3(surfaces.values[surface],
+        surfaces.values[surface + 1], surfaces.values[surface + 2]);
+    vec3 normal = normalize(vec3(surfaces.values[surface + 4],
+        surfaces.values[surface + 5], surfaces.values[surface + 6]));
+    bool worldProbe = surfaces.values[surface + 3] < 0.5;
+    vec3 sky = vec3(scene.values[4], scene.values[5], scene.values[6]);
+    float maximumDistance = scene.values[3];
+    vec3 radiance = vec3(0.0);
+    for (uint ray = 0; ray < 6; ++ray) {
+        vec3 direction = worldProbe
+            ? probeDirection(ray) : hemisphereDirection(normal, ray);
+        radiance += traceRadiance(position + normal * 0.02,
+            direction, maximumDistance, sky);
+    }
+    radiance /= 6.0;
+    uint outputBase = sampleIndex * 4;
+    vec3 previous = vec3(history.values[outputBase],
+        history.values[outputBase + 1], history.values[outputBase + 2]);
+    vec3 previousPosition = vec3(temporal_position.values[outputBase],
+        temporal_position.values[outputBase + 1],
+        temporal_position.values[outputBase + 2]);
+    bool historyValid = temporal_position.values[outputBase + 3] > 0.5 &&
+        distance(previousPosition, position) <
+            (worldProbe ? 1.0 : 0.35);
+    float historyWeight = historyValid
+        ? clamp(scene.values[2], 0.0, 0.98) : 0.0;
+    vec3 accumulated = mix(radiance, previous, historyWeight);
+    history.values[outputBase] = accumulated.x;
+    history.values[outputBase + 1] = accumulated.y;
+    history.values[outputBase + 2] = accumulated.z;
+    history.values[outputBase + 3] =
+        min(history.values[outputBase + 3] + 1.0, 255.0);
+    temporal_position.values[outputBase] = position.x;
+    temporal_position.values[outputBase + 1] = position.y;
+    temporal_position.values[outputBase + 2] = position.z;
+    temporal_position.values[outputBase + 3] = 1.0;
+}

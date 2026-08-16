@@ -1,0 +1,98 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    GpuDynamicGi, GraphicsInstance, SdfBrickCache, SdfSphere,
+    SurfaceCacheSample, gpu_software_gi
+}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut cache = SdfBrickCache::new(2_u32)
+    let first = cache.request(10_u64, 1_u32, 1_u64)
+    let second = cache.request(20_u64, 2_u32, 2_u64)
+    let touched = cache.request(10_u64, 1_u32, 3_u64)
+    let replacement = cache.request(30_u64, 3_u32, 4_u64)
+    if first.resident() || second.resident() || !touched.resident() ||
+    touched.page() != first.page() || replacement.evicted_object() != 20_u64 ||
+    replacement.evicted_brick() != 2_u32 || cache.len() != 2_usize {
+        ret 1_u32
+    }
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 2_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let device = instance.create_device(adapter)
+            if !device.available() {
+                instance.destroy()
+                ret 3_u32
+            }
+            let mut spheres = Vec[SdfSphere]::new()
+            spheres.push(SdfSphere::new(
+                    Vec3::new(0.0_f32, 2.0_f32, 0.0_f32), 1.5_f32,
+                    Vec3::new(4.0_f32, 2.0_f32, 1.0_f32),))
+            let mut samples = Vec[SurfaceCacheSample]::new()
+            samples.push(SurfaceCacheSample::new(
+                    Vec3::zero(), Vec3::new(0.0_f32, 1.0_f32, 0.0_f32),
+                    Vec3::new(0.8_f32, 0.7_f32, 0.6_f32),))
+            let gi = gpu_software_gi(device, spheres, samples,
+                Vec3::new(0.05_f32, 0.08_f32, 0.12_f32), 20.0_f32, 0.0_f32,)
+            let valid = gi.valid()
+            let radiance = gi.radiance(0_u32)
+            let frames = gi.accumulated_frames(0_u32)
+            let illuminated = valid && radiance.x() > 0.04_f32 &&
+            radiance.y() > 0.03_f32 && radiance.z() > 0.02_f32 &&
+            frames == 1.0_f32
+            gi.destroy()
+            if !illuminated {
+                device.destroy()
+                instance.destroy()
+                ret 4_u32
+            }
+            let mut temporal = GpuDynamicGi::create(device, 4_usize, 4_usize)
+            let mut first_spheres = Vec[SdfSphere]::new()
+            first_spheres.push(SdfSphere::new(
+                    Vec3::new(0.0_f32, 2.0_f32, 0.0_f32), 1.5_f32,
+                    Vec3::new(4.0_f32, 2.0_f32, 1.0_f32),))
+            let mut first_samples = Vec[SurfaceCacheSample]::new()
+            first_samples.push(SurfaceCacheSample::new(
+                    Vec3::zero(), Vec3::new(0.0_f32, 1.0_f32, 0.0_f32),
+                    Vec3::new(0.8_f32, 0.7_f32, 0.6_f32),))
+            if !temporal.available() || !temporal.trace(first_spheres, first_samples,
+                Vec3::new(0.05_f32, 0.08_f32, 0.12_f32), 20.0_f32, 0.0_f32,) {
+                temporal.destroy()
+                device.destroy()
+                instance.destroy()
+                ret 6_u32
+            }
+            let first_radiance = temporal.radiance(0_u32)
+            let mut second_spheres = Vec[SdfSphere]::new()
+            second_spheres.push(SdfSphere::new(
+                    Vec3::new(0.0_f32, 2.0_f32, 0.0_f32), 1.5_f32,
+                    Vec3::zero(),))
+            let mut second_samples = Vec[SurfaceCacheSample]::new()
+            second_samples.push(SurfaceCacheSample::new(
+                    Vec3::zero(), Vec3::new(0.0_f32, 1.0_f32, 0.0_f32),
+                    Vec3::new(0.8_f32, 0.7_f32, 0.6_f32),))
+            let second_traced = temporal.trace(second_spheres, second_samples,
+                Vec3::zero(), 20.0_f32, 0.9_f32,)
+            let second_radiance = temporal.radiance(0_u32)
+            let temporal_valid = second_traced &&
+            temporal.accumulated_frames(0_u32) == 2.0_f32 &&
+            second_radiance.x() > first_radiance.x() * 0.85_f32 &&
+            second_radiance.x() < first_radiance.x()
+            temporal.destroy()
+            device.destroy()
+            instance.destroy()
+            if !temporal_valid {
+                ret 7_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 5_u32
+        }
+    }
+    ret 0_u32
+}

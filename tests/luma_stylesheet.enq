@@ -1,0 +1,49 @@
+//! Regression coverage for Graphene's new Luma stylesheet state model.
+
+import luma:: {
+    Body, Button, Html, Nav, StyleSheet
+}
+import core::result::Result
+
+fn main() -> u32 {
+    let sheet = StyleSheet::parse(
+        ".viewport-tool { background: #222327; border: 1px solid #2b2c31; } " +
+        ".viewport-tool:hover { background: #32343a; } " +
+        ".viewport-tool.active { background: #0070b8; } " +
+        ".viewport-tool.active:hover { background: #148bd6; } " +
+        ".viewport-tool:focus { outline: 2px solid #f0c65d; }")
+    let selected = Button::new("tool-move", "Move").with_classes("viewport-tool active")
+    let root = Html::new().with_child(
+        Body::new("root").with_classes("graphene-editor").with_child(selected),)
+    let normal = sheet.style(selected, false, false, false)
+    let hovered = sheet.style(selected, true, false, false)
+    let focused = sheet.apply(root, "tool-move", "", "tool-move")
+    .find("tool-move").unwrap_or(selected)
+    if normal.background().packed() == hovered.background().packed() {
+        ret 1_u32
+    }
+    if hovered.background().red() != 20_u8 || hovered.background().green() != 139_u8 ||
+    hovered.background().blue() != 214_u8 {
+        ret 2_u32
+    }
+    if focused.style().outline().width() != 2.0_f32 || focused.tag() != "button" {
+        ret 3_u32
+    }
+    let application = match StyleSheet::from_file("graphene.css") {
+        Result::Ok(value) => value
+        Result::Err(_) => { ret 4_u32 }
+    }
+    let file_hovered = application.style(selected, true, false, false)
+    if application.len() < 20_usize || file_hovered.background().red() != 20_u8 ||
+    file_hovered.background().green() != 139_u8 || file_hovered.background().blue() != 214_u8 {
+        ret 5_u32
+    }
+    let viewport_bar = Nav::new("viewport-bar").with_classes("viewport-bar")
+    let viewport_bar_style = application.style(viewport_bar, false, false, false)
+    if viewport_bar_style.background().red() != 20_u8 ||
+    viewport_bar_style.background().green() != 20_u8 ||
+    viewport_bar_style.background().blue() != 23_u8 {
+        ret 6_u32
+    }
+    ret 0_u32
+}

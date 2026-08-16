@@ -1,0 +1,94 @@
+//! File-backed source-page archive for virtual geometry.
+
+import core::vec::Vec
+
+extern fn graphene_geometry_archive_create(
+    vertex_data: usize, vertex_count: usize,
+    triangle_data: usize, triangle_count: usize,) -> usize
+extern fn graphene_geometry_archive_read_vertices(
+    handle: usize, first: usize, count: usize,
+    destination: usize,) -> bool
+extern fn graphene_geometry_archive_read_triangles(
+    handle: usize, first: usize, count: usize,
+    destination: usize,) -> bool
+extern fn graphene_geometry_archive_prefetch(
+    handle: usize, vertex_first: usize, vertex_count: usize,
+    triangle_first: usize, triangle_count: usize,) -> bool
+extern fn graphene_geometry_archive_bytes(handle: usize) -> usize
+extern fn graphene_geometry_archive_destroy(handle: usize) -> bool
+
+pub struct GeometryPageArchive {
+    handle: usize
+}
+
+impl for GeometryPageArchive {
+    pub fn create(vertices: Vec[f32], triangles: Vec[u32])
+    -> Self {
+        let vertex_data = vertices.get_handle(0_usize)
+        let vertex_count = vertices.len()
+        let triangle_data = triangles.get_handle(0_usize)
+        let triangle_count = triangles.len()
+        ret Self {
+            graphene_geometry_archive_create(
+                vertex_data, vertex_count, triangle_data, triangle_count,)
+        }
+    }
+}
+
+pub fn geometry_page_archive_available(
+    archive: GeometryPageArchive,) -> bool {
+    ret archive.handle != 0_usize
+}
+
+pub fn geometry_page_archive_bytes(
+    archive: GeometryPageArchive,) -> usize {
+    ret graphene_geometry_archive_bytes(archive.handle)
+}
+
+pub fn geometry_page_archive_prefetch(
+    archive: GeometryPageArchive,
+    vertex_first: usize, vertex_count: usize,
+    triangle_first: usize, triangle_count: usize,) -> bool {
+    ret graphene_geometry_archive_prefetch(
+        archive.handle, vertex_first, vertex_count,
+        triangle_first, triangle_count,)
+}
+
+pub fn geometry_page_archive_vertices(
+    archive: GeometryPageArchive,
+    first: usize, count: usize,) -> Vec[f32] {
+    let mut values = Vec[f32]::new()
+    let mut index = 0_usize
+    while index < count {
+        values.push(0.0_f32)
+        index += 1_usize
+    }
+    if !geometry_page_archive_available(archive) ||
+    !graphene_geometry_archive_read_vertices(
+        archive.handle, first, count, values.get_handle(0_usize),) {
+        values.clear()
+    }
+    ret values
+}
+
+pub fn geometry_page_archive_triangles(
+    archive: GeometryPageArchive,
+    first: usize, count: usize,) -> Vec[u32] {
+    let mut values = Vec[u32]::new()
+    let mut index = 0_usize
+    while index < count {
+        values.push(0_u32)
+        index += 1_usize
+    }
+    if !geometry_page_archive_available(archive) ||
+    !graphene_geometry_archive_read_triangles(
+        archive.handle, first, count, values.get_handle(0_usize),) {
+        values.clear()
+    }
+    ret values
+}
+
+pub fn geometry_page_archive_destroy(
+    archive: GeometryPageArchive,) -> bool {
+    ret graphene_geometry_archive_destroy(archive.handle)
+}
