@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ENCORE_BOOTSTRAP_TAG: bootstrap/v0.1.4.3
+  ENCORE_RELEASE_TAG: v0.2.1
 
 jobs:
   quality:
@@ -23,29 +23,30 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Install Encore 0.1.4
+      - name: Install Encore 0.2.1
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          destination="$RUNNER_TEMP/encore-bootstrap"
-          mkdir -p "$destination"
-          gh release download "$ENCORE_BOOTSTRAP_TAG" \
+          archive_dir="$RUNNER_TEMP/encore-archive"
+          install_dir="$RUNNER_TEMP/encore-0.2.1"
+          mkdir -p "$archive_dir" "$install_dir"
+          gh release download "$ENCORE_RELEASE_TAG" \
             --repo encore-ecosystem/encore \
             --pattern encore-x86_64-unknown-linux-gnu.tar.gz \
             --pattern encore-x86_64-unknown-linux-gnu.tar.gz.sha256 \
-            --dir "$destination"
-          cd "$destination"
+            --dir "$archive_dir"
+          cd "$archive_dir"
           expected=$(awk 'NF {print tolower($1); exit}' encore-x86_64-unknown-linux-gnu.tar.gz.sha256)
           actual=$(sha256sum encore-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
           test "$actual" = "$expected"
-          mkdir distribution
-          tar -xzf encore-x86_64-unknown-linux-gnu.tar.gz -C distribution
-          compiler=$(find distribution -type f -path '*/bin/encore' -print -quit)
-          test -n "$compiler"
-          test -x "$compiler"
-          echo "$(dirname "$compiler")" >> "$GITHUB_PATH"
+          tar -xzf encore-x86_64-unknown-linux-gnu.tar.gz \
+            --strip-components=1 \
+            -C "$install_dir"
+          test -x "$install_dir/bin/encore"
+          "$install_dir/bin/encore" --version
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
 
       - name: Restore locked dependencies
         run: encore sync
