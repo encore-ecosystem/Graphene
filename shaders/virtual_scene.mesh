@@ -1,0 +1,150 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32) in;
+layout(triangles, max_vertices = 64, max_primitives = 126) out;
+
+layout(set = 0, binding = 0, std430) readonly buffer SceneStream {
+    uint values[];
+} scene;
+layout(set = 0, binding = 1, std430) readonly buffer PackedVertices {
+    float values[];
+} vertices;
+layout(set = 0, binding = 2, std430) readonly buffer PackedTriangles {
+    uint values[];
+} triangles;
+
+layout(location = 0) out vec3 world_normal[];
+layout(location = 1) out vec3 color[];
+layout(location = 2) flat out vec4 material_base_color[];
+layout(location = 3) flat out vec4 material_surface[];
+layout(location = 4) flat out vec4 light_direction[];
+layout(location = 5) flat out vec4 light_color_intensity[];
+layout(location = 6) flat out vec4 indirect_ambient[];
+layout(location = 7) out vec3 world_position[];
+layout(location = 8) flat out vec3 camera_position[];
+layout(location = 9) flat out uvec4 virtual_debug[];
+// Per-primitive IDs are explicit so diagnostic coloring does not depend on
+// fragment-stage PrimitiveID behavior across mesh-shader implementations.
+layout(location = 10) perprimitiveEXT out uint triangle_debug[];
+layout(location = 11) out vec2 texture_uv[];
+
+shared uint vertexCount;
+
+float valuef(uint index) {
+    return uintBitsToFloat(scene.values[index]);
+}
+
+mat4 matrixAt(uint base) {
+    return mat4(
+        vec4(valuef(base), valuef(base + 1), valuef(base + 2), valuef(base + 3)),
+        vec4(valuef(base + 4), valuef(base + 5), valuef(base + 6), valuef(base + 7)),
+        vec4(valuef(base + 8), valuef(base + 9), valuef(base + 10), valuef(base + 11)),
+        vec4(valuef(base + 12), valuef(base + 13), valuef(base + 14), valuef(base + 15)));
+}
+
+void main() {
+    uint clusterCount = scene.values[0];
+    uint instanceCount = scene.values[1];
+    uint maximumInstances = uint(valuef(39));
+    uint maximumCandidates = clusterCount * maximumInstances;
+    uint hierarchyCount = scene.values[2];
+    uint feedbackBase = 64 + clusterCount * 16 + hierarchyCount * 12 +
+        maximumInstances * 24 + maximumCandidates * 4;
+    uint hizBase = feedbackBase + clusterCount;
+    uint indirectBase = hizBase + 3067u * 2u;
+    uint visibleCount = min(scene.values[indirectBase],
+        clusterCount * instanceCount);
+    uint visibleIndex = gl_WorkGroupID.x;
+    if (visibleIndex >= visibleCount) {
+        if (gl_LocalInvocationIndex == 0) {
+            SetMeshOutputsEXT(0, 0);
+        }
+        return;
+    }
+
+    uint outputBase = 64 + clusterCount * 16 + hierarchyCount * 12 +
+        maximumInstances * 24 +
+        visibleIndex * 2;
+    uint clusterIndex = scene.values[outputBase];
+    uint packedInstance = scene.values[outputBase + 1];
+    uint instanceIndex = packedInstance & 0x0007ffffu;
+    uint desiredLod = (packedInstance >> 20u) & 0x3fu;
+    uint selectedLod = (packedInstance >> 26u) & 0x3fu;
+    uint clusterBase = 64 + clusterIndex * 16;
+    uint instanceBase = 64 + clusterCount * 16 +
+        hierarchyCount * 12 + instanceIndex * 24;
+    uint indexCount = uint(valuef(clusterBase + 8));
+    uint triangleCount = indexCount / 3;
+    uint firstIndex = uint(valuef(clusterBase + 9));
+    uint vertexOffset = uint(valuef(clusterBase + 10));
+
+    uint maximumLocalVertex = 0;
+    for (uint index = gl_LocalInvocationIndex; index < indexCount; index += 32) {
+        maximumLocalVertex = max(maximumLocalVertex,
+            triangles.values[firstIndex + index]);
+    }
+    if (gl_LocalInvocationIndex == 0) {
+        vertexCount = 0;
+    }
+    barrier();
+    atomicMax(vertexCount, maximumLocalVertex + 1);
+    barrier();
+    if (gl_LocalInvocationIndex == 0) {
+        SetMeshOutputsEXT(min(vertexCount, 64), min(triangleCount, 126));
+    }
+    barrier();
+
+    mat4 viewProjection = matrixAt(4);
+    mat4 model = matrixAt(instanceBase);
+    vec4 baseColor = vec4(valuef(instanceBase + 16),
+        valuef(instanceBase + 17), valuef(instanceBase + 18),
+        valuef(instanceBase + 19));
+    vec4 surface = vec4(valuef(instanceBase + 20),
+        valuef(instanceBase + 21), valuef(instanceBase + 22),
+        valuef(instanceBase + 23));
+
+    for (uint vertex = gl_LocalInvocationIndex;
+        vertex < vertexCount && vertex < 64; vertex += 32) {
+        uint base = (vertexOffset + vertex) * 11;
+        vec3 position = vec3(vertices.values[base],
+            vertices.values[base + 1], vertices.values[base + 2]);
+        vec3 normal = vec3(vertices.values[base + 3],
+            vertices.values[base + 4], vertices.values[base + 5]);
+        vec4 transformedPosition = model * vec4(position, 1.0);
+        gl_MeshVerticesEXT[vertex].gl_Position =
+            viewProjection * transformedPosition;
+        world_position[vertex] = transformedPosition.xyz;
+        world_normal[vertex] = normalize(mat3(model) * normal);
+        color[vertex] = vec3(vertices.values[base + 6],
+            vertices.values[base + 7], vertices.values[base + 8]);
+        texture_uv[vertex] = vec2(vertices.values[base + 9],
+            vertices.values[base + 10]);
+        material_base_color[vertex] = baseColor;
+        material_surface[vertex] = surface;
+        light_direction[vertex] = vec4(valuef(24), valuef(25),
+            valuef(26), valuef(27));
+        light_color_intensity[vertex] = vec4(valuef(28), valuef(29),
+            valuef(30), valuef(31));
+        indirect_ambient[vertex] = vec4(valuef(32), valuef(33),
+            valuef(34), valuef(35));
+        camera_position[vertex] = vec3(valuef(20), valuef(21), valuef(22));
+        uint packedDebugInstance =
+            (packedInstance & 0x00080000u) | instanceIndex |
+            (desiredLod << 20u) | (selectedLod << 26u);
+        uint packedPrimitiveMode =
+            (uint(valuef(clusterBase + 13)) & 0x00ffffffu) |
+            ((scene.values[3] & 0xffu) << 24u);
+        virtual_debug[vertex] = uvec4(clusterIndex, packedDebugInstance,
+            uint(valuef(clusterBase + 11)), packedPrimitiveMode);
+    }
+    for (uint primitive = gl_LocalInvocationIndex;
+        primitive < triangleCount && primitive < 126; primitive += 32) {
+        uint base = firstIndex + primitive * 3;
+        gl_PrimitiveTriangleIndicesEXT[primitive] = uvec3(
+            triangles.values[base], triangles.values[base + 1],
+            triangles.values[base + 2]);
+        triangle_debug[primitive] = clusterIndex * 4099u +
+            primitive * 131u + instanceIndex;
+    }
+}

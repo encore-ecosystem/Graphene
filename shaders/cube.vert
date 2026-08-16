@@ -7,11 +7,14 @@ layout(location = 0) out vec3 world_normal;
 layout(location = 1) out vec3 color;
 layout(location = 2) flat out vec4 material_base_color;
 layout(location = 3) flat out vec4 material_surface;
+layout(location = 4) out vec3 world_position;
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4 view_projection;
     vec4 light_direction;
     vec4 light_color_intensity;
+    vec4 indirect_ambient;
+    vec4 camera_position;
 } frame;
 
 struct Instance {
@@ -26,7 +29,9 @@ layout(std430, set = 0, binding = 1) readonly buffer Instances {
 
 void main() {
     Instance instance = instances.values[gl_InstanceIndex];
-    gl_Position = frame.view_projection * instance.model * vec4(position, 1.0);
+    vec4 transformed_position = instance.model * vec4(position, 1.0);
+    gl_Position = frame.view_projection * transformed_position;
+    world_position = transformed_position.xyz;
     world_normal = normalize(mat3(instance.model) * normal);
     color = vertex_color;
     material_base_color = instance.material_base_color;

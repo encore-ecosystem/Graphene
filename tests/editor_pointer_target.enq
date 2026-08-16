@@ -1,0 +1,23 @@
+import graphene::resolve_editor_pointer_target
+
+fn main() -> u32 {
+    if resolve_editor_pointer_target(false, "save") != "save" {
+        ret 1_u32
+    }
+    if resolve_editor_pointer_target(true, "") != "viewport-surface" {
+        ret 2_u32
+    }
+    if resolve_editor_pointer_target(
+        true, "viewport-surface",) != "viewport-surface" {
+        ret 3_u32
+    }
+    if resolve_editor_pointer_target(
+        true, "shading-overdraw",) != "shading-overdraw" {
+        ret 4_u32
+    }
+    if resolve_editor_pointer_target(
+        true, "tool-move",) != "tool-move" {
+        ret 5_u32
+    }
+    ret 0_u32
+}

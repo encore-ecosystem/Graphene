@@ -115,6 +115,11 @@ impl for MeshData {
     pub fn index_count(self: Self) -> usize {
         ret self.indices.len()
     }
+    /// Moves all owned mesh parts together, avoiding sequential owned-field
+    /// accessor calls on one aggregate.
+    pub fn parts(self: Self) ->(Vec[f32], Vec[u32], u32) {
+        ret(self.vertices, self.indices, self.stride)
+    }
 }
 
 pub fn cube_mesh(size: f32) -> MeshData {

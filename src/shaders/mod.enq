@@ -1,10 +1,16 @@
+pub import mod::cluster_cull::cluster_cull_spirv
 pub import mod::compute::double_words
-pub import mod::cube:: {
-    cube_fragment_spirv, cube_vertex_spirv
-}
-pub import mod::depth:: {
-    depth_fragment_spirv, depth_vertex_spirv
-}
-pub import mod::triangle:: {
-    triangle_fragment_spirv, triangle_vertex_spirv
-}
+pub import mod::cube::{cube_fragment_spirv, cube_vertex_spirv}
+pub import mod::depth::{depth_fragment_spirv, depth_vertex_spirv}
+pub import mod::gi_spatial_filter::gi_spatial_filter_spirv
+pub import mod::mesh_triangle::mesh_triangle_spirv
+pub import mod::ray_query_gi::ray_query_gi_spirv
+pub import mod::screen_probe_place::screen_probe_place_spirv
+pub import mod::software_gi::software_gi_spirv
+pub import mod::triangle::{triangle_fragment_spirv, triangle_vertex_spirv}
+pub import mod::virtual_geometry::virtual_geometry_mesh_spirv
+pub import mod::virtual_scene_cull::virtual_scene_cull_spirv
+pub import mod::virtual_scene_fragment::virtual_scene_fragment_spirv
+pub import mod::virtual_scene_mesh::virtual_scene_mesh_spirv
+pub import mod::virtual_scene_post_cull::virtual_scene_post_cull_spirv
+pub import mod::virtual_scene_triangle::virtual_scene_triangle_spirv

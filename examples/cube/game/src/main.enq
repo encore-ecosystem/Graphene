@@ -1,12 +1,13 @@
-import core::io::println
+import std::io::println
 import core::option::Option
-import core::time::perf_counter_ms
+import std::time::perf_counter_ms
 import core::vec::Vec
 import graphene::{BindGroupLayoutEntry, DirectionalLight, GraphicsInstance, MaterialAssets, MeshAssets,
     PerspectiveCamera, Renderable, Scene, SceneRenderer, StandardMaterial, Transform,
-    RenderPipelineOptions, VertexAttribute, VertexBufferLayout, cube_fragment_spirv, cube_mesh,
+    PhysicsWorld, RigidBody, RenderPipelineOptions, RuntimeConfig, InputMap, InputSnapshot, RuntimeSession, RuntimeTransform,
+    VertexAttribute, VertexBufferLayout, World, cube_fragment_spirv, cube_mesh,
     cube_vertex_spirv, key_a, key_d, key_escape, key_s, key_w, mouse_right,
-    shader_stage_fragment, shader_stage_vertex, vertex_format_float32x3}
+    shader_stage_fragment, shader_stage_vertex, sync_runtime_world, vertex_format_float32x3}
 import linalg::Vec3
 
 fn main() -> u32 {
@@ -59,9 +60,26 @@ fn main() -> u32 {
                     Option[Renderable]::Some(Renderable::new(mesh_id, root_material)))
                 scene.set_renderable(child,
                     Option[Renderable]::Some(Renderable::new(mesh_id, child_material)))
+                // Gameplay owns this world. The render Scene is only a
+                // presentation target synchronized after fixed simulation.
+                let mut gameplay_world = World::new()
+                let gameplay_root = gameplay_world.spawn_actor("Root cube", RuntimeTransform::new(
+                    Vec3::new(-0.55_f32, 0.0_f32, 0.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)))
+                let gameplay_child = gameplay_world.spawn_actor("Child cube", RuntimeTransform::new(
+                    Vec3::new(1.7_f32, 0.0_f32, 0.0_f32), Vec3::zero(),
+                    Vec3::new(0.55_f32, 0.55_f32, 0.55_f32)))
+                let mut physics = PhysicsWorld::new(RuntimeConfig::defaults().gravity())
+                physics.add_body(RigidBody::dynamic(gameplay_root, 1.0_f32, 0.7_f32))
+                physics.add_body(RigidBody::static(gameplay_child, 0.7_f32))
                 let mut yaw = 0.0_f32
                 let mut pitch = 0.32_f32
                 let mut distance = 4.2_f32
+                let mut input_map = InputMap::new()
+                input_map.bind_key("OrbitLeft", key_a())
+                input_map.bind_key("OrbitRight", key_d())
+                input_map.bind_key("ZoomIn", key_w())
+                input_map.bind_key("ZoomOut", key_s())
+                let mut runtime = RuntimeSession::new(RuntimeConfig::defaults(), gameplay_world, physics)
                 let started = perf_counter_ms()
                 let mut previous = started
                 while window.poll() {
@@ -69,10 +87,17 @@ fn main() -> u32 {
                     let delta = ((now - previous) as f32) * 0.001_f32
                     previous = now
                     if window.key_down(key_escape()) { break }
-                    if window.key_down(key_a()) { yaw = yaw - delta * 1.5_f32 }
-                    if window.key_down(key_d()) { yaw = yaw + delta * 1.5_f32 }
-                    if window.key_down(key_w()) { distance = distance - delta * 2.0_f32 }
-                    if window.key_down(key_s()) { distance = distance + delta * 2.0_f32 }
+                    let mut input = InputSnapshot::empty()
+                    if window.key_down(key_a()) { input = input.with_down(key_a()) }
+                    if window.key_down(key_d()) { input = input.with_down(key_d()) }
+                    if window.key_down(key_w()) { input = input.with_down(key_w()) }
+                    if window.key_down(key_s()) { input = input.with_down(key_s()) }
+                    let frame = runtime.tick(delta, input)
+                    let frame_delta = frame.delta_seconds()
+                    yaw = yaw + input_map.value("OrbitRight", frame.input()) * frame_delta * 1.5_f32
+                    yaw = yaw - input_map.value("OrbitLeft", frame.input()) * frame_delta * 1.5_f32
+                    distance = distance - input_map.value("ZoomIn", frame.input()) * frame_delta * 2.0_f32
+                    distance = distance + input_map.value("ZoomOut", frame.input()) * frame_delta * 2.0_f32
                     if window.mouse_down(mouse_right()) {
                         yaw = yaw + window.mouse_dx() * 0.006_f32
                         pitch = pitch + window.mouse_dy() * 0.006_f32
@@ -86,9 +111,17 @@ fn main() -> u32 {
                     let frame = swapchain.acquire_frame()
                     if !frame.available() { println(frame.error()) frame.destroy() break }
                     let seconds = ((perf_counter_ms() - started) as f32) * 0.001_f32
-                    scene.set_transform(root, Transform::identity()
-                        .with_position(Vec3::new(-0.55_f32, 0.0_f32, 0.0_f32))
-                        .with_rotation(Vec3::new(seconds * 0.35_f32, seconds, 0.0_f32)))
+                    let mut gameplay_world = runtime.world()
+                    match gameplay_world.transform(gameplay_root) {
+                        Option::Some(transform) => {
+                            gameplay_world.set_transform(gameplay_root, transform
+                                .with_rotation(Vec3::new(seconds * 0.35_f32, seconds, 0.0_f32)))
+                        }
+                        Option::None => {
+                        }
+                    }
+                    runtime.set_world(gameplay_world)
+                    sync_runtime_world(runtime.world(), scene)
                     let aspect = (swapchain.width() as f32) / (swapchain.height() as f32)
                     let pass = frame.begin_render_pass(pipeline, 0.025_f32, 0.04_f32, 0.06_f32, 1.0_f32)
                     let recorded = renderer.render_scene(scene, camera, light, meshes, materials,

@@ -1,0 +1,70 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32) in;
+layout(triangles, max_vertices = 64, max_primitives = 126) out;
+
+layout(set = 0, binding = 0, std430) readonly buffer CullStream {
+    uint values[];
+} stream;
+layout(set = 0, binding = 1, std430) readonly buffer PackedVertices {
+    float values[];
+} vertices;
+layout(set = 0, binding = 2, std430) readonly buffer PackedTriangles {
+    uint values[];
+} triangles;
+
+layout(location = 0) out vec3 color[];
+layout(location = 1) out vec2 texture_coordinate[];
+shared uint vertexCount;
+
+void main() {
+    uint clusterCount = stream.values[0];
+    uint visibleCount = stream.values[1];
+    uint visibleIndex = gl_WorkGroupID.x;
+    if (visibleIndex >= visibleCount) {
+        if (gl_LocalInvocationIndex == 0) {
+            SetMeshOutputsEXT(0, 0);
+        }
+        return;
+    }
+
+    uint command = 4 + clusterCount * 8 + visibleIndex * 5;
+    uint clusterIndex = stream.values[command + 4];
+    uint metadata = 4 + clusterIndex * 8;
+    uint indexCount = stream.values[command];
+    uint triangleCount = indexCount / 3;
+    uint firstIndex = stream.values[command + 2];
+    uint vertexOffset = stream.values[command + 3];
+
+    uint maximumLocalVertex = 0;
+    for (uint index = gl_LocalInvocationIndex; index < indexCount; index += 32) {
+        maximumLocalVertex = max(maximumLocalVertex, triangles.values[firstIndex + index]);
+    }
+    if (gl_LocalInvocationIndex == 0) {
+        vertexCount = 0;
+    }
+    barrier();
+    atomicMax(vertexCount, maximumLocalVertex + 1);
+    barrier();
+    if (gl_LocalInvocationIndex == 0) {
+        SetMeshOutputsEXT(min(vertexCount, 64), min(triangleCount, 126));
+    }
+    barrier();
+
+    for (uint vertex = gl_LocalInvocationIndex; vertex < vertexCount && vertex < 64; vertex += 32) {
+        uint base = (vertexOffset + vertex) * 9;
+        vec3 position = vec3(vertices.values[base],
+            vertices.values[base + 1], vertices.values[base + 2]);
+        gl_MeshVerticesEXT[vertex].gl_Position = vec4(position, 1.0);
+        color[vertex] = vec3(vertices.values[base + 6],
+            vertices.values[base + 7], vertices.values[base + 8]);
+        texture_coordinate[vertex] = position.xy * 0.5 + 0.5;
+    }
+    for (uint primitive = gl_LocalInvocationIndex;
+        primitive < triangleCount && primitive < 126; primitive += 32) {
+        uint base = firstIndex + primitive * 3;
+        gl_PrimitiveTriangleIndicesEXT[primitive] = uvec3(
+            triangles.values[base], triangles.values[base + 1], triangles.values[base + 2]);
+    }
+}

@@ -7,7 +7,7 @@ fn main() -> u32 {
         Result::Ok(mesh) => {
             if mesh.vertex_count() != 6_usize { ret 1_u32 }
             if mesh.index_count() != 6_usize { ret 2_u32 }
-            if mesh.stride() != 36_u32 { ret 3_u32 }
+            if mesh.stride() != 44_u32 { ret 3_u32 }
         }
         Result::Err(_) => { ret 4_u32 }
     }
@@ -19,6 +19,16 @@ fn main() -> u32 {
     match parse_obj("v 0 0 0\nf 1 2 3\n") {
         Result::Ok(_) => { ret 7_u32 }
         Result::Err(_) => {}
+    }
+    let textured = "v 0 0 0\nv 1 0 0\nv 0 0 1\nvt 0 0\nvt 2 0\nvt 0 2\nf 1/1 2/2 3/3\n"
+    match parse_obj(textured) {
+        Result::Ok(mesh) => {
+            let vertices = mesh.vertices()
+            if vertices.get(9_usize).unwrap_or(-1.0_f32) != 0.0_f32 { ret 8_u32 }
+            if vertices.get(10_usize).unwrap_or(-1.0_f32) != 1.0_f32 { ret 9_u32 }
+            if vertices.get(20_usize).unwrap_or(-1.0_f32) != 2.0_f32 { ret 10_u32 }
+        }
+        Result::Err(_) => { ret 11_u32 }
     }
     ret 0_u32
 }

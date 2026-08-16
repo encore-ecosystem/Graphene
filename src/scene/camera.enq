@@ -1,6 +1,4 @@
-import linalg:: {
-    Mat4, Vec3
-}
+import linalg::{Mat4, Vec3}
 
 pub struct PerspectiveCamera {
     position: Vec3

@@ -1,0 +1,105 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene_tlas;
+layout(set = 0, binding = 1, std430) readonly buffer ProbeScene {
+    float values[];
+} scene;
+layout(set = 0, binding = 2, std430) buffer SurfaceCache {
+    float values[];
+} surfaces;
+layout(set = 0, binding = 3, std430) buffer UnusedHistory {
+    float values[];
+} unused_history;
+layout(set = 0, binding = 4, std430) readonly buffer UnusedPreviousCache {
+    float values[];
+} unused_previous_cache;
+layout(set = 0, binding = 5, std430) buffer UnusedTemporalPosition {
+    float values[];
+} unused_temporal_position;
+
+void main() {
+    uint probeIndex = gl_GlobalInvocationID.x;
+    uint probeCount = uint(scene.values[8]);
+    if (probeIndex >= probeCount) return;
+    uint firstProbe = uint(scene.values[9]);
+    uint gridWidth = uint(scene.values[10]);
+    uint gridHeight = uint(scene.values[11]);
+    uint x = probeIndex % gridWidth;
+    uint y = probeIndex / gridWidth;
+    vec2 uv = (vec2(x, y) + vec2(0.5)) /
+        vec2(gridWidth, gridHeight);
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec3 origin = vec3(scene.values[12],
+        scene.values[13], scene.values[14]);
+    vec3 forward = normalize(vec3(scene.values[16],
+        scene.values[17], scene.values[18]));
+    vec3 right = normalize(vec3(scene.values[20],
+        scene.values[21], scene.values[22]));
+    vec3 up = normalize(vec3(scene.values[24],
+        scene.values[25], scene.values[26]));
+    float tanHalfFov = tan(scene.values[28] * 0.5);
+    float aspect = scene.values[29];
+    vec3 direction = normalize(forward +
+        right * ndc.x * tanHalfFov * aspect -
+        up * ndc.y * tanHalfFov);
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene_tlas,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0xff, origin, 0.02, direction, scene.values[3]);
+    while (rayQueryProceedEXT(query)) {
+    }
+    bool hit = rayQueryGetIntersectionTypeEXT(query, true) !=
+        gl_RayQueryCommittedIntersectionNoneEXT;
+    vec3 position;
+    vec3 normal;
+    float kind;
+    if (hit) {
+        float distance = rayQueryGetIntersectionTEXT(query, true);
+        position = origin + direction * distance;
+        // Reconstruct a mesh-independent surface orientation from the
+        // persistent surface cache. The old dominant-local-axis rule was only
+        // valid for boxes and visibly broke curved or imported meshes.
+        float nearestDistance = 1e30;
+        vec3 nearestNormal = -direction;
+        uint surfaceSampleCount = firstProbe;
+        for (uint candidate = 0u; candidate < surfaceSampleCount; ++candidate) {
+            uint candidateBase = candidate * 12u;
+            if (surfaces.values[candidateBase + 3u] < 0.5) continue;
+            vec3 candidatePosition = vec3(
+                surfaces.values[candidateBase],
+                surfaces.values[candidateBase + 1u],
+                surfaces.values[candidateBase + 2u]);
+            float candidateDistance = dot(
+                position - candidatePosition, position - candidatePosition);
+            if (candidateDistance < nearestDistance) {
+                nearestDistance = candidateDistance;
+                nearestNormal = vec3(
+                    surfaces.values[candidateBase + 4u],
+                    surfaces.values[candidateBase + 5u],
+                    surfaces.values[candidateBase + 6u]);
+            }
+        }
+        normal = normalize(nearestNormal);
+        kind = 2.0;
+    } else {
+        position = origin + direction * scene.values[3];
+        normal = -direction;
+        kind = 0.0;
+    }
+    uint surface = (firstProbe + probeIndex) * 12;
+    surfaces.values[surface] = position.x;
+    surfaces.values[surface + 1] = position.y;
+    surfaces.values[surface + 2] = position.z;
+    surfaces.values[surface + 3] = kind;
+    surfaces.values[surface + 4] = normal.x;
+    surfaces.values[surface + 5] = normal.y;
+    surfaces.values[surface + 6] = normal.z;
+    surfaces.values[surface + 7] = 0.0;
+    surfaces.values[surface + 8] = 1.0;
+    surfaces.values[surface + 9] = 1.0;
+    surfaces.values[surface + 10] = 1.0;
+    surfaces.values[surface + 11] = 1.0;
+}

@@ -1,0 +1,395 @@
+//! Backend-neutral frame planning for explicit graphics APIs.
+
+import core::option::Option
+import core::vec::Vec
+
+pub fn graph_queue_graphics() -> u32 {
+    ret 0_u32
+}
+pub fn graph_queue_compute() -> u32 {
+    ret 1_u32
+}
+pub fn graph_queue_transfer() -> u32 {
+    ret 2_u32
+}
+
+pub fn graph_access_sampled() -> u32 {
+    ret 1_u32
+}
+pub fn graph_access_storage_read() -> u32 {
+    ret 2_u32
+}
+pub fn graph_access_storage_write() -> u32 {
+    ret 3_u32
+}
+pub fn graph_access_color_attachment() -> u32 {
+    ret 4_u32
+}
+pub fn graph_access_depth_attachment() -> u32 {
+    ret 5_u32
+}
+pub fn graph_access_indirect() -> u32 {
+    ret 6_u32
+}
+pub fn graph_access_transfer_read() -> u32 {
+    ret 7_u32
+}
+pub fn graph_access_transfer_write() -> u32 {
+    ret 8_u32
+}
+pub fn graph_access_present() -> u32 {
+    ret 9_u32
+}
+
+pub struct GraphResource {
+    id: usize
+    name: str
+    kind: u32
+    size: u64
+    transient: bool
+}
+
+impl for GraphResource {
+    pub fn id(self: Self) -> usize {
+        ret self.id
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+    pub fn kind(self: Self) -> u32 {
+        ret self.kind
+    }
+    pub fn size(self: Self) -> u64 {
+        ret self.size
+    }
+    pub fn transient(self: Self) -> bool {
+        ret self.transient
+    }
+}
+
+pub struct GraphAccess {
+    resource: usize
+    state: u32
+    write: bool
+}
+
+impl for GraphAccess {
+    pub fn read(resource: GraphResource, state: u32) -> Self {
+        ret Self {
+            resource.id, state, false
+        }
+    }
+    pub fn write(resource: GraphResource, state: u32) -> Self {
+        ret Self {
+            resource.id, state, true
+        }
+    }
+    pub fn resource(self: Self) -> usize {
+        ret self.resource
+    }
+    pub fn state(self: Self) -> u32 {
+        ret self.state
+    }
+    pub fn writes(self: Self) -> bool {
+        ret self.write
+    }
+}
+
+pub struct GraphPass {
+    id: usize
+    name: str
+    queue: u32
+    accesses: Vec[GraphAccess]
+}
+
+impl for GraphPass {
+    pub fn id(self: Self) -> usize {
+        ret self.id
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+    pub fn queue(self: Self) -> u32 {
+        ret self.queue
+    }
+    pub fn accesses(self: Self) -> Vec[GraphAccess] {
+        ret self.accesses
+    }
+}
+
+pub struct GraphBarrier {
+    resource: usize
+    before_pass: usize
+    after_pass: usize
+    from_state: u32
+    to_state: u32
+    queue_transfer: bool
+}
+
+impl for GraphBarrier {
+    pub fn resource(self: Self) -> usize {
+        ret self.resource
+    }
+    pub fn before_pass(self: Self) -> usize {
+        ret self.before_pass
+    }
+    pub fn after_pass(self: Self) -> usize {
+        ret self.after_pass
+    }
+    pub fn from_state(self: Self) -> u32 {
+        ret self.from_state
+    }
+    pub fn to_state(self: Self) -> u32 {
+        ret self.to_state
+    }
+    pub fn queue_transfer(self: Self) -> bool {
+        ret self.queue_transfer
+    }
+}
+
+pub struct ResourceLifetime {
+    resource: usize
+    first_pass: usize
+    last_pass: usize
+    alias_slot: usize
+}
+
+impl for ResourceLifetime {
+    pub fn resource(self: Self) -> usize {
+        ret self.resource
+    }
+    pub fn first_pass(self: Self) -> usize {
+        ret self.first_pass
+    }
+    pub fn last_pass(self: Self) -> usize {
+        ret self.last_pass
+    }
+    pub fn alias_slot(self: Self) -> usize {
+        ret self.alias_slot
+    }
+}
+
+struct LastAccess {
+    seen: bool
+    pass: usize
+    queue: u32
+    state: u32
+    write: bool
+}
+
+struct AliasSlot {
+    id: usize
+    kind: u32
+    size: u64
+    available_after: usize
+}
+
+pub struct CompiledRenderGraph {
+    valid: bool
+    error: str
+    passes: Vec[GraphPass]
+    barriers: Vec[GraphBarrier]
+    lifetimes: Vec[ResourceLifetime]
+    alias_slots: usize
+}
+
+impl for CompiledRenderGraph {
+    pub fn valid(self: Self) -> bool {
+        ret self.valid
+    }
+    pub fn error(self: Self) -> str {
+        ret self.error
+    }
+    pub fn passes(self: Self) -> Vec[GraphPass] {
+        ret self.passes
+    }
+    pub fn barriers(self: Self) -> Vec[GraphBarrier] {
+        ret self.barriers
+    }
+    pub fn lifetimes(self: Self) -> Vec[ResourceLifetime] {
+        ret self.lifetimes
+    }
+    pub fn alias_slots(self: Self) -> usize {
+        ret self.alias_slots
+    }
+}
+
+pub struct RenderGraph {
+    resources: Vec[GraphResource]
+    passes: Vec[GraphPass]
+}
+
+impl for RenderGraph {
+    pub fn new() -> Self {
+        ret Self {
+            Vec[GraphResource]::new(), Vec[GraphPass]::new()
+        }
+    }
+    pub fn transient(self: mut Self, name: str, kind: u32, size: u64) ->
+    (RenderGraph, GraphResource) {
+        let resource = GraphResource {
+            self.resources.len(), name, kind, size, true
+        }
+        self.resources.push(resource)
+        ret(self, resource)
+    }
+    pub fn external(self: mut Self, name: str, kind: u32, size: u64) ->
+    (RenderGraph, GraphResource) {
+        let resource = GraphResource {
+            self.resources.len(), name, kind, size, false
+        }
+        self.resources.push(resource)
+        ret(self, resource)
+    }
+    pub fn pass(self: mut Self, name: str, queue: u32,
+        accesses: Vec[GraphAccess],) -> Self {
+        let id = self.passes.len()
+        self.passes.push(GraphPass {
+                id, name, queue, accesses
+            }
+            ,
+        )
+        ret self
+    }
+    pub fn compile(self: Self) -> CompiledRenderGraph {
+        let mut last = Vec[LastAccess]::new()
+        let mut first_pass = Vec[usize]::new()
+        let mut last_pass = Vec[usize]::new()
+        let mut initialized = Vec[bool]::new()
+        for resource in self.resources {
+            last.push(LastAccess {
+                    false, 0_usize, 0_u32, 0_u32, false
+                }
+                ,
+            )
+            first_pass.push(self.passes.len())
+            last_pass.push(0_usize)
+            initialized.push(!resource.transient)
+        }
+        let mut barriers = Vec[GraphBarrier]::new()
+        for pass in self.passes {
+            for access in pass.accesses {
+                if access.resource >= self.resources.len() {
+                    ret invalid_graph("Render graph access references an unknown resource")
+                }
+                match initialized.get(access.resource) {
+                    Option::Some(value) => {
+                        if !value && !access.write {
+                            ret invalid_graph("Transient resource is read before its first write")
+                        }
+                    }
+                    Option::None => {
+                        ret invalid_graph("Render graph initialization state is missing")
+                    }
+                }
+                if access.write {
+                    initialized.set(access.resource, true)
+                }
+                match first_pass.get(access.resource) {
+                    Option::Some(first) => {
+                        if first == self.passes.len() {
+                            first_pass.set(access.resource, pass.id)
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+                last_pass.set(access.resource, pass.id)
+                match last.get(access.resource) {
+                    Option::Some(previous) => {
+                        if previous.seen &&
+                        (previous.write || access.write ||
+                            previous.state != access.state ||
+                            previous.queue != pass.queue) {
+                            barriers.push(GraphBarrier {
+                                    access.resource, previous.pass, pass.id,
+                                    previous.state, access.state,
+                                    previous.queue != pass.queue
+                                }
+                                ,)
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+                last.set(access.resource, LastAccess {
+                        true, pass.id, pass.queue, access.state, access.write
+                    }
+                    ,)
+            }
+        }
+
+        let mut lifetimes = Vec[ResourceLifetime]::new()
+        let mut slots = Vec[AliasSlot]::new()
+        for resource in self.resources {
+            match first_pass.get(resource.id) {
+                Option::Some(first) => {
+                    if first < self.passes.len() {
+                        let last_use = match last_pass.get(resource.id) {
+                            Option::Some(value) => {
+                                value
+                            }
+                            Option::None => {
+                                first
+                            }
+                        }
+                        let slot = if resource.transient {
+                            acquire_alias_slot(slots, resource.kind, resource.size, first, last_use)
+                        } else {
+                            (slots, slots.len())
+                        }
+                        slots = slot.0
+                        lifetimes.push(ResourceLifetime {
+                                resource.id, first, last_use, slot.1
+                            }
+                            ,)
+                    }
+                }
+                Option::None => {
+                }
+            }
+        }
+        ret CompiledRenderGraph {
+            true, "", self.passes, barriers, lifetimes, slots.len()
+        }
+    }
+}
+
+fn acquire_alias_slot(slots: Vec[AliasSlot], kind: u32, size: u64,
+    first: usize, last: usize,) ->(Vec[AliasSlot], usize) {
+    let mut result = slots
+    let mut index = 0_usize
+    while index < result.len() {
+        match result.get(index) {
+            Option::Some(slot) => {
+                if slot.kind == kind && slot.size >= size &&
+                slot.available_after < first {
+                    let id = slot.id
+                    result.set(index, AliasSlot {
+                            id, kind, slot.size, last
+                        }
+                        ,
+                    )
+                    ret(result, id)
+                }
+            }
+            Option::None => {
+            }
+        }
+        index += 1_usize
+    }
+    let id = result.len()
+    result.push(AliasSlot {
+            id, kind, size, last
+        }
+        ,
+    )
+    ret(result, id)
+}
+
+fn invalid_graph(error: str) -> CompiledRenderGraph {
+    ret CompiledRenderGraph {
+        false, error, Vec[GraphPass]::new(), Vec[GraphBarrier]::new(),
+        Vec[ResourceLifetime]::new(), 0_usize
+    }
+}

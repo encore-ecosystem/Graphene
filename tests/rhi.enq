@@ -1,7 +1,7 @@
 import core::option::Option
-import core::io::println
+import std::io::println
 import core::vec::Vec
-import core::os::{read_file, remove_file, write_file}
+import std::os::{read_file, remove_file, write_file}
 import graphene::{ApiVersion, BindGroupLayoutEntry, DirectionalLight, GraphicsDevice, GraphicsInstance, ObjectUniforms,
     MaterialAssets, MaterialId, MeshAssets, MeshData, MeshId, PerspectiveCamera, Renderable, Scene, SceneActor, SceneAsset,
     StandardMaterial, Transform, buffer_storage,

@@ -1,0 +1,4 @@
+[project]
+name = "fox_grass_world"
+version = "0.1.0"
+dependencies = []

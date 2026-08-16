@@ -1,11 +1,7 @@
 import core::option::Option
 import core::vec::Vec
-import linalg:: {
-    Mat4, Vec3
-}
-import mod::renderable:: {
-    RenderItem, Renderable
-}
+import linalg::{Mat4, Vec3}
+import mod::renderable::{RenderItem, Renderable}
 import mod::transform::Transform
 
 pub struct Entity {

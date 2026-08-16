@@ -2,9 +2,7 @@
 
 import core::result::Result
 import mod::command_bus::GrapheneCommand
-import mod::command_protocol:: {
-    ProtocolError, command_registry_json, decode_command_request
-}
+import mod::command_protocol::{ProtocolError, command_registry_json, decode_command_request}
 
 fn command_from_request(request: str) -> Result[GrapheneCommand, ProtocolError] {
     match decode_command_request(request) {

@@ -2,13 +2,9 @@
 
 import core::option::Option
 import core::vec::Vec
-import mod::scene::renderable:: {
-    MaterialId, MeshId, Renderable
-}
+import mod::scene::renderable::{MaterialId, MeshId, Renderable}
 import mod::scene::transform::Transform
-import mod::scene::world:: {
-    Entity, Scene
-}
+import mod::scene::world::{Entity, Scene}
 
 pub struct AddActorCommand {
     name: str value: Transform asset_name: str
@@ -36,6 +32,13 @@ pub struct ActorTransformCommand {
 }
 pub struct ActorSelectionCommand {
     actor: Option[u64]
+}
+pub struct ActorSelectionSetCommand {
+    actors: Vec[u64]
+    primary: Option[u64]
+}
+pub struct ActorTransformsCommand {
+    values: Vec[ActorTransformCommand]
 }
 pub struct SimulationCommand {
     mode: str
@@ -83,6 +86,8 @@ pub enum GrapheneCommand {
     SetVisibility(ActorVisibilityCommand)
     SetTransform(ActorTransformCommand)
     Select(ActorSelectionCommand)
+    SelectSet(ActorSelectionSetCommand)
+    SetTransforms(ActorTransformsCommand)
     StartSimulation(SimulationCommand)
     StopSimulation
     RequestProject(ProjectRequestCommand)
@@ -113,6 +118,7 @@ enum CommandEdit {
     Rename(ActorNameCommand)
     Visibility(ActorVisibilityCommand)
     Transform(ActorTransformCommand)
+    Transforms(ActorTransformsCommand)
 }
 
 struct ActorSnapshot {
@@ -141,6 +147,7 @@ struct ActorAsset {
 pub struct EditorState {
     scene: Scene
     selection: Option[u64]
+    selection_ids: Vec[u64]
     revision: u64
     dirty: bool
     undo: Vec[CommandEdit]
@@ -276,6 +283,31 @@ impl for ActorSelectionCommand {
     }
     pub fn actor(self: Self) -> Option[u64] {
         ret self.actor
+    }
+}
+
+impl for ActorSelectionSetCommand {
+    pub fn new(actors: Vec[u64], primary: Option[u64]) -> Self {
+        ret Self {
+            actors, primary
+        }
+    }
+    pub fn actors(self: Self) -> Vec[u64] {
+        ret self.actors
+    }
+    pub fn primary(self: Self) -> Option[u64] {
+        ret self.primary
+    }
+}
+
+impl for ActorTransformsCommand {
+    pub fn new(values: Vec[ActorTransformCommand]) -> Self {
+        ret Self {
+            values
+        }
+    }
+    pub fn values(self: Self) -> Vec[ActorTransformCommand] {
+        ret self.values
     }
 }
 
@@ -450,7 +482,7 @@ impl for CommandResult {
 impl for EditorState {
     pub fn new(scene: Scene) -> Self {
         let mut state = Self {
-            scene, Option[u64]::None, 0_u64, false,
+            scene, Option[u64]::None, Vec[u64]::new(), 0_u64, false,
             Vec[CommandEdit]::new(), Vec[CommandEdit]::new(), Option[InteractiveEdit]::None,
             Vec[ActorAsset]::new(), 0_i64, 0_i64, Vec[GrapheneEvent]::new(),
             false, "", false, false,
@@ -490,6 +522,9 @@ impl for EditorState {
     }
     pub fn selection(self: Self) -> Option[u64] {
         ret self.selection
+    }
+    pub fn selection_ids(self: Self) -> Vec[u64] {
+        ret self.selection_ids
     }
     pub fn revision(self: Self) -> u64 {
         ret self.revision
@@ -617,6 +652,13 @@ impl for EditorState {
             Option::None => {
             }
         }
+        let mut valid_selection = Vec[u64]::new()
+        for actor in self.selection_ids {
+            if self.scene.get(actor).is_some() {
+                valid_selection.push(actor)
+            }
+        }
+        self.selection_ids = valid_selection
         self.revision = self.revision + 1_u64
         let event = GrapheneEvent::new("scene.replaced", Option[u64]::None, self.revision)
         self.record_event(event)
@@ -693,6 +735,13 @@ impl for EditorState {
                         if self.selection == Option[u64]::Some(value.actor()) {
                             self.selection = Option[u64]::None
                         }
+                        let mut remaining_selection = Vec[u64]::new()
+                        for actor in self.selection_ids {
+                            if actor != value.actor() {
+                                remaining_selection.push(actor)
+                            }
+                        }
+                        self.selection_ids = remaining_selection
                         ret self.commit(CommandEdit::RestoreActor(snapshot),
                             "scene.actor.deleted", value.actor(),)
                     }
@@ -772,6 +821,33 @@ impl for EditorState {
                     }
                 }
             }
+            GrapheneCommand::SetTransforms(value) => {
+                let mut inverse = Vec[ActorTransformCommand]::new()
+                let mut primary = 0_u64
+                for transform in value.values() {
+                    match self.scene.get(transform.actor()) {
+                        Option::Some(actor) => {
+                            if primary == 0_u64 {
+                                primary = transform.actor()
+                            }
+                            inverse.push(ActorTransformCommand::new(transform.actor(), actor.transform()))
+                        }
+                        Option::None => {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                }
+                if inverse.len() == 0_usize {
+                    ret CommandResult::error(self.revision, "Transform set must not be empty")
+                }
+                for transform in value.values() {
+                    if !self.scene.set_transform(transform.actor(), transform.value()) {
+                        ret CommandResult::error(self.revision, "Unable to transform actor")
+                    }
+                }
+                ret self.commit(CommandEdit::Transforms(ActorTransformsCommand::new(inverse)),
+                    "scene.actors.transform-changed", primary,)
+            }
             GrapheneCommand::Select(value) => {
                 match value.actor() {
                     Option::Some(id) => {
@@ -786,6 +862,75 @@ impl for EditorState {
                     ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
                 }
                 self.selection = value.actor()
+                self.selection_ids.clear()
+                match self.selection {
+                    Option::Some(actor) => {
+                        self.selection_ids.push(actor)
+                    }
+                    Option::None => {
+                    }
+                }
+                self.revision = self.revision + 1_u64
+                let mut events = Vec[GrapheneEvent]::new()
+                let event = GrapheneEvent::new("selection.changed", self.selection, self.revision)
+                self.record_event(event)
+                events.push(event)
+                ret CommandResult::ok(self.revision, events)
+            }
+            GrapheneCommand::SelectSet(value) => {
+                match value.primary() {
+                    Option::Some(primary) => {
+                        if self.scene.get(primary).is_none() {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+                let mut next = Vec[u64]::new()
+                for actor in value.actors() {
+                    if self.scene.get(actor).is_none() {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                    let mut duplicate = false
+                    for existing in next {
+                        if existing == actor {
+                            duplicate = true
+                        }
+                    }
+                    if !duplicate {
+                        next.push(actor)
+                    }
+                }
+                if self.selection == value.primary() && self.selection_ids.len() == next.len() {
+                    let mut same = true
+                    let mut index = 0_usize
+                    while index < next.len() {
+                        match self.selection_ids.get(index) {
+                            Option::Some(existing) => {
+                                match next.get(index) {
+                                    Option::Some(expected) => {
+                                        if existing != expected {
+                                            same = false
+                                        }
+                                    }
+                                    Option::None => {
+                                        same = false
+                                    }
+                                }
+                            }
+                            Option::None => {
+                                same = false
+                            }
+                        }
+                        index = index + 1_usize
+                    }
+                    if same {
+                        ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+                    }
+                }
+                self.selection = value.primary()
+                self.selection_ids = next
                 self.revision = self.revision + 1_u64
                 let mut events = Vec[GrapheneEvent]::new()
                 let event = GrapheneEvent::new("selection.changed", self.selection, self.revision)
@@ -1024,6 +1169,31 @@ impl for EditorState {
                     }
                 }
             }
+            GrapheneCommand::SetTransforms(value) => {
+                let mut inverse = Vec[ActorTransformCommand]::new()
+                let mut primary = 0_u64
+                for transform in value.values() {
+                    match self.scene.get(transform.actor()) {
+                        Option::Some(actor) => {
+                            if primary == 0_u64 {
+                                primary = transform.actor()
+                            }
+                            inverse.push(ActorTransformCommand::new(transform.actor(), actor.transform()))
+                        }
+                        Option::None => {
+                            ret CommandResult::error(self.revision, "Actor was not found")
+                        }
+                    }
+                }
+                if inverse.len() == 0_usize {
+                    ret CommandResult::error(self.revision, "Transform set must not be empty")
+                }
+                self.interactive = Option[InteractiveEdit]::Some(InteractiveEdit {
+                        CommandEdit::Transforms(ActorTransformsCommand::new(inverse)),
+                        primary, "transforms", "scene.actors.transform-changed"
+                    }
+                    ,)
+            }
             _ => {
                 ret CommandResult::error(self.revision,
                     "Only rename and transform commands support interactive editing",)
@@ -1052,6 +1222,28 @@ impl for EditorState {
             GrapheneCommand::SetTransform(value) => {
                 edit.kind == "transform" && edit.actor == value.actor() &&
                 self.scene.set_transform(value.actor(), value.value())
+            }
+            GrapheneCommand::SetTransforms(value) => {
+                if edit.kind != "transforms" {
+                    false
+                } else {
+                    let mut applied = true
+                    let transforms = value.values()
+                    let mut index = 0_usize
+                    while index < transforms.len() {
+                        match transforms.get(index) {
+                            Option::Some(transform) => {
+                                if !self.scene.set_transform(transform.actor(), transform.value()) {
+                                    applied = false
+                                }
+                            }
+                            Option::None => {
+                            }
+                        }
+                        index = index + 1_usize
+                    }
+                    applied
+                }
             }
             _ => {
                 false
@@ -1202,6 +1394,23 @@ impl for EditorState {
                     Option::None => {
                     }
                 }
+            }
+            CommandEdit::Transforms(value) => {
+                let mut inverse = Vec[ActorTransformCommand]::new()
+                for transform in value.values() {
+                    match self.scene.get(transform.actor()) {
+                        Option::Some(actor) => {
+                            inverse.push(ActorTransformCommand::new(transform.actor(), actor.transform()))
+                            if !self.scene.set_transform(transform.actor(), transform.value()) {
+                                ret Option[CommandEdit]::None
+                            }
+                        }
+                        Option::None => {
+                            ret Option[CommandEdit]::None
+                        }
+                    }
+                }
+                ret Option[CommandEdit]::Some(CommandEdit::Transforms(ActorTransformsCommand::new(inverse)))
             }
         }
         ret Option[CommandEdit]::None

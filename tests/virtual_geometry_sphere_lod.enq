@@ -1,0 +1,130 @@
+import core::option::Option
+import graphene::{build_virtual_geometry_lods, simplify_virtual_geometry_indices, sphere_mesh}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mesh = sphere_mesh(0.6_f32, 20_u32, 32_u32)
+    let source = mesh.parts()
+    let values = source.0
+    let indices = source.1
+    let mut positions = Vec[Vec3]::new()
+    let stride = (source.2 / 4_u32) as usize
+    let mut offset = 0_usize
+    while offset + 2_usize < values.len() {
+        let x = match values.get(offset) {
+            Option::Some(value) => value
+            Option::None => 0.0_f32
+        }
+        let y = match values.get(offset + 1_usize) {
+            Option::Some(value) => value
+            Option::None => 0.0_f32
+        }
+        let z = match values.get(offset + 2_usize) {
+            Option::Some(value) => value
+            Option::None => 0.0_f32
+        }
+        positions.push(Vec3::new(x, y, z))
+        offset += stride
+    }
+    let geometry = build_virtual_geometry_lods(positions, indices, 64_usize, 126_usize)
+    let coarse_indices = simplify_virtual_geometry_indices(positions, indices, 16_u32)
+    let mut coarse_triangle = 0_usize
+    while coarse_triangle + 2_usize < coarse_indices.len() {
+        let ia = match coarse_indices.get(coarse_triangle) { Option::Some(value) => value Option::None => { ret 102_u32 } }
+        let ib = match coarse_indices.get(coarse_triangle + 1_usize) { Option::Some(value) => value Option::None => { ret 102_u32 } }
+        let ic = match coarse_indices.get(coarse_triangle + 2_usize) { Option::Some(value) => value Option::None => { ret 102_u32 } }
+        let a = match positions.get(ia as usize) { Option::Some(value) => value Option::None => { ret 103_u32 } }
+        let b = match positions.get(ib as usize) { Option::Some(value) => value Option::None => { ret 103_u32 } }
+        let c = match positions.get(ic as usize) { Option::Some(value) => value Option::None => { ret 103_u32 } }
+        // A one-pass disjoint contraction may span adjacent source edges, but
+        // must never create the long radial strips caused by collapse chains.
+        if a.sub(b).length() > 0.35_f32 || b.sub(c).length() > 0.35_f32 ||
+            c.sub(a).length() > 0.35_f32 { ret 104_u32 }
+        if b.sub(a).cross(c.sub(a)).length() < 0.00001_f32 { ret 105_u32 }
+        coarse_triangle += 3_usize
+    }
+    let lods = geometry.lods()
+    if lods.len() < 3_usize { ret lods.len() as u32 }
+    let mut base = 0_usize
+    let mut coarse = 0_usize
+    let mut coarse_minimum_y = 1000.0_f32
+    let mut coarse_maximum_y = -1000.0_f32
+    let clusters = geometry.clusters()
+    let first = match lods.get(0_usize) {
+        Option::Some(value) => value
+        Option::None => { ret 2_u32 }
+    }
+    let last = match lods.get(lods.len() - 1_usize) {
+        Option::Some(value) => value
+        Option::None => { ret 3_u32 }
+    }
+    let mut index = first.first_cluster()
+    while index < first.first_cluster() + first.cluster_count() {
+        match clusters.get(index) {
+            Option::Some(cluster) => { base += cluster.triangle_count() }
+            Option::None => { ret 4_u32 }
+        }
+        index += 1_usize
+    }
+    index = last.first_cluster()
+    while index < last.first_cluster() + last.cluster_count() {
+        match clusters.get(index) {
+            Option::Some(cluster) => {
+                coarse += cluster.triangle_count()
+                let minimum_y = cluster.center().y() - cluster.radius()
+                let maximum_y = cluster.center().y() + cluster.radius()
+                if minimum_y < coarse_minimum_y {
+                    coarse_minimum_y = minimum_y
+                }
+                if maximum_y > coarse_maximum_y {
+                    coarse_maximum_y = maximum_y
+                }
+            }
+            Option::None => { ret 5_u32 }
+        }
+        index += 1_usize
+    }
+    if coarse >= base { ret 100_u32 }
+    // Every LOD must conservatively cover both hemispheres. This catches
+    // index-order-biased simplification even when the triangle count falls.
+    if coarse_minimum_y > -0.45_f32 || coarse_maximum_y < 0.45_f32 {
+        ret 101_u32
+    }
+    // A parent must never advertise less error than either finer child. The
+    // GPU relies on this monotonic bound when it stops traversal at 1 px.
+    let hierarchy = geometry.hierarchy()
+    let mut node_index = 0_usize
+    while node_index < hierarchy.len() {
+        match hierarchy.get(node_index) {
+            Option::Some(node) => {
+                if node.geometric_error() < 0.0_f32 ||
+                node.geometric_error() > 1.2_f32 {
+                    ret 106_u32
+                }
+                if !node.leaf() {
+                    match hierarchy.get(node.left_child() as usize) {
+                        Option::Some(child) => {
+                            if child.geometric_error() > node.geometric_error() {
+                                ret 107_u32
+                            }
+                        }
+                        Option::None => { ret 108_u32 }
+                    }
+                    if node.right_child() != 4294967295_u32 {
+                        match hierarchy.get(node.right_child() as usize) {
+                            Option::Some(child) => {
+                                if child.geometric_error() > node.geometric_error() {
+                                    ret 109_u32
+                                }
+                            }
+                            Option::None => { ret 110_u32 }
+                        }
+                    }
+                }
+            }
+            Option::None => { ret 111_u32 }
+        }
+        node_index += 1_usize
+    }
+    ret 0_u32
+}

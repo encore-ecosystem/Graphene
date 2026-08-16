@@ -1,16 +1,20 @@
 import core::option::Option
 import core::vec::Vec
 import linalg::Vec3
-import mod::rhi:: {
-    GpuMesh, GraphicsDevice, RenderPassEncoder
-}
+import mod::rhi::{AccelerationStructure, GpuBuffer, GpuMesh, GraphicsDevice, RenderPassEncoder, buffer_acceleration_structure_input, buffer_shader_device_address, buffer_storage}
 import mod::scene::primitive::MeshData
-import mod::scene::renderable:: {
-    MaterialId, MeshId
-}
+import mod::scene::renderable::{MaterialId, MeshId}
+import mod::virtual_geometry::{GeometryCluster, VirtualGeometry, build_virtual_geometry_lods}
+import mod::virtual_geometry_gpu::GpuClusterCullResult
 
 struct MeshAssetEntry {
-    id: MeshId mesh: GpuMesh
+    id: MeshId
+    mesh: GpuMesh
+    virtual_mesh: GpuMesh
+    virtual_geometry: VirtualGeometry
+    ray_vertices: GpuBuffer
+    ray_indices: GpuBuffer
+    ray_blas: AccelerationStructure
 }
 struct MaterialAssetEntry {
     id: MaterialId material: StandardMaterial
@@ -121,14 +125,99 @@ impl for MeshAssets {
         ret self.entries.len()
     }
     pub fn upload(self: mut Self, device: GraphicsDevice, data: MeshData) -> MeshId {
-        let mesh = device.create_mesh(data.vertices(), data.indices())
-        if !mesh.available() {
+        let values = data.vertices()
+        let indices = data.indices()
+        let stride =(data.stride() / 4_u32) as usize
+        let mut positions = Vec[Vec3]::new()
+        if stride >= 3_usize {
+            let mut offset = 0_usize
+            while offset + 2_usize < values.len() {
+                let mut x = 0.0_f32
+                let mut y = 0.0_f32
+                let mut z = 0.0_f32
+                match values.get(offset) {
+                    Option::Some(value) => {
+                        x = value
+                    }
+                    Option::None => {
+                    }
+                }
+                match values.get(offset + 1_usize) {
+                    Option::Some(value) => {
+                        y = value
+                    }
+                    Option::None => {
+                    }
+                }
+                match values.get(offset + 2_usize) {
+                    Option::Some(value) => {
+                        z = value
+                    }
+                    Option::None => {
+                    }
+                }
+                positions.push(Vec3::new(x, y, z))
+                offset += stride
+            }
+        }
+        let virtual_geometry = build_virtual_geometry_lods(
+            positions, indices, 64_usize, 126_usize,)
+        if !virtual_geometry.valid() {
             ret MeshId::new(0_u64)
+        }
+        let packed_vertex_indices = virtual_geometry.vertex_indices()
+        let packed_triangle_indices = virtual_geometry.triangle_indices()
+        let mut packed_values = Vec[f32]::new()
+        for vertex in packed_vertex_indices {
+            let source = vertex as usize * stride
+            let mut component = 0_usize
+            while component < stride {
+                match values.get(source + component) {
+                    Option::Some(value) => {
+                        packed_values.push(value)
+                    }
+                    Option::None => {
+                        packed_values.push(0.0_f32)
+                    }
+                }
+                component += 1_usize
+            }
+        }
+        let virtual_mesh = device.create_mesh(packed_values, packed_triangle_indices)
+        if !virtual_mesh.available() {
+            ret MeshId::new(0_u64)
+        }
+        let mesh = device.create_mesh(values, indices)
+        if !mesh.available() {
+            virtual_mesh.destroy()
+            ret MeshId::new(0_u64)
+        }
+        // Keep one reusable BLAS per mesh asset. TLAS construction can then
+        // instance the actual mesh assigned to each actor instead of treating
+        // every editor object as the built-in cube.
+        let ray_usage = buffer_storage() |
+        buffer_shader_device_address() |
+        buffer_acceleration_structure_input()
+        let ray_vertices = device.create_buffer(
+            (values.len() as u64) * 4_u64, ray_usage, true,)
+        let ray_indices = device.create_buffer(
+            (indices.len() as u64) * 4_u64, ray_usage, true,)
+        let ray_uploaded = ray_vertices.available() && ray_indices.available() &&
+        ray_vertices.write_f32s(0_u64, values) &&
+        ray_indices.write_u32s(0_u64, indices)
+        let ray_blas = if ray_uploaded {
+            device.create_triangle_blas(
+                ray_vertices, data.stride() as u64,
+                (data.vertices().len() / stride) as u32,
+                ray_indices, data.indices().len() as u32,)
+        } else {
+            AccelerationStructure::unavailable()
         }
         let id = MeshId::new(self.next_id)
         self.next_id = self.next_id + 1_u64
         self.entries.push(MeshAssetEntry {
-                id, mesh
+                id, mesh, virtual_mesh, virtual_geometry,
+                ray_vertices, ray_indices, ray_blas
             }
             ,
         )
@@ -162,10 +251,54 @@ impl for MeshAssets {
         }
         ret false
     }
+    /// Draws the compacted GPU-selected cluster stream for this mesh.
+    pub fn draw_virtual(self: Self, pass: RenderPassEncoder, id: MeshId,
+        cull: GpuClusterCullResult,) -> bool {
+        for entry in self.entries {
+            if entry.id.value() == id.value() {
+                ret entry.virtual_mesh.available() &&
+                pass.bind_vertex_buffer(entry.virtual_mesh.vertex_buffer()) &&
+                pass.bind_index_buffer(entry.virtual_mesh.index_buffer()) &&
+                cull.draw(pass)
+            }
+        }
+        ret false
+    }
+    pub fn virtual_clusters(self: Self, id: MeshId) -> Vec[GeometryCluster] {
+        for entry in self.entries {
+            if entry.id.value() == id.value() {
+                ret entry.virtual_geometry.clusters()
+            }
+        }
+        ret Vec[GeometryCluster]::new()
+    }
+    /// Returns the immutable bottom-level acceleration structure cached for
+    /// this mesh. Unsupported devices expose an unavailable handle so callers
+    /// can retain the software tracing fallback.
+    pub fn acceleration(self: Self, id: MeshId) -> AccelerationStructure {
+        for entry in self.entries {
+            if entry.id.value() == id.value() {
+                ret entry.ray_blas
+            }
+        }
+        ret AccelerationStructure::unavailable()
+    }
     pub fn destroy(self: Self) -> bool {
         let mut destroyed = true
         for entry in self.entries {
+            if entry.ray_blas.available() && !entry.ray_blas.destroy() {
+                destroyed = false
+            }
+            if entry.ray_indices.available() && !entry.ray_indices.destroy() {
+                destroyed = false
+            }
+            if entry.ray_vertices.available() && !entry.ray_vertices.destroy() {
+                destroyed = false
+            }
             if !entry.mesh.destroy() {
+                destroyed = false
+            }
+            if !entry.virtual_mesh.destroy() {
                 destroyed = false
             }
         }

@@ -1,0 +1,138 @@
+//! Editor camera state kept independent from UI and renderer ownership.
+
+import linalg::Vec3
+import mod::performance::camera_step
+
+pub struct EditorCameraState {
+    yaw: f32
+    pitch: f32
+    distance: f32
+    target: Vec3
+    position: Vec3
+    fov: f32
+    saved_yaw: f32
+    saved_pitch: f32
+    saved_distance: f32
+    saved_target: Vec3
+    saved_position: Vec3
+    saved_fov: f32
+}
+
+impl for EditorCameraState {
+    pub fn new(mode: str, play: bool) -> Self {
+        let mut yaw = if mode == "front" {
+            1.5707963_f32
+        } elif mode == "perspective" {
+            0.64_f32
+        } else {
+            0.0_f32
+        }
+        let mut pitch = if mode == "top" {
+            1.35_f32
+        } elif mode == "perspective" {
+            0.42_f32
+        } else {
+            0.0_f32
+        }
+        let mut distance = 5.7_f32
+        let target = Vec3::zero()
+        let mut position = target.add(
+            Vec3::from_spherical(yaw, pitch).scale(distance),)
+        let fov = 1.0471976_f32
+        let saved_yaw = yaw
+        let saved_pitch = pitch
+        let saved_distance = distance
+        let saved_target = target
+        let saved_position = position
+        let saved_fov = fov
+        if play {
+            yaw = 0.0_f32
+            pitch = 0.32175055_f32
+            distance = 6.3245554_f32
+            position = target.add(Vec3::from_spherical(yaw, pitch).scale(distance))
+        }
+        ret Self {
+            yaw, pitch, distance, target, position, fov,
+            saved_yaw, saved_pitch, saved_distance, saved_target,
+            saved_position, saved_fov
+        }
+    }
+    pub fn save_editor_pose(self: mut Self) ->() {
+        self.saved_yaw = self.yaw
+        self.saved_pitch = self.pitch
+        self.saved_distance = self.distance
+        self.saved_target = self.target
+        self.saved_position = self.position
+        self.saved_fov = self.fov
+        ret()
+    }
+    pub fn restore_editor_pose(self: mut Self) ->() {
+        self.yaw = self.saved_yaw
+        self.pitch = self.saved_pitch
+        self.distance = self.saved_distance
+        self.target = self.saved_target
+        self.position = self.saved_position
+        self.fov = self.saved_fov
+        ret()
+    }
+    pub fn enter_play_pose(self: mut Self) ->() {
+        self.save_editor_pose()
+        self.yaw = 0.0_f32
+        self.pitch = 0.32175055_f32
+        self.distance = 6.3245554_f32
+        self.target = Vec3::zero()
+        self.position = self.target.add(
+            Vec3::from_spherical(self.yaw, self.pitch).scale(self.distance),)
+        ret()
+    }
+    pub fn look(self: mut Self, delta_x: f32, delta_y: f32,
+        orbit_pivot: bool,) ->() {
+        self.yaw = self.yaw - delta_x * 0.006_f32
+        self.pitch = self.pitch + delta_y * 0.006_f32
+        if self.pitch > 1.35_f32 {
+            self.pitch = 1.35_f32
+        }
+        if self.pitch < - 1.35_f32 {
+            self.pitch = - 1.35_f32
+        }
+        if orbit_pivot {
+            self.position = self.target.add(
+                Vec3::from_spherical(self.yaw, self.pitch).scale(self.distance),)
+        }
+        ret()
+    }
+    pub fn pan(self: mut Self, delta_x: f32, delta_y: f32,
+        speed_multiplier: f32,) ->() {
+        let forward = Vec3::zero().sub(
+            Vec3::from_spherical(self.yaw, self.pitch),).normalized()
+        let right = forward.cross(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32)).normalized()
+        let up = right.cross(forward).normalized()
+        let speed = self.distance * 0.0015_f32 * speed_multiplier
+        let delta = right.scale( - delta_x * speed).add(up.scale(delta_y * speed))
+        self.target = self.target.add(delta)
+        self.position = self.position.add(delta)
+        ret()
+    }
+    pub fn fly(self: mut Self, direction: Vec3, speed: f32,
+        elapsed_ns: u64,) -> bool {
+        let displacement = camera_step(direction, speed, elapsed_ns)
+        if displacement.x() == 0.0_f32 && displacement.y() == 0.0_f32 &&
+        displacement.z() == 0.0_f32 {
+            ret false
+        }
+        self.position = self.position.add(displacement)
+        self.target = self.target.add(displacement)
+        ret true
+    }
+}
+
+#attr(test)
+fn editor_camera_play_pose_preserves_editor_snapshot() -> bool {
+    let mut camera = EditorCameraState::new("perspective", true)
+    if camera.yaw == camera.saved_yaw || camera.distance == camera.saved_distance {
+        ret false
+    }
+    camera.restore_editor_pose()
+    ret camera.yaw == 0.64_f32 && camera.pitch == 0.42_f32 &&
+    camera.distance == 5.7_f32 && camera.fov == 1.0471976_f32
+}

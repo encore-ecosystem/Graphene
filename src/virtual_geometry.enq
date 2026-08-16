@@ -1,0 +1,1250 @@
+//! Offline cluster construction for Graphene Virtual Geometry.
+
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+
+pub struct GeometryCluster {
+    vertex_offset: usize
+    vertex_count: usize
+    triangle_offset: usize
+    triangle_count: usize
+    center: Vec3
+    radius: f32
+    cone_axis: Vec3
+    cone_cutoff: f32
+}
+
+pub struct GeometryLod {
+    first_cluster: usize
+    cluster_count: usize
+    geometric_error: f32
+    hierarchy_root: u32
+}
+
+impl for GeometryLod {
+    pub fn first_cluster(self: Self) -> usize {
+        ret self.first_cluster
+    }
+    pub fn cluster_count(self: Self) -> usize {
+        ret self.cluster_count
+    }
+    pub fn geometric_error(self: Self) -> f32 {
+        ret self.geometric_error
+    }
+    pub fn hierarchy_root(self: Self) -> u32 {
+        ret self.hierarchy_root
+    }
+}
+
+/// A bottom-up cluster-group hierarchy node. Leaves reference one renderable
+/// cluster; internal nodes bound a contiguous cluster range and are traversed
+/// by the GPU before leaf-level culling.
+pub struct ClusterHierarchyNode {
+    center: Vec3
+    radius: f32
+    first_cluster: usize
+    cluster_count: usize
+    left_child: u32
+    right_child: u32
+    level: u32
+    geometric_error: f32
+}
+
+impl for ClusterHierarchyNode {
+    pub fn center(self: Self) -> Vec3 {
+        ret self.center
+    }
+    pub fn radius(self: Self) -> f32 {
+        ret self.radius
+    }
+    pub fn first_cluster(self: Self) -> usize {
+        ret self.first_cluster
+    }
+    pub fn cluster_count(self: Self) -> usize {
+        ret self.cluster_count
+    }
+    pub fn left_child(self: Self) -> u32 {
+        ret self.left_child
+    }
+    pub fn right_child(self: Self) -> u32 {
+        ret self.right_child
+    }
+    pub fn level(self: Self) -> u32 {
+        ret self.level
+    }
+    pub fn geometric_error(self: Self) -> f32 {
+        ret self.geometric_error
+    }
+    pub fn leaf(self: Self) -> bool {
+        ret self.left_child == 4294967295_u32
+    }
+}
+
+impl for GeometryCluster {
+    pub fn vertex_offset(self: Self) -> usize {
+        ret self.vertex_offset
+    }
+    pub fn vertex_count(self: Self) -> usize {
+        ret self.vertex_count
+    }
+    pub fn triangle_offset(self: Self) -> usize {
+        ret self.triangle_offset
+    }
+    pub fn triangle_count(self: Self) -> usize {
+        ret self.triangle_count
+    }
+    pub fn center(self: Self) -> Vec3 {
+        ret self.center
+    }
+    pub fn radius(self: Self) -> f32 {
+        ret self.radius
+    }
+    pub fn cone_axis(self: Self) -> Vec3 {
+        ret self.cone_axis
+    }
+    pub fn cone_cutoff(self: Self) -> f32 {
+        ret self.cone_cutoff
+    }
+}
+
+pub struct VirtualGeometry {
+    valid: bool
+    error: str
+    clusters: Vec[GeometryCluster]
+    lods: Vec[GeometryLod]
+    hierarchy: Vec[ClusterHierarchyNode]
+    root_node: u32
+    vertex_indices: Vec[u32]
+    triangle_indices: Vec[u32]
+}
+
+impl for VirtualGeometry {
+    pub fn valid(self: Self) -> bool {
+        ret self.valid
+    }
+    pub fn error(self: Self) -> str {
+        ret self.error
+    }
+    pub fn clusters(self: Self) -> Vec[GeometryCluster] {
+        ret self.clusters
+    }
+    pub fn lods(self: Self) -> Vec[GeometryLod] {
+        ret self.lods
+    }
+    pub fn hierarchy(self: Self) -> Vec[ClusterHierarchyNode] {
+        ret self.hierarchy
+    }
+    pub fn root_node(self: Self) -> u32 {
+        ret self.root_node
+    }
+    pub fn vertex_indices(self: Self) -> Vec[u32] {
+        ret self.vertex_indices
+    }
+    pub fn triangle_indices(self: Self) -> Vec[u32] {
+        ret self.triangle_indices
+    }
+}
+
+fn local_vertex(vertices: Vec[u32], global: u32) -> usize {
+    let mut index = 0_usize
+    while index < vertices.len() {
+        match vertices.get(index) {
+            Option::Some(value) => {
+                if value == global {
+                    ret index
+                }
+            }
+            Option::None => {
+            }
+        }
+        index += 1_usize
+    }
+    ret vertices.len()
+}
+
+fn position(values: Vec[Vec3], vertex: u32) -> Vec3 {
+    match values.get(vertex as usize) {
+        Option::Some(value) => {
+            ret value
+        }
+        Option::None => {
+        }
+    }
+    ret Vec3::zero()
+}
+
+fn cluster_metadata(values: Vec[Vec3],
+    vertices: Vec[u32], triangles: Vec[u32],
+    vertex_offset: usize, triangle_offset: usize,) -> GeometryCluster {
+    let mut minimum = Vec3::zero()
+    let mut maximum = Vec3::zero()
+    let mut initialized = false
+    for vertex in vertices {
+        let point = position(values, vertex)
+        if !initialized {
+            minimum = point
+            maximum = point
+            initialized = true
+        } else {
+            minimum = Vec3::new(
+                if point.x() < minimum.x() {
+                    point.x()
+                } else {
+                    minimum.x()
+                }
+                ,
+                if point.y() < minimum.y() {
+                    point.y()
+                } else {
+                    minimum.y()
+                }
+                ,
+                if point.z() < minimum.z() {
+                    point.z()
+                } else {
+                    minimum.z()
+                }
+                ,)
+            maximum = Vec3::new(
+                if point.x() > maximum.x() {
+                    point.x()
+                } else {
+                    maximum.x()
+                }
+                ,
+                if point.y() > maximum.y() {
+                    point.y()
+                } else {
+                    maximum.y()
+                }
+                ,
+                if point.z() > maximum.z() {
+                    point.z()
+                } else {
+                    maximum.z()
+                }
+                ,)
+        }
+    }
+    let center = minimum.add(maximum).scale(0.5_f32)
+    let mut radius = 0.0_f32
+    for vertex in vertices {
+        let distance = position(values, vertex).sub(center).length()
+        if distance > radius {
+            radius = distance
+        }
+    }
+
+    let mut normal_sum = Vec3::zero()
+    let mut triangle = 0_usize
+    while triangle + 2_usize < triangles.len() {
+        let a_local = match triangles.get(triangle) {
+            Option::Some(value) => {
+                value as usize
+            }
+            Option::None => {
+                0_usize
+            }
+        }
+        let b_local = match triangles.get(triangle + 1_usize) {
+            Option::Some(value) => {
+                value as usize
+            }
+            Option::None => {
+                0_usize
+            }
+        }
+        let c_local = match triangles.get(triangle + 2_usize) {
+            Option::Some(value) => {
+                value as usize
+            }
+            Option::None => {
+                0_usize
+            }
+        }
+        let a = match vertices.get(a_local) {
+            Option::Some(value) => {
+                position(values, value)
+            }
+            Option::None => {
+                Vec3::zero()
+            }
+        }
+        let b = match vertices.get(b_local) {
+            Option::Some(value) => {
+                position(values, value)
+            }
+            Option::None => {
+                Vec3::zero()
+            }
+        }
+        let c = match vertices.get(c_local) {
+            Option::Some(value) => {
+                position(values, value)
+            }
+            Option::None => {
+                Vec3::zero()
+            }
+        }
+        normal_sum = normal_sum.add(b.sub(a).cross(c.sub(a)).normalized())
+        triangle += 3_usize
+    }
+    let cone_axis = normal_sum.normalized()
+    let mut cone_cutoff = 1.0_f32
+    triangle = 0_usize
+    while triangle + 2_usize < triangles.len() {
+        let ai = match triangles.get(triangle) {
+            Option::Some(value) => {
+                value as usize
+            }
+            Option::None => {
+                0_usize
+            }
+        }
+        let bi = match triangles.get(triangle + 1_usize) {
+            Option::Some(value) => {
+                value as usize
+            }
+            Option::None => {
+                0_usize
+            }
+        }
+        let ci = match triangles.get(triangle + 2_usize) {
+            Option::Some(value) => {
+                value as usize
+            }
+            Option::None => {
+                0_usize
+            }
+        }
+        let a = match vertices.get(ai) {
+            Option::Some(value) => {
+                position(values, value)
+            }
+            Option::None => {
+                Vec3::zero()
+            }
+        }
+        let b = match vertices.get(bi) {
+            Option::Some(value) => {
+                position(values, value)
+            }
+            Option::None => {
+                Vec3::zero()
+            }
+        }
+        let c = match vertices.get(ci) {
+            Option::Some(value) => {
+                position(values, value)
+            }
+            Option::None => {
+                Vec3::zero()
+            }
+        }
+        let alignment = cone_axis.dot(b.sub(a).cross(c.sub(a)).normalized())
+        if alignment < cone_cutoff {
+            cone_cutoff = alignment
+        }
+        triangle += 3_usize
+    }
+    ret GeometryCluster {
+        vertex_offset, vertices.len(), triangle_offset, triangles.len() / 3_usize,
+        center, radius, cone_axis, cone_cutoff
+    }
+}
+
+fn invalid_geometry(message: str) -> VirtualGeometry {
+    ret VirtualGeometry {
+        false, message, Vec[GeometryCluster]::new(), Vec[GeometryLod]::new(),
+        Vec[ClusterHierarchyNode]::new(), 4294967295_u32,
+        Vec[u32]::new(), Vec[u32]::new()
+    }
+}
+
+fn hierarchy_node(nodes: Vec[ClusterHierarchyNode], index: u32) -> ClusterHierarchyNode {
+    match nodes.get(index as usize) {
+        Option::Some(node) => {
+            ret node
+        }
+        Option::None => {
+            ret ClusterHierarchyNode {
+                Vec3::zero(), 0.0_f32, 0_usize, 0_usize,
+                4294967295_u32, 4294967295_u32, 0_u32, 0.0_f32
+            }
+        }
+    }
+}
+
+fn merged_sphere(a_center: Vec3, a_radius: f32,
+    b_center: Vec3, b_radius: f32,) ->(Vec3, f32) {
+    let offset = b_center.sub(a_center)
+    let distance = offset.length()
+    if a_radius >= distance + b_radius {
+        ret(a_center, a_radius)
+    }
+    if b_radius >= distance + a_radius {
+        ret(b_center, b_radius)
+    }
+    if distance <= 0.000001_f32 {
+        ret(a_center, if a_radius > b_radius {
+                a_radius
+            } else {
+                b_radius
+            }
+            ,)
+    }
+    let radius =(distance + a_radius + b_radius) * 0.5_f32
+    let center = a_center.add(offset.scale((radius - a_radius) / distance))
+    ret(center, radius)
+}
+
+/// Builds a compact binary hierarchy in leaf-first, root-last order.
+///
+/// Keeping topology-adjacent clusters adjacent gives stable groups without a
+/// separate allocation-heavy sort. Imported meshes already preserve triangle
+/// locality, while a future offline Morton reorder can improve traversal
+/// coherence without changing this public representation.
+pub fn build_cluster_hierarchy(clusters: Vec[GeometryCluster]) -> Vec[ClusterHierarchyNode] {
+    let mut nodes = Vec[ClusterHierarchyNode]::new()
+    let mut level_nodes = Vec[u32]::new()
+    let mut cluster_index = 0_usize
+    while cluster_index < clusters.len() {
+        match clusters.get(cluster_index) {
+            Option::Some(cluster) => {
+                nodes.push(ClusterHierarchyNode {
+                        cluster.center(), cluster.radius(), cluster_index, 1_usize,
+                        4294967295_u32, 4294967295_u32, 0_u32,
+                        cluster.radius() * 0.001_f32
+                    }
+                    ,)
+                level_nodes.push((nodes.len() - 1_usize) as u32)
+            }
+            Option::None => {
+            }
+        }
+        cluster_index += 1_usize
+    }
+    let mut level = 1_u32
+    while level_nodes.len() > 1_usize {
+        let mut next = Vec[u32]::new()
+        let mut index = 0_usize
+        while index < level_nodes.len() {
+            let left_index = match level_nodes.get(index) {
+                Option::Some(value) => {
+                    value
+                }
+                Option::None => {
+                    0_u32
+                }
+            }
+            if index + 1_usize >= level_nodes.len() {
+                next.push(left_index)
+                index += 1_usize
+            } else {
+                let right_index = match level_nodes.get(index + 1_usize) {
+                    Option::Some(value) => {
+                        value
+                    }
+                    Option::None => {
+                        left_index
+                    }
+                }
+                let left = hierarchy_node(nodes, left_index)
+                let right = hierarchy_node(nodes, right_index)
+                let bounds = merged_sphere(left.center(), left.radius(), right.center(), right.radius())
+                let combined_count = left.cluster_count() + right.cluster_count()
+                let child_error = if left.geometric_error() > right.geometric_error() {
+                    left.geometric_error()
+                } else {
+                    right.geometric_error()
+                }
+                nodes.push(ClusterHierarchyNode {
+                        bounds.0, bounds.1, left.first_cluster(), combined_count,
+                        left_index, right_index, level,
+                        child_error + bounds.1 * 0.01_f32
+                    }
+                    ,)
+                next.push((nodes.len() - 1_usize) as u32)
+                index += 2_usize
+            }
+        }
+        level_nodes = next
+        level += 1_u32
+    }
+    ret nodes
+}
+
+/// Partitions an indexed triangle mesh into independently addressable
+/// clusters. Defaults matching current mesh-shader hardware are 64 vertices
+/// and 126 triangles; callers may use lower limits for software fallback.
+pub fn build_virtual_geometry(values: Vec[Vec3], indices: Vec[u32],
+    max_vertices: usize, max_triangles: usize,) ->
+VirtualGeometry {
+    if indices.len() % 3_usize != 0_usize || max_vertices < 3_usize ||
+    max_triangles == 0_usize {
+        ret invalid_geometry("Invalid triangle list or cluster limits")
+    }
+    let vertex_count = values.len()
+    let mut clusters = Vec[GeometryCluster]::new()
+    let mut packed_vertices = Vec[u32]::new()
+    let mut packed_triangles = Vec[u32]::new()
+    let mut cluster_vertices = Vec[u32]::new()
+    let mut cluster_triangles = Vec[u32]::new()
+    let mut triangle = 0_usize
+    while triangle < indices.len() {
+        let a = match indices.get(triangle) {
+            Option::Some(value) => {
+                value
+            }
+            Option::None => {
+                0_u32
+            }
+        }
+        let b = match indices.get(triangle + 1_usize) {
+            Option::Some(value) => {
+                value
+            }
+            Option::None => {
+                0_u32
+            }
+        }
+        let c = match indices.get(triangle + 2_usize) {
+            Option::Some(value) => {
+                value
+            }
+            Option::None => {
+                0_u32
+            }
+        }
+        if a as usize >= vertex_count || b as usize >= vertex_count ||
+        c as usize >= vertex_count {
+            ret invalid_geometry("Triangle index is outside the vertex buffer")
+        }
+        let mut additional = 0_usize
+        if local_vertex(cluster_vertices, a) == cluster_vertices.len() {
+            additional += 1_usize
+        }
+        if local_vertex(cluster_vertices, b) == cluster_vertices.len() {
+            additional += 1_usize
+        }
+        if c != a && c != b &&
+        local_vertex(cluster_vertices, c) == cluster_vertices.len() {
+            additional += 1_usize
+        }
+        let full = cluster_triangles.len() / 3_usize >= max_triangles ||
+        cluster_vertices.len() + additional > max_vertices
+        if full && cluster_triangles.len() > 0_usize {
+            clusters.push(cluster_metadata(values, cluster_vertices,
+                    cluster_triangles, packed_vertices.len(), packed_triangles.len(),))
+            for vertex in cluster_vertices {
+                packed_vertices.push(vertex)
+            }
+            for local in cluster_triangles {
+                packed_triangles.push(local)
+            }
+            cluster_vertices.clear()
+            cluster_triangles.clear()
+        }
+        let mut triangle_vertices = Vec[u32]::new()
+        triangle_vertices.push(a)
+        triangle_vertices.push(b)
+        triangle_vertices.push(c)
+        for global in triangle_vertices {
+            let mut local = local_vertex(cluster_vertices, global)
+            if local == cluster_vertices.len() {
+                cluster_vertices.push(global)
+                local = cluster_vertices.len() - 1_usize
+            }
+            cluster_triangles.push(local as u32)
+        }
+        triangle += 3_usize
+    }
+    if cluster_triangles.len() > 0_usize {
+        clusters.push(cluster_metadata(values, cluster_vertices,
+                cluster_triangles, packed_vertices.len(), packed_triangles.len(),))
+        for vertex in cluster_vertices {
+            packed_vertices.push(vertex)
+        }
+        for local in cluster_triangles {
+            packed_triangles.push(local)
+        }
+    }
+    let hierarchy = build_cluster_hierarchy(clusters)
+    let root_node = if hierarchy.len() == 0_usize {
+        4294967295_u32
+    } else {
+        (hierarchy.len() - 1_usize) as u32
+    }
+    let mut lods = Vec[GeometryLod]::new()
+    lods.push(GeometryLod {
+            0_usize, clusters.len(), 0.0_f32, root_node
+        }
+        ,)
+    ret VirtualGeometry {
+        true, "", clusters, lods,
+        hierarchy, root_node, packed_vertices, packed_triangles
+    }
+}
+
+fn representative_root(representatives: Vec[u32], value: u32) -> u32 {
+    let mut root = value
+    let mut guard = 0_usize
+    while guard < representatives.len() {
+        let next = match representatives.get(root as usize) {
+            Option::Some(candidate) => candidate
+            Option::None => root
+        }
+        if next == root {
+            ret root
+        }
+        root = next
+        guard += 1_usize
+    }
+    ret root
+}
+
+// Symmetric 4x4 plane quadric. Only the upper triangle is stored, keeping the
+// builder allocation-free per candidate while retaining the full QEM metric.
+struct GeometryQuadric {
+    xx: f32 xy: f32 xz: f32 xw: f32
+    yy: f32 yz: f32 yw: f32
+    zz: f32 zw: f32 ww: f32
+    planes: f32
+}
+
+impl for GeometryQuadric {
+    fn zero() -> Self {
+        ret Self {
+            0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32,
+            0.0_f32, 0.0_f32, 0.0_f32,
+            0.0_f32, 0.0_f32, 0.0_f32,
+            0.0_f32
+        }
+    }
+    fn plane(normal: Vec3, distance: f32) -> Self {
+        let x = normal.x() let y = normal.y() let z = normal.z()
+        ret Self {
+            x * x, x * y, x * z, x * distance,
+            y * y, y * z, y * distance,
+            z * z, z * distance, distance * distance,
+            1.0_f32
+        }
+    }
+    fn add(self: Self, other: Self) -> Self {
+        ret Self {
+            self.xx + other.xx, self.xy + other.xy,
+            self.xz + other.xz, self.xw + other.xw,
+            self.yy + other.yy, self.yz + other.yz,
+            self.yw + other.yw, self.zz + other.zz,
+            self.zw + other.zw, self.ww + other.ww,
+            self.planes + other.planes
+        }
+    }
+    fn plane_count(self: Self) -> f32 {
+        ret self.planes
+    }
+    fn evaluate(self: Self, point: Vec3) -> f32 {
+        let x = point.x() let y = point.y() let z = point.z()
+        let value = self.xx * x * x + 2.0_f32 * self.xy * x * y +
+        2.0_f32 * self.xz * x * z + 2.0_f32 * self.xw * x +
+        self.yy * y * y + 2.0_f32 * self.yz * y * z +
+        2.0_f32 * self.yw * y + self.zz * z * z +
+        2.0_f32 * self.zw * z + self.ww
+        // Floating-point cancellation can make an exact on-plane result a
+        // tiny negative number. QEM cost is non-negative by definition.
+        ret if value > 0.0_f32 {
+            value
+        } else {
+            0.0_f32
+        }
+    }
+}
+
+struct SimplifiedGeometryIndices {
+    indices: Vec[u32]
+    geometric_error: f32
+}
+
+impl for SimplifiedGeometryIndices {
+    fn parts(self: Self) ->(Vec[u32], f32) {
+        ret(self.indices, self.geometric_error)
+    }
+}
+
+fn geometry_quadric_at(values: Vec[GeometryQuadric], index: u32) -> GeometryQuadric {
+    match values.get(index as usize) {
+        Option::Some(value) => {
+            ret value
+        }
+        Option::None => {
+        }
+    }
+    ret GeometryQuadric::zero()
+}
+
+fn geometry_bool_at(values: Vec[bool], index: u32) -> bool {
+    match values.get(index as usize) {
+        Option::Some(value) => {
+            ret value
+        }
+        Option::None => {
+        }
+    }
+    ret true
+}
+
+fn triangle_index(indices: Vec[u32], offset: usize) -> u32 {
+    match indices.get(offset) {
+        Option::Some(value) => {
+            ret value
+        }
+        Option::None => {
+        }
+    }
+    ret 0_u32
+}
+
+fn same_undirected_edge(a: u32, b: u32, c: u32, d: u32) -> bool {
+    ret(a == c && b == d) ||(a == d && b == c)
+}
+
+/// Marks topological borders, seams and non-manifold junctions. A collapse may
+/// move an interior vertex onto a locked border, but never moves a locked
+/// vertex itself. Adjacent cluster groups therefore retain byte-identical
+/// boundary indices and can select different hierarchy levels without cracks.
+fn locked_geometry_vertices(indices: Vec[u32], vertex_count: usize) -> Vec[bool] {
+    let mut locked = Vec[bool]::new()
+    let mut vertex = 0_usize
+    while vertex < vertex_count {
+        locked.push(false)
+        vertex += 1_usize
+    }
+    let mut triangle = 0_usize
+    while triangle + 2_usize < indices.len() {
+        let a = triangle_index(indices, triangle)
+        let b = triangle_index(indices, triangle + 1_usize)
+        let c = triangle_index(indices, triangle + 2_usize)
+        let mut edge = 0_usize
+        while edge < 3_usize {
+            let first = if edge == 0_usize {
+                a
+            } elif edge == 1_usize {
+                b
+            } else {
+                c
+            }
+            let second = if edge == 0_usize {
+                b
+            } elif edge == 1_usize {
+                c
+            } else {
+                a
+            }
+            let mut uses = 0_usize
+            let mut probe = 0_usize
+            while probe + 2_usize < indices.len() {
+                let pa = triangle_index(indices, probe)
+                let pb = triangle_index(indices, probe + 1_usize)
+                let pc = triangle_index(indices, probe + 2_usize)
+                if same_undirected_edge(first, second, pa, pb) {
+                    uses += 1_usize
+                }
+                if same_undirected_edge(first, second, pb, pc) {
+                    uses += 1_usize
+                }
+                if same_undirected_edge(first, second, pc, pa) {
+                    uses += 1_usize
+                }
+                probe += 3_usize
+            }
+            if uses != 2_usize {
+                if first as usize < locked.len() {
+                    locked.set(first as usize, true)
+                }
+                if second as usize < locked.len() {
+                    locked.set(second as usize, true)
+                }
+            }
+            edge += 1_usize
+        }
+        triangle += 3_usize
+    }
+    ret locked
+}
+
+fn build_geometry_quadrics(values: Vec[Vec3], indices: Vec[u32],
+    representatives: Vec[u32],) -> Vec[GeometryQuadric] {
+    let mut quadrics = Vec[GeometryQuadric]::new()
+    let mut vertex = 0_usize
+    while vertex < values.len() {
+        quadrics.push(GeometryQuadric::zero())
+        vertex += 1_usize
+    }
+    let mut triangle = 0_usize
+    while triangle + 2_usize < indices.len() {
+        let a = representative_root(representatives, triangle_index(indices, triangle))
+        let b = representative_root(representatives, triangle_index(indices, triangle + 1_usize))
+        let c = representative_root(representatives, triangle_index(indices, triangle + 2_usize))
+        if a != b && b != c && a != c {
+            let pa = position(values, a)
+            let pb = position(values, b)
+            let pc = position(values, c)
+            let cross = pb.sub(pa).cross(pc.sub(pa))
+            if cross.length() > 0.0000001_f32 {
+                let normal = cross.normalized()
+                let plane = GeometryQuadric::plane(normal, - normal.dot(pa))
+                quadrics.set(a as usize, geometry_quadric_at(quadrics, a).add(plane))
+                quadrics.set(b as usize, geometry_quadric_at(quadrics, b).add(plane))
+                quadrics.set(c as usize, geometry_quadric_at(quadrics, c).add(plane))
+            }
+        }
+        triangle += 3_usize
+    }
+    ret quadrics
+}
+
+fn collapse_preserves_orientation(values: Vec[Vec3], indices: Vec[u32],
+    representatives: Vec[u32], removed: u32, retained: u32,) -> bool {
+    let mut triangle = 0_usize
+    while triangle + 2_usize < indices.len() {
+        let old_a = representative_root(representatives, triangle_index(indices, triangle))
+        let old_b = representative_root(representatives, triangle_index(indices, triangle + 1_usize))
+        let old_c = representative_root(representatives, triangle_index(indices, triangle + 2_usize))
+        if old_a == removed || old_b == removed || old_c == removed {
+            let a = if old_a == removed {
+                retained
+            } else {
+                old_a
+            }
+            let b = if old_b == removed {
+                retained
+            } else {
+                old_b
+            }
+            let c = if old_c == removed {
+                retained
+            } else {
+                old_c
+            }
+            if a != b && b != c && a != c {
+                let old_normal = position(values, old_b).sub(position(values, old_a)).cross(
+                    position(values, old_c).sub(position(values, old_a)),)
+                let new_normal = position(values, b).sub(position(values, a)).cross(
+                    position(values, c).sub(position(values, a)),)
+                if new_normal.length() < 0.0000001_f32 ||
+                old_normal.dot(new_normal) <= 0.0_f32 {
+                    ret false
+                }
+            }
+        }
+        triangle += 3_usize
+    }
+    ret true
+}
+
+fn approximate_square_root(value: f32) -> f32 {
+    if value <= 0.0_f32 {
+        ret 0.0_f32
+    }
+    let mut estimate = if value > 1.0_f32 {
+        value
+    } else {
+        1.0_f32
+    }
+    let mut iteration = 0_u32
+    while iteration < 8_u32 {
+        estimate = 0.5_f32 *(estimate + value / estimate)
+        iteration += 1_u32
+    }
+    ret estimate
+}
+
+fn canonical_geometry_representatives(values: Vec[Vec3],
+    indices: Vec[u32],) -> Vec[u32] {
+    let mut representatives = Vec[u32]::new()
+    let mut vertex = 0_usize
+    while vertex < values.len() {
+        representatives.push(vertex as u32)
+        vertex += 1_usize
+    }
+    // Only vertices referenced by this cluster group participate. Comparing
+    // the full source mesh for every group would make build time quadratic in
+    // unrelated geometry.
+    let mut offset = 0_usize
+    while offset < indices.len() {
+        let current = triangle_index(indices, offset)
+        let point = position(values, current)
+        let mut canonical = current
+        let mut probe = 0_usize
+        while probe < offset {
+            let candidate_index = triangle_index(indices, probe)
+            let candidate = position(values, candidate_index)
+            let delta = point.sub(candidate)
+            if delta.dot(delta) <= 0.000000000001_f32 {
+                canonical = match representatives.get(candidate_index as usize) {
+                    Option::Some(value) => value
+                    Option::None => candidate_index
+                }
+                break
+            }
+            probe += 1_usize
+        }
+        if current as usize < representatives.len() {
+            representatives.set(current as usize, canonical)
+        }
+        offset += 1_usize
+    }
+    ret representatives
+}
+
+fn canonical_geometry_indices(indices: Vec[u32],
+    representatives: Vec[u32],) -> Vec[u32] {
+    let mut canonical = Vec[u32]::new()
+    for index in indices {
+        canonical.push(representative_root(representatives, index))
+    }
+    ret canonical
+}
+
+fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
+    target_triangles: usize,) -> SimplifiedGeometryIndices {
+    if values.len() == 0_usize || indices.len() < 3_usize {
+        ret SimplifiedGeometryIndices {
+            Vec[u32]::new(), 0.0_f32
+        }
+    }
+    // Rendering keeps the original split vertices (hard normals, UV seams and
+    // colors), while the topology graph welds position-equivalent vertices.
+    // OBJ and glTF importers are therefore free to use per-corner attributes
+    // without turning every triangle into an un-simplifiable boundary island.
+    let mut representatives = canonical_geometry_representatives(values, indices)
+    let working_indices = canonical_geometry_indices(indices, representatives)
+    let locked = locked_geometry_vertices(working_indices, values.len())
+    let mut active_triangles = working_indices.len() / 3_usize
+    let safe_target = if target_triangles > 0_usize {
+        target_triangles
+    } else {
+        1_usize
+    }
+    let mut maximum_error = 0.0_f32
+    let mut guard = 0_usize
+    while active_triangles > safe_target && guard < values.len() * 2_usize {
+        let quadrics = build_geometry_quadrics(values, working_indices, representatives)
+        let mut best_removed = 4294967295_u32
+        let mut best_retained = 4294967295_u32
+        let mut best_cost = 340282346638528859811704183484516925440.0_f32
+        let mut best_plane_count = 1.0_f32
+        let mut triangle = 0_usize
+        while triangle + 2_usize < working_indices.len() {
+            let a = representative_root(representatives, triangle_index(working_indices, triangle))
+            let b = representative_root(representatives, triangle_index(working_indices, triangle + 1_usize))
+            let c = representative_root(representatives, triangle_index(working_indices, triangle + 2_usize))
+            let mut edge = 0_usize
+            while edge < 3_usize {
+                let first = if edge == 0_usize {
+                    a
+                } elif edge == 1_usize {
+                    b
+                } else {
+                    c
+                }
+                let second = if edge == 0_usize {
+                    b
+                } elif edge == 1_usize {
+                    c
+                } else {
+                    a
+                }
+                if first != second {
+                    let combined = geometry_quadric_at(quadrics, first).add(
+                        geometry_quadric_at(quadrics, second),)
+                    let first_locked = geometry_bool_at(locked, first)
+                    let second_locked = geometry_bool_at(locked, second)
+                    let first_cost = combined.evaluate(position(values, second))
+                    if !first_locked && first_cost < best_cost &&
+                    collapse_preserves_orientation(values, working_indices,
+                        representatives, first, second,) {
+                        best_removed = first best_retained = second best_cost = first_cost
+                        best_plane_count = combined.plane_count()
+                    }
+                    let second_cost = combined.evaluate(position(values, first))
+                    if !second_locked && second_cost < best_cost &&
+                    collapse_preserves_orientation(values, working_indices,
+                        representatives, second, first,) {
+                        best_removed = second best_retained = first best_cost = second_cost
+                        best_plane_count = combined.plane_count()
+                    }
+                }
+                edge += 1_usize
+            }
+            triangle += 3_usize
+        }
+        if best_removed == 4294967295_u32 {
+            break
+        }
+        representatives.set(best_removed as usize, best_retained)
+        let normalized_cost = best_cost /
+        if best_plane_count > 1.0_f32 {
+            best_plane_count
+        } else {
+            1.0_f32
+        }
+        if normalized_cost > maximum_error {
+            maximum_error = normalized_cost
+        }
+        active_triangles = 0_usize
+        triangle = 0_usize
+        while triangle + 2_usize < working_indices.len() {
+            let a = representative_root(representatives, triangle_index(working_indices, triangle))
+            let b = representative_root(representatives, triangle_index(working_indices, triangle + 1_usize))
+            let c = representative_root(representatives, triangle_index(working_indices, triangle + 2_usize))
+            if a != b && b != c && a != c {
+                active_triangles += 1_usize
+            }
+            triangle += 3_usize
+        }
+        guard += 1_usize
+    }
+    let mut simplified = Vec[u32]::new()
+    let mut triangle = 0_usize
+    while triangle + 2_usize < working_indices.len() {
+        let a = representative_root(representatives, triangle_index(working_indices, triangle))
+        let b = representative_root(representatives, triangle_index(working_indices, triangle + 1_usize))
+        let c = representative_root(representatives, triangle_index(working_indices, triangle + 2_usize))
+        if a != b && b != c && a != c {
+            simplified.push(a) simplified.push(b) simplified.push(c)
+        }
+        triangle += 3_usize
+    }
+    ret SimplifiedGeometryIndices {
+        simplified, approximate_square_root(maximum_error)
+    }
+}
+
+pub fn simplify_virtual_geometry_indices(values: Vec[Vec3], indices: Vec[u32],
+    resolution: u32,) -> Vec[u32] {
+    if values.len() == 0_usize || resolution < 2_u32 {
+        ret Vec[u32]::new()
+    }
+    let triangle_count = indices.len() / 3_usize
+    let target_triangles =
+    triangle_count * resolution as usize /(resolution as usize + 16_usize)
+    let result = simplify_geometry_qem(values, indices, target_triangles)
+    ret result.parts().0
+}
+
+fn cluster_range_global_indices(clusters: Vec[GeometryCluster],
+    packed_vertices: Vec[u32], packed_triangles: Vec[u32],
+    first_cluster: usize, cluster_count: usize,) -> Vec[u32] {
+    let mut result = Vec[u32]::new()
+    let mut cluster_index = first_cluster
+    while cluster_index < first_cluster + cluster_count &&
+    cluster_index < clusters.len() {
+        match clusters.get(cluster_index) {
+            Option::Some(cluster) => {
+                let mut triangle = 0_usize
+                while triangle < cluster.triangle_count() * 3_usize {
+                    let local = triangle_index(
+                        packed_triangles, cluster.triangle_offset() + triangle,)
+                    match packed_vertices.get(cluster.vertex_offset() + local as usize) {
+                        Option::Some(global) => {
+                            result.push(global)
+                        }
+                        Option::None => {
+                        }
+                    }
+                    triangle += 1_usize
+                }
+            }
+            Option::None => {
+            }
+        }
+        cluster_index += 1_usize
+    }
+    ret result
+}
+
+fn append_virtual_partition(clusters: mut Vec[GeometryCluster],
+    hierarchy: mut Vec[ClusterHierarchyNode],
+    packed_vertices: mut Vec[u32], packed_triangles: mut Vec[u32],
+    partition: VirtualGeometry, left_child: u32, right_child: u32,
+    level: u32, geometric_error: f32,) ->(usize, usize, u32) {
+    let first_cluster = clusters.len()
+    let vertex_base = packed_vertices.len()
+    let triangle_base = packed_triangles.len()
+    for cluster in partition.clusters() {
+        clusters.push(GeometryCluster {
+                cluster.vertex_offset() + vertex_base,
+                cluster.vertex_count(),
+                cluster.triangle_offset() + triangle_base,
+                cluster.triangle_count(),
+                cluster.center(), cluster.radius(),
+                cluster.cone_axis(), cluster.cone_cutoff()
+            }
+            ,)
+    }
+    for vertex_index in partition.vertex_indices() {
+        packed_vertices.push(vertex_index)
+    }
+    for triangle_index in partition.triangle_indices() {
+        packed_triangles.push(triangle_index)
+    }
+    let partition_root = hierarchy_node(partition.hierarchy(), partition.root_node())
+    let node_index = hierarchy.len() as u32
+    hierarchy.push(ClusterHierarchyNode {
+            partition_root.center(), partition_root.radius(),
+            first_cluster, clusters.len() - first_cluster,
+            left_child, right_child, level, geometric_error
+        }
+        ,)
+    ret(first_cluster, clusters.len() - first_cluster, node_index)
+}
+
+/// Builds a crack-free, continuous cluster hierarchy.
+///
+/// Every internal node owns renderable parent clusters and points at one or
+/// two finer children. QEM simplification locks the boundary of each group, so
+/// neighboring groups may independently render parent or child geometry
+/// without T-junctions. The hierarchy is leaf-first/root-last, which keeps the
+/// root page range contiguous and lets the runtime pin the coarsest cut.
+pub fn build_virtual_geometry_lods(values: Vec[Vec3], indices: Vec[u32],
+    max_vertices: usize, max_triangles: usize,) -> VirtualGeometry {
+    let base = build_virtual_geometry(values, indices, max_vertices, max_triangles)
+    if !base.valid() {
+        ret base
+    }
+    let mut clusters = base.clusters()
+    let mut hierarchy = Vec[ClusterHierarchyNode]::new()
+    let mut packed_vertices = base.vertex_indices()
+    let mut packed_triangles = base.triangle_indices()
+    let mut lods = Vec[GeometryLod]::new()
+    let base_cluster_count = clusters.len()
+    let mut level_nodes = Vec[u32]::new()
+    let mut cluster_index = 0_usize
+    while cluster_index < base_cluster_count {
+        match clusters.get(cluster_index) {
+            Option::Some(cluster) => {
+                hierarchy.push(ClusterHierarchyNode {
+                        cluster.center(), cluster.radius(), cluster_index, 1_usize,
+                        4294967295_u32, 4294967295_u32, 0_u32, 0.0_f32
+                    }
+                    ,)
+                level_nodes.push((hierarchy.len() - 1_usize) as u32)
+            }
+            Option::None => {
+            }
+        }
+        cluster_index += 1_usize
+    }
+    lods.push(GeometryLod {
+            0_usize, base_cluster_count, 0.0_f32,
+            if level_nodes.len() == 1_usize {
+                match level_nodes.get(0_usize) {
+                    Option::Some(value) => value
+                    Option::None => 4294967295_u32
+                }
+            } else {
+                4294967295_u32
+            }
+        }
+        ,)
+
+    let mut level = 1_u32
+    let mut accumulated_error = 0.0_f32
+    while level_nodes.len() > 1_usize && level < 24_u32 {
+        let level_first_cluster = clusters.len()
+        let mut next_nodes = Vec[u32]::new()
+        let mut node_offset = 0_usize
+        let mut level_error = accumulated_error
+        while node_offset < level_nodes.len() {
+            let left_index = match level_nodes.get(node_offset) {
+                Option::Some(value) => value
+                Option::None => 4294967295_u32
+            }
+            let right_index = if node_offset + 1_usize < level_nodes.len() {
+                match level_nodes.get(node_offset + 1_usize) {
+                    Option::Some(value) => value
+                    Option::None => 4294967295_u32
+                }
+            } else {
+                4294967295_u32
+            }
+            let left = hierarchy_node(hierarchy, left_index)
+            let mut source_indices = cluster_range_global_indices(
+                clusters, packed_vertices, packed_triangles,
+                left.first_cluster(), left.cluster_count(),)
+            let mut child_error = left.geometric_error()
+            if right_index != 4294967295_u32 {
+                let right = hierarchy_node(hierarchy, right_index)
+                for index in cluster_range_global_indices(
+                    clusters, packed_vertices, packed_triangles,
+                    right.first_cluster(), right.cluster_count(),) {
+                    source_indices.push(index)
+                }
+                if right.geometric_error() > child_error {
+                    child_error = right.geometric_error()
+                }
+            }
+            let source_triangle_count = source_indices.len() / 3_usize
+            let target_triangle_count = if right_index == 4294967295_u32 {
+                source_triangle_count
+            } else {
+                let half = source_triangle_count / 2_usize
+                if half > 0_usize {
+                    half
+                } else {
+                    1_usize
+                }
+            }
+            let simplified = simplify_geometry_qem(
+                values, source_indices, target_triangle_count,)
+            let simplified_parts = simplified.parts()
+            let simplified_indices = simplified_parts.0
+            let collapse_error = simplified_parts.1
+            let partition = build_virtual_geometry(
+                values, simplified_indices, max_vertices, max_triangles,)
+            if !partition.valid() {
+                ret invalid_geometry("AutoLOD parent cluster construction failed")
+            }
+            let node_error = child_error + collapse_error
+            if node_error > level_error {
+                level_error = node_error
+            }
+            let appended = append_virtual_partition(
+                clusters, hierarchy, packed_vertices, packed_triangles,
+                partition, left_index, right_index, level, node_error,)
+            next_nodes.push(appended.2)
+            node_offset += 2_usize
+        }
+        let level_cluster_count = clusters.len() - level_first_cluster
+        let level_root = if next_nodes.len() == 1_usize {
+            match next_nodes.get(0_usize) {
+                Option::Some(value) => value
+                Option::None => 4294967295_u32
+            }
+        } else {
+            4294967295_u32
+        }
+        lods.push(GeometryLod {
+                level_first_cluster, level_cluster_count,
+                level_error, level_root
+            }
+            ,)
+        accumulated_error = level_error
+        level_nodes = next_nodes
+        level += 1_u32
+    }
+    let root_node = if level_nodes.len() == 0_usize {
+        4294967295_u32
+    } else {
+        match level_nodes.get(0_usize) {
+            Option::Some(value) => value
+            Option::None => 4294967295_u32
+        }
+    }
+    ret VirtualGeometry {
+        true, "", clusters, lods, hierarchy, root_node,
+        packed_vertices, packed_triangles
+    }
+}

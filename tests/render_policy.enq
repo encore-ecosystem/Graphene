@@ -1,0 +1,25 @@
+import graphene:: {
+    DeviceFeatures, RenderFeaturePolicy
+}
+
+fn main() -> u32 {
+    let compatibility = RenderFeaturePolicy::select(DeviceFeatures::none())
+    if compatibility.virtual_geometry_name() != "compatibility" ||
+    compatibility.dynamic_gi_name() != "screen-space" {
+        ret 1_u32
+    }
+
+    let compute_mask = 1_u32 | 8_u32 | 16_u32 | 128_u32
+    let compute = RenderFeaturePolicy::select(DeviceFeatures::from_mask(compute_mask))
+    if compute.virtual_geometry_name() != "compute-indirect" ||
+    compute.dynamic_gi_name() != "software-sdf" {
+        ret 2_u32
+    }
+
+    let full = RenderFeaturePolicy::select(DeviceFeatures::from_mask(511_u32))
+    if full.virtual_geometry_name() != "mesh-shader" ||
+    full.dynamic_gi_name() != "ray-query" {
+        ret 3_u32
+    }
+    ret 0_u32
+}

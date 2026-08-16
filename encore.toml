@@ -5,4 +5,7 @@ description = "Graphene real-time engine and editor"
 readme = "README.md"
 licence = "MIT"
 build = "build.enq"
-dependencies = ["index@json", "index@linalg", "path@../Luma/workspace/vulkan_native", "path@../Luma[fonts]"]
+dependencies = ["index@std@^1.0.1", "index@json@^1.0.0", "index@linalg@^0.1.1", "index@vulkan_native@^0.1.0", "index@luma@^0.2.1"]
+
+[target.x86_64-unknown-linux-gnu]
+link-args = ["-Wl,--allow-multiple-definition"]

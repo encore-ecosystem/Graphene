@@ -3,15 +3,9 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import json:: {
-    Json, field, parse, stringify
-}
+import json::{Json, field, parse, stringify}
 import linalg::Vec3
-import mod::command_bus:: {
-    ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand,
-    ActorVisibilityCommand, AddActorCommand, CommandResult, DuplicateActorCommand, GrapheneCommand,
-    SimulationCommand
-}
+import mod::command_bus::{ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand, ActorVisibilityCommand, AddActorCommand, CommandResult, DuplicateActorCommand, GrapheneCommand, SimulationCommand}
 import mod::editor_values::parse_editor_scalar
 import mod::scene::transform::Transform
 

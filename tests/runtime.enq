@@ -1,0 +1,174 @@
+import core::option::Option
+import linalg::Vec3
+import graphene::Transform
+import graphene::{InputMap, InputSnapshot, PhysicsWorld, RigidBody, RuntimeClock, RuntimeConfig, RuntimeSession, RuntimeTransform, Scene, Subsystem, TickContext, TickGroup, World, sync_runtime_world}
+
+fn clock_contract() -> u32 {
+    let config = RuntimeConfig::defaults()
+    let mut clock = RuntimeClock::new(config)
+    let first = clock.begin_frame(1.0_f32 / 30.0_f32, InputSnapshot::empty())
+    if first.fixed_steps() != 2_u32 || first.frame_index() != 1_u64 || first.fixed_frame_index() != 2_u64 {
+        ret 1_u32
+    }
+    let clamped = clock.begin_frame(10.0_f32, InputSnapshot::empty())
+    if clamped.delta_seconds() > config.max_frame_delta_seconds() || clamped.fixed_steps() > 8_u32 {
+        ret 2_u32
+    }
+    ret 0_u32
+}
+
+fn input_contract() -> u32 {
+    let snapshot = InputSnapshot::empty()
+        .with_down(87_u32)
+        .with_pressed(87_u32)
+        .with_released(1_u32)
+    if !snapshot.key_down(87_u32) || !snapshot.key_pressed(87_u32) || !snapshot.key_released(1_u32) {
+        ret 10_u32
+    }
+    let mut map = InputMap::new()
+    map.bind_axis_key("MoveForward", 87_u32, 1.0_f32)
+    map.bind_axis_key("MoveForward", 83_u32, -1.0_f32)
+    if map.value("MoveForward", snapshot) != 1.0_f32 || !map.pressed("MoveForward", snapshot) {
+        ret 11_u32
+    }
+    ret 0_u32
+}
+
+fn world_contract() -> u32 {
+    let mut world = World::new()
+    let actor = world.spawn_actor("Player", RuntimeTransform::identity())
+    if actor == 0_u64 || world.actor_count() != 1_usize || !world.contains(actor) {
+        ret 20_u32
+    }
+    world.translate(actor, Vec3::new(1.0_f32, 2.0_f32, 3.0_f32))
+    match world.transform(actor) {
+        Option[RuntimeTransform]::Some(transform) => {
+            let position = transform.position()
+            if position.x() != 1.0_f32 || position.y() != 2.0_f32 || position.z() != 3.0_f32 {
+                ret 21_u32
+            }
+        }
+        Option[RuntimeTransform]::None => {
+            ret 22_u32
+        }
+    }
+    if !world.despawn_actor(actor) || world.contains(actor) || world.actor_count() != 0_usize {
+        ret 23_u32
+    }
+    ret 0_u32
+}
+
+fn physics_contract() -> u32 {
+    let mut world = World::new()
+    let actor = world.spawn_actor("Ball", RuntimeTransform::new(
+        Vec3::new(0.0_f32, 3.0_f32, 0.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)
+    ))
+    let mut physics = PhysicsWorld::new(Vec3::new(0.0_f32, -9.81_f32, 0.0_f32))
+    physics.add_body(RigidBody::dynamic(actor, 1.0_f32, 0.5_f32))
+    physics.step(world, 1.0_f32 / 60.0_f32)
+    match world.transform(actor) {
+        Option[RuntimeTransform]::Some(transform) => {
+            if transform.position().y() >= 3.0_f32 { ret 30_u32 }
+        }
+        Option[RuntimeTransform]::None => { ret 31_u32 }
+    }
+    let mut settled = 0_u32
+    let mut frame = 0_u32
+    while frame < 120_u32 {
+        physics.step(world, 1.0_f32 / 60.0_f32)
+        frame = frame + 1_u32
+    }
+    match world.transform(actor) {
+        Option[RuntimeTransform]::Some(transform) => {
+            if transform.position().y() < 0.499_f32 || transform.position().y() > 0.501_f32 { ret 32_u32 }
+        }
+        Option[RuntimeTransform]::None => { ret 33_u32 }
+    }
+    match physics.events().get(0_usize) {
+        Option::Some(_) => { settled = 1_u32 }
+        Option::None => {
+        }
+    }
+    if settled != 1_u32 { ret 34_u32 }
+    let mut pair_world = World::new()
+    let first = pair_world.spawn_actor("First", RuntimeTransform::new(
+        Vec3::new(0.0_f32, 0.5_f32, 0.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)
+    ))
+    let second = pair_world.spawn_actor("Second", RuntimeTransform::new(
+        Vec3::new(0.6_f32, 0.5_f32, 0.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)
+    ))
+    let mut pair_physics = PhysicsWorld::new(Vec3::zero())
+    pair_physics.add_body(RigidBody::dynamic(first, 1.0_f32, 0.5_f32))
+    pair_physics.add_body(RigidBody::static(second, 0.5_f32))
+    pair_physics.step(pair_world, 1.0_f32 / 60.0_f32)
+    if pair_physics.events().len() == 0_usize { ret 35_u32 }
+    ret 0_u32
+}
+
+fn tick_contract() -> u32 {
+    let frame = RuntimeClock::new(RuntimeConfig::defaults())
+        .begin_frame(1.0_f32 / 60.0_f32, InputSnapshot::empty())
+    let context = TickContext::for_frame(frame, TickGroup::Physics)
+    if context.group().order() != 1_u32 || context.fixed_frame_index() != 1_u64 {
+        ret 40_u32
+    }
+    let mut subsystem = Subsystem::new("Gameplay", TickGroup::PostUpdate)
+    if !subsystem.enabled() || subsystem.group().order() != 3_u32 { ret 41_u32 }
+    subsystem.set_enabled(false)
+    if subsystem.enabled() { ret 42_u32 }
+    ret 0_u32
+}
+
+fn scene_bridge_contract() -> u32 {
+    let mut runtime = World::new()
+    let actor = runtime.spawn_actor("Bridge", RuntimeTransform::new(
+        Vec3::new(4.0_f32, 5.0_f32, 6.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)
+    ))
+    let mut scene = Scene::new()
+    scene.create_entity_with_id(actor, "Bridge", Transform::identity())
+    sync_runtime_world(runtime, scene)
+    match scene.get(actor) {
+        Option::Some(entity) => {
+            if entity.transform().position().x() != 4.0_f32 || entity.transform().position().y() != 5.0_f32 {
+                ret 50_u32
+            }
+        }
+        Option::None => { ret 51_u32 }
+    }
+    ret 0_u32
+}
+
+fn session_contract() -> u32 {
+    let mut world = World::new()
+    let actor = world.spawn_actor("Session", RuntimeTransform::new(
+        Vec3::new(0.0_f32, 2.0_f32, 0.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)
+    ))
+    let mut physics = PhysicsWorld::new(Vec3::new(0.0_f32, -9.81_f32, 0.0_f32))
+    physics.add_body(RigidBody::dynamic(actor, 1.0_f32, 0.5_f32))
+    let mut session = RuntimeSession::new(RuntimeConfig::defaults(), world, physics)
+    let frame = session.tick(1.0_f32 / 60.0_f32, InputSnapshot::empty())
+    if frame.fixed_steps() != 1_u32 { ret 60_u32 }
+    match session.world().transform(actor) {
+        Option::Some(transform) => {
+            if transform.position().y() >= 2.0_f32 { ret 61_u32 }
+        }
+        Option::None => { ret 62_u32 }
+    }
+    ret 0_u32
+}
+
+fn main() -> u32 {
+    let clock = clock_contract()
+    if clock != 0_u32 { ret clock }
+    let input = input_contract()
+    if input != 0_u32 { ret input }
+    let world = world_contract()
+    if world != 0_u32 { ret world }
+    let physics = physics_contract()
+    if physics != 0_u32 { ret physics }
+    let tick = tick_contract()
+    if tick != 0_u32 { ret tick }
+    let bridge = scene_bridge_contract()
+    if bridge != 0_u32 { ret bridge }
+    ret session_contract()
+}

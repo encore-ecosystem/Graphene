@@ -1,0 +1,232 @@
+//! Fixed-allocation physical page pool for GPU virtual geometry.
+//!
+//! The pool deliberately uses one raw allocation. Keeping a retained `Vec`
+//! inside a heap-owned aggregate currently exercises an Encore generic-field
+//! ownership bug; an AutoLOD page pool also benefits from stable addresses
+//! and zero allocation after creation.
+
+import graphene::virtual_geometry_streaming::GeometryPageAllocation
+
+pub struct GeometryPagePool {
+    words: usize *
+    capacity: usize
+    resident_count: usize
+}
+
+#attr(safe)
+fn __page_pool_allocate(count: usize) -> usize * {
+    unsafe {
+        unsafe ehir {
+            zero: usize = lcpos 0_usize
+            null: usize * = pcast zero: usize, usize *
+            storage: usize * = hrealloc null: usize *, count: usize
+        }
+        ret storage
+    }
+}
+
+#attr(safe)
+fn __page_pool_free(storage: usize *) -> bool {
+    unsafe {
+        unsafe ehir {
+            hfree storage: usize *
+        }
+        ret true
+    }
+}
+
+#attr(safe)
+fn __page_pool_load(storage: usize *, index: usize) -> usize {
+    unsafe {
+        unsafe ehir {
+            item: usize * = gep storage: usize *, index: usize
+            value: usize = load item: usize *
+        }
+        ret value
+    }
+}
+
+#attr(safe)
+fn __page_pool_store(storage: usize *, index: usize, value: usize) -> bool {
+    unsafe {
+        unsafe ehir {
+            item: usize * = gep storage: usize *, index: usize
+            store value: usize, item: usize *
+        }
+        ret true
+    }
+}
+
+fn __page_pool_entry_word(slot: usize, field: usize) -> usize {
+    ret 2_usize + slot * 5_usize + field
+}
+
+fn __page_pool_storage(pool: GeometryPagePool &) -> usize * {
+    unsafe {
+        unsafe ehir {
+            words: usize * = pcast pool: GeometryPagePool &, usize *
+            address: usize = load words: usize *
+            storage: usize * = pcast address: usize, usize *
+        }
+        ret storage
+    }
+}
+
+fn __page_pool_capacity(pool: GeometryPagePool &) -> usize {
+    unsafe {
+        unsafe ehir {
+            field: usize * = getfieldptr pool: GeometryPagePool & > 1
+            value: usize = load field: usize *
+        }
+        ret value
+    }
+}
+
+fn __page_pool_resident_count(pool: GeometryPagePool &) -> usize {
+    unsafe {
+        unsafe ehir {
+            field: usize * = getfieldptr pool: GeometryPagePool & > 2
+            value: usize = load field: usize *
+        }
+        ret value
+    }
+}
+
+fn __page_pool_increment_resident(pool: GeometryPagePool &) -> bool {
+    unsafe {
+        unsafe ehir {
+            field: usize * = getfieldptr pool: GeometryPagePool & > 2
+            value: usize = load field: usize *
+            one: usize = lcpos 1_usize
+            next: usize = add value: usize, one: usize
+            store next: usize, field: usize *
+        }
+        ret true
+    }
+}
+
+impl for GeometryPagePool {
+    pub fn create(capacity: usize) -> GeometryPagePool < H > {
+        let word_count = 2_usize + capacity * 5_usize
+        let storage = __page_pool_allocate(word_count)
+        let mut word = 0_usize
+        while word < word_count {
+            __page_pool_store(storage, word, 0_usize)
+            word += 1_usize
+        }
+        __page_pool_store(storage, 0_usize, capacity)
+        ret GeometryPagePool < H > {
+            storage, capacity, 0_usize
+        }
+    }
+}
+
+pub fn geometry_page_pool_capacity(pool: GeometryPagePool &) -> usize {
+    ret pool.capacity
+}
+
+pub fn geometry_page_pool_resident_count(pool: GeometryPagePool &) -> usize {
+    ret pool.resident_count
+}
+
+pub fn geometry_page_pool_request(pool: GeometryPagePool &,
+    asset: u64, page: u32, frame: u64,
+    priority: u32,) -> GeometryPageAllocation {
+    let capacity = __page_pool_capacity(pool)
+    if asset == 0_u64 || capacity == 0_usize {
+        ret GeometryPageAllocation::new(false, 0_u32, 0_u64, 0_u32)
+    }
+    let storage = __page_pool_storage(pool)
+    let mut index = 0_usize
+    let mut empty = capacity
+    let mut victim = capacity
+    let mut victim_priority = 4294967295_u32
+    let mut victim_frame = 18446744073709551615_u64
+    while index < capacity {
+        let occupied = __page_pool_load(
+            storage, __page_pool_entry_word(index, 0_usize),) != 0_usize
+        let entry_asset = __page_pool_load(
+            storage, __page_pool_entry_word(index, 1_usize),) as u64
+        let entry_page = __page_pool_load(
+            storage, __page_pool_entry_word(index, 2_usize),) as u32
+        let entry_frame = __page_pool_load(
+            storage, __page_pool_entry_word(index, 3_usize),) as u64
+        let entry_priority = __page_pool_load(
+            storage, __page_pool_entry_word(index, 4_usize),) as u32
+        if occupied && entry_asset == asset && entry_page == page {
+            __page_pool_store(storage,
+                __page_pool_entry_word(index, 3_usize), frame as usize,)
+            __page_pool_store(storage,
+                __page_pool_entry_word(index, 4_usize),
+                (if priority > entry_priority {
+                        priority
+                    } else {
+                        entry_priority
+                    }
+                ) as usize,)
+            ret GeometryPageAllocation::new(
+                true, index as u32, 0_u64, 0_u32,)
+        }
+        if !occupied && empty == capacity {
+            empty = index
+        }
+        if occupied &&
+        (entry_priority < victim_priority ||
+            (entry_priority == victim_priority &&
+                entry_frame < victim_frame)) {
+            victim = index
+            victim_priority = entry_priority
+            victim_frame = entry_frame
+        }
+        index += 1_usize
+    }
+    let slot = if empty < capacity {
+        empty
+    } else {
+        victim
+    }
+    if slot >= capacity {
+        ret GeometryPageAllocation::new(false, 0_u32, 0_u64, 0_u32)
+    }
+    let previous_occupied = __page_pool_load(
+        storage, __page_pool_entry_word(slot, 0_usize),) != 0_usize
+    let previous_asset = __page_pool_load(
+        storage, __page_pool_entry_word(slot, 1_usize),) as u64
+    let previous_page = __page_pool_load(
+        storage, __page_pool_entry_word(slot, 2_usize),) as u32
+    if !previous_occupied {
+        __page_pool_increment_resident(pool)
+    }
+    __page_pool_store(storage,
+        __page_pool_entry_word(slot, 0_usize), 1_usize,)
+    __page_pool_store(storage,
+        __page_pool_entry_word(slot, 1_usize), asset as usize,)
+    __page_pool_store(storage,
+        __page_pool_entry_word(slot, 2_usize), page as usize,)
+    __page_pool_store(storage,
+        __page_pool_entry_word(slot, 3_usize), frame as usize,)
+    __page_pool_store(storage,
+        __page_pool_entry_word(slot, 4_usize), priority as usize,)
+    ret GeometryPageAllocation::new(
+        true, slot as u32,
+        if previous_occupied {
+            previous_asset
+        } else {
+            0_u64
+        }
+        ,
+        if previous_occupied {
+            previous_page
+        } else {
+            0_u32
+        }
+        ,)
+}
+
+pub fn geometry_page_pool_destroy(pool: GeometryPagePool &) -> bool {
+    let storage = __page_pool_storage(pool)
+    if storage as usize != 0_usize {
+        ret __page_pool_free(storage)
+    }
+    ret true
+}

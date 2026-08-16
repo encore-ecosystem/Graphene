@@ -1,0 +1,92 @@
+//! Deterministic render-path selection from logical-device features.
+
+import mod::rhi::DeviceFeatures
+
+pub enum VirtualGeometryPath {
+    Compatibility
+    Compute
+    MeshShader
+}
+
+pub enum DynamicGiPath {
+    ScreenSpace
+    SoftwareSdf
+    RayQuery
+}
+
+pub struct RenderFeaturePolicy {
+    virtual_geometry: VirtualGeometryPath
+    dynamic_gi: DynamicGiPath
+}
+
+impl for RenderFeaturePolicy {
+    pub fn select(features: DeviceFeatures) -> Self {
+        let compute_geometry = features.contains(DeviceFeatures::descriptor_indexing()) &&
+        features.contains(DeviceFeatures::synchronization_2()) &&
+        features.contains(DeviceFeatures::dynamic_rendering()) &&
+        features.contains(DeviceFeatures::draw_indirect_count())
+        let mesh_geometry = compute_geometry &&
+        features.contains(DeviceFeatures::buffer_device_address()) &&
+        features.contains(DeviceFeatures::mesh_shader())
+        let software_gi = features.contains(DeviceFeatures::descriptor_indexing()) &&
+        features.contains(DeviceFeatures::synchronization_2()) &&
+        features.contains(DeviceFeatures::dynamic_rendering())
+        let ray_gi = software_gi &&
+        features.contains(DeviceFeatures::buffer_device_address()) &&
+        features.contains(DeviceFeatures::ray_query())
+
+        ret Self {
+            if mesh_geometry {
+                VirtualGeometryPath::MeshShader
+            } else {
+                if compute_geometry {
+                    VirtualGeometryPath::Compute
+                } else {
+                    VirtualGeometryPath::Compatibility
+                }
+            }
+            ,
+            if ray_gi {
+                DynamicGiPath::RayQuery
+            } else {
+                if software_gi {
+                    DynamicGiPath::SoftwareSdf
+                } else {
+                    DynamicGiPath::ScreenSpace
+                }
+            }
+        }
+    }
+    pub fn virtual_geometry(self: Self) -> VirtualGeometryPath {
+        ret self.virtual_geometry
+    }
+    pub fn dynamic_gi(self: Self) -> DynamicGiPath {
+        ret self.dynamic_gi
+    }
+    pub fn virtual_geometry_name(self: Self) -> str {
+        match self.virtual_geometry {
+            VirtualGeometryPath::MeshShader => {
+                ret "mesh-shader"
+            }
+            VirtualGeometryPath::Compute => {
+                ret "compute-indirect"
+            }
+            VirtualGeometryPath::Compatibility => {
+                ret "compatibility"
+            }
+        }
+    }
+    pub fn dynamic_gi_name(self: Self) -> str {
+        match self.dynamic_gi {
+            DynamicGiPath::RayQuery => {
+                ret "ray-query"
+            }
+            DynamicGiPath::SoftwareSdf => {
+                ret "software-sdf"
+            }
+            DynamicGiPath::ScreenSpace => {
+                ret "screen-space"
+            }
+        }
+    }
+}

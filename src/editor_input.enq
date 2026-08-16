@@ -1,0 +1,272 @@
+//! Editor-owned viewport input state consumed by Luma `AppEvent` updates.
+
+import linalg::Vec3
+import luma::AppEvent
+
+pub struct FlightInput {
+    forward: bool
+    back: bool
+    left: bool
+    right: bool
+    up: bool
+    down: bool
+    local_up: bool
+    local_down: bool
+    boost: bool
+}
+
+pub struct ViewportInputState {
+    focused: bool
+    orbiting: bool
+    panning: bool
+    orbit_pivot: bool
+    dolly: bool
+    pointer_locked: bool
+    pointer_x: f32
+    pointer_y: f32
+    tick_ns: u64
+}
+
+impl for ViewportInputState {
+    pub fn new(tick_ns: u64) -> Self {
+        ret Self {
+            false, false, false, false, false, false,
+            0.0_f32, 0.0_f32, tick_ns
+        }
+    }
+    pub fn cancel_pointer(self: mut Self) ->() {
+        self.orbiting = false
+        self.panning = false
+        self.orbit_pivot = false
+        self.dolly = false
+        self.pointer_locked = false
+        ret()
+    }
+    pub fn moving(self: Self) -> bool {
+        ret self.orbiting || self.panning
+    }
+    pub fn update(self: mut Self, event: AppEvent) -> Self {
+        if event.is_focus_lost() {
+            self.cancel_pointer()
+            self.focused = false
+            ret self
+        }
+        if event.target() != "viewport-surface" {
+            ret self
+        }
+        if event.is_pointer_down() {
+            self.focused = true
+            self.pointer_x = event.x()
+            self.pointer_y = event.y()
+            if event.pointer_button() == 3_u32 {
+                self.orbiting = true
+                self.pointer_locked = true
+            } elif event.pointer_button() == 2_u32 {
+                self.panning = true
+            }
+        } elif event.is_pointer_move() {
+            self.pointer_x = event.x()
+            self.pointer_y = event.y()
+        } elif event.is_pointer_up() {
+            if event.pointer_button() == 3_u32 {
+                self.orbiting = false
+                self.orbit_pivot = false
+                self.dolly = false
+                self.pointer_locked = false
+            } elif event.pointer_button() == 2_u32 {
+                self.panning = false
+            }
+        }
+        ret self
+    }
+}
+
+impl for FlightInput {
+    pub fn new() -> Self {
+        ret Self {
+            false, false, false, false, false, false, false, false, false
+        }
+    }
+    pub fn clear(self: mut Self) ->() {
+        self.forward = false
+        self.back = false
+        self.left = false
+        self.right = false
+        self.up = false
+        self.down = false
+        self.local_up = false
+        self.local_down = false
+        self.boost = false
+        ret()
+    }
+    pub fn active(self: Self) -> bool {
+        ret self.forward || self.back || self.left || self.right || self.up ||
+        self.down || self.local_up || self.local_down
+    }
+    pub fn set_action(self: mut Self, action: str, down: bool) ->() {
+        if action == "flight.forward" {
+            self.forward = down
+        } elif action == "flight.back" {
+            self.back = down
+        } elif action == "flight.left" {
+            self.left = down
+        } elif action == "flight.right" {
+            self.right = down
+        } elif action == "flight.up" {
+            self.up = down
+        } elif action == "flight.down" {
+            self.down = down
+        } elif action == "flight.local_up" {
+            self.local_up = down
+        } elif action == "flight.local_down" {
+            self.local_down = down
+        } elif action == "flight.boost" {
+            self.boost = down
+        }
+        ret()
+    }
+    pub fn update(self: mut Self, event: AppEvent) -> Self {
+        if event.is_focus_lost() {
+            self.clear()
+            ret self
+        }
+        if !event.is_key_down() && !event.is_key_up() {
+            ret self
+        }
+        let down = event.is_key_down()
+        let key = event.key()
+        if key == 119_u32 {
+            self.forward = down
+        } elif key == 115_u32 {
+            self.back = down
+        } elif key == 97_u32 {
+            self.left = down
+        } elif key == 100_u32 {
+            self.right = down
+        } elif key == 101_u32 {
+            self.up = down
+        } elif key == 113_u32 {
+            self.down = down
+        } elif key == 114_u32 {
+            self.local_up = down
+        } elif key == 102_u32 {
+            self.local_down = down
+        } elif key == 1073742049_u32 || key == 1073742053_u32 {
+            self.boost = down
+        }
+        ret self
+    }
+    pub fn direction(self: Self, yaw: f32, pitch: f32) -> Vec3 {
+        let forward = Vec3::zero().sub(Vec3::from_spherical(yaw, pitch)).normalized()
+        let right = forward.cross(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32)).normalized()
+        let local_up = right.cross(forward).normalized()
+        let mut movement = Vec3::zero()
+        if self.forward {
+            movement = movement.add(forward)
+        }
+        if self.back {
+            movement = movement.sub(forward)
+        }
+        if self.right {
+            movement = movement.add(right)
+        }
+        if self.left {
+            movement = movement.sub(right)
+        }
+        if self.up {
+            movement = movement.add(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32))
+        }
+        if self.down {
+            movement = movement.sub(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32))
+        }
+        if self.local_up {
+            movement = movement.add(local_up)
+        }
+        if self.local_down {
+            movement = movement.sub(local_up)
+        }
+        ret movement
+    }
+    pub fn speed_multiplier(self: Self) -> f32 {
+        ret if self.boost {
+            4.0_f32
+        } else {
+            1.0_f32
+        }
+    }
+}
+
+#attr(test)
+fn flight_input_clear_releases_every_held_key() -> bool {
+    let mut input = FlightInput::new()
+    input.forward = true
+    input.right = true
+    input.local_down = true
+    input.boost = true
+    if !input.active() {
+        ret false
+    }
+    input.clear()
+    ret !input.active() && !input.boost
+}
+
+#attr(test)
+fn flight_input_actions_track_press_and_release() -> bool {
+    let mut input = FlightInput::new()
+    input.set_action("flight.forward", true)
+    input.set_action("flight.boost", true)
+    if !input.forward || !input.boost || !input.active() {
+        ret false
+    }
+    input.set_action("flight.forward", false)
+    input.set_action("flight.boost", false)
+    ret !input.active() && !input.boost
+}
+
+#attr(test)
+fn flight_input_managed_events_never_leave_stuck_keys() -> bool {
+    let mut input = FlightInput::new()
+    input = input.update(AppEvent::key_down(119_u32, 0_u32, "viewport-surface"))
+    input = input.update(AppEvent::key_down(1073742049_u32, 0_u32,
+            "viewport-surface",))
+    if !input.forward || !input.boost {
+        ret false
+    }
+    input = input.update(AppEvent::key_up(119_u32, 0_u32, "viewport-surface"))
+    if input.forward || !input.boost {
+        ret false
+    }
+    input = input.update(AppEvent::focus_lost())
+    ret !input.active() && !input.boost
+}
+
+#attr(test)
+fn viewport_pointer_cancellation_releases_every_gesture() -> bool {
+    let mut input = ViewportInputState::new(10_u64)
+    input.orbiting = true
+    input.panning = true
+    input.orbit_pivot = true
+    input.dolly = true
+    input.pointer_locked = true
+    input.cancel_pointer()
+    ret !input.orbiting && !input.panning && !input.orbit_pivot &&
+    !input.dolly && !input.pointer_locked && input.tick_ns == 10_u64
+}
+
+#attr(test)
+fn viewport_managed_pointer_capture_survives_motion_and_releases() -> bool {
+    let mut input = ViewportInputState::new(10_u64)
+    input = input.update(AppEvent::pointer_button_down("viewport-surface",
+            20.0_f32, 30.0_f32, 3_u32, 0_u32,))
+    if !input.focused || !input.orbiting || !input.pointer_locked {
+        ret false
+    }
+    input = input.update(AppEvent::pointer_motion("viewport-surface",
+            21.0_f32, 31.0_f32, 1.0_f32, 1.0_f32, 4_u32, 0_u32, 20_u64,))
+    if !input.orbiting || input.pointer_x != 21.0_f32 {
+        ret false
+    }
+    input = input.update(AppEvent::pointer_button_up("viewport-surface",
+            21.0_f32, 31.0_f32, 3_u32, 0_u32,))
+    ret !input.orbiting && !input.pointer_locked
+}

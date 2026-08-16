@@ -1,0 +1,54 @@
+import core::vec::Vec
+import graphene:: {
+    GeometryPageArchive, geometry_page_archive_available,
+    geometry_page_archive_bytes, geometry_page_archive_destroy,
+    geometry_page_archive_prefetch, geometry_page_archive_triangles,
+    geometry_page_archive_vertices
+}
+
+fn main() -> u32 {
+    let mut vertices = Vec[f32]::new()
+    let mut index = 0_usize
+    while index < 4096_usize {
+        vertices.push((index as f32) * 0.25_f32)
+        index += 1_usize
+    }
+    let mut triangles = Vec[u32]::new()
+    index = 0_usize
+    while index < 1024_usize {
+        triangles.push((index * 3_usize) as u32)
+        index += 1_usize
+    }
+    let archive = GeometryPageArchive::create(vertices, triangles)
+    if !geometry_page_archive_available(archive) {
+        ret 1_u32
+    }
+    if geometry_page_archive_bytes(archive) !=
+    (4096_usize + 1024_usize) * 4_usize {
+        ret 3_u32
+    }
+    if !geometry_page_archive_prefetch(
+        archive, 511_usize, 64_usize, 127_usize, 96_usize,) {
+        ret 4_u32
+    }
+    let page_vertices = geometry_page_archive_vertices(
+        archive, 511_usize, 64_usize,)
+    let page_triangles = geometry_page_archive_triangles(
+        archive, 127_usize, 96_usize,)
+    let valid = page_vertices.len() == 64_usize &&
+    page_triangles.len() == 96_usize &&
+    match page_vertices.get(0_usize) {
+        core::option::Option::Some(value) => value == 127.75_f32
+        core::option::Option::None => false
+    } &&
+    match page_triangles.get(95_usize) {
+        core::option::Option::Some(value) => value == 666_u32
+        core::option::Option::None => false
+    }
+    let destroyed = geometry_page_archive_destroy(archive)
+    ret if valid && destroyed {
+        0_u32
+    } else {
+        2_u32
+    }
+}

@@ -1,9 +1,9 @@
 //! Local approval broker for sensitive Automation API operations.
 
 import core::option::Option
-import core::time::perf_counter_ms
 import core::vec::Vec
 import mod::automation_transport::automation_capability_token
+import std::time::perf_counter_ms
 
 pub struct ApprovalRequest {
     id: str

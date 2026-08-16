@@ -1,0 +1,66 @@
+import core::option::Option
+import core::vec::Vec
+import graphene::build_virtual_geometry_lods
+import linalg::Vec3
+
+fn main() -> u32 {
+    // Four tetrahedron faces with fully split per-corner vertices reproduce
+    // the topology emitted by Graphene's OBJ importer. AutoLOD must weld the
+    // position graph for QEM without requiring the render vertices to be
+    // shared.
+    let mut source = Vec[Vec3]::new()
+    let a = Vec3::new(0.0_f32, 1.0_f32, 0.0_f32)
+    let b = Vec3::new(-1.0_f32, -1.0_f32, 1.0_f32)
+    let c = Vec3::new(1.0_f32, -1.0_f32, 1.0_f32)
+    let d = Vec3::new(0.0_f32, -1.0_f32, -1.0_f32)
+    source.push(a) source.push(b) source.push(c)
+    source.push(a) source.push(c) source.push(d)
+    source.push(a) source.push(d) source.push(b)
+    source.push(b) source.push(d) source.push(c)
+    let mut indices = Vec[u32]::new()
+    let mut index = 0_u32
+    while index < 12_u32 {
+        indices.push(index)
+        index += 1_u32
+    }
+    let geometry = build_virtual_geometry_lods(
+        source, indices, 3_usize, 1_usize,)
+    if !geometry.valid() || geometry.root_node() == 4294967295_u32 {
+        ret 1_u32
+    }
+    let lods = geometry.lods()
+    if lods.len() < 2_usize { ret 2_u32 }
+    let clusters = geometry.clusters()
+    let base = match lods.get(0_usize) {
+        Option::Some(value) => value
+        Option::None => { ret 3_u32 }
+    }
+    let coarse = match lods.get(lods.len() - 1_usize) {
+        Option::Some(value) => value
+        Option::None => { ret 4_u32 }
+    }
+    let mut base_triangles = 0_usize
+    let mut cluster = base.first_cluster()
+    while cluster < base.first_cluster() + base.cluster_count() {
+        match clusters.get(cluster) {
+            Option::Some(value) => { base_triangles += value.triangle_count() }
+            Option::None => { ret 5_u32 }
+        }
+        cluster += 1_usize
+    }
+    let mut coarse_triangles = 0_usize
+    cluster = coarse.first_cluster()
+    while cluster < coarse.first_cluster() + coarse.cluster_count() {
+        match clusters.get(cluster) {
+            Option::Some(value) => { coarse_triangles += value.triangle_count() }
+            Option::None => { ret 6_u32 }
+        }
+        cluster += 1_usize
+    }
+    ret if coarse_triangles < base_triangles &&
+        coarse.geometric_error() > 0.0_f32 {
+        0_u32
+    } else {
+        7_u32
+    }
+}

@@ -3,9 +3,7 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import json:: {
-    Json, field, parse, stringify
-}
+import json::{Json, field, parse, stringify}
 import mod::automation::AutomationServer
 import mod::automation_transport::automation_request
 

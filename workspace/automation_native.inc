@@ -18,6 +18,7 @@ typedef struct {
     char path[108];
 #endif
     char input[65536];
+    char output[65536];
     size_t input_len;
     char error[256];
 } GrapheneAutomationListener;
@@ -151,13 +152,12 @@ encore_str graphene_automation_poll(size_t handle) {
         return graphene_string("");
     }
     size_t line_len = (size_t)(newline - listener->input);
-    char line[65536];
-    memcpy(line, listener->input, line_len);
-    line[line_len] = '\0';
+    memcpy(listener->output, listener->input, line_len);
+    listener->output[line_len] = '\0';
     size_t consumed = line_len + 1;
     memmove(listener->input, listener->input + consumed, listener->input_len - consumed);
     listener->input_len -= consumed;
-    return graphene_string(line);
+    return graphene_string(listener->output);
 }
 
 bool graphene_automation_respond(size_t handle, encore_str response) {

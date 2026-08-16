@@ -1,0 +1,78 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    GraphicsInstance, Vec3, build_virtual_geometry, gpu_cull_clusters
+}
+
+fn main() -> u32 {
+    let mut positions = Vec[Vec3]::new()
+    positions.push(Vec3::new( - 1.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(1.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32))
+    positions.push(Vec3::new(4.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(6.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(5.0_f32, 1.0_f32, 0.0_f32))
+    positions.push(Vec3::new(49.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(51.0_f32, 0.0_f32, 0.0_f32))
+    positions.push(Vec3::new(50.0_f32, 1.0_f32, 0.0_f32))
+    let mut indices = Vec[u32]::new()
+    let mut index = 0_u32
+    while index < 9_u32 {
+        indices.push(index)
+        index += 1_u32
+    }
+    let geometry = build_virtual_geometry(positions, indices, 3_usize, 1_usize)
+    if !geometry.valid() {
+        ret 1_u32
+    }
+
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 2_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(value) => {
+            let device = instance.create_device(value)
+            if !device.available() {
+                instance.destroy()
+                ret 4_u32
+            }
+            let result = gpu_cull_clusters(device, geometry.clusters(), 10.0_f32)
+            let result_valid = result.valid()
+            let result_error = result.error()
+            let visible = result.visible_clusters()
+            if !result_valid {
+                println("GPU cluster cull: " + result_error)
+            }
+            let visible_count = visible.len()
+            let mut saw_zero = false
+            let mut saw_one = false
+            let mut saw_two = false
+            for cluster in visible {
+                if cluster == 0_u32 {
+                    saw_zero = true
+                }
+                if cluster == 1_u32 {
+                    saw_one = true
+                }
+                if cluster == 2_u32 {
+                    saw_two = true
+                }
+            }
+            let passed = result_valid && visible_count == 2_usize &&
+            saw_zero && saw_one && !saw_two
+            result.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if passed {
+                0_u32
+            } else {
+                5_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 3_u32
+        }
+    }
+}

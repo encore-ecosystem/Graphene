@@ -1,0 +1,17 @@
+struct Counter {
+    value: u32
+}
+
+fn read(counter: Counter&) -> u32 {
+    ret counter.value
+}
+
+fn increment(counter: Counter&) {
+    counter.value += 1_u32
+}
+
+fn main() -> u32 {
+    let counter = Counter<H>{41_u32}
+    increment(counter)
+    ret if read(counter) == 42_u32 { 0_u32 } else { 1_u32 }
+}

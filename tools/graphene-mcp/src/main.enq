@@ -1,8 +1,8 @@
 //! Stdio MCP proxy for a running Graphene editor.
 
-import core::io::println
+import std::io::println
 import core::option::Option
-import core::os::{env, file_exists, home_dir, read_file}
+import std::os::{env, file_exists, home_dir, read_file}
 import core::result::Result
 import graphene::GrapheneMcpGateway
 import json::{Json, parse}

@@ -1,0 +1,32 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer ClusterCullBuffer {
+    uint values[];
+} cull;
+
+void main() {
+    uint clusterIndex = gl_GlobalInvocationID.x;
+    uint clusterCount = cull.values[0];
+    if (clusterIndex >= clusterCount) {
+        return;
+    }
+
+    float maximumDistance = uintBitsToFloat(cull.values[2]);
+    uint metadata = 4 + clusterIndex * 8;
+    vec3 center = vec3(
+        uintBitsToFloat(cull.values[metadata]),
+        uintBitsToFloat(cull.values[metadata + 1]),
+        uintBitsToFloat(cull.values[metadata + 2]));
+    float radius = uintBitsToFloat(cull.values[metadata + 3]);
+    if (length(center) <= maximumDistance + radius) {
+        uint outputIndex = atomicAdd(cull.values[1], 1);
+        uint command = 4 + clusterCount * 8 + outputIndex * 5;
+        cull.values[command] = uint(uintBitsToFloat(cull.values[metadata + 4]));
+        cull.values[command + 1] = 1;
+        cull.values[command + 2] = uint(uintBitsToFloat(cull.values[metadata + 5]));
+        cull.values[command + 3] = uint(uintBitsToFloat(cull.values[metadata + 6]));
+        cull.values[command + 4] = clusterIndex;
+    }
+}

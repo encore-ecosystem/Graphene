@@ -1,0 +1,115 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    build_virtual_geometry_lods, simplify_virtual_geometry_indices
+}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let width = 40_u32
+    let mut positions = Vec[Vec3]::new()
+    let mut y = 0_u32
+    while y < width {
+        let mut x = 0_u32
+        while x < width {
+            let height = if (x + y) % 3_u32 == 0_u32 {
+                0.08_f32
+            } else {
+                0.0_f32
+            }
+            positions.push(Vec3::new(
+                    x as f32 /(width - 1_u32) as f32,
+                    height,
+                    y as f32 /(width - 1_u32) as f32,))
+            x += 1_u32
+        }
+        y += 1_u32
+    }
+    let mut indices = Vec[u32]::new()
+    y = 0_u32
+    while y + 1_u32 < width {
+        let mut x = 0_u32
+        while x + 1_u32 < width {
+            let a = y * width + x
+            let b = a + 1_u32
+            let c = a + width
+            let d = c + 1_u32
+            indices.push(a) indices.push(c) indices.push(b)
+            indices.push(b) indices.push(c) indices.push(d)
+            x += 1_u32
+        }
+        y += 1_u32
+    }
+    let simplified_probe = simplify_virtual_geometry_indices(
+        positions, indices, 16_u32,)
+    if simplified_probe.len() == 0_usize {
+        ret 7_u32
+    }
+    let geometry = build_virtual_geometry_lods(
+        positions, indices, 64_usize, 126_usize,)
+    let lods = geometry.lods()
+    if !geometry.valid() || lods.len() < 2_usize {
+        ret 1_u32
+    }
+    let base = match lods.get(0_usize) {
+        Option::Some(value) => value
+        Option::None => {
+            ret 2_u32
+        }
+    }
+    let coarse = match lods.get(lods.len() - 1_usize) {
+        Option::Some(value) => value
+        Option::None => {
+            ret 3_u32
+        }
+    }
+    let clusters = geometry.clusters()
+    let hierarchy = geometry.hierarchy()
+    if base.hierarchy_root() == coarse.hierarchy_root() ||
+    coarse.hierarchy_root() as usize >= hierarchy.len() {
+        ret 8_u32
+    }
+    match hierarchy.get(coarse.hierarchy_root() as usize) {
+        Option::Some(root) => {
+            if root.first_cluster() != coarse.first_cluster() ||
+            root.cluster_count() != coarse.cluster_count() {
+                ret 9_u32
+            }
+        }
+        Option::None => {
+            ret 10_u32
+        }
+    }
+    let mut base_triangles = 0_usize
+    let mut index = base.first_cluster()
+    while index < base.first_cluster() + base.cluster_count() {
+        match clusters.get(index) {
+            Option::Some(cluster) => {
+                base_triangles += cluster.triangle_count()
+            }
+            Option::None => {
+                ret 4_u32
+            }
+        }
+        index += 1_usize
+    }
+    let mut coarse_triangles = 0_usize
+    index = coarse.first_cluster()
+    while index < coarse.first_cluster() + coarse.cluster_count() {
+        match clusters.get(index) {
+            Option::Some(cluster) => {
+                coarse_triangles += cluster.triangle_count()
+            }
+            Option::None => {
+                ret 5_u32
+            }
+        }
+        index += 1_usize
+    }
+    ret if coarse.geometric_error() > 0.0_f32 &&
+    coarse_triangles < base_triangles {
+        0_u32
+    } else {
+        6_u32
+    }
+}

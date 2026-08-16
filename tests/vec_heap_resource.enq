@@ -1,0 +1,50 @@
+import core::option::Option
+import core::vec::Vec
+
+struct HeapResource {
+    values: Vec[u32]
+    updates: u32
+}
+
+fn touch(resource: HeapResource&) -> u32 {
+    ret resource.values.len() as u32 + resource.updates
+}
+
+fn main() -> u32 {
+    let mut payload = Vec[u32]::new()
+    payload.push(13_u32)
+    let resource = HeapResource<H>{payload, 0_u32}
+    let mut resources = Vec[HeapResource<H>]::new()
+    resources.push(resource)
+    let mut iteration = 0_usize
+    while iteration < 100000_usize {
+        match resources.get(0_usize) {
+            Option::Some(current) => {
+                current.updates += 1_u32
+                if touch(current) != current.updates + 1_u32 {
+                    ret 1_u32
+                }
+                if iteration < 1000_usize {
+                    resources.set(0_usize, current)
+                }
+            }
+            Option::None => {
+                ret 2_u32
+            }
+        }
+        iteration += 1_usize
+    }
+    match resources.get(0_usize) {
+        Option::Some(current) => {
+            ret if current.updates == 100000_u32 &&
+                current.values.len() == 1_usize {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            ret 4_u32
+        }
+    }
+}

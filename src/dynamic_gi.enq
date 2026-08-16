@@ -1,0 +1,840 @@
+//! Residency and temporal policy for Graphene Dynamic GI.
+
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import mod::rhi::{AccelerationStructure, BindGroup, BindGroupLayout, BindGroupLayoutEntry, ComputePipeline, GpuBuffer, GraphicsDevice, RenderFrame, ShaderModule, buffer_storage, shader_stage_compute}
+import mod::shaders::{gi_spatial_filter_spirv, ray_query_gi_spirv, screen_probe_place_spirv, software_gi_spirv}
+
+pub struct SdfSphere {
+    center: Vec3
+    radius: f32
+    emission: Vec3
+}
+
+pub struct SdfBox {
+    center: Vec3
+    extent: Vec3
+    emission: Vec3
+}
+
+impl for SdfBox {
+    pub fn new(center: Vec3, extent: Vec3, emission: Vec3) -> Self {
+        ret Self {
+            center, extent, emission
+        }
+    }
+}
+
+impl for SdfSphere {
+    pub fn new(center: Vec3, radius: f32, emission: Vec3) -> Self {
+        ret Self {
+            center, radius, emission
+        }
+    }
+}
+
+pub struct SurfaceCacheSample {
+    position: Vec3
+    normal: Vec3
+    albedo: Vec3
+    world_probe: bool
+}
+
+impl for SurfaceCacheSample {
+    pub fn new(position: Vec3, normal: Vec3, albedo: Vec3) -> Self {
+        ret Self {
+            position, normal, albedo, false
+        }
+    }
+    pub fn world_probe(position: Vec3) -> Self {
+        ret Self {
+            position, Vec3::new(0.0_f32, 1.0_f32, 0.0_f32),
+            Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), true
+        }
+    }
+}
+
+pub struct GpuGiResult {
+    valid: bool
+    error: str
+    sample_count: u32
+    history: GpuBuffer
+}
+
+/// Persistent surface-cache tracer. Resources and temporal history survive
+/// across frames; `trace` only updates active scene/sample ranges.
+pub struct GpuDynamicGi {
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    group: BindGroup
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    ray_layout: BindGroupLayout
+    ray_group: BindGroup
+    ray_shader: ShaderModule
+    ray_pipeline: ComputePipeline
+    screen_probe_shader: ShaderModule
+    screen_probe_pipeline: ComputePipeline
+    ray_available: bool
+    filter_layout: BindGroupLayout
+    filter_group: BindGroup
+    filter_shader: ShaderModule
+    filter_pipeline: ComputePipeline
+    scene_buffer: GpuBuffer
+    surface_buffer: GpuBuffer
+    history_buffer: GpuBuffer
+    filtered_buffer: GpuBuffer
+    temporal_position_buffer: GpuBuffer
+    max_spheres: usize
+    max_samples: usize
+    active_samples: usize
+    available: bool
+}
+
+impl for GpuDynamicGi {
+    pub fn create(device: GraphicsDevice, max_spheres: usize, max_samples: usize) -> Self {
+        let scene_bytes =((8_usize + max_spheres * 12_usize) as u64) * 4_u64
+        let surface_bytes =(max_samples as u64) * 12_u64 * 4_u64
+        let history_bytes =(max_samples as u64) * 4_u64 * 4_u64
+        let scene_buffer = device.create_buffer(scene_bytes, buffer_storage(), true)
+        let surface_buffer = device.create_buffer(surface_bytes, buffer_storage(), true)
+        let history_buffer = device.create_buffer(history_bytes, buffer_storage(), true)
+        let filtered_buffer = device.create_buffer(history_bytes, buffer_storage(), true)
+        let temporal_position_buffer = device.create_buffer(
+            history_bytes, buffer_storage(), true,)
+        let mut entries = Vec[BindGroupLayoutEntry]::new()
+        entries.push(BindGroupLayoutEntry::storage(0_u32, shader_stage_compute()))
+        entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
+        entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
+        let layout = device.create_bind_group_layout(entries)
+        let mut bindings = Vec[u32]::new()
+        bindings.push(0_u32) bindings.push(1_u32) bindings.push(2_u32)
+        let mut buffers = Vec[GpuBuffer]::new()
+        buffers.push(scene_buffer) buffers.push(surface_buffer) buffers.push(history_buffer)
+        let mut offsets = Vec[u64]::new()
+        offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
+        let mut ranges = Vec[u64]::new()
+        ranges.push(scene_bytes) ranges.push(surface_bytes) ranges.push(history_bytes)
+        let group = device.create_storage_bind_group_many(layout, bindings, buffers, offsets, ranges)
+        let shader = device.create_shader_module(software_gi_spirv(), shader_stage_compute())
+        let pipeline = device.create_compute_pipeline(shader, layout)
+        let mut ray_entries = Vec[BindGroupLayoutEntry]::new()
+        ray_entries.push(BindGroupLayoutEntry::acceleration_structure(
+                0_u32, shader_stage_compute(),))
+        ray_entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
+        ray_entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
+        ray_entries.push(BindGroupLayoutEntry::storage(3_u32, shader_stage_compute()))
+        ray_entries.push(BindGroupLayoutEntry::storage(4_u32, shader_stage_compute()))
+        ray_entries.push(BindGroupLayoutEntry::storage(5_u32, shader_stage_compute()))
+        let ray_layout = device.create_bind_group_layout(ray_entries)
+        let ray_shader = device.create_shader_module(
+            ray_query_gi_spirv(), shader_stage_compute(),)
+        let ray_pipeline = device.create_compute_pipeline(ray_shader, ray_layout)
+        let screen_probe_shader = device.create_shader_module(
+            screen_probe_place_spirv(), shader_stage_compute(),)
+        let screen_probe_pipeline = device.create_compute_pipeline(
+            screen_probe_shader, ray_layout,)
+        let ray_group = BindGroup::unavailable()
+        let ray_available = ray_layout.available() &&
+        ray_shader.available() && ray_pipeline.available() &&
+        screen_probe_shader.available() && screen_probe_pipeline.available()
+        let mut filter_entries = Vec[BindGroupLayoutEntry]::new()
+        filter_entries.push(BindGroupLayoutEntry::storage(0_u32, shader_stage_compute()))
+        filter_entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
+        filter_entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
+        filter_entries.push(BindGroupLayoutEntry::storage(3_u32, shader_stage_compute()))
+        let filter_layout = device.create_bind_group_layout(filter_entries)
+        let mut filter_bindings = Vec[u32]::new()
+        filter_bindings.push(0_u32) filter_bindings.push(1_u32)
+        filter_bindings.push(2_u32) filter_bindings.push(3_u32)
+        let mut filter_buffers = Vec[GpuBuffer]::new()
+        filter_buffers.push(scene_buffer) filter_buffers.push(surface_buffer)
+        filter_buffers.push(history_buffer) filter_buffers.push(filtered_buffer)
+        let mut filter_offsets = Vec[u64]::new()
+        filter_offsets.push(0_u64) filter_offsets.push(0_u64)
+        filter_offsets.push(0_u64) filter_offsets.push(0_u64)
+        let mut filter_ranges = Vec[u64]::new()
+        filter_ranges.push(scene_bytes) filter_ranges.push(surface_bytes)
+        filter_ranges.push(history_bytes) filter_ranges.push(history_bytes)
+        let filter_group = device.create_storage_bind_group_many(
+            filter_layout, filter_bindings, filter_buffers,
+            filter_offsets, filter_ranges,)
+        let filter_shader = device.create_shader_module(
+            gi_spatial_filter_spirv(), shader_stage_compute(),)
+        let filter_pipeline = device.create_compute_pipeline(
+            filter_shader, filter_layout,)
+        let mut zero_history = Vec[f32]::new()
+        let mut index = 0_usize
+        while index < max_samples * 4_usize {
+            zero_history.push(0.0_f32)
+            index += 1_usize
+        }
+        let available = max_spheres > 0_usize && max_samples > 0_usize &&
+        scene_buffer.available() && surface_buffer.available() &&
+        history_buffer.available() && filtered_buffer.available() &&
+        temporal_position_buffer.available() &&
+        history_buffer.write_f32s(0_u64, zero_history) &&
+        filtered_buffer.write_f32s(0_u64, zero_history) &&
+        temporal_position_buffer.write_f32s(0_u64, zero_history) &&
+        layout.available() && group.available() && shader.available() && pipeline.available() &&
+        filter_layout.available() && filter_group.available() &&
+        filter_shader.available() && filter_pipeline.available()
+        ret Self {
+            device, layout, group, shader, pipeline,
+            ray_layout, ray_group, ray_shader, ray_pipeline,
+            screen_probe_shader, screen_probe_pipeline, ray_available,
+            filter_layout, filter_group, filter_shader, filter_pipeline,
+            scene_buffer, surface_buffer, history_buffer, filtered_buffer,
+            temporal_position_buffer,
+            max_spheres, max_samples, 0_usize, available
+        }
+    }
+    pub fn available(self: mut Self) -> bool {
+        ret self.available
+    }
+    pub fn scene_storage(self: Self) -> GpuBuffer {
+        ret self.scene_buffer
+    }
+    pub fn surface_storage(self: Self) -> GpuBuffer {
+        ret self.surface_buffer
+    }
+    pub fn history_storage(self: Self) -> GpuBuffer {
+        ret self.filtered_buffer
+    }
+    pub fn hardware_available(self: Self) -> bool {
+        ret self.ray_available
+    }
+    pub fn bind_ray_scene(self: mut Self,
+        acceleration: AccelerationStructure,) -> bool {
+        if !self.ray_available || !acceleration.available() {
+            ret false
+        }
+        if self.ray_group.available() {
+            self.ray_group.destroy()
+        }
+        let mut bindings = Vec[u32]::new()
+        bindings.push(1_u32) bindings.push(2_u32)
+        bindings.push(3_u32) bindings.push(4_u32)
+        bindings.push(5_u32)
+        let mut buffers = Vec[GpuBuffer]::new()
+        buffers.push(self.scene_buffer)
+        buffers.push(self.surface_buffer)
+        buffers.push(self.history_buffer)
+        buffers.push(self.filtered_buffer)
+        buffers.push(self.temporal_position_buffer)
+        let mut offsets = Vec[u64]::new()
+        offsets.push(0_u64) offsets.push(0_u64)
+        offsets.push(0_u64) offsets.push(0_u64)
+        offsets.push(0_u64)
+        let mut ranges = Vec[u64]::new()
+        ranges.push(self.scene_buffer.size())
+        ranges.push(self.surface_buffer.size())
+        ranges.push(self.history_buffer.size())
+        ranges.push(self.filtered_buffer.size())
+        ranges.push(self.temporal_position_buffer.size())
+        self.ray_group = self.device.create_ray_query_bind_group(
+            self.ray_layout, 0_u32, acceleration,
+            bindings, buffers, offsets, ranges,)
+        ret self.ray_group.available()
+    }
+    pub fn trace(self: mut Self, spheres: Vec[SdfSphere], samples: Vec[SurfaceCacheSample],
+        sky: Vec3, maximum_distance: f32, history_weight: f32,) -> bool {
+        if !self.available || samples.len() == 0_usize ||
+        samples.len() > self.max_samples || spheres.len() > self.max_spheres {
+            ret false
+        }
+        let sample_count = samples.len()
+        let mut scene_values = Vec[f32]::new()
+        scene_values.push(sample_count as f32)
+        scene_values.push(spheres.len() as f32)
+        scene_values.push(history_weight)
+        scene_values.push(maximum_distance)
+        scene_values.push(sky.x()) scene_values.push(sky.y()) scene_values.push(sky.z())
+        scene_values.push(0.0_f32)
+        for sphere in spheres {
+            scene_values.push(sphere.center.x())
+            scene_values.push(sphere.center.y())
+            scene_values.push(sphere.center.z())
+            scene_values.push(sphere.radius)
+            scene_values.push(sphere.emission.x())
+            scene_values.push(sphere.emission.y())
+            scene_values.push(sphere.emission.z())
+            scene_values.push(0.0_f32)
+        }
+        let mut surface_values = Vec[f32]::new()
+        for sample in samples {
+            surface_values.push(sample.position.x())
+            surface_values.push(sample.position.y())
+            surface_values.push(sample.position.z())
+            surface_values.push(if sample.world_probe {
+                    0.0_f32
+                } else {
+                    1.0_f32
+                }
+            )
+            surface_values.push(sample.normal.x())
+            surface_values.push(sample.normal.y())
+            surface_values.push(sample.normal.z())
+            surface_values.push(0.0_f32)
+            surface_values.push(sample.albedo.x())
+            surface_values.push(sample.albedo.y())
+            surface_values.push(sample.albedo.z())
+            surface_values.push(1.0_f32)
+        }
+        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
+        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let encoder = self.device.create_encoder()
+        let executed = uploaded && encoder.available() &&
+        encoder.bind_compute_pipeline(self.pipeline) &&
+        encoder.bind_compute_group(self.pipeline, self.group) &&
+        encoder.dispatch(((sample_count + 63_usize) / 64_usize) as u32, 1_u32, 1_u32) &&
+        encoder.storage_host_barrier() && encoder.submit_and_wait()
+        encoder.destroy()
+        let filter_encoder = self.device.create_encoder()
+        let filtered = executed && filter_encoder.available() &&
+        filter_encoder.bind_compute_pipeline(self.filter_pipeline) &&
+        filter_encoder.bind_compute_group(self.filter_pipeline, self.filter_group) &&
+        filter_encoder.dispatch(
+            ((sample_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) &&
+        filter_encoder.storage_host_barrier() &&
+        filter_encoder.submit_and_wait()
+        filter_encoder.destroy()
+        if filtered {
+            self.active_samples = sample_count
+        }
+        ret filtered
+    }
+    /// Uploads the current surface cache and records GI into Luma's borrowed
+    /// frame. Submission remains owned by Luma, so GI and composition preserve
+    /// queue ordering without a blocking submit.
+    pub fn record(self: mut Self, frame: RenderFrame,
+        spheres: Vec[SdfSphere], boxes: Vec[SdfBox],
+        samples: Vec[SurfaceCacheSample],
+        sky: Vec3, maximum_distance: f32, history_weight: f32,) -> bool {
+        if !self.available || !frame.available() || samples.len() == 0_usize ||
+        samples.len() > self.max_samples ||
+        spheres.len() + boxes.len() > self.max_spheres {
+            ret false
+        }
+        let sample_count = samples.len()
+        let mut scene_values = Vec[f32]::new()
+        scene_values.push(sample_count as f32)
+        scene_values.push(spheres.len() as f32)
+        scene_values.push(history_weight)
+        scene_values.push(maximum_distance)
+        scene_values.push(sky.x()) scene_values.push(sky.y()) scene_values.push(sky.z())
+        scene_values.push(boxes.len() as f32)
+        for sphere in spheres {
+            scene_values.push(sphere.center.x())
+            scene_values.push(sphere.center.y())
+            scene_values.push(sphere.center.z())
+            scene_values.push(sphere.radius)
+            scene_values.push(sphere.emission.x())
+            scene_values.push(sphere.emission.y())
+            scene_values.push(sphere.emission.z())
+            scene_values.push(0.0_f32)
+        }
+        for box_value in boxes {
+            scene_values.push(box_value.center.x())
+            scene_values.push(box_value.center.y())
+            scene_values.push(box_value.center.z())
+            scene_values.push(0.0_f32)
+            scene_values.push(box_value.extent.x())
+            scene_values.push(box_value.extent.y())
+            scene_values.push(box_value.extent.z())
+            scene_values.push(0.0_f32)
+            scene_values.push(box_value.emission.x())
+            scene_values.push(box_value.emission.y())
+            scene_values.push(box_value.emission.z())
+            scene_values.push(0.0_f32)
+        }
+        let mut surface_values = Vec[f32]::new()
+        for sample in samples {
+            surface_values.push(sample.position.x())
+            surface_values.push(sample.position.y())
+            surface_values.push(sample.position.z())
+            surface_values.push(if sample.world_probe {
+                    0.0_f32
+                } else {
+                    1.0_f32
+                }
+            )
+            surface_values.push(sample.normal.x())
+            surface_values.push(sample.normal.y())
+            surface_values.push(sample.normal.z())
+            surface_values.push(0.0_f32)
+            surface_values.push(sample.albedo.x())
+            surface_values.push(sample.albedo.y())
+            surface_values.push(sample.albedo.z())
+            surface_values.push(1.0_f32)
+        }
+        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
+        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let traced = uploaded && frame.dispatch_compute(
+            self.pipeline, self.group,
+            ((sample_count + 63_usize) / 64_usize) as u32, 1_u32, 1_u32,) &&
+        frame.compute_barrier()
+        let recorded = traced && frame.dispatch_compute(
+            self.filter_pipeline, self.filter_group,
+            ((sample_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) && frame.compute_barrier()
+        if recorded {
+            self.active_samples = sample_count
+        }
+        ret recorded
+    }
+    pub fn record_ray_query(self: mut Self, frame: RenderFrame,
+        samples: Vec[SurfaceCacheSample], sky: Vec3,
+        maximum_distance: f32, history_weight: f32,) -> bool {
+        if !self.available || !self.ray_available ||
+        !self.ray_group.available() || !frame.available() ||
+        samples.len() == 0_usize || samples.len() > self.max_samples {
+            ret false
+        }
+        let sample_count = samples.len()
+        let mut scene_values = Vec[f32]::new()
+        scene_values.push(sample_count as f32)
+        scene_values.push(0.0_f32)
+        scene_values.push(history_weight)
+        scene_values.push(maximum_distance)
+        scene_values.push(sky.x()) scene_values.push(sky.y()) scene_values.push(sky.z())
+        scene_values.push(0.0_f32)
+        scene_values.push(0.0_f32)
+        scene_values.push(sample_count as f32)
+        scene_values.push(0.0_f32)
+        scene_values.push(0.0_f32)
+        let mut surface_values = Vec[f32]::new()
+        for sample in samples {
+            surface_values.push(sample.position.x())
+            surface_values.push(sample.position.y())
+            surface_values.push(sample.position.z())
+            surface_values.push(if sample.world_probe {
+                    0.0_f32
+                } else {
+                    1.0_f32
+                }
+            )
+            surface_values.push(sample.normal.x())
+            surface_values.push(sample.normal.y())
+            surface_values.push(sample.normal.z())
+            surface_values.push(0.0_f32)
+            surface_values.push(sample.albedo.x())
+            surface_values.push(sample.albedo.y())
+            surface_values.push(sample.albedo.z())
+            surface_values.push(1.0_f32)
+        }
+        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
+        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let traced = uploaded && frame.dispatch_compute(
+            self.ray_pipeline, self.ray_group,
+            ((sample_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) && frame.compute_barrier()
+        let recorded = traced && frame.dispatch_compute(
+            self.filter_pipeline, self.filter_group,
+            ((sample_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) && frame.compute_barrier()
+        if recorded {
+            self.active_samples = sample_count
+        }
+        ret recorded
+    }
+    /// Places a regular screen-space probe grid with primary ray queries,
+    /// then traces and spatially filters its indirect radiance in the same
+    /// borrowed frame.
+    pub fn record_screen_probes(self: mut Self, frame: RenderFrame,
+        samples: Vec[SurfaceCacheSample], probe_width: u32, probe_height: u32,
+        camera_position: Vec3, camera_forward: Vec3,
+        camera_right: Vec3, camera_up: Vec3,
+        fov: f32, aspect: f32, sky: Vec3,
+        maximum_distance: f32, history_weight: f32,) -> bool {
+        let screen_count =(probe_width as usize) *(probe_height as usize)
+        let sample_count = samples.len() + screen_count
+        if !self.available || !self.ray_available ||
+        !self.ray_group.available() || !frame.available() ||
+        screen_count == 0_usize || sample_count > self.max_samples {
+            ret false
+        }
+        let mut scene_values = Vec[f32]::new()
+        scene_values.push(sample_count as f32)
+        scene_values.push(0.0_f32)
+        scene_values.push(history_weight)
+        scene_values.push(maximum_distance)
+        scene_values.push(sky.x()) scene_values.push(sky.y()) scene_values.push(sky.z())
+        scene_values.push(0.0_f32)
+        scene_values.push(screen_count as f32)
+        scene_values.push(samples.len() as f32)
+        scene_values.push(probe_width as f32)
+        scene_values.push(probe_height as f32)
+        scene_values.push(camera_position.x())
+        scene_values.push(camera_position.y())
+        scene_values.push(camera_position.z())
+        scene_values.push(0.0_f32)
+        scene_values.push(camera_forward.x())
+        scene_values.push(camera_forward.y())
+        scene_values.push(camera_forward.z())
+        scene_values.push(0.0_f32)
+        scene_values.push(camera_right.x())
+        scene_values.push(camera_right.y())
+        scene_values.push(camera_right.z())
+        scene_values.push(0.0_f32)
+        scene_values.push(camera_up.x())
+        scene_values.push(camera_up.y())
+        scene_values.push(camera_up.z())
+        scene_values.push(0.0_f32)
+        scene_values.push(fov) scene_values.push(aspect)
+        scene_values.push(0.0_f32) scene_values.push(0.0_f32)
+        let mut surface_values = Vec[f32]::new()
+        for sample in samples {
+            surface_values.push(sample.position.x())
+            surface_values.push(sample.position.y())
+            surface_values.push(sample.position.z())
+            surface_values.push(if sample.world_probe {
+                    0.0_f32
+                } else {
+                    1.0_f32
+                }
+            )
+            surface_values.push(sample.normal.x())
+            surface_values.push(sample.normal.y())
+            surface_values.push(sample.normal.z())
+            surface_values.push(0.0_f32)
+            surface_values.push(sample.albedo.x())
+            surface_values.push(sample.albedo.y())
+            surface_values.push(sample.albedo.z())
+            surface_values.push(1.0_f32)
+        }
+        let mut placeholder = 0_usize
+        while placeholder < screen_count * 12_usize {
+            surface_values.push(0.0_f32)
+            placeholder += 1_usize
+        }
+        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
+        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let placed = uploaded && frame.dispatch_compute(
+            self.screen_probe_pipeline, self.ray_group,
+            ((screen_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) && frame.compute_barrier()
+        let traced = placed && frame.dispatch_compute(
+            self.ray_pipeline, self.ray_group,
+            ((sample_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) && frame.compute_barrier()
+        let recorded = traced && frame.dispatch_compute(
+            self.filter_pipeline, self.filter_group,
+            ((sample_count + 63_usize) / 64_usize) as u32,
+            1_u32, 1_u32,) && frame.compute_barrier()
+        if recorded {
+            self.active_samples = sample_count
+        }
+        ret recorded
+    }
+    pub fn radiance(self: mut Self, sample: u32) -> Vec3 {
+        if !self.available || sample as usize >= self.active_samples {
+            ret Vec3::zero()
+        }
+        let base =(sample as u64) * 16_u64
+        ret Vec3::new(self.filtered_buffer.read_f32(base),
+            self.filtered_buffer.read_f32(base + 4_u64),
+            self.filtered_buffer.read_f32(base + 8_u64),)
+    }
+    pub fn accumulated_frames(self: mut Self, sample: u32) -> f32 {
+        ret if !self.available || sample as usize >= self.active_samples {
+            0.0_f32
+        } else {
+            self.filtered_buffer.read_f32((sample as u64) * 16_u64 + 12_u64)
+        }
+    }
+    pub fn destroy(self: mut Self) -> bool {
+        let ray_group = if self.ray_group.available() {
+            self.ray_group.destroy()
+        } else {
+            true
+        }
+        let ray_pipeline = self.ray_pipeline.destroy()
+        let ray_shader = self.ray_shader.destroy()
+        let screen_probe_pipeline = self.screen_probe_pipeline.destroy()
+        let screen_probe_shader = self.screen_probe_shader.destroy()
+        let ray_layout = self.ray_layout.destroy()
+        let filter_pipeline = self.filter_pipeline.destroy()
+        let filter_shader = self.filter_shader.destroy()
+        let filter_group = self.filter_group.destroy()
+        let filter_layout = self.filter_layout.destroy()
+        let pipeline = self.pipeline.destroy()
+        let shader = self.shader.destroy()
+        let group = self.group.destroy()
+        let layout = self.layout.destroy()
+        let temporal_positions = self.temporal_position_buffer.destroy()
+        let filtered = self.filtered_buffer.destroy()
+        let history = self.history_buffer.destroy()
+        let surfaces = self.surface_buffer.destroy()
+        let scene = self.scene_buffer.destroy()
+        ret ray_group && ray_pipeline && ray_shader &&
+        screen_probe_pipeline && screen_probe_shader && ray_layout &&
+        filter_pipeline && filter_shader && filter_group && filter_layout &&
+        pipeline && shader && group && layout && temporal_positions && filtered &&
+        history && surfaces && scene
+    }
+}
+
+impl for GpuGiResult {
+    pub fn valid(self: Self) -> bool {
+        ret self.valid
+    }
+    pub fn error(self: Self) -> str {
+        ret self.error
+    }
+    pub fn sample_count(self: Self) -> u32 {
+        ret self.sample_count
+    }
+    pub fn radiance(self: Self, sample: u32) -> Vec3 {
+        if !self.valid || sample >= self.sample_count {
+            ret Vec3::zero()
+        }
+        let base =(sample as u64) * 16_u64
+        ret Vec3::new(self.history.read_f32(base),
+            self.history.read_f32(base + 4_u64),
+            self.history.read_f32(base + 8_u64),)
+    }
+    pub fn accumulated_frames(self: Self, sample: u32) -> f32 {
+        ret if !self.valid || sample >= self.sample_count {
+            0.0_f32
+        } else {
+            self.history.read_f32((sample as u64) * 16_u64 + 12_u64)
+        }
+    }
+    pub fn destroy(self: Self) -> bool {
+        ret if self.history.available() {
+            self.history.destroy()
+        } else {
+            true
+        }
+    }
+}
+
+fn failed_gpu_gi(message: str) -> GpuGiResult {
+    ret GpuGiResult {
+        false, message, 0_u32, GpuBuffer::unavailable()
+    }
+}
+
+/// Executes the software-SDF Dynamic GI fallback on the Vulkan compute queue.
+///
+/// Surface samples form the first surface-cache representation; the output
+/// buffer is persistent temporal radiance data rather than a CPU lighting
+/// approximation.
+pub fn gpu_software_gi(device: GraphicsDevice,
+    spheres: Vec[SdfSphere], samples: Vec[SurfaceCacheSample],
+    sky: Vec3, maximum_distance: f32, history_weight: f32,) -> GpuGiResult {
+    if samples.len() == 0_usize || samples.len() > 4294967295_usize {
+        ret failed_gpu_gi("Dynamic GI requires at least one addressable surface sample")
+    }
+    let sample_count = samples.len()
+    let mut scene_values = Vec[f32]::new()
+    scene_values.push(sample_count as f32)
+    scene_values.push(spheres.len() as f32)
+    scene_values.push(history_weight)
+    scene_values.push(maximum_distance)
+    scene_values.push(sky.x()) scene_values.push(sky.y()) scene_values.push(sky.z())
+    scene_values.push(0.0_f32)
+    for sphere in spheres {
+        scene_values.push(sphere.center.x())
+        scene_values.push(sphere.center.y())
+        scene_values.push(sphere.center.z())
+        scene_values.push(sphere.radius)
+        scene_values.push(sphere.emission.x())
+        scene_values.push(sphere.emission.y())
+        scene_values.push(sphere.emission.z())
+        scene_values.push(0.0_f32)
+    }
+    let mut surface_values = Vec[f32]::new()
+    for sample in samples {
+        surface_values.push(sample.position.x())
+        surface_values.push(sample.position.y())
+        surface_values.push(sample.position.z())
+        surface_values.push(if sample.world_probe {
+                0.0_f32
+            } else {
+                1.0_f32
+            }
+        )
+        surface_values.push(sample.normal.x())
+        surface_values.push(sample.normal.y())
+        surface_values.push(sample.normal.z())
+        surface_values.push(0.0_f32)
+        surface_values.push(sample.albedo.x())
+        surface_values.push(sample.albedo.y())
+        surface_values.push(sample.albedo.z())
+        surface_values.push(1.0_f32)
+    }
+    let mut history_values = Vec[f32]::new()
+    let mut history_index = 0_usize
+    while history_index < sample_count * 4_usize {
+        history_values.push(0.0_f32)
+        history_index += 1_usize
+    }
+    let scene_bytes =(scene_values.len() as u64) * 4_u64
+    let surface_bytes =(surface_values.len() as u64) * 4_u64
+    let history_bytes =(history_values.len() as u64) * 4_u64
+    let scene_buffer = device.create_buffer(scene_bytes, buffer_storage(), true)
+    let surface_buffer = device.create_buffer(surface_bytes, buffer_storage(), true)
+    let history_buffer = device.create_buffer(history_bytes, buffer_storage(), true)
+    let mut entries = Vec[BindGroupLayoutEntry]::new()
+    entries.push(BindGroupLayoutEntry::storage(0_u32, shader_stage_compute()))
+    entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
+    entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
+    let layout = device.create_bind_group_layout(entries)
+    let mut bindings = Vec[u32]::new()
+    bindings.push(0_u32) bindings.push(1_u32) bindings.push(2_u32)
+    let mut buffers = Vec[GpuBuffer]::new()
+    buffers.push(scene_buffer) buffers.push(surface_buffer) buffers.push(history_buffer)
+    let mut offsets = Vec[u64]::new()
+    offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
+    let mut ranges = Vec[u64]::new()
+    ranges.push(scene_bytes) ranges.push(surface_bytes) ranges.push(history_bytes)
+    let group = device.create_storage_bind_group_many(layout, bindings, buffers, offsets, ranges)
+    let shader = device.create_shader_module(software_gi_spirv(), shader_stage_compute())
+    let pipeline = device.create_compute_pipeline(shader, layout)
+    let initialized = scene_buffer.available() && scene_buffer.write_f32s(0_u64, scene_values) &&
+    surface_buffer.available() && surface_buffer.write_f32s(0_u64, surface_values) &&
+    history_buffer.available() && history_buffer.write_f32s(0_u64, history_values) &&
+    layout.available() && group.available() && shader.available() && pipeline.available()
+    let encoder = device.create_encoder()
+    let executed = initialized && encoder.available() &&
+    encoder.bind_compute_pipeline(pipeline) &&
+    encoder.bind_compute_group(pipeline, group) &&
+    encoder.dispatch(((sample_count + 63_usize) / 64_usize) as u32, 1_u32, 1_u32) &&
+    encoder.storage_host_barrier() && encoder.submit_and_wait()
+    encoder.destroy()
+    pipeline.destroy()
+    shader.destroy()
+    group.destroy()
+    layout.destroy()
+    surface_buffer.destroy()
+    scene_buffer.destroy()
+    if !executed {
+        history_buffer.destroy()
+        ret failed_gpu_gi("Software-SDF Dynamic GI dispatch failed")
+    }
+    ret GpuGiResult {
+        true, "", sample_count as u32, history_buffer
+    }
+}
+
+struct SdfBrickEntry {
+    object: u64
+    brick: u32
+    page: u32
+    last_used_frame: u64
+}
+
+pub struct SdfBrickAllocation {
+    page: u32
+    resident: bool
+    evicted_object: u64
+    evicted_brick: u32
+}
+
+impl for SdfBrickAllocation {
+    pub fn page(self: Self) -> u32 {
+        ret self.page
+    }
+    pub fn resident(self: Self) -> bool {
+        ret self.resident
+    }
+    pub fn evicted_object(self: Self) -> u64 {
+        ret self.evicted_object
+    }
+    pub fn evicted_brick(self: Self) -> u32 {
+        ret self.evicted_brick
+    }
+}
+
+/// Fixed-capacity sparse SDF atlas. Pages are stable while resident and use
+/// deterministic least-recently-used eviction under memory pressure.
+pub struct SdfBrickCache {
+    capacity: u32
+    entries: Vec[SdfBrickEntry]
+}
+
+impl for SdfBrickCache {
+    pub fn new(capacity: u32) -> Self {
+        ret Self {
+            capacity, Vec[SdfBrickEntry]::new()
+        }
+    }
+    pub fn len(self: mut Self) -> usize {
+        ret self.entries.len()
+    }
+    pub fn request(self: mut Self, object: u64, brick: u32,
+        frame: u64,) -> SdfBrickAllocation {
+        let mut index = 0_usize
+        while index < self.entries.len() {
+            match self.entries.get(index) {
+                Option::Some(entry) => {
+                    if entry.object == object && entry.brick == brick {
+                        self.entries.set(index, SdfBrickEntry {
+                                object, brick, entry.page, frame
+                            }
+                            ,)
+                        ret SdfBrickAllocation {
+                            entry.page, true, 0_u64, 0_u32
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index += 1_usize
+        }
+        if self.capacity == 0_u32 {
+            ret SdfBrickAllocation {
+                0_u32, false, object, brick
+            }
+        }
+        if self.entries.len() < self.capacity as usize {
+            let page = self.entries.len() as u32
+            self.entries.push(SdfBrickEntry {
+                    object, brick, page, frame
+                }
+                ,
+            )
+            ret SdfBrickAllocation {
+                page, false, 0_u64, 0_u32
+            }
+        }
+        let mut oldest_index = 0_usize
+        let mut oldest_frame = frame + 1_u64
+        index = 0_usize
+        while index < self.entries.len() {
+            match self.entries.get(index) {
+                Option::Some(entry) => {
+                    if entry.last_used_frame < oldest_frame {
+                        oldest_frame = entry.last_used_frame
+                        oldest_index = index
+                    }
+                }
+                Option::None => {
+                }
+            }
+            index += 1_usize
+        }
+        match self.entries.get(oldest_index) {
+            Option::Some(evicted) => {
+                let page = evicted.page
+                self.entries.set(oldest_index, SdfBrickEntry {
+                        object, brick, page, frame
+                    }
+                    ,)
+                ret SdfBrickAllocation {
+                    page, false, evicted.object, evicted.brick
+                }
+            }
+            Option::None => {
+            }
+        }
+        ret SdfBrickAllocation {
+            0_u32, false, object, brick
+        }
+    }
+}

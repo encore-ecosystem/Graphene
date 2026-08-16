@@ -1,0 +1,137 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    AccelerationStructure, BindGroupLayoutEntry, DeviceFeatures, GpuBuffer,
+    GraphicsInstance,
+    buffer_acceleration_structure_input, buffer_shader_device_address,
+    buffer_storage, ray_query_gi_spirv, shader_stage_compute
+}
+import linalg::Mat4
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let required = DeviceFeatures::from_mask(
+                DeviceFeatures::buffer_device_address().mask() |
+                DeviceFeatures::ray_query().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, required, DeviceFeatures::none(),)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            let usage = buffer_storage() |
+            buffer_shader_device_address() |
+            buffer_acceleration_structure_input()
+            let vertices = device.create_buffer(36_u64, usage, true)
+            let indices = device.create_buffer(12_u64, usage, true)
+            let mut vertex_values = Vec[f32]::new()
+            vertex_values.push( - 1.0_f32) vertex_values.push( - 1.0_f32)
+            vertex_values.push(0.0_f32)
+            vertex_values.push(1.0_f32) vertex_values.push( - 1.0_f32)
+            vertex_values.push(0.0_f32)
+            vertex_values.push(0.0_f32) vertex_values.push(1.0_f32)
+            vertex_values.push(0.0_f32)
+            let mut index_values = Vec[u32]::new()
+            index_values.push(0_u32) index_values.push(1_u32) index_values.push(2_u32)
+            let uploaded = vertices.available() && indices.available() &&
+            vertices.write_f32s(0_u64, vertex_values) &&
+            indices.write_u32s(0_u64, index_values)
+            let blas = device.create_triangle_blas(
+                vertices, 12_u64, 3_u32, indices, 3_u32,)
+            let mut structures = Vec[AccelerationStructure]::new()
+            structures.push(blas)
+            let mut transforms = Vec[Mat4]::new()
+            transforms.push(Mat4::identity())
+            let tlas = device.create_tlas(structures, transforms)
+            let built = uploaded && blas.available() && tlas.available()
+            let scene = device.create_buffer(32_u64, buffer_storage(), true)
+            let surfaces = device.create_buffer(48_u64, buffer_storage(), true)
+            let history = device.create_buffer(16_u64, buffer_storage(), true)
+            let mut scene_values = Vec[f32]::new()
+            scene_values.push(1.0_f32) scene_values.push(0.0_f32)
+            scene_values.push(0.0_f32) scene_values.push(20.0_f32)
+            scene_values.push(0.4_f32) scene_values.push(0.5_f32)
+            scene_values.push(0.7_f32) scene_values.push(0.0_f32)
+            let mut surface_values = Vec[f32]::new()
+            surface_values.push(0.0_f32) surface_values.push(0.0_f32)
+            surface_values.push( - 0.5_f32) surface_values.push(1.0_f32)
+            surface_values.push(0.0_f32) surface_values.push(0.0_f32)
+            surface_values.push(1.0_f32) surface_values.push(0.0_f32)
+            surface_values.push(1.0_f32) surface_values.push(1.0_f32)
+            surface_values.push(1.0_f32) surface_values.push(1.0_f32)
+            let mut zero_history = Vec[f32]::new()
+            zero_history.push(0.0_f32) zero_history.push(0.0_f32)
+            zero_history.push(0.0_f32) zero_history.push(0.0_f32)
+            let mut entries = Vec[BindGroupLayoutEntry]::new()
+            entries.push(BindGroupLayoutEntry::acceleration_structure(
+                    0_u32, shader_stage_compute(),))
+            entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
+            entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
+            entries.push(BindGroupLayoutEntry::storage(3_u32, shader_stage_compute()))
+            entries.push(BindGroupLayoutEntry::storage(4_u32, shader_stage_compute()))
+            entries.push(BindGroupLayoutEntry::storage(5_u32, shader_stage_compute()))
+            let layout = device.create_bind_group_layout(entries)
+            let mut bindings = Vec[u32]::new()
+            bindings.push(1_u32) bindings.push(2_u32)
+            bindings.push(3_u32) bindings.push(4_u32)
+            bindings.push(5_u32)
+            let mut buffers = Vec[GpuBuffer]::new()
+            buffers.push(scene) buffers.push(surfaces)
+            buffers.push(history) buffers.push(history)
+            buffers.push(history)
+            let mut offsets = Vec[u64]::new()
+            offsets.push(0_u64) offsets.push(0_u64)
+            offsets.push(0_u64)
+            offsets.push(0_u64) offsets.push(0_u64)
+            let mut ranges = Vec[u64]::new()
+            ranges.push(32_u64) ranges.push(48_u64)
+            ranges.push(16_u64) ranges.push(16_u64)
+            ranges.push(16_u64)
+            let group = device.create_ray_query_bind_group(
+                layout, 0_u32, tlas, bindings, buffers, offsets, ranges,)
+            let shader = device.create_shader_module(
+                ray_query_gi_spirv(), shader_stage_compute(),)
+            let pipeline = device.create_compute_pipeline(shader, layout)
+            let initialized = built && scene.write_f32s(0_u64, scene_values) &&
+            surfaces.write_f32s(0_u64, surface_values) &&
+            history.write_f32s(0_u64, zero_history) &&
+            layout.available() && group.available() &&
+            shader.available() && pipeline.available()
+            let encoder = device.create_encoder()
+            let traced = initialized && encoder.available() &&
+            encoder.bind_compute_pipeline(pipeline) &&
+            encoder.bind_compute_group(pipeline, group) &&
+            encoder.dispatch(1_u32, 1_u32, 1_u32) &&
+            encoder.storage_host_barrier() && encoder.submit_and_wait() &&
+            history.read_f32(12_u64) >= 1.0_f32
+            encoder.destroy()
+            pipeline.destroy()
+            shader.destroy()
+            group.destroy()
+            layout.destroy()
+            history.destroy()
+            surfaces.destroy()
+            scene.destroy()
+            tlas.destroy()
+            blas.destroy()
+            indices.destroy()
+            vertices.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if traced {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

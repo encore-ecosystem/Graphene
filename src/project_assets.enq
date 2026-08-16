@@ -1,14 +1,13 @@
 import core::option::Option
-import core::os:: {
-    file_exists, mkdir_all, read_dir, read_file, write_file
-}
 import core::result::Result
 import core::vec::Vec
 import mod::scene::obj::parse_obj
 import mod::scene::primitive::MeshData
+import std::os::{file_exists, mkdir_all, read_dir, read_file, write_file}
 
 pub struct ImportedMeshAsset {
     name: str source_path: str project_path: str mesh: MeshData
+    texture_pixels: Vec[u32] texture_width: u32 texture_height: u32
 }
 
 impl for ImportedMeshAsset {
@@ -24,6 +23,97 @@ impl for ImportedMeshAsset {
     pub fn mesh(self: Self) -> MeshData {
         ret self.mesh
     }
+    pub fn texture_pixels(self: Self) -> Vec[u32] {
+        ret self.texture_pixels
+    }
+    pub fn texture_width(self: Self) -> u32 {
+        ret self.texture_width
+    }
+    pub fn texture_height(self: Self) -> u32 {
+        ret self.texture_height
+    }
+    pub fn autolod_enabled(self: Self) -> bool {
+        ret project_mesh_autolod_enabled(self.project_path)
+    }
+    pub fn render_parts(self: Self) ->(MeshData, Vec[u32], u32, u32) {
+        ret(self.mesh, self.texture_pixels, self.texture_width, self.texture_height)
+    }
+}
+
+pub fn project_mesh_autolod_path(mesh_path: str) -> str {
+    ret mesh_path + ".autolod"
+}
+
+/// Reads the per-asset AutoLOD switch. Imported meshes opt in by default, so
+/// existing projects immediately benefit without a migration step.
+pub fn project_mesh_autolod_enabled(mesh_path: str) -> bool {
+    let path = project_mesh_autolod_path(mesh_path)
+    if !file_exists(path) {
+        ret true
+    }
+    let setting = read_file(path)
+    ret setting != "enabled=false\n" && setting != "enabled=false"
+}
+
+/// Persists only editor policy. Derived cluster data remains disposable and
+/// can be rebuilt from the source mesh whenever its cache version changes.
+pub fn set_project_mesh_autolod(mesh_path: str, enabled: bool) -> bool {
+    ret write_file(project_mesh_autolod_path(mesh_path),
+        if enabled {
+            "enabled=true\n"
+        } else {
+            "enabled=false\n"
+        }
+        ,) == 0_i32
+}
+
+fn asset_u32(source: str, start: usize) ->(u32, usize) {
+    let mut value = 0_u32
+    let mut index = start
+    while index < source.byte_len() && source.byte_at(index) >= 48_u8 && source.byte_at(index) <= 57_u8 {
+        value = value * 10_u32 +(source.byte_at(index) - 48_u8) as u32
+        index += 1_usize
+    }
+    ret(value, index)
+}
+
+fn asset_texture(path: str) ->(Vec[u32], u32, u32) {
+    let mut white = Vec[u32]::new() white.push(4294967295_u32)
+    if path.byte_len() < 4_usize {
+        ret(white, 1_u32, 1_u32)
+    }
+    let base = path.slice(0_usize, path.byte_len() - 4_usize)
+    let metadata = base + ".texture"
+    let rgba = base + ".rgba"
+    if !file_exists(metadata) || !file_exists(rgba) {
+        ret(white, 1_u32, 1_u32)
+    }
+    let dimensions = read_file(metadata)
+    let width_part = asset_u32(dimensions, 0_usize)
+    let mut split = width_part.1
+    while split < dimensions.byte_len() &&(dimensions.byte_at(split) < 48_u8 || dimensions.byte_at(split) > 57_u8) {
+        split += 1_usize
+    }
+    let height_part = asset_u32(dimensions, split)
+    let width = width_part.0
+    let height = height_part.0
+    if width == 0_u32 || height == 0_u32 {
+        ret(white, 1_u32, 1_u32)
+    }
+    let bytes = read_file(rgba)
+    if bytes.byte_len() !=(width as usize) *(height as usize) * 4_usize {
+        ret(white, 1_u32, 1_u32)
+    }
+    let mut pixels = Vec[u32]::new()
+    let mut index = 0_usize
+    while index < bytes.byte_len() {
+        pixels.push((bytes.byte_at(index) as u32) |
+            ((bytes.byte_at(index + 1_usize) as u32) << 8_u32) |
+            ((bytes.byte_at(index + 2_usize) as u32) << 16_u32) |
+            ((bytes.byte_at(index + 3_usize) as u32) << 24_u32))
+        index += 4_usize
+    }
+    ret(pixels, width, height)
 }
 
 fn asset_file_name(path: str) -> str {
@@ -59,8 +149,9 @@ pub fn load_obj_asset(path: str) -> Result[ImportedMeshAsset, str] {
     }
     match parse_obj(read_file(path)) {
         Result::Ok(mesh) => {
+            let texture = asset_texture(path)
             ret Result[ImportedMeshAsset, str]::Ok(ImportedMeshAsset {
-                    asset_file_name(path), path, path, mesh
+                    asset_file_name(path), path, path, mesh, texture.0, texture.1, texture.2
                 }
                 ,
             )
@@ -83,7 +174,8 @@ pub fn import_obj_asset(project_root: str, source_path: str) -> Result[ImportedM
                 ret Result[ImportedMeshAsset, str]::Err("Unable to write imported mesh: " + destination)
             }
             ret Result[ImportedMeshAsset, str]::Ok(ImportedMeshAsset {
-                    asset.name(), source_path, destination, asset.mesh()
+                    asset.name(), source_path, destination, asset.mesh(),
+                    asset.texture_pixels(), asset.texture_width(), asset.texture_height()
                 }
                 ,
             )

@@ -1,7 +1,7 @@
 import core::fmt::Debug
-import core::io::println
+import std::io::println
 import core::option::Option
-import core::os:: {
+import std::os:: {
     argc, argv, mkdir_all, write_file
 }
 import core::vec::Vec
@@ -147,7 +147,7 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
     if !instance.available() {
         println("Benchmark Vulkan instance failed: " + instance.error())
         instance.destroy()
-        ret Option[BenchmarkResult]::None
+        ret Option[BenchыmarkResult]::None
     }
     let window = instance.create_window("Graphene Benchmark — " + name, width, height)
     if !window.available() {

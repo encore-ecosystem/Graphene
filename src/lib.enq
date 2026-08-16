@@ -1,74 +1,41 @@
-pub import mod::assets:: {
-    MaterialAssets, MeshAssets, StandardMaterial
-}
-pub import mod::approval:: {
-    ApprovalBroker, ApprovalRequest
-}
-pub import mod::automation:: {
-    AutomationScopes, AutomationServer
-}
-pub import mod::automation_transport:: {
-    AutomationListener, automation_capability_token, automation_request, automation_secure_file
-}
-pub import mod::content_search:: {
-    content_asset_matches, outliner_actor_matches, search_matches
-}
-pub import mod::command_bus:: {
-    ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand,
-    ActorVisibilityCommand, AddActorCommand, DuplicateActorCommand,
-    AssetImportCommand, CommandResult, EditorState, GrapheneCommand, GrapheneDiagnostic,
-    GrapheneEvent, GrapheneTask, OperationCompletionCommand, ProjectLoadedCommand,
-    ProjectRequestCommand, SimulationCommand
-}
-pub import mod::command_console:: {
-    console_help, decode_console_command
-}
-pub import mod::command_protocol:: {
-    CommandEnvelope, ProtocolError, command_registry_json, decode_command_request, encode_command_response
-}
-pub import mod::editor_guard:: {
-    action_needs_confirmation, guard_editor_action, guarded_action
-}
-pub import mod::editor_history:: {
-    ActorRecord, EditorActors, EditorEdit, ParentEdit, RenameEdit, TransformEdit, VisibilityEdit,
-    editor_actors_from_scene
-}
-pub import mod::editor_values:: {
-    EditorTransform, apply_editor_transform, parse_editor_scalar
-}
-pub import mod::material_asset:: {
-    edit_default_material, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color
-}
+pub import mod::approval::{ApprovalBroker, ApprovalRequest}
+pub import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
+pub import mod::automation::{AutomationScopes, AutomationServer}
+pub import mod::automation_transport::{AutomationListener, automation_capability_token, automation_request, automation_secure_file}
+pub import mod::command_bus::{ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, DuplicateActorCommand, AssetImportCommand, CommandResult, EditorState, GrapheneCommand, GrapheneDiagnostic, GrapheneEvent, GrapheneTask, OperationCompletionCommand, ProjectLoadedCommand, ProjectRequestCommand, SimulationCommand}
+pub import mod::command_console::{console_help, decode_console_command}
+pub import mod::command_protocol::{CommandEnvelope, ProtocolError, command_registry_json, decode_command_request, encode_command_response}
+pub import mod::content_search::{content_asset_matches, outliner_actor_matches, search_matches}
+pub import mod::dynamic_gi::{GpuDynamicGi, GpuGiResult, SdfBox, SdfBrickAllocation, SdfBrickCache, SdfSphere, SurfaceCacheSample, gpu_software_gi}
+pub import mod::editor_camera::EditorCameraState
+pub import mod::editor_guard::{action_needs_confirmation, guard_editor_action, guarded_action}
+pub import mod::editor_history::{ActorRecord, EditorActors, EditorEdit, ParentEdit, RenameEdit, TransformEdit, VisibilityEdit, editor_actors_from_scene}
+pub import mod::editor_input::{FlightInput, ViewportInputState}
+pub import mod::editor_values::{EditorTransform, apply_editor_transform, gizmo_axis_drag_scalar, gizmo_move_delta, gizmo_rotation_from_drag, gizmo_scale_from_drag, parse_editor_scalar, resolve_editor_pointer_target}
+pub import mod::material_asset::{edit_default_material, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color}
 pub import mod::mcp_gateway::GrapheneMcpGateway
-pub import mod::performance:: {
-    FrameStatistics, frame_statistics, performance_counter_ns
-}
+pub import mod::performance::{FrameStatistics, camera_step, camera_wheel_dolly, frame_statistics, navigation_delta_seconds, performance_counter_ns}
 pub import mod::preview::ViewportRenderer
-pub import mod::project_assets:: {
-    ImportedMeshAsset, add_actor_mesh_name, discover_obj_assets, import_obj_asset, load_obj_asset, project_mesh_directory
-}
-pub import mod::renderer:: {
-    ObjectUniforms, SceneRenderer
-}
+pub import mod::process::graphene_process_exit
+pub import mod::project_assets::{ImportedMeshAsset, add_actor_mesh_name, discover_obj_assets, import_obj_asset, load_obj_asset, project_mesh_autolod_enabled, project_mesh_autolod_path, project_mesh_directory, set_project_mesh_autolod}
+pub import mod::render_graph:: *
+pub import mod::render_policy::{DynamicGiPath, RenderFeaturePolicy, VirtualGeometryPath}
+pub import mod::renderer::{ObjectUniforms, SceneRenderer}
 pub import mod::rhi:: *
-pub import mod::scene::asset:: {
-    SceneActor, SceneAsset
-}
+pub import mod::runtime::{Actor, ActorComponent, InputBinding, InputMap, InputSnapshot, RuntimeClock, RuntimeConfig, RuntimeFrame, CollisionEvent, PhysicsWorld, RigidBody, RuntimeSession, RuntimeTransform, Subsystem, TickContext, TickGroup, World}
+pub import mod::runtime_bridge::runtime_transform_to_scene
+pub import mod::runtime_bridge::sync_runtime_world
+pub import mod::scene::asset::{SceneActor, SceneAsset}
 pub import mod::scene::camera::PerspectiveCamera
 pub import mod::scene::light::DirectionalLight
 pub import mod::scene::obj::parse_obj
-pub import mod::scene::primitive:: {
-    MeshData, cube_mesh, plane_mesh, sphere_mesh, editor_grid_mesh, gizmo_ring_mesh, gizmo_tip_mesh
-}
-pub import mod::scene::renderable:: {
-    MaterialId, MeshId, RenderItem, Renderable
-}
+pub import mod::scene::primitive::{MeshData, cube_mesh, plane_mesh, sphere_mesh, editor_grid_mesh, gizmo_ring_mesh, gizmo_tip_mesh}
+pub import mod::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
 pub import mod::scene::transform::Transform
-pub import mod::scene::world:: {
-    Entity, Scene
-}
+pub import mod::scene::world::{Entity, Scene}
 pub import mod::shaders:: *
-pub import mod::simulation_mode:: {
-    normalize_simulation_mode, simulation_mode_active, simulation_mode_is_play, simulation_mode_label,
-    simulation_world_message
-}
+pub import mod::simulation_mode::{normalize_simulation_mode, simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message}
+pub import mod::virtual_geometry::{ClusterHierarchyNode, GeometryCluster, GeometryLod, VirtualGeometry, build_cluster_hierarchy, build_virtual_geometry, build_virtual_geometry_lods, simplify_virtual_geometry_indices}
+pub import mod::virtual_geometry_archive::{GeometryPageArchive, geometry_page_archive_available, geometry_page_archive_bytes, geometry_page_archive_destroy, geometry_page_archive_prefetch, geometry_page_archive_triangles, geometry_page_archive_vertices}
+pub import mod::virtual_geometry_gpu::{GpuClusterCullResult, GpuVirtualGeometry, VirtualGeometryInstance, gpu_cull_clusters, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_archive_bytes, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pipeline, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_occlusion_counts, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_record, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_staging_bytes, gpu_virtual_geometry_traversal_instances}
+pub import mod::virtual_geometry_streaming::{GeometryPageAllocation, GeometryPageCache}

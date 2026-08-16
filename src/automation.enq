@@ -3,14 +3,10 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import json:: {
-    Json, field, parse, stringify
-}
+import json::{Json, field, parse, stringify}
 import mod::approval::ApprovalBroker
 import mod::command_bus::EditorState
-import mod::command_protocol:: {
-    command_registry_json, decode_command_request, encode_command_response
-}
+import mod::command_protocol::{command_registry_json, decode_command_request, encode_command_response}
 
 pub struct AutomationServer {
     state: EditorState
@@ -205,6 +201,11 @@ impl for AutomationServer {
                 state.push(field("selection", Json::Null))
             }
         }
+        let mut selection_ids = Vec[Json]::new()
+        for actor in self.state.selection_ids() {
+            selection_ids.push(Json::Number(actor.fmt()))
+        }
+        state.push(field("selection_ids", Json::Array(selection_ids)))
         state.push(field("actors", Json::Array(actors)))
         let mut response = Vec[(str, Json)]::new()
         response.push(field("id", Json::String(id)))

@@ -1,5 +1,6 @@
 import core::option::Option
-import graphene::{apply_editor_transform, parse_editor_scalar}
+import graphene::{apply_editor_transform, gizmo_axis_drag_scalar, gizmo_move_delta, gizmo_rotation_from_drag,
+    gizmo_scale_from_drag, parse_editor_scalar}
 import linalg::Vec3
 
 fn close(left: f32, right: f32) -> bool {
@@ -26,5 +27,19 @@ fn main() -> u32 {
     }
     if apply_editor_transform("transform-scale-x", "0", position, rotation, scale).is_some() { ret 8_u32 }
     if apply_editor_transform("unknown", "1", position, rotation, scale).is_some() { ret 9_u32 }
+    let move_y = gizmo_move_delta(2_u32, 0.0_f32, -10.0_f32, 5.0_f32)
+    if !close(move_y.x(), 0.0_f32) || !close(move_y.y(), 0.6_f32) || !close(move_y.z(), 0.0_f32) { ret 10_u32 }
+    let move_x = gizmo_move_delta(1_u32, 10.0_f32, 0.0_f32, 5.0_f32)
+    if !close(move_x.x(), 0.6_f32) || !close(move_x.y(), 0.0_f32) { ret 11_u32 }
+    let rotated = gizmo_rotation_from_drag(1_u32, rotation, 0.0_f32, -10.0_f32)
+    if !close(rotated.x(), 0.1_f32) { ret 12_u32 }
+    let scaled = gizmo_scale_from_drag(2_u32, scale, 0.0_f32, -20.0_f32)
+    if !close(scaled.y(), 1.2_f32) || !close(scaled.x(), 1.0_f32) { ret 13_u32 }
+    let clamped = gizmo_scale_from_drag(3_u32, scale, - 1000.0_f32, 0.0_f32)
+    if !close(clamped.z(), 0.1_f32) { ret 14_u32 }
+    let blue_forward = gizmo_scale_from_drag(3_u32, scale, 20.0_f32, 0.0_f32)
+    if blue_forward.z() <= scale.z() { ret 15_u32 }
+    let projected_y = gizmo_axis_drag_scalar(2_u32, Vec3::zero(), Vec3::new(3.0_f32, 0.75_f32, -2.0_f32))
+    if !close(projected_y, 0.75_f32) { ret 16_u32 }
     ret 0_u32
 }

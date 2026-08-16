@@ -1,0 +1,22 @@
+import graphene::RenderPipelineOptions
+
+fn main() -> u32 {
+    let overdraw = RenderPipelineOptions::depth()
+        .with_depth_test(false)
+        .with_depth_write(false)
+        .with_additive_blending()
+        .with_color_load(false)
+    if !overdraw.depth_attachment() || overdraw.depth_test() ||
+    overdraw.depth_write() || overdraw.alpha_blend() ||
+    !overdraw.additive_blend() || overdraw.load_color() {
+        ret 1_u32
+    }
+    let overlay = RenderPipelineOptions::opaque()
+        .with_alpha_blending()
+        .with_color_load(true)
+    if !overlay.alpha_blend() || overlay.additive_blend() ||
+    !overlay.load_color() {
+        ret 2_u32
+    }
+    ret 0_u32
+}

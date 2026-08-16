@@ -1,0 +1,103 @@
+import core::option::Option
+import core::vec::Vec
+import graphene:: {
+    DeviceFeatures, GpuVirtualGeometry, GraphicsInstance,
+    VirtualGeometryInstance, buffer_storage, cube_mesh, sphere_mesh
+}
+import linalg:: {
+    Mat4, Vec3
+}
+
+struct OwnedVirtualScene {
+    geometry: GpuVirtualGeometry<H>
+}
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let requested = DeviceFeatures::from_mask(
+                DeviceFeatures::mesh_shader().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, DeviceFeatures::none(), requested,)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            if !device.enabled_features().contains(requested) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+            let target = device.create_offscreen_target(96_u32, 96_u32)
+            let gi_scene = device.create_buffer(128_u64, buffer_storage(), true)
+            let gi_surfaces = device.create_buffer(64_u64 * 12_u64 * 4_u64,
+                buffer_storage(), true,)
+            let gi_history = device.create_buffer(64_u64 * 4_u64 * 4_u64,
+                buffer_storage(), true,)
+            gi_scene.write_f32(0_u64, 0.0_f32)
+            gi_history.write_f32(12_u64, 0.0_f32)
+            let cubes = OwnedVirtualScene<H> {
+                GpuVirtualGeometry::create_from_mesh(
+                    device, target, cube_mesh(0.8_f32), 4_usize,
+                    gi_scene, gi_surfaces, gi_history,)
+            }
+            let spheres = OwnedVirtualScene<H> {
+                GpuVirtualGeometry::create_from_mesh(
+                    device, target, sphere_mesh(0.45_f32, 12_u32, 16_u32), 4_usize,
+                    gi_scene, gi_surfaces, gi_history,)
+            }
+            let frame = target.acquire_frame()
+            let mut cube_instances = Vec[VirtualGeometryInstance]::new()
+            cube_instances.push(VirtualGeometryInstance::new(
+                    Mat4::translation(Vec3::new( - 0.55_f32, 0.0_f32, 0.0_f32)),
+                    Vec3::new(0.9_f32, 0.25_f32, 0.12_f32),
+                    0.0_f32, 0.45_f32, false,))
+            let mut sphere_instances = Vec[VirtualGeometryInstance]::new()
+            sphere_instances.push(VirtualGeometryInstance::new(
+                    Mat4::translation(Vec3::new(0.55_f32, 0.0_f32, 0.0_f32)),
+                    Vec3::new(0.15_f32, 0.45_f32, 0.95_f32),
+                    0.1_f32, 0.3_f32, false,))
+            let light_direction = Vec3::new( - 0.4_f32, - 0.8_f32, - 0.3_f32)
+            let light_color = Vec3::new(1.0_f32, 0.97_f32, 0.92_f32)
+            let ambient = Vec3::new(0.2_f32, 0.2_f32, 0.2_f32)
+            let cube_recorded = gpu_virtual_geometry_record(cubes.geometry, frame, Mat4::identity(),
+                Vec3::new(0.0_f32, 0.0_f32, - 2.0_f32),
+                cube_instances, 100.0_f32, light_direction,
+                light_color, 1.2_f32, ambient, 96.0_f32,)
+            let sphere_recorded = gpu_virtual_geometry_record(spheres.geometry, frame, Mat4::identity(),
+                Vec3::new(0.0_f32, 0.0_f32, - 2.0_f32),
+                sphere_instances, 100.0_f32, light_direction,
+                light_color, 1.2_f32, ambient, 96.0_f32,)
+            let pass = frame.begin_render_pass(
+                gpu_virtual_geometry_pipeline(cubes.geometry), 0.01_f32, 0.01_f32, 0.01_f32, 1.0_f32,)
+            let rendered = target.available() && gpu_virtual_geometry_available(cubes.geometry) &&
+            gpu_virtual_geometry_available(spheres.geometry) && frame.available() &&
+            cube_recorded && sphere_recorded && pass.available() &&
+            gpu_virtual_geometry_draw(cubes.geometry, pass) &&
+            gpu_virtual_geometry_draw(spheres.geometry, pass) &&
+            pass.end() && frame.present()
+            frame.destroy()
+            gpu_virtual_geometry_destroy(spheres.geometry)
+            gpu_virtual_geometry_destroy(cubes.geometry)
+            gi_history.destroy()
+            gi_surfaces.destroy()
+            gi_scene.destroy()
+            target.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if rendered {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}
