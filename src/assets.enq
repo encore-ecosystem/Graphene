@@ -223,6 +223,24 @@ impl for MeshAssets {
         )
         ret id
     }
+    pub fn upload_compatibility(self: mut Self, device: GraphicsDevice,
+        values: Vec[f32], indices: Vec[u32], stride: u32,) -> MeshId {
+        let mesh = device.create_mesh(values, indices)
+        if !mesh.available() {
+            ret MeshId::new(0_u64)
+        }
+        let id = MeshId::new(self.next_id)
+        self.next_id = self.next_id + 1_u64
+        self.entries.push(MeshAssetEntry {
+                id, mesh, GpuMesh::unavailable(),
+                VirtualGeometry::unavailable("Virtual geometry is unsupported by this backend"),
+                GpuBuffer::unavailable(), GpuBuffer::unavailable(),
+                AccelerationStructure::unavailable()
+            }
+            ,
+        )
+        ret id
+    }
     pub fn contains(self: Self, id: MeshId) -> bool {
         if !id.valid() {
             ret false

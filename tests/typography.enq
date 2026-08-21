@@ -1,0 +1,20 @@
+import graphene::{typography_body, typography_caption, typography_display, typography_heading, typography_metadata, typography_section}
+
+fn main() -> u32 {
+    if typography_caption() != 10.0_f32 ||
+    typography_metadata() != 11.0_f32 ||
+    typography_body() != 12.0_f32 ||
+    typography_section() != 13.0_f32 ||
+    typography_heading() != 17.0_f32 ||
+    typography_display() != 25.0_f32 {
+        ret 1_u32
+    }
+    if typography_caption() >= typography_metadata() ||
+    typography_metadata() >= typography_body() ||
+    typography_body() >= typography_section() ||
+    typography_section() >= typography_heading() ||
+    typography_heading() >= typography_display() {
+        ret 2_u32
+    }
+    ret 0_u32
+}

@@ -1,0 +1,21 @@
+import core::option::Option
+import graphene::{cube_fragment_spirv, cube_vertex_spirv}
+
+fn main() -> u32 {
+    let vertex = cube_vertex_spirv()
+    let fragment = cube_fragment_spirv()
+    if vertex.len() == 0_usize || fragment.len() == 0_usize {
+        ret 1_u32
+    }
+    match vertex.get(0_usize) {
+        Option::Some(magic) => {
+            if magic != 119734787_u32 {
+                ret 2_u32
+            }
+        }
+        Option::None => {
+            ret 3_u32
+        }
+    }
+    ret 0_u32
+}

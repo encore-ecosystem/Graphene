@@ -1,7 +1,17 @@
 import core::vec::Vec
 
+#cfg(target_os = "macos")
 pub fn gi_spatial_filter_spirv() -> Vec[u32] {
-    let mut words = Vec[u32]::new()
+    let mut words = Vec[u32]::with_capacity(3_usize)
+    words.push(119734787_u32)
+    words.push(3338111982_u32)
+    words.push(3437066282_u32)
+    ret words
+}
+
+#cfg(not(target_os = "macos"))
+pub fn gi_spatial_filter_spirv() -> Vec[u32] {
+    let mut words = Vec[u32]::with_capacity(1087_usize)
     words.push(119734787_u32)
     words.push(67072_u32)
     words.push(851979_u32)

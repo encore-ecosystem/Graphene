@@ -4,6 +4,7 @@ import core::vec::Vec
 import linalg::{Mat4, Vec3}
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
 import mod::dynamic_gi::{GpuDynamicGi, SdfBox, SdfSphere, SurfaceCacheSample}
+import mod::render_policy::{RenderFeaturePolicy, VirtualGeometryPath}
 import mod::renderer::SceneRenderer
 import mod::rhi:: *
 import mod::scene::camera::PerspectiveCamera
@@ -318,26 +319,39 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     let cube_vertices = cube_parts.0
     let cube_indices = cube_parts.1
     let cube_stride = cube_parts.2
-    let mesh_id = meshes.upload(device,
-        MeshData::new(cube_vertices, cube_indices, cube_stride),)
-    let ray_tlas = AccelerationStructure::unavailable()
-    let virtual_cubes = GpuVirtualGeometry::create_from_mesh(
-        device, swapchain,
-        MeshData::new(cube_vertices, cube_indices, cube_stride), 1024_usize,
-        dynamic_gi.scene_storage(), dynamic_gi.surface_storage(),
-        dynamic_gi.history_storage(),)
-    if !virtual_cubes.is_ready() {
-        println("Graphene Virtual Geometry initialization failed: " +
-            virtual_cubes.error_message())
-    }
-    let mut virtual_meshes = Vec[VirtualMeshEntry < H >]::new()
-    virtual_meshes.push(VirtualMeshEntry < H > {
-            virtual_cubes, mesh_id.value(), false, true
+    let feature_policy = RenderFeaturePolicy::select(device.enabled_features())
+    let mesh_id = match feature_policy.virtual_geometry() {
+        VirtualGeometryPath::Compatibility => {
+            meshes.upload_compatibility(device, cube_vertices, cube_indices, cube_stride)
         }
-        ,
-    )
+        _ => {
+            meshes.upload(device, MeshData::new(cube_vertices, cube_indices, cube_stride))
+        }
+    }
+    let ray_tlas = AccelerationStructure::unavailable()
+    let mut virtual_meshes = Vec[VirtualMeshEntry < H >]::new()
     let mut virtual_mesh_frame_ready = Vec[bool]::new()
-    virtual_mesh_frame_ready.push(false)
+    match feature_policy.virtual_geometry() {
+        VirtualGeometryPath::Compatibility => {
+        }
+        _ => {
+            let virtual_cubes = GpuVirtualGeometry::create_from_mesh(
+                device, swapchain,
+                MeshData::new(cube_vertices, cube_indices, cube_stride), 1024_usize,
+                dynamic_gi.scene_storage(), dynamic_gi.surface_storage(),
+                dynamic_gi.history_storage(),)
+            if !virtual_cubes.is_ready() {
+                println("Graphene Virtual Geometry initialization failed: " +
+                    virtual_cubes.error_message())
+            }
+            virtual_meshes.push(VirtualMeshEntry < H > {
+                    virtual_cubes, mesh_id.value(), false, true
+                }
+                ,
+            )
+            virtual_mesh_frame_ready.push(false)
+        }
+    }
     let mut mesh_bounds_min = Vec[Vec3]::new()
     let mut mesh_bounds_max = Vec[Vec3]::new()
     mesh_bounds_min.push(Vec3::new( - 0.6_f32, - 0.6_f32, - 0.6_f32))
@@ -345,13 +359,22 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     // The grid is recentered around the camera as it travels.  This keeps a
     // large, stable patch of world grid under the viewport without requiring
     // an unbounded vertex buffer.
-    let grid_mesh_id = meshes.upload(device, editor_grid_mesh(200.0_f32, 200_u32))
+    let grid_data = editor_grid_mesh(200.0_f32, 200_u32)
+    let grid_parts = grid_data.parts()
+    let grid_mesh_id = meshes.upload_compatibility(
+        device, grid_parts.0, grid_parts.1, grid_parts.2,)
     mesh_bounds_min.push(Vec3::new( - 100.0_f32, - 0.01_f32, - 100.0_f32))
     mesh_bounds_max.push(Vec3::new(100.0_f32, 0.01_f32, 100.0_f32))
-    let gizmo_tip_mesh_id = meshes.upload(device, gizmo_tip_mesh(0.28_f32, 0.36_f32))
+    let gizmo_tip_data = gizmo_tip_mesh(0.28_f32, 0.36_f32)
+    let gizmo_tip_parts = gizmo_tip_data.parts()
+    let gizmo_tip_mesh_id = meshes.upload_compatibility(
+        device, gizmo_tip_parts.0, gizmo_tip_parts.1, gizmo_tip_parts.2,)
     mesh_bounds_min.push(Vec3::new( - 0.18_f32, 0.0_f32, - 0.18_f32))
     mesh_bounds_max.push(Vec3::new(0.18_f32, 0.36_f32, 0.18_f32))
-    let gizmo_ring_mesh_id = meshes.upload(device, gizmo_ring_mesh(1.55_f32, 0.075_f32, 64_u32))
+    let gizmo_ring_data = gizmo_ring_mesh(1.55_f32, 0.075_f32, 64_u32)
+    let gizmo_ring_parts = gizmo_ring_data.parts()
+    let gizmo_ring_mesh_id = meshes.upload_compatibility(
+        device, gizmo_ring_parts.0, gizmo_ring_parts.1, gizmo_ring_parts.2,)
     mesh_bounds_min.push(Vec3::new( - 1.55_f32, 0.0_f32, - 1.55_f32))
     mesh_bounds_max.push(Vec3::new(1.55_f32, 0.0_f32, 1.55_f32))
     let mut materials = MaterialAssets::new()
@@ -1043,29 +1066,43 @@ impl for ViewportRenderer {
             }
             classic_source += stride as usize
         }
-        let virtual_mesh = GpuVirtualGeometry::create_from_mesh_textured(
-            self.device, self.swapchain,
-            MeshData::new(values, source_indices, source_stride), 1024_usize,
-            self.dynamic_gi.scene_storage(),
-            self.dynamic_gi.surface_storage(),
-            self.dynamic_gi.history_storage(), texture_pixels, texture_width, texture_height,)
-        let mesh = self.meshes.upload(self.device,
-            MeshData::new(classic_values, source_indices, 36_u32),)
+        let feature_policy = RenderFeaturePolicy::select(self.device.enabled_features())
+        let mesh = match feature_policy.virtual_geometry() {
+            VirtualGeometryPath::Compatibility => {
+                self.meshes.upload_compatibility(
+                    self.device, classic_values, source_indices, 36_u32,)
+            }
+            _ => {
+                self.meshes.upload(self.device,
+                    MeshData::new(classic_values, source_indices, 36_u32),)
+            }
+        }
         if mesh.valid() {
             self.mesh_bounds_min.push(minimum)
             self.mesh_bounds_max.push(maximum)
-            if virtual_mesh.is_ready() {
-                self.virtual_meshes.push(VirtualMeshEntry < H > {
-                        virtual_mesh, mesh.value(), false, autolod_enabled
+            match feature_policy.virtual_geometry() {
+                VirtualGeometryPath::Compatibility => {
+                }
+                _ => {
+                    let virtual_mesh = GpuVirtualGeometry::create_from_mesh_textured(
+                        self.device, self.swapchain,
+                        MeshData::new(values, source_indices, source_stride), 1024_usize,
+                        self.dynamic_gi.scene_storage(),
+                        self.dynamic_gi.surface_storage(),
+                        self.dynamic_gi.history_storage(), texture_pixels,
+                        texture_width, texture_height,)
+                    if virtual_mesh.is_ready() {
+                        self.virtual_meshes.push(VirtualMeshEntry < H > {
+                                virtual_mesh, mesh.value(), false, autolod_enabled
+                            }
+                            ,
+                        )
+                        self.virtual_mesh_frame_ready.push(false)
+                    } else {
+                        gpu_virtual_geometry_destroy(virtual_mesh)
                     }
-                    ,
-                )
-                self.virtual_mesh_frame_ready.push(false)
-            } else {
-                gpu_virtual_geometry_destroy(virtual_mesh)
+                }
             }
-        } else {
-            gpu_virtual_geometry_destroy(virtual_mesh)
         }
         ret mesh
     }
@@ -1210,7 +1247,7 @@ impl for ViewportRenderer {
     pub fn create(width: u32, height: u32) -> Option[ViewportRenderer < H >] {
         let instance = GraphicsInstance::create()
         if !instance.available() {
-            println("Graphene viewport Vulkan initialization: " + instance.error())
+            println("Graphene viewport graphics initialization: " + instance.error())
             ret Option[ViewportRenderer < H >]::None
         }
         match instance.preferred_adapter() {
@@ -1221,7 +1258,7 @@ impl for ViewportRenderer {
                     Option[GrapheneWindow]::None, false,)
             }
             Option::None => {
-                println("Graphene viewport: no Vulkan adapter found")
+                println("Graphene viewport: no graphics adapter found")
             }
         }
         ret Option[ViewportRenderer < H >]::None
@@ -1231,7 +1268,7 @@ impl for ViewportRenderer {
     {
         let instance = GraphicsInstance::with_external_window_support(false)
         if !instance.available() {
-            println("Graphene window Vulkan initialization: " + instance.error()) ret Option[ViewportRenderer < H >]::None
+            println("Graphene window graphics initialization: " + instance.error()) ret Option[ViewportRenderer < H >]::None
         }
         let window = instance.attach_window(platform_handle, width, height)
         if !window.available() {
@@ -1245,7 +1282,7 @@ impl for ViewportRenderer {
                     Option[GrapheneWindow]::Some(window), false,)
             }
             Option::None => {
-                println("Graphene viewport: no Vulkan adapter found")
+                println("Graphene viewport: no graphics adapter found")
             }
         }
         ret Option[ViewportRenderer < H >]::None
@@ -1255,7 +1292,7 @@ impl for ViewportRenderer {
         queue_family: u32, width: u32, height: u32,) -> Option[ViewportRenderer < H >] {
         let instance = GraphicsInstance::borrow(instance_handle, physical_device)
         if !instance.available() {
-            println("Graphene borrowed Vulkan initialization: " + instance.error())
+            println("Graphene borrowed graphics initialization: " + instance.error())
             ret Option[ViewportRenderer < H >]::None
         }
         let device = instance.borrow_device(device_handle, queue_family)
@@ -1270,7 +1307,7 @@ impl for ViewportRenderer {
     Option[ViewportRenderer < H >] {
         let instance = GraphicsInstance::borrow(instance_handle, physical_device)
         if !instance.available() {
-            println("Graphene borrowed Vulkan initialization: " + instance.error())
+            println("Graphene borrowed graphics initialization: " + instance.error())
             ret Option[ViewportRenderer < H >]::None
         }
         match instance.preferred_adapter() {
@@ -1285,7 +1322,7 @@ impl for ViewportRenderer {
                     Option[GrapheneWindow]::None, true,)
             }
             Option::None => {
-                println("Graphene viewport: borrowed Vulkan adapter was not found")
+                println("Graphene viewport: borrowed graphics adapter was not found")
             }
         }
         ret Option[ViewportRenderer < H >]::None

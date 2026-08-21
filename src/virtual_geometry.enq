@@ -362,6 +362,12 @@ fn invalid_geometry(message: str) -> VirtualGeometry {
     }
 }
 
+impl for VirtualGeometry {
+    pub fn unavailable(message: str) -> Self {
+        ret invalid_geometry(message)
+    }
+}
+
 fn hierarchy_node(nodes: Vec[ClusterHierarchyNode], index: u32) -> ClusterHierarchyNode {
     match nodes.get(index as usize) {
         Option::Some(node) => {

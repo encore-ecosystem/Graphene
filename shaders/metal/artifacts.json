@@ -1,0 +1,84 @@
+{
+  "format": 1,
+  "metal_language": "3.1",
+  "minimum_macos": "14.0",
+  "shaderc": "shaderc v2026.3 unknown hash, 2026-07-16",
+  "shaders": [
+    {
+      "metallib_sha256": "2ff62d564e839feb8decc6591c2b54a8c78c0ac102dfe3a39f6a139e6973bb2d",
+      "name": "triangle_vertex",
+      "source": "triangle.vert",
+      "spirv_sha256": "0afff58ff490f58b54569c27f1603d150f5ae852828186cc9efd5b71015ed782",
+      "stage": "vert"
+    },
+    {
+      "metallib_sha256": "59336f746a78c4eaf6ba91bc416867dd3ef1c055bdd7a573bd3e016b264c23b4",
+      "name": "triangle_fragment",
+      "source": "triangle.frag",
+      "spirv_sha256": "7857393bd3cd044244c48219a656faa136cb709eb69c5928dcb0cf24c27038a3",
+      "stage": "frag"
+    },
+    {
+      "metallib_sha256": "745a65426823fa047c82378ce167b095663c6eedfc0c6357725d0ccbad9f8da9",
+      "name": "depth_vertex",
+      "source": "depth.vert",
+      "spirv_sha256": "d74c1e3d585010e8532d8b31fc206953c1c735efcd36108bd6908eb6d6748978",
+      "stage": "vert"
+    },
+    {
+      "metallib_sha256": "f76c7588f6e4c021260db324db14cdd09aee39ab07adc7b06cb1714a9ec21658",
+      "name": "depth_fragment",
+      "source": "depth.frag",
+      "spirv_sha256": "1e2f9cdaa51bff0903f4098641bc0158246a011529000efcb90e5b77bd69bb89",
+      "stage": "frag"
+    },
+    {
+      "metallib_sha256": "44f8392876c1f50d9c90a94b32a5e465766ea1cf06d9c7a039c8f57cf4fd2f18",
+      "name": "cube_vertex",
+      "source": "cube.vert",
+      "spirv_sha256": "f006b82bbe131a55d7c25b5a8673fb7318597c5018cac324805e9e4fecb6739e",
+      "stage": "vert"
+    },
+    {
+      "metallib_sha256": "3b019fc997cd4c046483982106dee459a824e3e2ab6aec86f87921896d8120e3",
+      "name": "cube_fragment",
+      "source": "cube.frag",
+      "spirv_sha256": "5505fd05c45980d22821ed45d30f696d27701bee84574ed7dad32d42ab857c6c",
+      "stage": "frag"
+    },
+    {
+      "metallib_sha256": "d3c9d05d18c00cdbf7b58fa87e1e094cb5e21a1b0ea11a1a5e75f1c43a009541",
+      "name": "double_compute",
+      "source": "double.comp",
+      "spirv_sha256": "ce8cfbeba5e2910fc46f9982cd9b9f35b8a16190ea1a747237c24a4d68e0d878",
+      "stage": "comp"
+    },
+    {
+      "metallib_sha256": "7431f29f82d21e8fc6d43b2a998d1ef2ee0c15dc8660a8329e6b789adc51c7e4",
+      "name": "cluster_cull",
+      "source": "cluster_cull.comp",
+      "spirv_sha256": "0a575997e29ea8cf4e23e16ca7f99c834a2a6eb9f586a7359f09c6b1f82d8df0",
+      "stage": "comp"
+    },
+    {
+      "metallib_sha256": "c4ec155c5c16739dfd8aa72587cc038f94302ae273b48ab859be2c52fb8a8d15",
+      "name": "software_gi",
+      "source": "software_gi.comp",
+      "spirv_sha256": "f59560192467969bf66fdf5248a890a0c4d748fdc20f28372e65498546c9bd1b",
+      "stage": "comp"
+    },
+    {
+      "metallib_sha256": "b397893d0f0417e5a9f8c6ed9e7804567bd5ad046b5008ff01fa545404cee206",
+      "name": "gi_spatial_filter",
+      "source": "gi_spatial_filter.comp",
+      "spirv_sha256": "7d32581d41e2ab189b26f0f3b2fcb4f3f4f2f41b6862b7ce7ca86401f0059f84",
+      "stage": "comp"
+    }
+  ],
+  "spirv_cross": "1.4.357.0",
+  "target": "aarch64-apple-darwin",
+  "xcode": [
+    "Xcode 26.6",
+    "Build version 17F113"
+  ]
+}

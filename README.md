@@ -2,16 +2,32 @@
 
 Graphene is a real-time engine and editor written in Encore.
 
-The first backend is Vulkan. Public rendering APIs are defined by Graphene RHI and do not expose Vulkan handles, allowing additional native backends later.
+Graphene uses Vulkan on Linux and native Metal on Apple Silicon macOS. Public
+rendering APIs are defined by Graphene RHI and do not expose either backend's
+handles.
 
 ## Requirements
 
-- Linux with a Vulkan 1.2-capable driver.
+- Linux with a Vulkan 1.2-capable driver, or Apple Silicon macOS 14 or newer.
 - Encore 0.1.4.
 - Clang and a native linker.
 - SDL3 available to the dynamic loader for editor windows.
 - A sibling checkout of
   [Luma](https://github.com/encore-ecosystem/Luma) for editor fonts and icons.
+
+Normal macOS builds consume checked-in `.metallib` artifacts and do not need a
+shader compiler. Regenerating those artifacts requires full Xcode, its optional
+Metal toolchain, Homebrew `shaderc`, and `spirv-cross` 1.4.357.0:
+
+```sh
+xcodebuild -downloadComponent metalToolchain
+brew install shaderc spirv-cross
+python3 tools/generate_metal_shaders.py
+```
+
+Without Xcode, `python3 tools/generate_metal_shaders.py --validate-only`
+still compiles every baseline GLSL shader to SPIR-V and verifies its MSL entry
+point and preserved binding ABI.
 
 Install Encore with its checksum-verifying installer:
 
@@ -33,11 +49,15 @@ encore test
 encore build
 ```
 
-The editor binary is written to `target/debug/graphene`. Launch it with an
+On macOS, use `tools/test_macos.sh` in place of `encore test`. It supplies the
+Objective-C Metal runtime that Encore's standalone-test linker does not yet
+take from target runtime sources.
+
+The editor binary is written to `target/dev/graphene`. Launch it with an
 example project:
 
 ```sh
-./target/debug/graphene --project ./examples/cube
+./target/dev/graphene --project ./examples/cube
 ```
 
 For editor development, place the repositories next to each other:
@@ -51,11 +71,16 @@ For editor development, place the repositories next to each other:
 Encore resolves the pinned Luma code dependency from `encore.lock`; the sibling
 checkout provides the runtime fonts and icons.
 
-The Vulkan bridge is one C translation unit with private implementation fragments: `platform.inc` owns loading, SDL and instance discovery; `device.inc` owns logical devices and pipeline resources; `presentation.inc` owns swapchains and frame recording; `resources.inc` owns command submissions, buffers, textures and transfers. Keeping one translation unit avoids exporting internal Vulkan declarations while preventing the backend from becoming one monolithic implementation file.
+The RHI selects a native package at compile time. Vulkan remains split across
+private platform, device, presentation, resource, and UI fragments. Metal is
+implemented in Luma's reusable `metal_native` package and owns `MTLDevice`,
+buffers, textures, compute/render pipelines, `CAMetalLayer` presentation, and
+the retained UI compositor. Luma and Graphene record UI, compute, scene, and
+overlays into one Metal command buffer and commit it exactly once per frame.
 
 ## Capability tiers
 
-- Tier 0: Vulkan 1.2-compatible raster and compute foundation.
+- Tier 0: baseline raster and storage-compute foundation (Vulkan 1.2 or Metal).
 - Tier 1: Vulkan 1.3 core rendering and synchronization model.
 - Tier 2: mesh shader support.
 - Tier 3: acceleration structures, ray queries or ray-tracing pipelines.
@@ -66,7 +91,9 @@ Ray tracing and mesh shaders are optional capabilities. Graphene must remain fun
 
 `CommandEncoder` owns a primary, one-time command buffer. Submitting it transfers the command buffer to `GpuSubmission`, which exposes fence polling and bounded waits. The synchronous path remains available for initialization.
 
-`GpuBuffer` supports device-local or host-visible allocation. The first implementation uses one Vulkan allocation per buffer; the public API is independent from the allocator strategy.
+`GpuBuffer` supports device-local or host-visible allocation. Allocation and
+host/GPU synchronization are backend-owned; the public API is independent from
+the allocator strategy.
 
 Static geometry should live in device-local memory. Create a host-visible `buffer_transfer_source` staging buffer, copy it into a device-local vertex or index buffer carrying `buffer_transfer_destination`, wait for the upload submission, then release staging memory.
 
@@ -88,19 +115,31 @@ The editor exposes Cube, Plane and UV Sphere as built-in actors. Their scene ide
 
 `GpuTexture` supports device-local 2D images with explicit format, usage and mip count. Texture upload and layout transitions are recorded separately by command encoders.
 
-Textures own a Vulkan image view. Staging uploads use an explicit transfer-destination transition, buffer-to-image copy and shader-read transition; the same Graphene commands will map to synchronization2 when that backend path is enabled.
+Textures own a backend-native image or texture view. Staging uploads use an
+explicit transfer-destination transition, buffer-to-texture copy and
+shader-read transition.
 
 ## Presentation
 
-Window support is opt-in through `GraphicsInstance::with_window_support`. Graphene loads SDL3 dynamically for native window and Vulkan surface creation; headless tools and CI do not require SDL3.
+Window support is opt-in through `GraphicsInstance::with_window_support`.
+Graphene loads SDL3 dynamically for native windows and creates either a Vulkan
+surface or an SDL Metal view backed by `CAMetalLayer`; headless tools do not
+require SDL3.
 
 Create presentation objects in this order: `GraphicsInstance`, `GrapheneWindow`, present-capable `GraphicsDevice`, `Swapchain`, shader modules, and `RenderPipeline`. GPU buffers can be created after the device. Destroy the swapchain before pipelines currently used by its framebuffers, then destroy pipelines, shaders, buffers, device, window and instance. The swapchain uses FIFO presentation and automatically rebuilds itself when Wayland, X11 or the compositor invalidates its extent.
 
-The swapchain keeps two frames in flight, each with persistent command buffers, semaphores and a fence. Rendering waits only when reusing a frame slot; queue-wide idle waits are reserved for swapchain rebuild and destruction.
+The presentation target keeps two frame slots. Vulkan uses persistent command
+buffers, semaphores, and fences. Metal retains each submitted command buffer
+until its slot is reused and synchronizes only host-written resources that are
+still referenced by an earlier submission.
 
 Dynamic resources must also be ring-buffered. `RenderFrame::slot` identifies the frame whose fence has already been waited by `acquire_frame`; update only the uniform or staging range owned by that slot. `Swapchain::frames_in_flight` reports the required ring size.
 
-`ShaderModule` accepts SPIR-V words directly from Encore. `RenderPipeline` describes its interleaved vertex layout independently from the swapchain extent, and `Swapchain::draw_indexed` binds vertex and `u32` index buffers. Dynamic viewport and scissor state keep a pipeline valid across window resize.
+`ShaderModule` accepts SPIR-V words from Encore. Vulkan consumes them directly;
+Metal hashes the static SPIR-V payload and resolves the matching checked-in,
+one-entry-point metallib. There is no runtime GLSL, SPIR-V Cross, or Metal
+compilation. `RenderPipeline` describes its interleaved vertex layout
+independently from the presentation extent.
 
 `BindGroupLayout` describes typed bindings visible to selected shader stages. The current descriptor types are uniform buffers and combined texture samplers. `BindGroup` owns its descriptor pool and set, references bounded resources, and can be bound by `Swapchain::draw_indexed_bound`. The API names intentionally match the future backend-neutral resource model rather than exposing Vulkan descriptor terminology.
 
@@ -144,6 +183,7 @@ cd examples/cube/game
 encore run
 ```
 
-Set `GRAPHENE_VK_TRACE=1` to print surface extents and Vulkan acquire/present results while diagnosing platform presentation.
+Set `GRAPHENE_VK_TRACE=1` on Linux or `GRAPHENE_METAL_TRACE=1` on macOS to log
+native adapter and submission details while diagnosing presentation.
 
 Window input uses physical keyboard scancodes and a per-poll mouse snapshot. In the cube probe, use `A/D` to orbit, `W/S` to zoom, drag with the right mouse button to orbit freely, and press `Escape` to exit.

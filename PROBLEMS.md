@@ -242,3 +242,23 @@ entry owns a nested resource aggregate and a scalar field. Exercise the owner
 for at least one minute, destroy the owner/device, and require generated drop
 code to complete under AddressSanitizer without an invalid heap release or
 double free.
+
+## Large generated `Vec[u32]` return stalls in retain lowering
+
+Status: confirmed compiler runtime/code-generation defect while validating the
+macOS Metal backend on 2026-08-21.
+
+A generated shader function that builds and returns a roughly 2,600-element
+`Vec[u32]` compiles successfully but never completes in either the editor or a
+single focused standalone test. Process samples consistently stop in
+`__retain_VecStorage_u32_H` via `encore_node_retain` while returning through
+`ViewportRenderer::create_composed`. Preallocating the exact vector capacity
+does not change the failure. The macOS path now returns a three-word artifact
+token and lets the native backend resolve it to the checked-in metallib; Vulkan
+targets continue to receive the complete SPIR-V vector.
+
+Regression test: generate a function that preallocates, fills, and returns a
+2,600-element `Vec[u32]`; consume its length and first element from a standalone
+test and from a second function returning an aggregate. Require both paths to
+finish promptly under a sampling profiler without remaining in
+`__retain_VecStorage_u32_H`.

@@ -5,7 +5,11 @@ description = "Graphene real-time engine and editor"
 readme = "README.md"
 licence = "MIT"
 build = "build.enq"
-dependencies = ["index@std@^1.0.1", "index@json@^1.0.0", "index@linalg@^0.1.1", "index@vulkan_native@^0.1.0", "index@luma@^0.2.1"]
+dependencies = ["index@std@^1.0.1", "index@json@^1.0.0", "index@linalg@^0.1.1", "path@../luma", "path@../luma/workspace/graphics_native"]
+
+[target.aarch64-apple-darwin]
+runtime-sources = ["../luma/workspace/metal_native/backend.m"]
+link-args = ["-framework", "Foundation", "-framework", "Metal", "-framework", "QuartzCore"]
 
 [target.x86_64-unknown-linux-gnu]
 link-args = ["-Wl,--allow-multiple-definition"]
