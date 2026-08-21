@@ -1,59 +1,17 @@
 import core::fmt::Debug
-import std::io::println
 import core::option::Option
-import std::os:: {
-    argc, argv, cwd, env, file_exists, home_dir, mkdir_all, read_file, remove_file, write_file
-}
 import core::panic::panic
-import std::process::run_args_capture
 import core::result::Result
+import core::vec::Vec
+import graphene::{ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, ApprovalBroker, ApprovalRequest, AssetImportCommand, AutomationListener, graphene_process_exit, AutomationScopes, AutomationServer, DuplicateActorCommand, EditorCameraState, EditorState, FlightInput, ViewportInputState, GrapheneCommand, ImportedMeshAsset, OperationCompletionCommand, ProjectLoadedCommand, ProjectRequestCommand, SimulationCommand, MaterialId, MeshId, Renderable, Scene, SceneActor, SceneAsset, StandardMaterial, Transform, ViewportRenderer, add_actor_mesh_name, apply_editor_transform, gizmo_rotation_from_drag, gizmo_scale_from_drag, resolve_editor_pointer_target, camera_wheel_dolly, performance_counter_ns, action_needs_confirmation, content_asset_matches, discover_obj_assets, guard_editor_action, guarded_action, import_obj_asset, set_project_mesh_autolod, automation_capability_token, automation_secure_file, edit_default_material, editor_actors_from_scene, console_help, decode_console_command, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color, normalize_simulation_mode, outliner_actor_matches, plane_mesh, simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message, sphere_mesh, typography_body, typography_caption, typography_display, typography_heading, typography_metadata, typography_section}
+import json::{Json, field, stringify}
+import linalg::Vec3
+import luma::{AppEvent, Body, Button, Color, FilePicker, FilePickerIcons, FontManager, Footer, Header, Html, IconManager, Insets, Main, Nav, PresentMode, ReactiveUi, RendererKind, Section, Style, StyleSheet, SvgDocument, TextEditor, VulkanFeatureRequest, Widget, WidgetLayout, Window, Shortcut, ShortcutRegistry, event_close, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_resize, event_scroll, event_text_input, event_key_up, backend_error, backend_name, align_start, horizontal, key_backspace, key_delete, key_down, key_end, key_enter, key_home, key_left, key_right, key_up, text_end, vertical, widget_button, widget_checkbox, widget_color_channel, widget_color_picker, widget_color_swatch, widget_icon_button, widget_icon_card, widget_input, widget_link, widget_radio, widget_select, widget_slider, widget_switch, widget_textarea}
+import std::io::println
+import std::os::{argc, argv, cwd, env, file_exists, home_dir, mkdir_all, read_file, remove_file, write_file}
+import std::process::run_args_capture
 import std::thread::JoinHandle
 import std::time::perf_counter_ms
-import core::vec::Vec
-import json:: {
-    Json, field, stringify
-}
-import luma:: {
-    AppEvent, Body, Button, Color, FilePicker, FilePickerIcons, FontManager, Footer, Header, Html, IconManager,
-    Insets,
-    Main, Nav, PresentMode, ReactiveUi, RendererKind, Section, Style, StyleSheet, SvgDocument,
-    TextEditor, VulkanFeatureRequest,
-    Widget, WidgetLayout, Window,
-    Shortcut, ShortcutRegistry,
-    event_close, event_focus_lost, event_key_down, event_pointer_down,
-    event_pointer_move, event_pointer_up, event_resize, event_scroll, event_text_input, event_key_up, backend_error,
-    backend_name,
-    align_start, horizontal, key_backspace, key_delete, key_down, key_end, key_enter, key_home, key_left,
-    key_right, key_up, text_end, vertical,
-    widget_button, widget_checkbox, widget_color_channel, widget_color_picker,
-    widget_color_swatch, widget_icon_button, widget_icon_card, widget_input,
-    widget_link, widget_radio, widget_select, widget_slider, widget_switch, widget_textarea
-}
-import graphene:: {
-    ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand,
-    ActorTransformCommand, ActorTransformsCommand,
-    ActorVisibilityCommand, AddActorCommand, ApprovalBroker, ApprovalRequest, AssetImportCommand,
-    AutomationListener,
-    graphene_process_exit,
-    AutomationScopes, AutomationServer,
-    DuplicateActorCommand, EditorCameraState, EditorState, FlightInput, ViewportInputState,
-    GrapheneCommand, ImportedMeshAsset, OperationCompletionCommand, ProjectLoadedCommand,
-    ProjectRequestCommand, SimulationCommand,
-    MaterialId, MeshId, Renderable, Scene, SceneActor, SceneAsset, StandardMaterial,
-    Transform, ViewportRenderer, add_actor_mesh_name, apply_editor_transform,
-    gizmo_rotation_from_drag, gizmo_scale_from_drag,
-    resolve_editor_pointer_target,
-    camera_wheel_dolly, performance_counter_ns,
-    action_needs_confirmation, content_asset_matches, discover_obj_assets, guard_editor_action, guarded_action,
-    import_obj_asset, set_project_mesh_autolod,
-    automation_capability_token, automation_secure_file, edit_default_material, editor_actors_from_scene,
-    console_help, decode_console_command, material_asset_parse, material_asset_stringify,
-    material_edit_action, material_preset_color,
-    normalize_simulation_mode, outliner_actor_matches, plane_mesh,
-    simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message,
-    sphere_mesh
-}
-import linalg::Vec3
 
 struct EditorIcons {
     brand: SvgDocument
@@ -134,7 +92,9 @@ fn file_picker_icons(icons: EditorIcons) -> FilePickerIcons {
 
 fn with_graphene_styles(window: Window) -> Window {
     match StyleSheet::from_file("graphene.css") {
-        Result::Ok(sheet) => { ret window.with_stylesheet(sheet) }
+        Result::Ok(sheet) => {
+            ret window.with_stylesheet(sheet)
+        }
         Result::Err(message) => {
             println("Graphene: unable to load graphene.css: " + message)
         }
@@ -142,8 +102,28 @@ fn with_graphene_styles(window: Window) -> Window {
     ret window
 }
 
+#cfg(target_os = "macos")
+fn create_editor_window() -> Window {
+    ret with_graphene_styles(
+        Window::create_with_renderer("Graphene Editor", 1440_u32, 900_u32,
+            RendererKind::DirectMetal,)
+        .with_background(Color::rgb(13_u8, 13_u8, 15_u8)),)
+}
+
+#cfg(not(target_os = "macos"))
+fn create_editor_window() -> Window {
+    ret with_graphene_styles(
+        Window::create_with_renderer_features("Graphene Editor", 1440_u32, 900_u32,
+            RendererKind::DirectVulkan, VulkanFeatureRequest::advanced_rendering(),)
+        .with_background(Color::rgb(13_u8, 13_u8, 15_u8)),)
+}
+
 fn state_classes(base: str, active: bool) -> str {
-    ret if active { base + " active" } else { base }
+    ret if active {
+        base + " active"
+    } else {
+        base
+    }
 }
 
 fn styled_editor_subtree(window: Window, root: Widget, hovered: str) -> Widget {
@@ -413,7 +393,12 @@ fn average_position(values: Vec[Vec3]) -> Vec3 {
 fn compile_game(compiler: str, manifest: str, profile: str, run_after_build: bool,
     log_path: str, completion_path: str,) -> i32 {
     let mut args = Vec[str]::new()
-    args.push(if run_after_build { "run" } else { "build" })
+    args.push(if run_after_build {
+            "run"
+        } else {
+            "build"
+        }
+    )
     args.push("--profile")
     args.push(profile)
     args.push("--manifest-path")
@@ -465,14 +450,14 @@ fn hover_style(widget: Widget) -> Style {
     let border = style.border_color()
     ret style.with_background(Color::rgba(brighten_hover_channel(background.red()),
             brighten_hover_channel(background.green()), brighten_hover_channel(background.blue()), background.alpha(),))
-        .with_foreground(Color::rgb(245_u8, 246_u8, 248_u8))
-        .with_border(if style.border_width() > 0.0_f32 {
-                style.border_width()
-            } else {
-                1.0_f32
-            }
-            , Color::rgba(brighten_hover_channel(border.red()),
-            brighten_hover_channel(border.green()), brighten_hover_channel(border.blue()), border.alpha(),))
+    .with_foreground(Color::rgb(245_u8, 246_u8, 248_u8))
+    .with_border(if style.border_width() > 0.0_f32 {
+            style.border_width()
+        } else {
+            1.0_f32
+        }
+        , Color::rgba(brighten_hover_channel(border.red()),
+            brighten_hover_channel(border.green()), brighten_hover_channel(border.blue()), border.alpha(),),)
 }
 
 fn panel_style() -> Style {
@@ -484,7 +469,7 @@ fn panel_style() -> Style {
 
 fn label(text: str) -> Widget {
     ret Widget::label(text).with_flex(24.0_f32, 0.0_f32).with_style(
-        Style::default().with_foreground(Color::rgb(188_u8, 190_u8, 196_u8)).with_font_size(11.0_f32))
+        Style::default().with_foreground(Color::rgb(188_u8, 190_u8, 196_u8)).with_font_size(typography_body()))
 }
 
 fn section_title(text: str) -> Widget {
@@ -496,7 +481,7 @@ fn section_title(text: str) -> Widget {
             Style::default().with_background(Color::rgb(31_u8, 132_u8, 194_u8)).with_pointer_events(false)))
     title.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(224_u8, 225_u8, 228_u8))
-            .with_padding(Insets::symmetric(4.0_f32, 7.0_f32)).with_font_size(10.0_f32).with_font_weight(600_u32)
+            .with_padding(Insets::symmetric(4.0_f32, 7.0_f32)).with_font_size(typography_body()).with_font_weight(600_u32)
             .with_pointer_events(false)))
     ret title
 }
@@ -507,7 +492,7 @@ fn dock_badge(text: str, width: f32) -> Widget {
                 142_u8, 149_u8,))
         .with_border(1.0_f32, theme_border()).with_radius(2.0_f32).with_padding(Insets::symmetric(2.0_f32,
                 5.0_f32,))
-        .with_font_size(8.0_f32).with_font_weight(600_u32).with_pointer_events(false))
+        .with_font_size(typography_caption()).with_font_weight(600_u32).with_pointer_events(false))
 }
 
 fn dock_header(text: str, context: str, context_width: f32) -> Widget {
@@ -521,7 +506,7 @@ fn dock_header(text: str, context: str, context_width: f32) -> Widget {
         Style::default().with_padding(Insets::symmetric(2.0_f32, 7.0_f32)).with_gap(5.0_f32).with_pointer_events(false))
     row.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(220_u8, 222_u8, 226_u8))
-            .with_font_size(10.0_f32).with_font_weight(600_u32)
+            .with_font_size(typography_body()).with_font_weight(600_u32)
             .with_pointer_events(false)))
     if context != "" {
         row.push(dock_badge(context, context_width))
@@ -635,18 +620,18 @@ fn add_actor_popup(imported_meshes: Vec[ImportedMeshAsset], hovered: str, icons:
         .with_absolute(true).with_left(6.0_f32).with_top(154.0_f32).with_z_index(96_i32)
         .with_shadow(0.0_f32, 7.0_f32, 18.0_f32, 0.0_f32, Color::rgba(0_u8, 0_u8, 0_u8, 190_u8), false))
     popup.push(Widget::label("BASIC").with_flex(18.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(8.0_f32).with_font_weight(700_u32)
+            Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(typography_caption()).with_font_weight(700_u32)
             .with_padding(Insets::symmetric(2.0_f32, 6.0_f32)).with_pointer_events(false)))
     popup.push(popup_action("add-actor-cube", "Cube", icons.mesh, hovered, false, false))
     popup.push(popup_action("add-actor-plane", "Plane", icons.mesh, hovered, false, false))
     popup.push(popup_action("add-actor-sphere", "Sphere", icons.mesh, hovered, false, false))
     popup.push(Widget::label("LIGHTING").with_flex(18.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(8.0_f32).with_font_weight(700_u32)
+            Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(typography_caption()).with_font_weight(700_u32)
             .with_padding(Insets::symmetric(2.0_f32, 6.0_f32)).with_pointer_events(false)))
     popup.push(popup_action("add-actor-light", "Directional Light", icons.light, hovered, false, false))
     if visible_meshes > 0_usize {
         popup.push(Widget::label("PROJECT MESHES").with_flex(18.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(8.0_f32).with_font_weight(700_u32)
+                Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(typography_caption()).with_font_weight(700_u32)
                 .with_padding(Insets::symmetric(2.0_f32, 6.0_f32)).with_pointer_events(false)))
         let mut index = 0_usize
         while index < visible_meshes {
@@ -673,7 +658,7 @@ fn outliner_settings_popup(show_editor_actors: bool, show_hidden_actors: bool, h
         .with_absolute(true).with_left(52.0_f32).with_top(154.0_f32).with_z_index(97_i32)
         .with_shadow(0.0_f32, 7.0_f32, 18.0_f32, 0.0_f32, Color::rgba(0_u8, 0_u8, 0_u8, 190_u8), false))
     popup.push(Widget::label("OUTLINER FILTERS").with_flex(18.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(8.0_f32).with_font_weight(700_u32)
+            Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_font_size(typography_caption()).with_font_weight(700_u32)
             .with_padding(Insets::symmetric(2.0_f32, 6.0_f32)).with_pointer_events(false)))
     popup.push(popup_action("outliner-show-editor-actors", "Editor Actors", icons.camera, hovered, false,
             show_editor_actors,))
@@ -704,7 +689,7 @@ fn project_dialog(mode: str, path_editor: TextEditor, focused: bool, error: str,
         )
         .with_flex(28.0_f32, 0.0_f32).with_style(Style::default().with_foreground(Color::rgb(235_u8,
                     236_u8, 239_u8,))
-            .with_font_size(16.0_f32).with_font_weight(600_u32)))
+            .with_font_size(typography_heading()).with_font_weight(600_u32)))
     dialog.push(Widget::label(if mode == "new" {
                 "Choose the new project directory."
             } else {
@@ -712,7 +697,7 @@ fn project_dialog(mode: str, path_editor: TextEditor, focused: bool, error: str,
             }
         )
         .with_flex(20.0_f32, 0.0_f32).with_style(Style::default().with_foreground(Color::rgb(157_u8,
-                    160_u8, 167_u8,)).with_font_size(10.0_f32)))
+                    160_u8, 167_u8,)).with_font_size(typography_body())))
     dialog.push(Widget::input("project-path", path_editor.value()).with_flex(38.0_f32, 0.0_f32).with_style(
             Style::default().with_background(Color::rgb(17_u8, 18_u8, 21_u8)).with_foreground(Color::rgb(226_u8,
                     228_u8, 232_u8,))
@@ -723,9 +708,9 @@ fn project_dialog(mode: str, path_editor: TextEditor, focused: bool, error: str,
                 }
                 ,
             ).with_radius(3.0_f32)
-            .with_padding(Insets::symmetric(7.0_f32, 9.0_f32)).with_font_size(11.0_f32)))
+            .with_padding(Insets::symmetric(7.0_f32, 9.0_f32)).with_font_size(typography_body())))
     dialog.push(Widget::label(error).with_flex(20.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(218_u8, 103_u8, 94_u8)).with_font_size(10.0_f32)))
+            Style::default().with_foreground(Color::rgb(218_u8, 103_u8, 94_u8)).with_font_size(typography_body())))
     dialog.push(Widget::spacer(1.0_f32))
     let mut actions = Widget::panel("project-dialog-actions").with_direction(horizontal()).with_flex(32.0_f32,
         0.0_f32,)
@@ -734,7 +719,7 @@ fn project_dialog(mode: str, path_editor: TextEditor, focused: bool, error: str,
     actions.push(Widget::button("project-cancel", "Cancel").with_flex(88.0_f32, 0.0_f32).with_style(
             Style::default().with_background(theme_control()).with_foreground(Color::rgb(210_u8, 212_u8,
                     217_u8,))
-            .with_border(1.0_f32, theme_border_hover()).with_radius(3.0_f32).with_font_size(10.0_f32)))
+            .with_border(1.0_f32, theme_border_hover()).with_radius(3.0_f32).with_font_size(typography_body())))
     actions.push(Widget::button("project-confirm", if mode == "new" {
                 "Create"
             } else {
@@ -744,7 +729,7 @@ fn project_dialog(mode: str, path_editor: TextEditor, focused: bool, error: str,
         ).with_flex(96.0_f32, 0.0_f32)
         .with_style(Style::default().with_background(theme_accent()).with_foreground(Color::rgb(255_u8,
                     255_u8, 255_u8,))
-            .with_border(1.0_f32, Color::rgb(55_u8, 166_u8, 226_u8)).with_radius(3.0_f32).with_font_size(10.0_f32).with_font_weight(600_u32)))
+            .with_border(1.0_f32, Color::rgb(55_u8, 166_u8, 226_u8)).with_radius(3.0_f32).with_font_size(typography_body()).with_font_weight(600_u32)))
     dialog.push(actions)
     shade.push(dialog)
     ret shade
@@ -763,7 +748,7 @@ fn unsaved_changes_dialog(action: str, view_width: f32, view_height: f32, icons:
         .with_radius(4.0_f32).with_padding(Insets::all(16.0_f32)).with_gap(10.0_f32).with_width(width).with_height(height)
         .with_shadow(0.0_f32, 12.0_f32, 32.0_f32, 0.0_f32, Color::rgba(0_u8, 0_u8, 0_u8, 210_u8), false))
     dialog.push(Widget::label("Save changes to this level?").with_flex(28.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8)).with_font_size(16.0_f32).with_font_weight(600_u32)))
+            Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8)).with_font_size(typography_heading()).with_font_weight(600_u32)))
     let destination = if action == "exit" {
         "before exiting Graphene"
     } else {
@@ -774,10 +759,10 @@ fn unsaved_changes_dialog(action: str, view_width: f32, view_height: f32, icons:
         }
     }
     dialog.push(Widget::label("Your scene and script contain unsaved changes.").with_flex(20.0_f32, 0.0_f32)
-        .with_style(Style::default().with_foreground(Color::rgb(174_u8, 177_u8, 184_u8)).with_font_size(11.0_f32)
+        .with_style(Style::default().with_foreground(Color::rgb(174_u8, 177_u8, 184_u8)).with_font_size(typography_body())
             .with_pointer_events(false)))
     dialog.push(Widget::label("Save them " + destination + ".").with_flex(20.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(145_u8, 148_u8, 155_u8)).with_font_size(10.0_f32)))
+            Style::default().with_foreground(Color::rgb(145_u8, 148_u8, 155_u8)).with_font_size(typography_body())))
     dialog.push(Widget::spacer(1.0_f32))
     let mut actions = Widget::panel("unsaved-actions").with_direction(horizontal()).with_flex(36.0_f32,
         0.0_f32,).with_style(
@@ -825,14 +810,14 @@ fn approval_dialog(request: ApprovalRequest, view_width: f32, view_height: f32) 
             Color::rgba(0_u8, 0_u8, 0_u8, 210_u8), false,))
     dialog.push(Widget::label("Allow external Graphene action?").with_flex(28.0_f32, 0.0_f32)
         .with_style(Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8))
-            .with_font_size(16.0_f32).with_font_weight(600_u32)))
+            .with_font_size(typography_heading()).with_font_weight(600_u32)))
     dialog.push(Widget::label(request.method()).with_flex(24.0_f32, 0.0_f32)
         .with_style(Style::default().with_foreground(Color::rgb(212_u8, 214_u8, 220_u8))
-            .with_font_size(12.0_f32)))
+            .with_font_size(typography_section())))
     dialog.push(Widget::label("Requested capability: " + request.scope())
         .with_flex(20.0_f32, 0.0_f32)
         .with_style(Style::default().with_foreground(Color::rgb(151_u8, 154_u8, 162_u8))
-            .with_font_size(10.0_f32)))
+            .with_font_size(typography_body())))
     dialog.push(Widget::spacer(1.0_f32))
     let mut actions = Widget::panel("approval-actions").with_direction(horizontal())
     .with_flex(36.0_f32, 0.0_f32).with_style(Style::default().with_gap(7.0_f32))
@@ -881,10 +866,10 @@ fn asset_import_dialog(picker: FilePicker, error: str, view_width: f32, view_hei
         .with_top((view_height - height) * 0.5_f32).with_z_index(141_i32)
         .with_shadow(0.0_f32, 12.0_f32, 32.0_f32, 0.0_f32, Color::rgba(0_u8, 0_u8, 0_u8, 210_u8), false))
     dialog.push(Widget::label("Import Static Mesh").with_flex(28.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8)).with_font_size(16.0_f32).with_font_weight(600_u32)))
+            Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8)).with_font_size(typography_heading()).with_font_weight(600_u32)))
     dialog.push(Widget::label("Select a Wavefront OBJ file. The validated source will be copied to Content/Meshes.")
         .with_flex(20.0_f32, 0.0_f32).with_style(Style::default().with_foreground(Color::rgb(157_u8,
-                    160_u8, 167_u8,)).with_font_size(10.0_f32)))
+                    160_u8, 167_u8,)).with_font_size(typography_body())))
     dialog.push(picker.view(file_picker_icons(icons)))
     let mut actions = Widget::panel("asset-import-actions").with_direction(horizontal()).with_flex(34.0_f32,
         0.0_f32,)
@@ -908,7 +893,7 @@ fn asset_import_dialog(picker: FilePicker, error: str, view_width: f32, view_hei
                 } else {
                     Color::rgb(145_u8, 148_u8, 155_u8)
                 }
-            ).with_font_size(9.0_f32)))
+            ).with_font_size(typography_metadata())))
     actions.push(Widget::button("project-cancel", "Cancel").with_flex(88.0_f32, 0.0_f32).with_style(
             Style::default().with_background(theme_control()).with_foreground(Color::rgb(210_u8, 212_u8,
                     217_u8,))
@@ -1155,12 +1140,12 @@ fn project_card(id: str, path: str, hovered: str, icons: EditorIcons) -> Widget 
             Style::default().with_foreground(Color::rgb(45_u8, 146_u8, 205_u8)).with_pointer_events(false)))
     card.push(preview)
     card.push(Widget::label(project_name(path)).with_flex(22.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(231_u8, 232_u8, 235_u8)).with_font_size(11.0_f32).with_font_weight(600_u32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(231_u8, 232_u8, 235_u8)).with_font_size(typography_body()).with_font_weight(600_u32).with_pointer_events(false)))
     card.push(Widget::label(Debug::fmt(project_actor_count(path)) + " scene objects").with_flex(16.0_f32,
             0.0_f32,).with_style(
-            Style::default().with_foreground(Color::rgb(157_u8, 160_u8, 168_u8)).with_font_size(8.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(157_u8, 160_u8, 168_u8)).with_font_size(typography_caption()).with_pointer_events(false)))
     card.push(Widget::label(path).with_flex(20.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(126_u8, 129_u8, 137_u8)).with_font_size(8.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(126_u8, 129_u8, 137_u8)).with_font_size(typography_caption()).with_pointer_events(false)))
     ret card
 }
 
@@ -1196,9 +1181,9 @@ fn project_template_card(id: str, title: str, description: str, icon: SvgDocumen
     let mut copy = Widget::panel("").with_direction(vertical()).with_flex(0.0_f32, 1.0_f32).with_style(
         Style::default().with_gap(2.0_f32).with_pointer_events(false))
     copy.push(Widget::label(title).with_flex(20.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(231_u8, 233_u8, 236_u8)).with_font_size(11.0_f32).with_font_weight(600_u32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(231_u8, 233_u8, 236_u8)).with_font_size(typography_body()).with_font_weight(600_u32).with_pointer_events(false)))
     copy.push(Widget::label(description).with_flex(28.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(139_u8, 142_u8, 150_u8)).with_font_size(8.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(139_u8, 142_u8, 150_u8)).with_font_size(typography_caption()).with_pointer_events(false)))
     card.push(copy)
     ret card
 }
@@ -1212,7 +1197,7 @@ fn project_browser_view(mode: str, picker: FilePicker, name: TextEditor, templat
     .with_direction(horizontal()).with_flex(72.0_f32, 0.0_f32)
     brand.push(Widget::icon("", icons.brand).with_flex(52.0_f32, 0.0_f32).with_style(Style::default().with_foreground(theme_accent()).with_pointer_events(false)))
     brand.push(Widget::heading("GRAPHENE").with_flex(190.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(239_u8, 240_u8, 243_u8)).with_font_size(25.0_f32).with_font_weight(700_u32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(239_u8, 240_u8, 243_u8)).with_font_size(typography_display()).with_font_weight(700_u32).with_pointer_events(false)))
     brand.push(Widget::spacer(1.0_f32))
     if mode != "home" {
         brand.push(Widget::button("browser-back", "Back to Projects").with_flex(130.0_f32, 0.0_f32).with_style(
@@ -1229,7 +1214,7 @@ fn project_browser_view(mode: str, picker: FilePicker, name: TextEditor, templat
             .with_radius(5.0_f32).with_padding(Insets::all(20.0_f32)).with_gap(9.0_f32))
         hero.push(Widget::icon("", icons.brand).with_flex(66.0_f32, 0.0_f32).with_style(Style::default().with_foreground(theme_accent()).with_pointer_events(false)))
         hero.push(Widget::label("Build worlds with Graphene").with_flex(28.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8)).with_font_size(17.0_f32).with_font_weight(600_u32).with_pointer_events(false)))
+                Style::default().with_foreground(Color::rgb(235_u8, 236_u8, 239_u8)).with_font_size(typography_heading()).with_font_weight(600_u32).with_pointer_events(false)))
         let mut actions = Widget::panel("browser-actions").with_direction(horizontal()).with_flex(38.0_f32,
             0.0_f32,).with_style(Style::default().with_gap(8.0_f32))
         actions.push(Widget::icon_button("browser-new", "New Project", icons.add).with_flex(132.0_f32,
@@ -1245,7 +1230,7 @@ fn project_browser_view(mode: str, picker: FilePicker, name: TextEditor, templat
         hero.push(actions)
         root.push(hero)
         root.push(Widget::label("RECENT PROJECTS").with_flex(24.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(137_u8, 140_u8, 148_u8)).with_font_size(9.0_f32).with_font_weight(700_u32)))
+                Style::default().with_foreground(Color::rgb(137_u8, 140_u8, 148_u8)).with_font_size(typography_metadata()).with_font_weight(700_u32)))
         let mut cards = Widget::panel("recent-projects").with_direction(horizontal()).with_flex(190.0_f32,
             0.0_f32,).with_style(
             Style::default().with_gap(10.0_f32).with_align(align_start()).with_overflow_hidden(true))
@@ -1273,7 +1258,7 @@ fn project_browser_view(mode: str, picker: FilePicker, name: TextEditor, templat
                     "OPEN PROJECT"
                 }
             ).with_flex(25.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(225_u8, 227_u8, 231_u8)).with_font_size(12.0_f32).with_font_weight(700_u32)))
+                Style::default().with_foreground(Color::rgb(225_u8, 227_u8, 231_u8)).with_font_size(typography_section()).with_font_weight(700_u32)))
         if mode == "new" {
             let mut templates = Widget::panel("project-templates").with_direction(horizontal()).with_flex(70.0_f32,
                 0.0_f32,).with_style(
@@ -1292,7 +1277,7 @@ fn project_browser_view(mode: str, picker: FilePicker, name: TextEditor, templat
         let mut footer = Footer::new("browser-footer").with_classes("browser-footer")
         .with_direction(horizontal()).with_flex(38.0_f32, 0.0_f32)
         footer.push(Widget::label(error).with_flex(0.0_f32, 1.0_f32).with_style(Style::default().with_foreground(Color::rgb(220_u8,
-                        102_u8, 94_u8,)).with_font_size(10.0_f32)))
+                        102_u8, 94_u8,)).with_font_size(typography_body())))
         footer.push(Widget::button("browser-confirm", if mode == "new" {
                     "Create Project"
                 } else {
@@ -1451,7 +1436,7 @@ fn launch_project_browser() -> Option[str] {
     }
     let mut font_manager = FontManager::with_bundled("../Luma/assets/fonts")
     font_manager.register_all(window)
-    font_manager = font_manager.activate(window, "Roboto", 12.0_f32, 400_u32)
+    font_manager = font_manager.activate(window, "Roboto", typography_body(), 400_u32)
     if font_manager.error() != "" {
         println("Graphene: unable to activate Roboto: " + font_manager.error())
     }
@@ -1481,7 +1466,7 @@ fn dock_tab(id: str, text: str, active: bool) -> Widget {
     tab.push(Widget::button(id, text).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_background(background).with_foreground(Color::rgb(218_u8, 219_u8, 223_u8))
             .with_border(0.0_f32, Color::rgb(0_u8, 0_u8, 0_u8)).with_radius(0.0_f32)
-            .with_padding(Insets::symmetric(3.0_f32, 8.0_f32)).with_font_size(10.0_f32)
+            .with_padding(Insets::symmetric(3.0_f32, 8.0_f32)).with_font_size(typography_body())
             .with_font_weight(if active {
                     600_u32
                 } else {
@@ -1501,7 +1486,7 @@ fn active_icon_tab(id: str, text: str, icon: SvgDocument, width: f32) -> Widget 
             Style::default().with_background(Color::rgb(35_u8, 36_u8, 40_u8)).with_foreground(Color::rgb(220_u8,
                     222_u8, 226_u8,))
             .with_border(0.0_f32, Color::rgb(0_u8, 0_u8, 0_u8)).with_radius(0.0_f32)
-            .with_padding(Insets::symmetric(3.0_f32, 8.0_f32)).with_font_size(10.0_f32).with_font_weight(600_u32)))
+            .with_padding(Insets::symmetric(3.0_f32, 8.0_f32)).with_font_size(typography_body()).with_font_weight(600_u32)))
     ret tab
 }
 
@@ -1530,7 +1515,7 @@ fn property_value(id: str, text: str, axis: str, active: bool, editor: TextEdito
         .with_radius(2.0_f32).with_padding(Insets::symmetric(2.0_f32, 4.0_f32)).with_gap(4.0_f32))
     field.push(Widget::label(axis).with_flex(15.0_f32, 0.0_f32).with_style(
             Style::default().with_background(axis_color).with_foreground(Color::rgb(248_u8, 248_u8, 249_u8))
-            .with_radius(2.0_f32).with_font_size(9.0_f32).with_font_weight(700_u32)))
+            .with_radius(2.0_f32).with_font_size(typography_metadata()).with_font_weight(700_u32)))
     field.push(Widget::input(id, if active {
                 editor.value()
             } else {
@@ -1547,7 +1532,7 @@ fn property_value(id: str, text: str, axis: str, active: bool, editor: TextEdito
                 }
             )
             .with_border(0.0_f32, Color::rgb(0_u8, 0_u8, 0_u8)).with_radius(0.0_f32).with_padding(Insets::all(0.0_f32))
-            .with_font_family("Roboto Mono").with_font_size(9.0_f32)))
+            .with_font_family("Roboto Mono").with_font_size(typography_metadata())))
     ret field
 }
 
@@ -1602,7 +1587,7 @@ fn transform_property(name: str, prefix: str, value: Vec3, active_field: str, ed
         0.0_f32,).with_style(
         Style::default().with_gap(4.0_f32).with_padding(Insets::symmetric(2.0_f32, 0.0_f32)))
     row.push(Widget::label(name).with_flex(58.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(181_u8, 183_u8, 188_u8)).with_font_size(10.0_f32)))
+            Style::default().with_foreground(Color::rgb(181_u8, 183_u8, 188_u8)).with_font_size(typography_body())))
     let x_id = "transform-" + prefix + "-x"
     let y_id = "transform-" + prefix + "-y"
     let z_id = "transform-" + prefix + "-z"
@@ -1698,7 +1683,7 @@ fn control_style(active: bool, hovered: bool) -> Style {
     }
     ret Style::default().with_background(background).with_foreground(Color::rgb(232_u8, 233_u8, 236_u8))
     .with_border(1.0_f32, border).with_radius(2.0_f32)
-    .with_padding(Insets::symmetric(5.0_f32, 9.0_f32)).with_font_size(11.0_f32)
+    .with_padding(Insets::symmetric(5.0_f32, 9.0_f32)).with_font_size(typography_body())
 }
 
 fn compact_icon_style(hovered: bool) -> Style {
@@ -1716,7 +1701,12 @@ fn segmented_icon_style(active: bool, hovered: bool) -> Style {
         interactive_background(hovered)
     }
     ret Style::default().with_background(background).with_foreground(Color::rgb(222_u8, 224_u8, 228_u8))
-    .with_border(if active && hovered { 1.0_f32 } else { 0.0_f32 }, if active && hovered {
+    .with_border(if active && hovered {
+            1.0_f32
+        } else {
+            0.0_f32
+        }
+        , if active && hovered {
             Color::rgb(70_u8, 176_u8, 230_u8)
         } else {
             Color::rgb(0_u8, 0_u8, 0_u8)
@@ -1744,7 +1734,7 @@ fn selector_control(id: str, text: str, icon: SvgDocument, chevron: SvgDocument,
             Style::default().with_foreground(Color::rgb(190_u8, 193_u8, 199_u8)).with_padding(Insets::all(2.0_f32))
             .with_pointer_events(false)))
     control.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(224_u8, 226_u8, 230_u8)).with_font_size(10.0_f32)
+            Style::default().with_foreground(Color::rgb(224_u8, 226_u8, 230_u8)).with_font_size(typography_body())
             .with_pointer_events(false)))
     control.push(Widget::icon("", chevron).with_flex(12.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(124_u8, 127_u8, 134_u8)).with_padding(Insets::all(2.0_f32))
@@ -1766,62 +1756,150 @@ fn camera_mode_name(mode: str) -> str {
 }
 
 fn shading_mode_name(mode: str) -> str {
-    if mode == "unlit" { ret "Unlit" }
-    if mode == "mask" { ret "Mask" }
-    if mode == "triangles" { ret "Triangles" }
-    if mode == "patches" { ret "Patches" }
-    if mode == "clusters" { ret "Clusters" }
-    if mode == "primitives" { ret "Primitives" }
-    if mode == "instances" { ret "Instances" }
-    if mode == "lod" { ret "LOD" }
-    if mode == "residency" { ret "Residency" }
-    if mode == "overdraw" { ret "Overdraw" }
-    if mode == "occlusion" { ret "Occlusion" }
+    if mode == "unlit" {
+        ret "Unlit"
+    }
+    if mode == "mask" {
+        ret "Mask"
+    }
+    if mode == "triangles" {
+        ret "Triangles"
+    }
+    if mode == "patches" {
+        ret "Patches"
+    }
+    if mode == "clusters" {
+        ret "Clusters"
+    }
+    if mode == "primitives" {
+        ret "Primitives"
+    }
+    if mode == "instances" {
+        ret "Instances"
+    }
+    if mode == "lod" {
+        ret "LOD"
+    }
+    if mode == "residency" {
+        ret "Residency"
+    }
+    if mode == "overdraw" {
+        ret "Overdraw"
+    }
+    if mode == "occlusion" {
+        ret "Occlusion"
+    }
     ret "Lit"
 }
 
 fn shading_mode_value(mode: str) -> u32 {
-    if mode == "unlit" { ret 1_u32 }
-    if mode == "mask" { ret 2_u32 }
-    if mode == "triangles" { ret 3_u32 }
-    if mode == "patches" { ret 4_u32 }
-    if mode == "clusters" { ret 5_u32 }
-    if mode == "primitives" { ret 6_u32 }
-    if mode == "instances" { ret 7_u32 }
-    if mode == "lod" { ret 8_u32 }
-    if mode == "residency" { ret 9_u32 }
-    if mode == "overdraw" { ret 10_u32 }
-    if mode == "occlusion" { ret 11_u32 }
+    if mode == "unlit" {
+        ret 1_u32
+    }
+    if mode == "mask" {
+        ret 2_u32
+    }
+    if mode == "triangles" {
+        ret 3_u32
+    }
+    if mode == "patches" {
+        ret 4_u32
+    }
+    if mode == "clusters" {
+        ret 5_u32
+    }
+    if mode == "primitives" {
+        ret 6_u32
+    }
+    if mode == "instances" {
+        ret 7_u32
+    }
+    if mode == "lod" {
+        ret 8_u32
+    }
+    if mode == "residency" {
+        ret 9_u32
+    }
+    if mode == "overdraw" {
+        ret 10_u32
+    }
+    if mode == "occlusion" {
+        ret 11_u32
+    }
     ret 0_u32
 }
 
 fn shading_mode_from_value(mode: u32) -> str {
-    if mode == 1_u32 { ret "unlit" }
-    if mode == 2_u32 { ret "mask" }
-    if mode == 3_u32 { ret "triangles" }
-    if mode == 4_u32 { ret "patches" }
-    if mode == 5_u32 { ret "clusters" }
-    if mode == 6_u32 { ret "primitives" }
-    if mode == 7_u32 { ret "instances" }
-    if mode == 8_u32 { ret "lod" }
-    if mode == 9_u32 { ret "residency" }
-    if mode == 10_u32 { ret "overdraw" }
-    if mode == 11_u32 { ret "occlusion" }
+    if mode == 1_u32 {
+        ret "unlit"
+    }
+    if mode == 2_u32 {
+        ret "mask"
+    }
+    if mode == 3_u32 {
+        ret "triangles"
+    }
+    if mode == 4_u32 {
+        ret "patches"
+    }
+    if mode == 5_u32 {
+        ret "clusters"
+    }
+    if mode == 6_u32 {
+        ret "primitives"
+    }
+    if mode == 7_u32 {
+        ret "instances"
+    }
+    if mode == 8_u32 {
+        ret "lod"
+    }
+    if mode == 9_u32 {
+        ret "residency"
+    }
+    if mode == 10_u32 {
+        ret "overdraw"
+    }
+    if mode == 11_u32 {
+        ret "occlusion"
+    }
     ret "lit"
 }
 
 fn shading_target_mode(target: str) -> str {
-    if target == "shading-unlit" { ret "unlit" }
-    if target == "shading-mask" { ret "mask" }
-    if target == "shading-triangles" { ret "triangles" }
-    if target == "shading-patches" { ret "patches" }
-    if target == "shading-clusters" { ret "clusters" }
-    if target == "shading-primitives" { ret "primitives" }
-    if target == "shading-instances" { ret "instances" }
-    if target == "shading-lod" { ret "lod" }
-    if target == "shading-residency" { ret "residency" }
-    if target == "shading-overdraw" { ret "overdraw" }
-    if target == "shading-occlusion" { ret "occlusion" }
+    if target == "shading-unlit" {
+        ret "unlit"
+    }
+    if target == "shading-mask" {
+        ret "mask"
+    }
+    if target == "shading-triangles" {
+        ret "triangles"
+    }
+    if target == "shading-patches" {
+        ret "patches"
+    }
+    if target == "shading-clusters" {
+        ret "clusters"
+    }
+    if target == "shading-primitives" {
+        ret "primitives"
+    }
+    if target == "shading-instances" {
+        ret "instances"
+    }
+    if target == "shading-lod" {
+        ret "lod"
+    }
+    if target == "shading-residency" {
+        ret "residency"
+    }
+    if target == "shading-overdraw" {
+        ret "overdraw"
+    }
+    if target == "shading-occlusion" {
+        ret "occlusion"
+    }
     ret "lit"
 }
 
@@ -1894,7 +1972,7 @@ fn viewport_camera_strip(mode: str, hovered: str, icons: EditorIcons) -> Widget 
         Style::default().with_background(Color::rgb(17_u8, 18_u8, 21_u8)).with_border(1.0_f32, theme_border())
         .with_padding(Insets::symmetric(3.0_f32, 6.0_f32)).with_gap(4.0_f32))
     strip.push(Widget::label("CAMERA").with_flex(54.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(112_u8, 115_u8, 122_u8)).with_font_size(8.0_f32)
+            Style::default().with_foreground(Color::rgb(112_u8, 115_u8, 122_u8)).with_font_size(typography_caption())
             .with_font_weight(700_u32).with_pointer_events(false)))
     strip.push(camera_option("camera-perspective", "Perspective", "perspective", mode, hovered, icons))
     strip.push(camera_option("camera-top", "Top", "top", mode, hovered, icons))
@@ -1935,7 +2013,7 @@ fn viewport_speed_strip(mode: str, hovered: str, icons: EditorIcons) -> Widget {
         Style::default().with_background(Color::rgb(17_u8, 18_u8, 21_u8)).with_border(1.0_f32, theme_border())
         .with_padding(Insets::symmetric(3.0_f32, 6.0_f32)).with_gap(4.0_f32))
     strip.push(Widget::label("CAMERA SPEED").with_flex(82.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(112_u8, 115_u8, 122_u8)).with_font_size(8.0_f32)
+            Style::default().with_foreground(Color::rgb(112_u8, 115_u8, 122_u8)).with_font_size(typography_caption())
             .with_font_weight(700_u32).with_pointer_events(false)))
     strip.push(Widget::icon_button("speed-025", "0.25x", icons.speed).with_flex(76.0_f32, 0.0_f32)
         .with_style(control_style(mode == "0.25", hovered == "speed-025")))
@@ -1957,7 +2035,7 @@ fn viewport_skybox_strip(mode: str, hovered: str, icons: EditorIcons) -> Widget 
         Style::default().with_background(Color::rgb(17_u8, 18_u8, 21_u8)).with_border(1.0_f32, theme_border())
         .with_padding(Insets::symmetric(3.0_f32, 6.0_f32)).with_gap(4.0_f32))
     strip.push(Widget::label("SKYBOX").with_flex(54.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(112_u8, 115_u8, 122_u8)).with_font_size(8.0_f32)
+            Style::default().with_foreground(Color::rgb(112_u8, 115_u8, 122_u8)).with_font_size(typography_caption())
             .with_font_weight(700_u32).with_pointer_events(false)))
     strip.push(Widget::icon_button("skybox-clear", "Clear Sky", icons.level).with_flex(94.0_f32, 0.0_f32)
         .with_style(control_style(mode == "clear", hovered == "skybox-clear")))
@@ -1981,7 +2059,7 @@ fn search_field(id: str, placeholder: str, icon: SvgDocument, basis: f32, grow: 
             Style::default().with_background(Color::rgb(15_u8, 15_u8, 17_u8)).with_foreground(Color::rgb(205_u8,
                     207_u8, 212_u8,))
             .with_border(0.0_f32, Color::rgb(0_u8, 0_u8, 0_u8)).with_radius(0.0_f32)
-            .with_padding(Insets::symmetric(2.0_f32, 0.0_f32)).with_font_size(10.0_f32)))
+            .with_padding(Insets::symmetric(2.0_f32, 0.0_f32)).with_font_size(typography_body())))
     ret field
 }
 
@@ -2019,7 +2097,7 @@ fn editable_search_field(id: str, editor: TextEditor, focused: bool, placeholder
                 }
             )
             .with_border(0.0_f32, Color::rgb(0_u8, 0_u8, 0_u8)).with_radius(0.0_f32)
-            .with_padding(Insets::symmetric(2.0_f32, 0.0_f32)).with_font_size(10.0_f32)))
+            .with_padding(Insets::symmetric(2.0_f32, 0.0_f32)).with_font_size(typography_body())))
     ret field
 }
 
@@ -2039,7 +2117,7 @@ fn viewport_readout(text: str, icon: SvgDocument, width: f32) -> Widget {
             Style::default().with_foreground(Color::rgb(139_u8, 171_u8, 190_u8)).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     readout.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(176_u8, 179_u8, 185_u8))
-            .with_font_family("Roboto Mono").with_font_size(9.0_f32).with_pointer_events(false)))
+            .with_font_family("Roboto Mono").with_font_size(typography_metadata()).with_pointer_events(false)))
     ret readout
 }
 
@@ -2068,7 +2146,7 @@ fn viewport_toggle_readout(id: str, text: str, icon: SvgDocument, width: f32, ac
             .with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     readout.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(204_u8, 207_u8, 212_u8)).with_font_family("Roboto Mono")
-            .with_font_size(9.0_f32).with_pointer_events(false)))
+            .with_font_size(typography_metadata()).with_pointer_events(false)))
     ret readout
 }
 
@@ -2078,7 +2156,7 @@ fn viewport_status_item(text: str, icon: SvgDocument, width: f32, accent: Color)
     item.push(Widget::icon("", icon).with_flex(14.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(accent).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     item.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(154_u8, 157_u8, 164_u8)).with_font_size(9.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(154_u8, 157_u8, 164_u8)).with_font_size(typography_metadata()).with_pointer_events(false)))
     ret item
 }
 
@@ -2113,7 +2191,7 @@ fn play_style(active: bool, hovered: bool) -> Style {
         }
         ,
     )
-    .with_radius(2.0_f32).with_padding(Insets::symmetric(5.0_f32, 9.0_f32)).with_font_size(11.0_f32)
+    .with_radius(2.0_f32).with_padding(Insets::symmetric(5.0_f32, 9.0_f32)).with_font_size(typography_body())
 }
 
 fn build_style(building: bool, hovered: bool) -> Style {
@@ -2123,7 +2201,7 @@ fn build_style(building: bool, hovered: bool) -> Style {
     ret Style::default().with_background(Color::rgb(105_u8, 73_u8, 29_u8)).with_foreground(Color::rgb(246_u8,
             229_u8, 195_u8,))
     .with_border(1.0_f32, Color::rgb(151_u8, 105_u8, 39_u8)).with_radius(2.0_f32)
-    .with_padding(Insets::symmetric(5.0_f32, 9.0_f32)).with_font_size(11.0_f32)
+    .with_padding(Insets::symmetric(5.0_f32, 9.0_f32)).with_font_size(typography_body())
 }
 
 fn status_segment(text: str, icon: SvgDocument, color: Color, width: f32, emphasized: bool) -> Widget
@@ -2141,7 +2219,7 @@ fn status_segment(text: str, icon: SvgDocument, color: Color, width: f32, emphas
     segment.push(Widget::icon("", icon).with_flex(14.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(color).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     segment.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(173_u8, 176_u8, 182_u8)).with_font_size(9.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(173_u8, 176_u8, 182_u8)).with_font_size(typography_metadata()).with_pointer_events(false)))
     ret segment
 }
 
@@ -2154,10 +2232,10 @@ fn log_line(prefix: str, text: str, color: Color) -> Widget {
             Style::default().with_background(color).with_pointer_events(false)))
     row.push(Widget::label(prefix).with_flex(48.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(color).with_font_family("Roboto Mono")
-            .with_font_size(9.0_f32).with_font_weight(600_u32)))
+            .with_font_size(typography_metadata()).with_font_weight(600_u32)))
     row.push(Widget::label(text).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(182_u8, 184_u8, 190_u8))
-            .with_font_family("Roboto Mono").with_font_size(9.0_f32)))
+            .with_font_family("Roboto Mono").with_font_size(typography_metadata())))
     ret row
 }
 
@@ -2198,7 +2276,7 @@ fn output_panel(simulation_mode: str, building: bool, status_message: str, build
             .with_foreground(Color::rgb(142_u8, 176_u8, 151_u8))
             .with_border(1.0_f32, Color::rgb(42_u8, 43_u8, 48_u8))
             .with_padding(Insets::symmetric(5.0_f32, 7.0_f32))
-            .with_font_family("Roboto Mono").with_font_size(9.0_f32)))
+            .with_font_family("Roboto Mono").with_font_size(typography_metadata())))
     output.push(Widget::input("command-console", console_editor.value())
         .with_focus(console_focused)
         .with_selection(console_editor.selection_start(), console_editor.selection_end())
@@ -2212,7 +2290,7 @@ fn output_panel(simulation_mode: str, building: bool, status_message: str, build
                 }
                 ,)
             .with_padding(Insets::symmetric(5.0_f32, 7.0_f32))
-            .with_font_family("Roboto Mono").with_font_size(10.0_f32)))
+            .with_font_family("Roboto Mono").with_font_size(typography_body())))
     ret output
 }
 
@@ -2262,7 +2340,7 @@ fn axis_stepper(axis: str, minus_id: str, plus_id: str, icons: EditorIcons, hove
         .with_radius(2.0_f32).with_padding(Insets::all(1.0_f32)).with_gap(1.0_f32).with_overflow_hidden(true))
     group.push(Widget::label(axis).with_flex(20.0_f32, 0.0_f32).with_style(
             Style::default().with_background(Color::rgb(24_u8, 25_u8, 29_u8)).with_foreground(axis_color(axis))
-            .with_font_size(9.0_f32).with_font_weight(700_u32).with_pointer_events(false)))
+            .with_font_size(typography_metadata()).with_font_weight(700_u32).with_pointer_events(false)))
     group.push(axis_step_button(minus_id, icons.minus, axis, hovered, disabled))
     group.push(axis_step_button(plus_id, icons.add, axis, hovered, disabled))
     ret group
@@ -2310,9 +2388,9 @@ fn actor_row(id: str, name: str, kind: str, icon: SvgDocument, selected: bool, v
                     Color::rgb(202_u8, 204_u8, 209_u8)
                 }
             )
-            .with_font_size(10.0_f32).with_overflow_hidden(true).with_pointer_events(false)))
+            .with_font_size(typography_body()).with_overflow_hidden(true).with_pointer_events(false)))
     row.push(Widget::label(kind).with_flex(32.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(111_u8, 114_u8, 121_u8)).with_font_size(7.0_f32)
+            Style::default().with_foreground(Color::rgb(111_u8, 114_u8, 121_u8)).with_font_size(typography_caption())
             .with_overflow_hidden(true).with_pointer_events(false)))
     if depth > 0_u32 {
         row.push(Widget::icon_button("toggle-visible-" + id, "", icons.visible).with_flex(18.0_f32, 0.0_f32).with_style(
@@ -2393,7 +2471,7 @@ fn collection_row(name: str, icons: EditorIcons) -> Widget {
     row.push(Widget::icon("", icons.folder).with_flex(17.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(185_u8, 144_u8, 66_u8)).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     row.push(Widget::label(name).with_flex(0.0_f32, 1.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(169_u8, 172_u8, 178_u8)).with_font_size(9.0_f32).with_font_weight(600_u32)
+            Style::default().with_foreground(Color::rgb(169_u8, 172_u8, 178_u8)).with_font_size(typography_metadata()).with_font_weight(600_u32)
             .with_pointer_events(false)))
     ret row
 }
@@ -2465,7 +2543,7 @@ fn hierarchy(selected: str, actor_ids: Vec[u64], actor_parents: Vec[Option[u64]]
     }
     if visible_count == 0_u32 {
         panel.push(Widget::label("No actors match current filters").with_flex(32.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(130_u8, 133_u8, 140_u8)).with_font_size(9.0_f32)
+                Style::default().with_foreground(Color::rgb(130_u8, 133_u8, 140_u8)).with_font_size(typography_metadata())
                 .with_padding(Insets::symmetric(8.0_f32, 6.0_f32)).with_pointer_events(false)))
     }
     panel.push(Widget::spacer(1.0_f32))
@@ -2559,7 +2637,8 @@ fn viewport(simulation_mode: str, dragging: bool, object_count: u32,
                         "AutoLOD Triangles + Edges"
                     } else {
                         "AutoLOD " + shading_mode_name(shading_mode)
-                    },
+                    }
+                    ,
                     icons.lighting, 154.0_f32,
                     Color::rgb(80_u8, 205_u8, 138_u8),))
             viewport_status.push(label(autolod_stats)
@@ -2567,43 +2646,43 @@ fn viewport(simulation_mode: str, dragging: bool, object_count: u32,
         }
         if shading_mode == "lit" || shading_mode == "unlit" {
             viewport_status.push(viewport_status_item(selected,
-                if selected == "Camera" {
-                    icons.camera
-                } else {
-                    if selected == "Directional Light" {
-                        icons.light
-                    } elif selected == "Nothing selected" {
-                        icons.select
+                    if selected == "Camera" {
+                        icons.camera
                     } else {
-                        icons.mesh
-                    }
-                }
-                ,
-                if compact {
-                    104.0_f32
-                } else {
-                    132.0_f32
-                }
-                    , Color::rgb(91_u8, 166_u8, 209_u8),))
-            viewport_status.push(viewport_status_item(tool_name(active_tool),
-                if active_tool == "move" {
-                    icons.move
-                } else {
-                    if active_tool == "rotate" {
-                        icons.rotate
-                    } else {
-                        if active_tool == "scale" {
-                            icons.scale
-                        } else {
+                        if selected == "Directional Light" {
+                            icons.light
+                        } elif selected == "Nothing selected" {
                             icons.select
+                        } else {
+                            icons.mesh
                         }
                     }
-                }
-                , if compact {
-                    64.0_f32
-                } else {
-                    76.0_f32
-                }
+                    ,
+                    if compact {
+                        104.0_f32
+                    } else {
+                        132.0_f32
+                    }
+                    , Color::rgb(91_u8, 166_u8, 209_u8),))
+            viewport_status.push(viewport_status_item(tool_name(active_tool),
+                    if active_tool == "move" {
+                        icons.move
+                    } else {
+                        if active_tool == "rotate" {
+                            icons.rotate
+                        } else {
+                            if active_tool == "scale" {
+                                icons.scale
+                            } else {
+                                icons.select
+                            }
+                        }
+                    }
+                    , if compact {
+                        64.0_f32
+                    } else {
+                        76.0_f32
+                    }
                     , Color::rgb(182_u8, 144_u8, 73_u8),))
             if !compact {
                 viewport_status.push(label("Actors " + Debug::fmt(object_count))
@@ -2790,11 +2869,15 @@ fn viewport_point(layout: WidgetLayout, x: f32, y: f32) -> Option[(f32, f32)] {
 fn viewport_point_extent(pixel_x: u32, pixel_y: u32, pixel_width: u32,
     pixel_height: u32, density: f32, x: f32, y: f32,) ->
 Option[(f32, f32)] {
-    let scale = if density <= 0.0_f32 { 1.0_f32 } else { density }
-    let local_x = x - (pixel_x as f32) / scale
-    let local_y = y - (pixel_y as f32) / scale
-    let width = (pixel_width as f32) / scale
-    let height = (pixel_height as f32) / scale
+    let scale = if density <= 0.0_f32 {
+        1.0_f32
+    } else {
+        density
+    }
+    let local_x = x -(pixel_x as f32) / scale
+    let local_y = y -(pixel_y as f32) / scale
+    let width =(pixel_width as f32) / scale
+    let height =(pixel_height as f32) / scale
     ret if local_x >= 0.0_f32 && local_y >= 0.0_f32 &&
     local_x < width && local_y < height {
         Option[(f32, f32)]::Some((local_x, local_y))
@@ -3012,10 +3095,10 @@ fn resolve_actor_gpu_mesh(mesh_name: str, plane: MeshId, sphere: MeshId,
     ret MeshId::new(0_u64)
 }
 
-fn create_viewport_renderer(window: Window, width: u32, height: u32) -> ViewportRenderer<H> {
-    let interop = window.vulkan_interop()
+fn create_viewport_renderer(window: Window, width: u32, height: u32) -> ViewportRenderer < H > {
+    let interop = window.direct_graphics_interop()
     if !interop.valid() {
-        panic("Graphene Editor: Luma Vulkan interop is unavailable")
+        panic("Graphene Editor: Luma direct graphics interop is unavailable")
     }
     match ViewportRenderer::create_composed(interop.instance(), interop.physical_device(),
         interop.render_device(), interop.swapchain(),) {
@@ -3023,7 +3106,7 @@ fn create_viewport_renderer(window: Window, width: u32, height: u32) -> Viewport
             ret renderer
         }
         Option::None => {
-            panic("Graphene Editor: unable to create composed Vulkan viewport")
+            panic("Graphene Editor: unable to create composed native viewport")
             ret create_viewport_renderer(window, width, height)
         }
     }
@@ -3097,7 +3180,7 @@ fn set_scale(scales: Vec[Vec3], cube_index: u32, scale: Vec3) -> Vec[Vec3] {
     ret result
 }
 
-fn rebuild_viewport_actors(renderer: ViewportRenderer&, previous_count: u32, meshes: Vec[str],
+fn rebuild_viewport_actors(renderer: ViewportRenderer &, previous_count: u32, meshes: Vec[str],
     visibilities: Vec[bool], positions: Vec[Vec3], rotations: Vec[Vec3], scales: Vec[Vec3], plane: MeshId,
     sphere: MeshId,
     imported: Vec[ImportedMeshAsset], uploaded: Vec[MeshId], selected_actor: u32, ids: Vec[u64], parents:
@@ -3312,10 +3395,10 @@ fn parent_selector(selected_id: u64, selected_parent: Option[u64], actor_ids: Ve
         ).with_radius(2.0_f32)
         .with_padding(Insets::symmetric(4.0_f32, 7.0_f32)).with_gap(5.0_f32))
     control.push(Widget::label("Parent").with_flex(62.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(143_u8, 146_u8, 153_u8)).with_font_size(9.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(143_u8, 146_u8, 153_u8)).with_font_size(typography_metadata()).with_pointer_events(false)))
     control.push(Widget::label(parent_display_name(selected_parent, actor_ids, actor_names)).with_flex(0.0_f32,
             1.0_f32,).with_style(
-            Style::default().with_foreground(Color::rgb(216_u8, 218_u8, 222_u8)).with_font_size(10.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(216_u8, 218_u8, 222_u8)).with_font_size(typography_body()).with_pointer_events(false)))
     control.push(Widget::icon("", icons.expanded).with_flex(14.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(139_u8, 142_u8, 149_u8)).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     group.push(control)
@@ -3348,9 +3431,9 @@ fn detail_row(name: str, value: str, accent: Color) -> Widget {
     row.push(Widget::panel("").with_flex(2.0_f32, 0.0_f32).with_style(
             Style::default().with_background(accent).with_pointer_events(false)))
     row.push(Widget::label(name).with_flex(78.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(147_u8, 150_u8, 157_u8)).with_font_size(9.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(147_u8, 150_u8, 157_u8)).with_font_size(typography_metadata()).with_pointer_events(false)))
     row.push(Widget::label(value).with_flex(0.0_f32, 1.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(211_u8, 213_u8, 217_u8)).with_font_size(10.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(211_u8, 213_u8, 217_u8)).with_font_size(typography_body()).with_pointer_events(false)))
     ret row
 }
 
@@ -3400,14 +3483,14 @@ fn material_scalar_control(name: str, prefix: str, value: f32, hovered: str, ico
                 44_u8, 49_u8,))
         .with_radius(2.0_f32).with_padding(Insets::all(3.0_f32)).with_gap(3.0_f32))
     row.push(Widget::label(name).with_flex(82.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(154_u8, 157_u8, 164_u8)).with_font_size(9.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(154_u8, 157_u8, 164_u8)).with_font_size(typography_metadata()).with_pointer_events(false)))
     row.push(Widget::icon_button("material-" + prefix + "-minus", "", icons.minus).with_flex(28.0_f32,
             0.0_f32,)
         .with_style(compact_icon_style(hovered == "material-" + prefix + "-minus")))
     row.push(Widget::label(material_percent(value)).with_flex(52.0_f32, 0.0_f32).with_style(
             Style::default().with_background(Color::rgb(13_u8, 13_u8, 15_u8)).with_foreground(Color::rgb(222_u8,
                     224_u8, 228_u8,))
-            .with_border(1.0_f32, Color::rgb(42_u8, 43_u8, 48_u8)).with_radius(2.0_f32).with_font_size(9.0_f32).with_pointer_events(false)))
+            .with_border(1.0_f32, Color::rgb(42_u8, 43_u8, 48_u8)).with_radius(2.0_f32).with_font_size(typography_metadata()).with_pointer_events(false)))
     row.push(Widget::icon_button("material-" + prefix + "-plus", "", icons.add).with_flex(28.0_f32, 0.0_f32)
         .with_style(compact_icon_style(hovered == "material-" + prefix + "-plus")))
     ret row
@@ -3427,11 +3510,11 @@ fn material_inspector(material: StandardMaterial, hovered: str, icons: EditorIco
                     176_u8, 91_u8,))
             .with_radius(2.0_f32).with_padding(Insets::all(4.0_f32)).with_pointer_events(false)))
     identity.push(Widget::label("Graphene Default").with_flex(0.0_f32, 1.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(222_u8, 224_u8, 228_u8)).with_font_size(10.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(222_u8, 224_u8, 228_u8)).with_font_size(typography_body()).with_pointer_events(false)))
     identity.push(Widget::label("MATERIAL").with_flex(56.0_f32, 0.0_f32).with_style(
             Style::default().with_background(Color::rgb(72_u8, 53_u8, 27_u8)).with_foreground(Color::rgb(224_u8,
                     183_u8, 108_u8,))
-            .with_border(1.0_f32, Color::rgb(103_u8, 75_u8, 37_u8)).with_radius(2.0_f32).with_font_size(7.0_f32).with_pointer_events(false)))
+            .with_border(1.0_f32, Color::rgb(103_u8, 75_u8, 37_u8)).with_radius(2.0_f32).with_font_size(typography_caption()).with_pointer_events(false)))
     panel.push(identity)
     panel.push(section_title("BASE COLOR"))
     panel.push(Widget::panel("material-color-preview").with_flex(54.0_f32, 0.0_f32).with_style(
@@ -3455,7 +3538,7 @@ fn material_inspector(material: StandardMaterial, hovered: str, icons: EditorIco
     panel.push(popup_action("material-double-sided", "Double Sided", icons.panels, hovered, false,
             material.double_sided(),))
     panel.push(Widget::button("material-reset", "Reset Material").with_flex(30.0_f32, 0.0_f32).with_style(
-            control_style(false, hovered == "material-reset").with_font_size(9.0_f32)))
+            control_style(false, hovered == "material-reset").with_font_size(typography_metadata())))
     panel.push(Widget::spacer(1.0_f32))
     ret panel
 }
@@ -3463,40 +3546,50 @@ fn material_inspector(material: StandardMaterial, hovered: str, icons: EditorIco
 fn autolod_asset_inspector(enabled: bool, statistics: str,
     hovered: str, icons: EditorIcons,) -> Widget {
     let mut panel = Widget::panel("details-panel").with_direction(vertical())
-        .with_flex(292.0_f32, 0.0_f32).with_style(panel_style())
+    .with_flex(292.0_f32, 0.0_f32).with_style(panel_style())
     panel.push(dock_header("DETAILS", "IMPORTED MESH", 104.0_f32))
     let mut identity = Widget::panel("autolod-identity").with_direction(horizontal())
-        .with_flex(38.0_f32, 0.0_f32).with_style(
-            Style::default().with_background(Color::rgb(20_u8, 20_u8, 23_u8))
-            .with_border(1.0_f32, Color::rgb(45_u8, 46_u8, 51_u8))
-            .with_padding(Insets::all(4.0_f32)).with_gap(6.0_f32))
+    .with_flex(38.0_f32, 0.0_f32).with_style(
+        Style::default().with_background(Color::rgb(20_u8, 20_u8, 23_u8))
+        .with_border(1.0_f32, Color::rgb(45_u8, 46_u8, 51_u8))
+        .with_padding(Insets::all(4.0_f32)).with_gap(6.0_f32))
     identity.push(Widget::icon("", icons.mesh).with_flex(24.0_f32, 0.0_f32)
         .with_style(Style::default().with_background(Color::rgb(27_u8, 58_u8, 51_u8))
             .with_foreground(Color::rgb(123_u8, 208_u8, 181_u8)).with_radius(2.0_f32)
             .with_padding(Insets::all(4.0_f32)).with_pointer_events(false)))
     identity.push(Widget::label("Static Mesh").with_flex(0.0_f32, 1.0_f32)
         .with_style(Style::default().with_foreground(Color::rgb(222_u8, 224_u8, 228_u8))
-            .with_font_size(10.0_f32).with_pointer_events(false)))
+            .with_font_size(typography_body()).with_pointer_events(false)))
     identity.push(Widget::label("ASSET").with_flex(48.0_f32, 0.0_f32)
         .with_style(Style::default().with_background(Color::rgb(27_u8, 65_u8, 55_u8))
             .with_foreground(Color::rgb(145_u8, 221_u8, 195_u8))
             .with_border(1.0_f32, Color::rgb(45_u8, 94_u8, 80_u8)).with_radius(2.0_f32)
-            .with_font_size(7.0_f32).with_pointer_events(false)))
+            .with_font_size(typography_caption()).with_pointer_events(false)))
     panel.push(identity)
     panel.push(section_title("AUTOLOD"))
     panel.push(Widget::icon_button("autolod-enabled", "Enabled", icons.lighting)
         .with_flex(26.0_f32, 0.0_f32).with_style(
             control_style(enabled, hovered == "autolod-enabled")
-            .with_padding(Insets::symmetric(3.0_f32, 7.0_f32)).with_font_size(9.0_f32)))
+            .with_padding(Insets::symmetric(3.0_f32, 7.0_f32)).with_font_size(typography_metadata())))
     panel.push(detail_row("Target Error", "1.0 px", Color::rgb(74_u8, 155_u8, 205_u8)))
-    panel.push(detail_row("Hierarchy", if enabled { "GPU continuous DAG" } else { "Classic mesh" },
-            if enabled { Color::rgb(67_u8, 174_u8, 112_u8) } else { Color::rgb(142_u8, 145_u8, 151_u8) },))
+    panel.push(detail_row("Hierarchy", if enabled {
+                "GPU continuous DAG"
+            } else {
+                "Classic mesh"
+            }
+            ,
+            if enabled {
+                Color::rgb(67_u8, 174_u8, 112_u8)
+            } else {
+                Color::rgb(142_u8, 145_u8, 151_u8)
+            }
+            ,))
     panel.push(section_title("RUNTIME"))
     panel.push(Widget::label(statistics).with_flex(58.0_f32, 0.0_f32).with_style(
             Style::default().with_background(Color::rgb(16_u8, 16_u8, 19_u8))
             .with_foreground(Color::rgb(155_u8, 181_u8, 197_u8))
             .with_border(1.0_f32, Color::rgb(41_u8, 43_u8, 48_u8)).with_radius(2.0_f32)
-            .with_padding(Insets::all(6.0_f32)).with_font_size(8.0_f32)
+            .with_padding(Insets::all(6.0_f32)).with_font_size(typography_caption())
             .with_pointer_events(false)))
     panel.push(Widget::spacer(1.0_f32))
     ret panel
@@ -3553,22 +3646,22 @@ fn inspector(selected: str, name_editor: TextEditor, name_focused: bool, positio
                     207_u8, 229_u8,))
             .with_border(1.0_f32, Color::rgb(43_u8, 82_u8, 105_u8)).with_radius(2.0_f32).with_padding(Insets::symmetric(3.0_f32,
                     5.0_f32,))
-            .with_font_size(8.0_f32).with_font_weight(700_u32).with_pointer_events(false)))
+            .with_font_size(typography_caption()).with_font_weight(700_u32).with_pointer_events(false)))
     panel.push(identity)
     if !cube_selected && selected == "Nothing selected" {
         let mut empty = Widget::panel("details-empty-state").with_direction(vertical()).with_flex(0.0_f32, 1.0_f32)
-            .with_style(Style::default().with_background(Color::rgb(17_u8, 17_u8, 20_u8))
-                .with_border(1.0_f32, Color::rgb(39_u8, 40_u8, 45_u8)).with_radius(2.0_f32)
-                .with_padding(Insets::all(18.0_f32)).with_gap(8.0_f32))
+        .with_style(Style::default().with_background(Color::rgb(17_u8, 17_u8, 20_u8))
+            .with_border(1.0_f32, Color::rgb(39_u8, 40_u8, 45_u8)).with_radius(2.0_f32)
+            .with_padding(Insets::all(18.0_f32)).with_gap(8.0_f32))
         empty.push(Widget::icon("", icons.select).with_flex(42.0_f32, 0.0_f32).with_style(
                 Style::default().with_foreground(Color::rgb(112_u8, 166_u8, 198_u8))
                 .with_padding(Insets::all(10.0_f32)).with_pointer_events(false)))
         empty.push(Widget::label("Nothing selected").with_flex(24.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(211_u8, 214_u8, 220_u8)).with_font_size(11.0_f32)
+                Style::default().with_foreground(Color::rgb(211_u8, 214_u8, 220_u8)).with_font_size(typography_body())
                 .with_font_weight(600_u32).with_pointer_events(false)))
         empty.push(Widget::label("Click an object in the viewport or Outliner to inspect it.")
             .with_flex(36.0_f32, 0.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(126_u8, 130_u8, 138_u8)).with_font_size(9.0_f32)
+                Style::default().with_foreground(Color::rgb(126_u8, 130_u8, 138_u8)).with_font_size(typography_metadata())
                 .with_pointer_events(false)))
         empty.push(Widget::spacer(1.0_f32))
         panel.push(empty)
@@ -3663,10 +3756,10 @@ fn asset_tile(id: str, name: str, kind: str, icon: SvgDocument, accent: Color, a
             ).with_foreground(accent)
             .with_radius(1.0_f32).with_padding(Insets::all(10.0_f32)).with_pointer_events(false)))
     tile.push(Widget::label(name).with_flex(18.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(218_u8, 220_u8, 224_u8)).with_font_size(9.0_f32)
+            Style::default().with_foreground(Color::rgb(218_u8, 220_u8, 224_u8)).with_font_size(typography_metadata())
             .with_font_weight(500_u32).with_pointer_events(false)))
     tile.push(Widget::label(kind).with_flex(15.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(132_u8, 135_u8, 143_u8)).with_font_size(8.0_f32)
+            Style::default().with_foreground(Color::rgb(132_u8, 135_u8, 143_u8)).with_font_size(typography_caption())
             .with_pointer_events(false)))
     ret tile
 }
@@ -3691,11 +3784,11 @@ fn content_browser(dragging: bool, selected_asset: str, imported_meshes: Vec[Imp
     path.push(Widget::icon("content-folder", icons.folder).with_flex(17.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(197_u8, 157_u8, 72_u8)).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     path.push(Widget::label("Content").with_flex(48.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(202_u8, 204_u8, 209_u8)).with_font_size(10.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(202_u8, 204_u8, 209_u8)).with_font_size(typography_body()).with_pointer_events(false)))
     path.push(Widget::icon("content-path-chevron", icons.chevron).with_flex(14.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(116_u8, 119_u8, 126_u8)).with_padding(Insets::all(2.0_f32)).with_pointer_events(false)))
     path.push(Widget::label("Game").with_flex(36.0_f32, 0.0_f32).with_style(
-            Style::default().with_foreground(Color::rgb(154_u8, 157_u8, 164_u8)).with_font_size(10.0_f32).with_pointer_events(false)))
+            Style::default().with_foreground(Color::rgb(154_u8, 157_u8, 164_u8)).with_font_size(typography_body()).with_pointer_events(false)))
     path.push(Widget::spacer(1.0_f32))
     panel.push(path)
     panel.push(editable_search_field("asset-search", search_editor, search_focused, "Search assets",
@@ -3742,7 +3835,7 @@ fn content_browser(dragging: bool, selected_asset: str, imported_meshes: Vec[Imp
     }
     if visible_assets == 0_usize {
         assets.push(Widget::label("No assets match '" + query + "'").with_flex(0.0_f32, 1.0_f32).with_style(
-                Style::default().with_foreground(Color::rgb(132_u8, 135_u8, 143_u8)).with_font_size(10.0_f32)
+                Style::default().with_foreground(Color::rgb(132_u8, 135_u8, 143_u8)).with_font_size(typography_body())
                 .with_padding(Insets::symmetric(12.0_f32, 8.0_f32)).with_pointer_events(false)))
     }
     panel.push(assets)
@@ -3828,14 +3921,14 @@ fn code_panel(editor: TextEditor, focused: bool, icons: EditorIcons) -> Widget {
                     96_u8, 104_u8,))
             .with_border(1.0_f32, Color::rgb(38_u8, 39_u8, 44_u8)).with_padding(Insets::symmetric(9.0_f32,
                     5.0_f32,))
-            .with_font_family("Roboto Mono").with_font_size(11.0_f32).with_text_align(text_end())
+            .with_font_family("Roboto Mono").with_font_size(typography_body()).with_text_align(text_end())
             .with_overflow_hidden(true).with_pointer_events(false)))
     editor_surface.push(Widget::textarea("code-editor", editor.value()).with_focus(focused)
         .with_selection(editor.selection_start(), editor.selection_end()).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_background(Color::rgb(13_u8, 13_u8, 15_u8)).with_foreground(Color::rgb(214_u8,
                     215_u8, 220_u8,))
             .with_border(0.0_f32, Color::rgb(0_u8, 0_u8, 0_u8)).with_radius(0.0_f32)
-            .with_padding(Insets::all(9.0_f32)).with_font_family("Roboto Mono").with_font_size(11.0_f32)))
+            .with_padding(Insets::all(9.0_f32)).with_font_family("Roboto Mono").with_font_size(typography_body())))
     panel.push(editor_surface)
     let location = code_cursor_location(editor.value(), editor.cursor())
     let mut editor_status = Widget::panel("code-status").with_direction(horizontal()).with_flex(20.0_f32,
@@ -3846,11 +3939,11 @@ fn code_panel(editor: TextEditor, focused: bool, icons: EditorIcons) -> Widget {
     editor_status.push(Widget::label("Ln " + Debug::fmt(location.0) + ", Col " + Debug::fmt(location.1)).with_flex(92.0_f32,
             0.0_f32,).with_style(
             Style::default().with_foreground(Color::rgb(142_u8, 145_u8, 152_u8))
-            .with_font_family("Roboto Mono").with_font_size(9.0_f32).with_pointer_events(false)))
+            .with_font_family("Roboto Mono").with_font_size(typography_metadata()).with_pointer_events(false)))
     editor_status.push(Widget::spacer(1.0_f32))
     editor_status.push(Widget::label("Spaces: 4   UTF-8   LF").with_flex(120.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(121_u8, 124_u8, 131_u8))
-            .with_font_family("Roboto Mono").with_font_size(9.0_f32).with_pointer_events(false)))
+            .with_font_family("Roboto Mono").with_font_size(typography_metadata()).with_pointer_events(false)))
     panel.push(editor_status)
     ret panel
 }
@@ -3984,22 +4077,34 @@ fn tooltip(text: str, pointer_x: f32, pointer_y: f32, view_width: f32, view_heig
         Style::default().with_background(Color::rgb(24_u8, 24_u8, 27_u8)).with_foreground(Color::rgb(224_u8,
                 225_u8, 229_u8,))
         .with_border(1.0_f32, Color::rgb(68_u8, 70_u8, 76_u8)).with_radius(2.0_f32)
-        .with_padding(Insets::symmetric(5.0_f32, 8.0_f32)).with_font_size(10.0_f32)
+        .with_padding(Insets::symmetric(5.0_f32, 8.0_f32)).with_font_size(typography_body())
         .with_width(180.0_f32).with_height(26.0_f32).with_absolute(true).with_left(left).with_top(top)
-    .with_z_index(100_i32).with_pointer_events(false))
+        .with_z_index(100_i32).with_pointer_events(false))
 }
 
 fn gizmo_axis_label(axis: u32) -> str {
-    if axis == 1_u32 { ret "X" }
-    if axis == 2_u32 { ret "Y" }
-    if axis == 3_u32 { ret "Z" }
+    if axis == 1_u32 {
+        ret "X"
+    }
+    if axis == 2_u32 {
+        ret "Y"
+    }
+    if axis == 3_u32 {
+        ret "Z"
+    }
     ret ""
 }
 
 fn gizmo_axis_value(value: Vec3, axis: u32) -> f32 {
-    if axis == 1_u32 { ret value.x() }
-    if axis == 2_u32 { ret value.y() }
-    if axis == 3_u32 { ret value.z() }
+    if axis == 1_u32 {
+        ret value.x()
+    }
+    if axis == 2_u32 {
+        ret value.y()
+    }
+    if axis == 3_u32 {
+        ret value.z()
+    }
     ret 0.0_f32
 }
 
@@ -4021,7 +4126,7 @@ fn transform_measurement(text: str, axis: u32, pointer_x: f32, pointer_y: f32,
         .with_foreground(Color::rgb(244_u8, 245_u8, 247_u8))
         .with_border(2.0_f32, axis_color(gizmo_axis_label(axis))).with_radius(3.0_f32)
         .with_padding(Insets::symmetric(7.0_f32, 10.0_f32)).with_font_family("Roboto Mono")
-        .with_font_size(11.0_f32).with_font_weight(700_u32)
+        .with_font_size(typography_body()).with_font_weight(700_u32)
         .with_width(width).with_height(32.0_f32).with_absolute(true).with_left(left).with_top(top)
         .with_z_index(110_i32).with_pointer_events(false))
 }
@@ -4058,14 +4163,14 @@ fn overlay_layer(open_menu: str, open_viewport_menu: str, shading_mode: str,
     }
     if project_dialog_mode == "import" {
         layer.push(interactive_overlay(asset_import_dialog(asset_picker, project_error,
-                    view_width, view_height, icons)))
+                    view_width, view_height, icons,)))
     } elif project_dialog_mode != "" {
         layer.push(interactive_overlay(project_dialog(project_dialog_mode, project_path_editor,
                     project_path_focused, project_error, view_width, view_height,)))
     }
     if unsaved_action != "" {
         layer.push(interactive_overlay(unsaved_changes_dialog(unsaved_action, view_width,
-                    view_height, icons)))
+                    view_height, icons,)))
     }
     match approvals.pending() {
         Option::Some(request) => {
@@ -4102,7 +4207,7 @@ fn editor_menu_bar(open_menu: str, hovered: str, project_loaded: bool,
             .with_padding(Insets::all(2.0_f32))))
     menu.push(Widget::label("GRAPHENE").with_flex(72.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(232_u8, 233_u8, 236_u8))
-            .with_font_size(10.0_f32).with_font_weight(700_u32)))
+            .with_font_size(typography_body()).with_font_weight(700_u32)))
     menu.push(menu_item("menu-file", "File",
             if open_menu == "menu-file" {
                 "menu-file"
@@ -4146,7 +4251,7 @@ fn editor_menu_bar(open_menu: str, hovered: str, project_loaded: bool,
             }
         ).with_flex(280.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(137_u8, 140_u8, 147_u8))
-            .with_font_size(10.0_f32)))
+            .with_font_size(typography_body())))
     ret menu
 }
 
@@ -4193,7 +4298,7 @@ fn editor_toolbar(simulation_mode: str, project_loaded: bool, project_dirty: boo
         .with_flex(88.0_f32, 0.0_f32)
         .with_disabled(!project_loaded || building || simulating))
     let mut profile_control = Widget::panel("build-profile-control").with_direction(vertical())
-        .with_flex(92.0_f32, 0.0_f32)
+    .with_flex(92.0_f32, 0.0_f32)
     profile_control.push(Widget::select("build-profile", build_profile)
         .with_flex(32.0_f32, 0.0_f32)
         .with_disabled(!project_loaded || building || simulating))
@@ -4242,7 +4347,7 @@ fn editor_toolbar(simulation_mode: str, project_loaded: bool, project_dirty: boo
             .with_foreground(Color::rgb(164_u8, 167_u8, 174_u8))
             .with_border(1.0_f32, Color::rgb(46_u8, 47_u8, 52_u8))
             .with_radius(2.0_f32).with_padding(Insets::symmetric(4.0_f32, 7.0_f32))
-            .with_font_size(10.0_f32)))
+            .with_font_size(typography_body())))
     ret toolbar
 }
 
@@ -4260,7 +4365,7 @@ fn workspace_tabs(project_dirty: bool, icons: EditorIcons) -> Widget {
     tabs.push(Widget::spacer(1.0_f32))
     tabs.push(Widget::label("LEVEL EDITOR").with_flex(78.0_f32, 0.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(105_u8, 108_u8, 115_u8))
-            .with_font_size(8.0_f32).with_font_weight(700_u32).with_pointer_events(false)))
+            .with_font_size(typography_caption()).with_font_weight(700_u32).with_pointer_events(false)))
     ret tabs
 }
 
@@ -4301,7 +4406,7 @@ fn status_bar(simulation_mode: str, building: bool, status_message: str,
             , 92.0_f32, building || simulating,))
     status.push(Widget::label(status_message).with_flex(0.0_f32, 1.0_f32).with_style(
             Style::default().with_foreground(Color::rgb(163_u8, 166_u8, 173_u8))
-            .with_font_size(10.0_f32)))
+            .with_font_size(typography_body())))
     status.push(Widget::spacer(1.0_f32))
     status.push(status_segment(if !project_loaded {
                 "No Project"
@@ -4455,38 +4560,38 @@ fn editor_view(simulation_mode: str, selected: str, selected_position: Vec3, sel
 
     part_started = perf_counter_ms()
     let upper = upper_workspace(simulation_mode, selected, selected_position,
-            selected_rotation, selected_scale, selected_cube, selected_mesh_name,
-            actor_ids, actor_parents, actor_names, actor_visibilities, name_editor,
-            name_focused, parent_menu_open, transform_field, transform_editor,
-            transform_invalid, outliner_search, outliner_search_focused, selected_asset,
-            selected_autolod_enabled, default_material, object_count, autolod_stats,
-            dragging, active_tool, camera_mode, shading_mode, skybox_mode,
-            camera_speed, grid_visible, rotation_snap, open_viewport_menu, hovered, compact,
-            outliner_show_editor_actors, outliner_show_hidden_actors, show_outliner,
-            show_details, icons,)
+        selected_rotation, selected_scale, selected_cube, selected_mesh_name,
+        actor_ids, actor_parents, actor_names, actor_visibilities, name_editor,
+        name_focused, parent_menu_open, transform_field, transform_editor,
+        transform_invalid, outliner_search, outliner_search_focused, selected_asset,
+        selected_autolod_enabled, default_material, object_count, autolod_stats,
+        dragging, active_tool, camera_mode, shading_mode, skybox_mode,
+        camera_speed, grid_visible, rotation_snap, open_viewport_menu, hovered, compact,
+        outliner_show_editor_actors, outliner_show_hidden_actors, show_outliner,
+        show_details, icons,)
     profile_view_part("upper workspace", part_started)
     root.push(upper)
     part_started = perf_counter_ms()
     let lower = lower_workspace(simulation_mode, building, status_message, build_output,
-            dragging, selected_asset, imported_meshes, asset_search, asset_search_focused,
-            code_editor, code_focused, console_editor, console_focused, console_output,
-            hovered, show_content, icons,)
+        dragging, selected_asset, imported_meshes, asset_search, asset_search_focused,
+        code_editor, code_focused, console_editor, console_focused, console_output,
+        hovered, show_content, icons,)
     profile_view_part("lower workspace", part_started)
     root.push(lower)
 
     part_started = perf_counter_ms()
     let status = status_bar(simulation_mode, building, status_message,
-            project_loaded, project_dirty, object_count, icons,)
+        project_loaded, project_dirty, object_count, icons,)
     profile_view_part("status", part_started)
     root.push(status)
     part_started = perf_counter_ms()
     let overlays = overlay_layer(open_menu, open_viewport_menu, shading_mode,
-            add_actor_open, outliner_settings_open, project_dialog_mode,
-            unsaved_action, project_loaded, project_dirty, can_undo, can_redo, selected_cube, simulating,
-            building, show_outliner, show_details, show_content, outliner_show_editor_actors,
-            outliner_show_hidden_actors, imported_meshes, hovered, "", 0_u32, pointer_x, pointer_y,
-            project_path_editor, project_path_focused, project_error, asset_picker,
-            approvals, view_width, view_height, icons,)
+        add_actor_open, outliner_settings_open, project_dialog_mode,
+        unsaved_action, project_loaded, project_dirty, can_undo, can_redo, selected_cube, simulating,
+        building, show_outliner, show_details, show_content, outliner_show_editor_actors,
+        outliner_show_hidden_actors, imported_meshes, hovered, "", 0_u32, pointer_x, pointer_y,
+        project_path_editor, project_path_focused, project_error, asset_picker,
+        approvals, view_width, view_height, icons,)
     profile_view_part("overlays", part_started)
     root.push(overlays)
     ret Html::new().with_child(root)
@@ -4548,17 +4653,14 @@ fn main() -> u32 {
     if project_at_startup == "" {
         ret 0_u32
     }
-    let window = with_graphene_styles(
-        Window::create_with_renderer_features("Graphene Editor", 1440_u32, 900_u32,
-            RendererKind::DirectVulkan, VulkanFeatureRequest::advanced_rendering(),)
-        .with_background(Color::rgb(13_u8, 13_u8, 15_u8)),)
+    let window = create_editor_window()
     if !window.available() {
         println("Graphene Editor: unable to create " + backend_name() + " window: " + backend_error())
         ret 1_u32
     }
     let mut font_manager = FontManager::with_bundled("../Luma/assets/fonts")
     font_manager.register_all(window)
-    font_manager = font_manager.activate(window, "Roboto", 12.0_f32, 400_u32)
+    font_manager = font_manager.activate(window, "Roboto", typography_body(), 400_u32)
     if font_manager.error() != "" {
         println("Graphene Editor: unable to activate Roboto: " + font_manager.error())
     }
@@ -5067,7 +5169,8 @@ fn main() -> u32 {
             2_u32
         } else {
             0_u32
-        })
+        }
+    )
     let mut camera = EditorCameraState::new(camera_mode,
         simulation_mode_is_play(simulation_mode),)
     let mut navigation = ViewportInputState::new(performance_counter_ns())
@@ -5119,7 +5222,7 @@ fn main() -> u32 {
     let initial_cache_frame = window.prepare_frame_with_surface_extent(
         layout, true, "viewport-surface", viewport_pixel_x, viewport_pixel_y,
         render_width, render_height, viewport_density, viewport_generation,)
-        .with_overlays(ui_cache_exclusions(), Vec[WidgetLayout]::new(), false)
+    .with_overlays(ui_cache_exclusions(), Vec[WidgetLayout]::new(), false)
     let mut layout_cached = window.cache_prepared_frame(initial_cache_frame)
     if profiling {
         println("Graphene profile: initial UI cache " + Debug::fmt(perf_counter_ms() - initial_cache_started)
@@ -5187,17 +5290,17 @@ fn main() -> u32 {
         layout, layout_cached, "viewport-surface", viewport_pixel_x,
         viewport_pixel_y, render_width, render_height, viewport_density,
         viewport_generation,)
-        .with_overlays(external_overlays, external_overlay_layouts,
-            overlay_cache_ready && external_overlays.len() > 0_usize,)
+    .with_overlays(external_overlays, external_overlay_layouts,
+        overlay_cache_ready && external_overlays.len() > 0_usize,)
     match initial_frame.surface("viewport-surface") {
         Option::Some(slot) => {
-            let borrowed = window.begin_vulkan_frame(initial_frame)
+            let borrowed = window.begin_direct_frame(initial_frame)
             let recorded = borrowed.valid() &&
-                viewport_renderer.record_camera_pose_at(borrowed.frame(), borrowed.slot(),
-                    slot.pixel_x(), slot.pixel_y(), slot.pixel_width(), slot.pixel_height(),
-                    camera.position, camera.yaw, camera.pitch, camera.fov,)
+            viewport_renderer.record_camera_pose_at(borrowed.frame(), borrowed.slot(),
+                slot.pixel_x(), slot.pixel_y(), slot.pixel_width(), slot.pixel_height(),
+                camera.position, camera.yaw, camera.pitch, camera.fov,)
             if borrowed.valid() {
-                let presented = window.present_vulkan_frame(borrowed)
+                let presented = window.present_direct_frame(borrowed)
                 first_frame_drawn = recorded && presented
             }
         }
@@ -5236,10 +5339,10 @@ fn main() -> u32 {
         shortcuts.handle(event)
         if event.kind() == event_key_down() {
             flight = flight.update(AppEvent::key_down(event.key(),
-                event.modifiers(), "viewport-surface",))
+                    event.modifiers(), "viewport-surface",))
         } elif event.kind() == event_key_up() {
             flight = flight.update(AppEvent::key_up(event.key(),
-                event.modifiers(), "viewport-surface",))
+                    event.modifiers(), "viewport-surface",))
         } elif event.kind() == event_focus_lost() {
             flight = flight.update(AppEvent::focus_lost())
         }
@@ -5456,8 +5559,12 @@ fn main() -> u32 {
                 }
                 if open_viewport_menu == "shading" {
                     let popup_hit = match reactive_ui.find_layout("viewport-shading-menu") {
-                        Option::Some(popup) => { popup.hit(event.x(), event.y()) }
-                        Option::None => { "" }
+                        Option::Some(popup) => {
+                            popup.hit(event.x(), event.y())
+                        }
+                        Option::None => {
+                            ""
+                        }
                     }
                     if popup_hit != "" {
                         hover_hit = popup_hit
@@ -5493,13 +5600,13 @@ fn main() -> u32 {
                         // vector-backed viewport and icon tree.
                         hovered_base = Option[Widget]::None
                         let _select_style = reactive_ui.patch_style("tool-select",
-                            segmented_icon_style(active_tool == "select", hovered == "tool-select"))
+                            segmented_icon_style(active_tool == "select", hovered == "tool-select"),)
                         let _move_style = reactive_ui.patch_style("tool-move",
-                            segmented_icon_style(active_tool == "move", hovered == "tool-move"))
+                            segmented_icon_style(active_tool == "move", hovered == "tool-move"),)
                         let _rotate_style = reactive_ui.patch_style("tool-rotate",
-                            segmented_icon_style(active_tool == "rotate", hovered == "tool-rotate"))
+                            segmented_icon_style(active_tool == "rotate", hovered == "tool-rotate"),)
                         let _scale_style = reactive_ui.patch_style("tool-scale",
-                            segmented_icon_style(active_tool == "scale", hovered == "tool-scale"))
+                            segmented_icon_style(active_tool == "scale", hovered == "tool-scale"),)
                     } else {
                         hovered_base = if hovered == "" {
                             Option[Widget]::None
@@ -5565,7 +5672,8 @@ fn main() -> u32 {
                         gizmo_axis
                     } else {
                         0_u32
-                    })
+                    }
+                    ,)
                 dirty = true
                 viewport_only = true
                 reactive_only = false
@@ -5609,13 +5717,17 @@ fn main() -> u32 {
             let over_viewport = viewport_point_extent(
                 viewport_pixel_x, viewport_pixel_y, render_width, render_height,
                 viewport_density, event.x(), event.y(),).is_some() &&
-                project_dialog_mode == "" && unsaved_action == ""
+            project_dialog_mode == "" && unsaved_action == ""
             let mut target = resolve_editor_pointer_target(
                 over_viewport, reactive_ui.hit(event.x(), event.y()),)
             if open_viewport_menu == "shading" {
                 let popup_hit = match reactive_ui.find_layout("viewport-shading-menu") {
-                    Option::Some(popup) => { popup.hit(event.x(), event.y()) }
-                    Option::None => { "" }
+                    Option::Some(popup) => {
+                        popup.hit(event.x(), event.y())
+                    }
+                    Option::None => {
+                        ""
+                    }
                 }
                 if popup_hit != "" {
                     target = popup_hit
@@ -5623,7 +5735,7 @@ fn main() -> u32 {
             }
             event_target = target
             text_selection_target = if target == "code-editor" ||
-                target == "command-console" {
+            target == "command-console" {
                 target
             } else {
                 ""
@@ -5967,7 +6079,11 @@ fn main() -> u32 {
                 build_profile = if target == "build-profile-release" {
                     "release"
                 } else {
-                    if target == "build-profile-extreme" { "extreme" } else { "debug" }
+                    if target == "build-profile-extreme" {
+                        "extreme"
+                    } else {
+                        "debug"
+                    }
                 }
                 build_profile_open = false
                 status_message = "Build profile: " + build_profile
@@ -6092,7 +6208,8 @@ fn main() -> u32 {
                         2_u32
                     } else {
                         0_u32
-                    })
+                    }
+                )
                 open_viewport_menu = ""
                 status_message = skybox_name(skybox_mode) + " skybox"
                 dirty = true
@@ -6467,7 +6584,8 @@ fn main() -> u32 {
                                     updated = true
                                 }
                             }
-                            Option::None => {}
+                            Option::None => {
+                            }
                         }
                     }
                     imported_index += 1_usize
@@ -6561,7 +6679,8 @@ fn main() -> u32 {
                                         (selected_cube - 1_u32) as usize
                                     } else {
                                         0_usize
-                                    }) {
+                                    }
+                                ) {
                                     Option::Some(actor) => Option[u64]::Some(actor)
                                     Option::None => Option[u64]::None
                                 }
@@ -6591,7 +6710,7 @@ fn main() -> u32 {
                                 }
                                 group_pivot_world = average_position(group_start_world_positions)
                                 moving_cube = true
-                            } elif gizmo_hit > 0_u32 && (active_tool == "rotate" || active_tool == "scale") {
+                            } elif gizmo_hit > 0_u32 &&(active_tool == "rotate" || active_tool == "scale") {
                                 moving_cube = true
                                 navigation.pointer_x = event.x()
                                 navigation.pointer_y = event.y()
@@ -6835,12 +6954,24 @@ fn main() -> u32 {
         if event.kind() == event_pointer_move() && navigation.orbiting {
             if navigation.dolly {
                 camera.distance = camera.distance - event.dy() * 0.025_f32
-                if camera.distance < 0.5_f32 { camera.distance = 0.5_f32 }
-                if camera.distance > 100.0_f32 { camera.distance = 100.0_f32 }
+                if camera.distance < 0.5_f32 {
+                    camera.distance = 0.5_f32
+                }
+                if camera.distance > 100.0_f32 {
+                    camera.distance = 100.0_f32
+                }
                 camera.position = camera.target.add(Vec3::from_spherical(camera.yaw, camera.pitch).scale(camera.distance))
             } else {
-                let delta_x = if navigation.pointer_locked { event.dx() } else { event.x() - navigation.pointer_x }
-                let delta_y = if navigation.pointer_locked { event.dy() } else { event.y() - navigation.pointer_y }
+                let delta_x = if navigation.pointer_locked {
+                    event.dx()
+                } else {
+                    event.x() - navigation.pointer_x
+                }
+                let delta_y = if navigation.pointer_locked {
+                    event.dy()
+                } else {
+                    event.y() - navigation.pointer_y
+                }
                 // UE's editor convention turns the scene opposite to the
                 // cursor: dragging right rotates the view to the left.
                 camera.look(delta_x, delta_y, navigation.orbit_pivot)
@@ -6868,11 +6999,15 @@ fn main() -> u32 {
         }
         if navigation.orbiting && event.kind() == event_key_down() && event.key() == 122_u32 {
             camera.fov = camera.fov + 0.05_f32
-            if camera.fov > 1.45_f32 { camera.fov = 1.45_f32 }
+            if camera.fov > 1.45_f32 {
+                camera.fov = 1.45_f32
+            }
             dirty = true viewport_only = true reactive_only = true
         } elif navigation.orbiting && event.kind() == event_key_down() && event.key() == 99_u32 {
             camera.fov = camera.fov - 0.05_f32
-            if camera.fov < 0.55_f32 { camera.fov = 0.55_f32 }
+            if camera.fov < 0.55_f32 {
+                camera.fov = 0.55_f32
+            }
             dirty = true viewport_only = true reactive_only = true
         }
         if navigation.orbiting && !navigation.orbit_pivot && !navigation.dolly && navigation.focused && !simulating {
@@ -6885,11 +7020,12 @@ fn main() -> u32 {
             navigation.tick_ns = now
             let movement = flight.direction(camera.yaw, camera.pitch)
             let speed = if camera.distance < 1.0_f32 {
-                    1.0_f32
-                } else {
-                    camera.distance
-                } * 1.25_f32 * camera_speed_value(camera_speed) *
-                flight.speed_multiplier()
+                1.0_f32
+            } else {
+                camera.distance
+            }
+            * 1.25_f32 * camera_speed_value(camera_speed) *
+            flight.speed_multiplier()
             if camera.fly(movement, speed, elapsed_ns) {
                 dirty = true
                 viewport_only = true
@@ -6927,8 +7063,8 @@ fn main() -> u32 {
                         // direction as the camera yaw changed and made the drag
                         // appear to teleport when the ray crossed the ground.
                         let projected_delta = viewport_renderer.gizmo_axis_drag_delta_pose_at(gizmo_start_x
-                                * window.pixel_density(), gizmo_start_y * window.pixel_density(), point.0
-                                * window.pixel_density(), point.1 * window.pixel_density(), camera.position,
+                            * window.pixel_density(), gizmo_start_y * window.pixel_density(), point.0
+                            * window.pixel_density(), point.1 * window.pixel_density(), camera.position,
                             camera.yaw, camera.pitch, camera.fov, move_start_world, gizmo_axis,)
                         let desired_world = move_start_world.add(projected_delta)
                         // The drag target is always measured from the pose captured on
@@ -7204,9 +7340,25 @@ fn main() -> u32 {
             {
                 if navigation.orbiting {
                     camera_speed = if event.wheel_y() > 0.0_f32 {
-                        if camera_speed == "0.25" { "0.5" } elif camera_speed == "0.5" { "1" } elif camera_speed == "1" { "2" } else { "4" }
+                        if camera_speed == "0.25" {
+                            "0.5"
+                        } elif camera_speed == "0.5" {
+                            "1"
+                        } elif camera_speed == "1" {
+                            "2"
+                        } else {
+                            "4"
+                        }
                     } else {
-                        if camera_speed == "4" { "2" } elif camera_speed == "2" { "1" } elif camera_speed == "1" { "0.5" } else { "0.25" }
+                        if camera_speed == "4" {
+                            "2"
+                        } elif camera_speed == "2" {
+                            "1"
+                        } elif camera_speed == "1" {
+                            "0.5"
+                        } else {
+                            "0.25"
+                        }
                     }
                     status_message = "Camera speed " + camera_speed_name(camera_speed)
                 } else {
@@ -7554,11 +7706,11 @@ fn main() -> u32 {
                         0_u32
                     }
                 }
-                                selected = if selected_cube > 0_u32 {
-                                    actor_name_at(actor_names, selected_cube)
-                                } else {
-                                    "Nothing selected"
-                                }
+                selected = if selected_cube > 0_u32 {
+                    actor_name_at(actor_names, selected_cube)
+                } else {
+                    "Nothing selected"
+                }
                 rebuild_viewport_actors(viewport_renderer, previous_count, cube_mesh_names,
                     actor_visibilities, cube_positions, render_rotations, cube_scales,
                     plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes,
@@ -7955,11 +8107,11 @@ fn main() -> u32 {
                                         0_u32
                                     }
                                 }
-                selected = if selected_cube > 0_u32 {
-                    actor_name_at(actor_names, selected_cube)
-                } else {
-                    "Nothing selected"
-                }
+                                selected = if selected_cube > 0_u32 {
+                                    actor_name_at(actor_names, selected_cube)
+                                } else {
+                                    "Nothing selected"
+                                }
                                 rebuild_viewport_actors(viewport_renderer, previous_count,
                                     cube_mesh_names, actor_visibilities, cube_positions,
                                     render_rotations, cube_scales, plane_gpu_mesh,
@@ -8055,7 +8207,7 @@ fn main() -> u32 {
                 transform_ui_tick = transform_ui_now
             }
         }
-        if transform_ui_refresh || (was_moving_cube && !moving_cube) {
+        if transform_ui_refresh ||(was_moving_cube && !moving_cube) {
             if patch_transform_display(reactive_ui,
                 position_at(cube_positions, selected_cube),
                 rotation_at(render_rotations, selected_cube),
@@ -8184,10 +8336,10 @@ fn main() -> u32 {
             if details_reactive_target(event_target) && selected_cube > 0_u32 {
                 if reactive_ui.replace_subtree("viewport",
                     styled_editor_subtree(window,
-                    viewport(simulation_mode, dragging, object_count, autolod_stats,
-                        selected, active_tool,
-                        camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap,
-                        open_viewport_menu, hovered, compact, icons,), hovered),) {
+                        viewport(simulation_mode, dragging, object_count, autolod_stats,
+                            selected, active_tool,
+                            camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap,
+                            open_viewport_menu, hovered, compact, icons,), hovered,),) {
                     layout = reactive_ui.layout()
                 }
             }
@@ -8289,10 +8441,10 @@ fn main() -> u32 {
             if !event_target.contains("asset-") {
                 components_updated = reactive_ui.replace_subtree("viewport",
                     styled_editor_subtree(window,
-                    viewport(simulation_mode, dragging, object_count, autolod_stats,
-                        selected, active_tool, camera_mode,
-                    shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap, open_viewport_menu,
-                        hovered, compact, icons,), hovered),) && components_updated
+                        viewport(simulation_mode, dragging, object_count, autolod_stats,
+                            selected, active_tool, camera_mode,
+                            shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap, open_viewport_menu,
+                            hovered, compact, icons,), hovered,),) && components_updated
             }
             if components_updated {
                 layout = reactive_ui.layout()
@@ -8304,6 +8456,40 @@ fn main() -> u32 {
             if event_target == "menu-outliner-action" || event_target == "menu-details-action" {
                 workspace_updated = reactive_ui.replace_subtree("upper",
                     styled_editor_subtree(window,
+                        upper_workspace(simulation_mode, selected,
+                            position_at(cube_positions, selected_cube),
+                            rotation_at(render_rotations, selected_cube),
+                            scale_at(cube_scales, selected_cube), selected_cube,
+                            mesh_name_at(cube_mesh_names, selected_cube), cube_entities,
+                            scene_actor_parents(editor_scene, cube_entities), actor_names,
+                            actor_visibilities, actor_name_editor, actor_name_focused,
+                            parent_menu_open, transform_field, transform_editor,
+                            transform_invalid, outliner_search, outliner_search_focused,
+                            selected_asset, selected_autolod_enabled,
+                            default_material, object_count,
+                            autolod_stats, dragging,
+                            active_tool, camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible,
+                            rotation_snap, open_viewport_menu, hovered, compact,
+                            outliner_show_editor_actors, outliner_show_hidden_actors,
+                            show_outliner, show_details, icons,), hovered,),) && workspace_updated
+            }
+            if event_target == "menu-content-action" {
+                workspace_updated = reactive_ui.replace_subtree("lower",
+                    styled_editor_subtree(window,
+                        lower_workspace(simulation_mode, building, status_message, build_output,
+                            dragging, selected_asset, imported_meshes, asset_search,
+                            asset_search_focused, code_editor, code_focused, console_editor,
+                            console_focused, console_output, hovered,
+                            show_content, icons,), hovered,),) && workspace_updated
+            }
+            if workspace_updated {
+                layout = reactive_ui.layout()
+                reactive_only = true
+            }
+        }
+        if dirty && previous_project_root != project_root {
+            let upper_updated = reactive_ui.replace_subtree("upper",
+                styled_editor_subtree(window,
                     upper_workspace(simulation_mode, selected,
                         position_at(cube_positions, selected_cube),
                         rotation_at(render_rotations, selected_cube),
@@ -8319,48 +8505,14 @@ fn main() -> u32 {
                         active_tool, camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible,
                         rotation_snap, open_viewport_menu, hovered, compact,
                         outliner_show_editor_actors, outliner_show_hidden_actors,
-                        show_outliner, show_details, icons,), hovered),) && workspace_updated
-            }
-            if event_target == "menu-content-action" {
-                workspace_updated = reactive_ui.replace_subtree("lower",
-                    styled_editor_subtree(window,
+                        show_outliner, show_details, icons,), hovered,),)
+            let lower_updated = reactive_ui.replace_subtree("lower",
+                styled_editor_subtree(window,
                     lower_workspace(simulation_mode, building, status_message, build_output,
                         dragging, selected_asset, imported_meshes, asset_search,
                         asset_search_focused, code_editor, code_focused, console_editor,
                         console_focused, console_output, hovered,
-                        show_content, icons,), hovered),) && workspace_updated
-            }
-            if workspace_updated {
-                layout = reactive_ui.layout()
-                reactive_only = true
-            }
-        }
-        if dirty && previous_project_root != project_root {
-            let upper_updated = reactive_ui.replace_subtree("upper",
-                styled_editor_subtree(window,
-                upper_workspace(simulation_mode, selected,
-                    position_at(cube_positions, selected_cube),
-                    rotation_at(render_rotations, selected_cube),
-                    scale_at(cube_scales, selected_cube), selected_cube,
-                    mesh_name_at(cube_mesh_names, selected_cube), cube_entities,
-                    scene_actor_parents(editor_scene, cube_entities), actor_names,
-                    actor_visibilities, actor_name_editor, actor_name_focused,
-                    parent_menu_open, transform_field, transform_editor,
-                    transform_invalid, outliner_search, outliner_search_focused,
-                    selected_asset, selected_autolod_enabled,
-                    default_material, object_count,
-                    autolod_stats, dragging,
-                    active_tool, camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible,
-                    rotation_snap, open_viewport_menu, hovered, compact,
-                    outliner_show_editor_actors, outliner_show_hidden_actors,
-                    show_outliner, show_details, icons,), hovered),)
-            let lower_updated = reactive_ui.replace_subtree("lower",
-                styled_editor_subtree(window,
-                lower_workspace(simulation_mode, building, status_message, build_output,
-                    dragging, selected_asset, imported_meshes, asset_search,
-                    asset_search_focused, code_editor, code_focused, console_editor,
-                    console_focused, console_output, hovered,
-                    show_content, icons,), hovered),)
+                        show_content, icons,), hovered,),)
             if upper_updated && lower_updated {
                 layout = reactive_ui.layout()
                 reactive_only = true
@@ -8433,10 +8585,10 @@ fn main() -> u32 {
                     console_editor, console_focused, console_output, icons,),)
             let viewport_updated = reactive_ui.replace_subtree("viewport",
                 styled_editor_subtree(window,
-                viewport(simulation_mode, dragging, object_count, autolod_stats,
-                    selected, active_tool,
-                    camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap,
-                    open_viewport_menu, hovered, compact, icons,), hovered),)
+                    viewport(simulation_mode, dragging, object_count, autolod_stats,
+                        selected, active_tool,
+                        camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap,
+                        open_viewport_menu, hovered, compact, icons,), hovered,),)
             if output_updated && viewport_updated {
                 layout = reactive_ui.layout()
                 reactive_only = true
@@ -8463,22 +8615,22 @@ fn main() -> u32 {
             if menu_changed {
                 chrome_updated = reactive_ui.replace_subtree("menu-bar",
                     styled_editor_subtree(window,
-                    editor_menu_bar(open_menu, hovered, project_loaded, project_root, icons), hovered),) ||
+                        editor_menu_bar(open_menu, hovered, project_loaded, project_root, icons), hovered,),) ||
                 chrome_updated
             }
             if toolbar_changed {
                 chrome_updated = reactive_ui.replace_subtree("toolbar",
                     styled_editor_subtree(window,
-                    editor_toolbar(simulation_mode, project_loaded, project_dirty,
-                        command_state.can_undo(), command_state.can_redo(),
-                        selected_cube, building, build_profile, build_profile_open, hovered, icons,), hovered),) ||
+                        editor_toolbar(simulation_mode, project_loaded, project_dirty,
+                            command_state.can_undo(), command_state.can_redo(),
+                            selected_cube, building, build_profile, build_profile_open, hovered, icons,), hovered,),) ||
                 chrome_updated
             }
             if status_changed {
                 chrome_updated = reactive_ui.replace_subtree("status",
                     styled_editor_subtree(window,
-                    status_bar(simulation_mode, building, status_message,
-                        project_loaded, project_dirty, object_count, icons,), hovered),) || chrome_updated
+                        status_bar(simulation_mode, building, status_message,
+                            project_loaded, project_dirty, object_count, icons,), hovered,),) || chrome_updated
             }
             if previous_project_dirty != project_dirty {
                 chrome_updated = reactive_ui.replace_subtree("workspace-tabs",
@@ -8509,24 +8661,24 @@ fn main() -> u32 {
                     compact = next_compact
                     let _viewport_replaced = reactive_ui.replace_subtree("viewport",
                         styled_editor_subtree(window,
-                        viewport(simulation_mode, dragging, object_count, autolod_stats,
-                            selected, active_tool,
-                            camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap,
-                            open_viewport_menu, hovered, compact, icons,), hovered),)
+                            viewport(simulation_mode, dragging, object_count, autolod_stats,
+                                selected, active_tool,
+                                camera_mode, shading_mode, skybox_mode, camera_speed, grid_visible, rotation_snap,
+                                open_viewport_menu, hovered, compact, icons,), hovered,),)
                 }
                 let _overlay_replaced = reactive_ui.replace_subtree("overlay-layer",
                     styled_editor_subtree(window,
-                    overlay_layer(open_menu, open_viewport_menu, shading_mode,
-                        add_actor_open, outliner_settings_open,
-                        project_dialog_mode, unsaved_action, project_loaded, project_dirty,
-                        command_state.can_undo(), command_state.can_redo(),
-                        selected_cube, simulating, building, show_outliner, show_details,
-                        show_content, outliner_show_editor_actors,
-                        outliner_show_hidden_actors, imported_meshes, hovered, gizmo_measurement,
-                        gizmo_axis, pointer_x,
-                        pointer_y, project_path_editor, project_path_focused, project_error,
-                        asset_picker, approval_broker, window.width() as f32,
-                        window.height() as f32, icons,), hovered),)
+                        overlay_layer(open_menu, open_viewport_menu, shading_mode,
+                            add_actor_open, outliner_settings_open,
+                            project_dialog_mode, unsaved_action, project_loaded, project_dirty,
+                            command_state.can_undo(), command_state.can_redo(),
+                            selected_cube, simulating, building, show_outliner, show_details,
+                            show_content, outliner_show_editor_actors,
+                            outliner_show_hidden_actors, imported_meshes, hovered, gizmo_measurement,
+                            gizmo_axis, pointer_x,
+                            pointer_y, project_path_editor, project_path_focused, project_error,
+                            asset_picker, approval_broker, window.width() as f32,
+                            window.height() as f32, icons,), hovered,),)
                 layout = window.relayout(reactive_ui.layout())
                 let layout_finished = perf_counter_ms()
                 let resize_frame = window.prepare_frame(layout, true)
@@ -8591,7 +8743,8 @@ fn main() -> u32 {
                         gizmo_axis
                     } else {
                         0_u32
-                    })
+                    }
+                    ,)
                 // Camera-only frames do not mutate scene state. Replaying all
                 // hierarchy and material updates here adds avoidable CPU work
                 // and repeatedly exercises owned scene graphs.
@@ -8601,11 +8754,13 @@ fn main() -> u32 {
                             Vec[u32]::new()
                         } else {
                             selected_cubes
-                        }, if simulation_mode_is_play(simulation_mode) {
+                        }
+                        , if simulation_mode_is_play(simulation_mode) {
                             0_u32
                         } else {
                             selected_cube
-                        })
+                        }
+                        ,)
                     viewport_renderer.sync_cube_transforms_hierarchical(cube_positions, render_rotations,
                         cube_scales,
                         actor_parent_indices(cube_entities,
@@ -8649,7 +8804,7 @@ fn main() -> u32 {
                 if overlay_visible(open_menu, add_actor_open, outliner_settings_open,
                     project_dialog_mode, unsaved_action, hovered,
                     pending_approval_id(approval_broker),) || gizmo_measurement != "" ||
-                    open_viewport_menu == "shading" {
+                open_viewport_menu == "shading" {
                     external_overlays.push("overlay-layer")
                     match reactive_ui.find_layout("overlay-layer") {
                         Option::Some(overlay) => {
@@ -8668,26 +8823,26 @@ fn main() -> u32 {
             let mut rendered = false
             let mut scene_recorded = false
             if ui_updated && render_width > 0_u32 && render_height > 0_u32 {
-                let borrowed = window.prepare_cached_vulkan_frame(
+                let borrowed = window.prepare_cached_direct_frame(
                     external_overlay_layouts,
                     overlay_cache_ready && external_overlays.len() > 0_usize,)
                 let gi_recorded = borrowed.valid() &&
-                    viewport_renderer.record_dynamic_gi(borrowed.frame())
+                viewport_renderer.record_dynamic_gi(borrowed.frame())
                 let geometry_recorded = borrowed.valid() &&
-                    viewport_renderer.record_virtual_geometry(
-                        borrowed.frame(), render_width, render_height,
-                        camera.position, camera.yaw, camera.pitch, camera.fov,)
+                viewport_renderer.record_virtual_geometry(
+                    borrowed.frame(), render_width, render_height,
+                    camera.position, camera.yaw, camera.pitch, camera.fov,)
                 let composition_started = borrowed.valid() && gi_recorded &&
-                    geometry_recorded &&
-                    window.begin_vulkan_composition(borrowed)
+                geometry_recorded &&
+                window.begin_direct_composition(borrowed)
                 scene_recorded = composition_started &&
-                    viewport_renderer.record_camera_pose_at(
-                        borrowed.frame(), borrowed.slot(),
-                        viewport_pixel_x, viewport_pixel_y,
-                        render_width, render_height,
-                        camera.position, camera.yaw, camera.pitch, camera.fov,)
+                viewport_renderer.record_camera_pose_at(
+                    borrowed.frame(), borrowed.slot(),
+                    viewport_pixel_x, viewport_pixel_y,
+                    render_width, render_height,
+                    camera.position, camera.yaw, camera.pitch, camera.fov,)
                 if borrowed.valid() {
-                    let presented = window.present_vulkan_frame(borrowed)
+                    let presented = window.present_direct_frame(borrowed)
                     rendered = scene_recorded && presented
                 }
             }

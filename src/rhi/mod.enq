@@ -1,7 +1,7 @@
 import core::option::Option
 import core::vec::Vec
+import graphics_native::{native_adapter_api_version, native_adapter_count, native_adapter_device, native_adapter_kind, native_adapter_mesh_shader, native_adapter_name, native_adapter_ray_pipeline, native_adapter_ray_query, native_adapter_tier, native_adapter_vendor, native_api_version, native_available, native_create, native_borrow, native_destroy, native_error, native_device_available, native_device_compute, native_device_create, native_device_create_features, native_device_destroy, native_device_error, native_device_graphics, native_device_queue_family, native_device_borrow, native_device_requested_features, native_device_enabled_features, native_present_device_create, native_shader_available, native_shader_create, native_shader_destroy, native_shader_error, native_shader_stage, native_bind_group_available, native_bind_group_create, native_bind_group_destroy, native_bind_group_error, native_bind_group_update_buffer, native_storage_bind_group_create, native_storage_bind_group_create_many, native_buffer_bind_group_create_many, native_buffer_texture_bind_group_create_many, native_ray_query_bind_group_create, native_scene_bind_group_create, native_bind_group_layout_available, native_bind_group_layout_create, native_bind_group_layout_destroy, native_bind_group_layout_create_entries, native_bind_group_layout_error, native_material_bind_group_create, native_sampler_available, native_sampler_create, native_sampler_create_repeat, native_sampler_destroy, native_sampler_error, native_pipeline_available, native_pipeline_create, native_pipeline_create_configured, native_pipeline_create_depth_state, native_pipeline_destroy, native_pipeline_error, native_compute_pipeline_available, native_compute_pipeline_create, native_compute_pipeline_destroy, native_compute_pipeline_error, native_encoder_available, native_encoder_create, native_encoder_destroy, native_encoder_error, native_encoder_submit_wait, native_buffer_available, native_buffer_create, native_buffer_destroy, native_buffer_error, native_buffer_host_visible, native_buffer_size, native_buffer_write_f32, native_buffer_read_f32, native_buffer_read_u32, native_buffer_write_u32, native_buffer_write_f32s, native_buffer_write_u32s, native_blas_create_triangles, native_tlas_create_instances, native_acceleration_structure_available, native_acceleration_structure_error, native_acceleration_structure_destroy, native_encoder_bind_compute_group, native_encoder_bind_compute_pipeline, native_encoder_dispatch, native_encoder_storage_host_barrier, native_encoder_copy_buffer, native_encoder_transfer_geometry_barrier, native_encoder_transfer_host_barrier, native_encoder_submit, native_submission_available, native_submission_complete, native_submission_destroy, native_submission_error, native_submission_wait, native_texture_available, native_texture_create, native_texture_destroy, native_texture_error, native_texture_format, native_texture_height, native_texture_mip_levels, native_texture_width, native_texture_layout, native_encoder_copy_buffer_to_texture, native_encoder_transition_texture, native_window_available, native_window_create, native_window_attach, native_window_destroy, native_window_error, native_window_height, native_window_open, native_window_poll, native_window_width, native_window_key_down, native_window_mouse_down, native_window_mouse_dx, native_window_mouse_dy, native_window_mouse_x, native_window_mouse_y, native_swapchain_available, native_swapchain_clear, native_swapchain_create, native_offscreen_create, native_shared_offscreen_create, native_swapchain_set_present_mode, native_swapchain_destroy, native_swapchain_destroy_retired, native_swapchain_last_frame_complete, native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound, native_swapchain_draw_pipeline, native_swapchain_error, native_swapchain_frames_in_flight, native_swapchain_height, native_swapchain_width, native_swapchain_pixels, native_swapchain_pitch, native_swapchain_external_image, native_swapchain_external_layout, native_frame_acquire, native_frame_available, native_frame_begin_render_pass, native_frame_dispatch_compute, native_frame_compute_barrier, native_frame_fill_buffer, native_frame_transfer_storage_barrier, native_frame_fragment_storage_barrier, native_frame_copy_buffer, native_frame_slot, native_frame_bind_group, native_frame_bind_index_buffer, native_frame_bind_vertex_buffer, native_frame_bind_pipeline, native_frame_destroy, native_frame_draw_indexed, native_frame_draw_indexed_indirect_count, native_frame_draw_mesh_tasks, native_frame_draw_mesh_tasks_indirect, native_frame_end_render_pass, native_frame_error, native_frame_present, native_frame_set_viewport, native_frame_upload_ui}
 import linalg::Mat4
-import vulkan_native::{native_adapter_api_version, native_adapter_count, native_adapter_device, native_adapter_kind, native_adapter_mesh_shader, native_adapter_name, native_adapter_ray_pipeline, native_adapter_ray_query, native_adapter_tier, native_adapter_vendor, native_api_version, native_available, native_create, native_borrow, native_destroy, native_error, native_device_available, native_device_compute, native_device_create, native_device_create_features, native_device_destroy, native_device_error, native_device_graphics, native_device_queue_family, native_device_borrow, native_device_requested_features, native_device_enabled_features, native_present_device_create, native_shader_available, native_shader_create, native_shader_destroy, native_shader_error, native_shader_stage, native_bind_group_available, native_bind_group_create, native_bind_group_destroy, native_bind_group_error, native_bind_group_update_buffer, native_storage_bind_group_create, native_storage_bind_group_create_many, native_buffer_bind_group_create_many, native_buffer_texture_bind_group_create_many, native_ray_query_bind_group_create, native_scene_bind_group_create, native_bind_group_layout_available, native_bind_group_layout_create, native_bind_group_layout_destroy, native_bind_group_layout_create_entries, native_bind_group_layout_error, native_material_bind_group_create, native_sampler_available, native_sampler_create, native_sampler_create_repeat, native_sampler_destroy, native_sampler_error, native_pipeline_available, native_pipeline_create, native_pipeline_create_configured, native_pipeline_create_depth_state, native_pipeline_destroy, native_pipeline_error, native_compute_pipeline_available, native_compute_pipeline_create, native_compute_pipeline_destroy, native_compute_pipeline_error, native_encoder_available, native_encoder_create, native_encoder_destroy, native_encoder_error, native_encoder_submit_wait, native_buffer_available, native_buffer_create, native_buffer_destroy, native_buffer_error, native_buffer_host_visible, native_buffer_size, native_buffer_write_f32, native_buffer_read_f32, native_buffer_read_u32, native_buffer_write_u32, native_buffer_write_f32s, native_buffer_write_u32s, native_blas_create_triangles, native_tlas_create_instances, native_acceleration_structure_available, native_acceleration_structure_error, native_acceleration_structure_destroy, native_encoder_bind_compute_group, native_encoder_bind_compute_pipeline, native_encoder_dispatch, native_encoder_storage_host_barrier, native_encoder_copy_buffer, native_encoder_transfer_geometry_barrier, native_encoder_transfer_host_barrier, native_encoder_submit, native_submission_available, native_submission_complete, native_submission_destroy, native_submission_error, native_submission_wait, native_texture_available, native_texture_create, native_texture_destroy, native_texture_error, native_texture_format, native_texture_height, native_texture_mip_levels, native_texture_width, native_texture_layout, native_encoder_copy_buffer_to_texture, native_encoder_transition_texture, native_window_available, native_window_create, native_window_attach, native_window_destroy, native_window_error, native_window_height, native_window_open, native_window_poll, native_window_width, native_window_key_down, native_window_mouse_down, native_window_mouse_dx, native_window_mouse_dy, native_window_mouse_x, native_window_mouse_y, native_swapchain_available, native_swapchain_clear, native_swapchain_create, native_offscreen_create, native_shared_offscreen_create, native_swapchain_set_present_mode, native_swapchain_destroy, native_swapchain_destroy_retired, native_swapchain_last_frame_complete, native_swapchain_draw_indexed, native_swapchain_draw_indexed_bound, native_swapchain_draw_pipeline, native_swapchain_error, native_swapchain_frames_in_flight, native_swapchain_height, native_swapchain_width, native_swapchain_pixels, native_swapchain_pitch, native_swapchain_external_image, native_swapchain_external_layout, native_frame_acquire, native_frame_available, native_frame_begin_render_pass, native_frame_dispatch_compute, native_frame_compute_barrier, native_frame_fill_buffer, native_frame_transfer_storage_barrier, native_frame_fragment_storage_barrier, native_frame_copy_buffer, native_frame_slot, native_frame_bind_group, native_frame_bind_index_buffer, native_frame_bind_vertex_buffer, native_frame_bind_pipeline, native_frame_destroy, native_frame_draw_indexed, native_frame_draw_indexed_indirect_count, native_frame_draw_mesh_tasks, native_frame_draw_mesh_tasks_indirect, native_frame_end_render_pass, native_frame_error, native_frame_present, native_frame_set_viewport, native_frame_upload_ui}
 
 pub fn adapter_other() -> u32 {
     ret 0_u32
@@ -530,6 +530,11 @@ impl for VertexBufferLayout {
 }
 
 impl for BindGroupLayout {
+    pub fn unavailable() -> Self {
+        ret Self {
+            0_usize
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_bind_group_layout_available(self.handle)
     }
@@ -627,6 +632,11 @@ impl for RenderPipeline {
 }
 
 impl for ComputePipeline {
+    pub fn unavailable() -> Self {
+        ret Self {
+            0_usize
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_compute_pipeline_available(self.handle)
     }
@@ -643,6 +653,11 @@ impl for ComputePipeline {
 }
 
 impl for ShaderModule {
+    pub fn unavailable() -> Self {
+        ret Self {
+            0_usize
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.handle != 0_usize && native_shader_available(self.handle)
     }
@@ -1098,6 +1113,11 @@ impl for GpuBuffer {
 }
 
 impl for GpuMesh {
+    pub fn unavailable() -> Self {
+        ret Self {
+            GpuBuffer::unavailable(), GpuBuffer::unavailable(), 0_u32, false
+        }
+    }
     pub fn available(self: Self) -> bool {
         ret self.uploaded && self.index_count > 0_u32 && self.vertex.available() && self.index.available()
     }
@@ -1186,7 +1206,7 @@ impl for GraphicsDevice {
     }
     pub fn error(self: Self) -> str {
         ret if self.handle == 0_usize {
-            "Unable to allocate Vulkan device"
+            "Unable to allocate graphics device"
         } else {
             native_device_error(self.handle)
         }
@@ -1638,7 +1658,7 @@ impl for GraphicsInstance {
                 ret GraphicsDevice {
                     0_usize,
                     AdapterInfo {
-                        0_usize, "Unavailable borrowed Vulkan device", 0_u32, 0_u32,
+                        0_usize, "Unavailable borrowed graphics device", 0_u32, 0_u32,
                         adapter_other(), ApiVersion::from_raw(0_u32),
                         RenderCapabilities {
                             0_u32, false, false, false

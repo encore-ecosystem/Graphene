@@ -147,7 +147,7 @@ fn run_mode(name: str, width: u32, height: u32, object_count: u32,
     if !instance.available() {
         println("Benchmark Vulkan instance failed: " + instance.error())
         instance.destroy()
-        ret Option[BenchыmarkResult]::None
+        ret Option[BenchmarkResult]::None
     }
     let window = instance.create_window("Graphene Benchmark — " + name, width, height)
     if !window.available() {

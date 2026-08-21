@@ -1,0 +1,28 @@
+/// Logical-pixel typography roles for the Graphene editor theme.
+///
+/// Luma converts these logical sizes to device pixels when rasterizing. Keep
+/// density and platform scaling out of this policy layer so layout remains
+/// identical across macOS, Linux, Windows, and mixed-DPI displays.
+pub fn typography_caption() -> f32 {
+    ret 10.0_f32
+}
+
+pub fn typography_metadata() -> f32 {
+    ret 11.0_f32
+}
+
+pub fn typography_body() -> f32 {
+    ret 12.0_f32
+}
+
+pub fn typography_section() -> f32 {
+    ret 13.0_f32
+}
+
+pub fn typography_heading() -> f32 {
+    ret 17.0_f32
+}
+
+pub fn typography_display() -> f32 {
+    ret 25.0_f32
+}

@@ -3,7 +3,7 @@
 import core::option::Option
 import core::vec::Vec
 import linalg::Vec3
-import mod::rhi::{AccelerationStructure, BindGroup, BindGroupLayout, BindGroupLayoutEntry, ComputePipeline, GpuBuffer, GraphicsDevice, RenderFrame, ShaderModule, buffer_storage, shader_stage_compute}
+import mod::rhi::{AccelerationStructure, BindGroup, BindGroupLayout, BindGroupLayoutEntry, ComputePipeline, DeviceFeatures, GpuBuffer, GraphicsDevice, RenderFrame, ShaderModule, buffer_storage, shader_stage_compute}
 import mod::shaders::{gi_spatial_filter_spirv, ray_query_gi_spirv, screen_probe_place_spirv, software_gi_spirv}
 
 pub struct SdfSphere {
@@ -119,24 +119,33 @@ impl for GpuDynamicGi {
         let group = device.create_storage_bind_group_many(layout, bindings, buffers, offsets, ranges)
         let shader = device.create_shader_module(software_gi_spirv(), shader_stage_compute())
         let pipeline = device.create_compute_pipeline(shader, layout)
-        let mut ray_entries = Vec[BindGroupLayoutEntry]::new()
-        ray_entries.push(BindGroupLayoutEntry::acceleration_structure(
-                0_u32, shader_stage_compute(),))
-        ray_entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
-        ray_entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
-        ray_entries.push(BindGroupLayoutEntry::storage(3_u32, shader_stage_compute()))
-        ray_entries.push(BindGroupLayoutEntry::storage(4_u32, shader_stage_compute()))
-        ray_entries.push(BindGroupLayoutEntry::storage(5_u32, shader_stage_compute()))
-        let ray_layout = device.create_bind_group_layout(ray_entries)
-        let ray_shader = device.create_shader_module(
-            ray_query_gi_spirv(), shader_stage_compute(),)
-        let ray_pipeline = device.create_compute_pipeline(ray_shader, ray_layout)
-        let screen_probe_shader = device.create_shader_module(
-            screen_probe_place_spirv(), shader_stage_compute(),)
-        let screen_probe_pipeline = device.create_compute_pipeline(
-            screen_probe_shader, ray_layout,)
+        let ray_supported = device.enabled_features().contains(DeviceFeatures::ray_query()) &&
+        device.enabled_features().contains(DeviceFeatures::buffer_device_address())
+        let mut ray_layout = BindGroupLayout::unavailable()
+        let mut ray_shader = ShaderModule::unavailable()
+        let mut ray_pipeline = ComputePipeline::unavailable()
+        let mut screen_probe_shader = ShaderModule::unavailable()
+        let mut screen_probe_pipeline = ComputePipeline::unavailable()
+        if ray_supported {
+            let mut ray_entries = Vec[BindGroupLayoutEntry]::new()
+            ray_entries.push(BindGroupLayoutEntry::acceleration_structure(
+                    0_u32, shader_stage_compute(),))
+            ray_entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_compute()))
+            ray_entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_compute()))
+            ray_entries.push(BindGroupLayoutEntry::storage(3_u32, shader_stage_compute()))
+            ray_entries.push(BindGroupLayoutEntry::storage(4_u32, shader_stage_compute()))
+            ray_entries.push(BindGroupLayoutEntry::storage(5_u32, shader_stage_compute()))
+            ray_layout = device.create_bind_group_layout(ray_entries)
+            ray_shader = device.create_shader_module(
+                ray_query_gi_spirv(), shader_stage_compute(),)
+            ray_pipeline = device.create_compute_pipeline(ray_shader, ray_layout)
+            screen_probe_shader = device.create_shader_module(
+                screen_probe_place_spirv(), shader_stage_compute(),)
+            screen_probe_pipeline = device.create_compute_pipeline(
+                screen_probe_shader, ray_layout,)
+        }
         let ray_group = BindGroup::unavailable()
-        let ray_available = ray_layout.available() &&
+        let ray_available = ray_supported && ray_layout.available() &&
         ray_shader.available() && ray_pipeline.available() &&
         screen_probe_shader.available() && screen_probe_pipeline.available()
         let mut filter_entries = Vec[BindGroupLayoutEntry]::new()
@@ -551,11 +560,13 @@ impl for GpuDynamicGi {
         } else {
             true
         }
-        let ray_pipeline = self.ray_pipeline.destroy()
-        let ray_shader = self.ray_shader.destroy()
-        let screen_probe_pipeline = self.screen_probe_pipeline.destroy()
-        let screen_probe_shader = self.screen_probe_shader.destroy()
-        let ray_layout = self.ray_layout.destroy()
+        let ray_pipeline = !self.ray_pipeline.available() || self.ray_pipeline.destroy()
+        let ray_shader = !self.ray_shader.available() || self.ray_shader.destroy()
+        let screen_probe_pipeline = !self.screen_probe_pipeline.available() ||
+        self.screen_probe_pipeline.destroy()
+        let screen_probe_shader = !self.screen_probe_shader.available() ||
+        self.screen_probe_shader.destroy()
+        let ray_layout = !self.ray_layout.available() || self.ray_layout.destroy()
         let filter_pipeline = self.filter_pipeline.destroy()
         let filter_shader = self.filter_shader.destroy()
         let filter_group = self.filter_group.destroy()

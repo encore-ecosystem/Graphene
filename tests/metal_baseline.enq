@@ -1,0 +1,63 @@
+import core::option::Option
+import graphene::{DeviceFeatures, GraphicsInstance, buffer_transfer_destination}
+
+#cfg(target_os = "macos")
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let capabilities = adapter.capabilities()
+            if capabilities.ray_query() || capabilities.ray_pipeline() ||
+            capabilities.mesh_shader() {
+                instance.destroy()
+                ret 2_u32
+            }
+            let rejected = instance.create_device_with_features(adapter,
+                DeviceFeatures::mesh_shader(), DeviceFeatures::none(),)
+            if rejected.available() || !rejected.destroy() {
+                instance.destroy()
+                ret 3_u32
+            }
+            let device = instance.create_device(adapter)
+            if !device.available() || device.enabled_features().mask() != 0_u32 {
+                device.destroy()
+                instance.destroy()
+                ret 4_u32
+            }
+            let destination = device.create_buffer(
+                16_u64, buffer_transfer_destination(), true,)
+            let target = device.create_offscreen_target(8_u32, 4_u32)
+            let frame = target.acquire_frame()
+            let recorded = destination.available() && target.available() &&
+            target.frames_in_flight() == 2_u32 && target.pitch() == 32_u32 &&
+            frame.available() && frame.fill_buffer(
+                destination, 0_u64, 16_u64, 305419896_u32,) &&
+            frame.present()
+            frame.destroy()
+            let result = recorded &&
+            destination.read_u32(0_u64) == 305419896_u32 &&
+            destination.read_u32(12_u64) == 305419896_u32
+            target.destroy()
+            destination.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if result {
+                0_u32
+            } else {
+                5_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 6_u32
+        }
+    }
+}
+
+#cfg(not(target_os = "macos"))
+fn main() -> u32 {
+    ret 0_u32
+}

@@ -4,5 +4,10 @@ version = "0.1.0"
 description = "Deterministic peak and representative Graphene performance benchmark"
 dependencies = [
     "path@../../..",
+    "index@std",
     "index@linalg",
 ]
+
+[target.aarch64-apple-darwin]
+runtime-sources = ["../../../../Luma/workspace/metal_native/backend.m"]
+link-args = ["-framework", "Foundation", "-framework", "Metal", "-framework", "QuartzCore"]

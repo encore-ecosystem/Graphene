@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -eu
+
+case " $* " in
+    *"/target/tests/"*)
+        wrapper_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+        metal_backend="$wrapper_dir/../../../luma/workspace/metal_native/backend.m"
+        exec /usr/bin/clang "$@" "$metal_backend" -fobjc-exceptions \
+            -framework Foundation -framework Metal -framework QuartzCore
+        ;;
+esac
+
+exec /usr/bin/clang "$@"
