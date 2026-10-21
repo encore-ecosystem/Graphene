@@ -1,0 +1,184 @@
+//! CPU deformation oracle and conservative pose-dependent cluster bounds.
+//! The GPU implementation must agree with this path, not rest-pose spheres.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{PoseVector, PoseMatrix, animation_clamp}
+import mod::model::SkeletalMesh
+
+pub struct DeformedVertex {
+    position: PoseVector
+    normal: PoseVector
+}
+pub struct PoseBounds {
+    minimum: PoseVector
+    maximum: PoseVector
+}
+
+impl for PoseBounds {
+    pub fn point(p: PoseVector) -> Self {
+        ret Self { p, p }
+    }
+    pub fn include(self: Self, p: PoseVector) -> Self {
+        ret Self {
+            PoseVector {
+                if p.x < self.minimum.x {
+                    p.x
+                } else {
+                    self.minimum.x
+                }
+                , if p.y < self.minimum.y {
+                    p.y
+                } else {
+                    self.minimum.y
+                }
+                , if p.z < self.minimum.z {
+                    p.z
+                } else {
+                    self.minimum.z
+                }
+            }
+            , PoseVector {
+                if p.x > self.maximum.x {
+                    p.x
+                } else {
+                    self.maximum.x
+                }
+                , if p.y > self.maximum.y {
+                    p.y
+                } else {
+                    self.maximum.y
+                }
+                , if p.z > self.maximum.z {
+                    p.z
+                } else {
+                    self.maximum.z
+                }
+            }
+        }
+    }
+    pub fn union(self: Self, b: Self) -> Self {
+        ret self.include(b.minimum).include(b.maximum)
+    }
+    pub fn transformed(self: Self, matrix: PoseMatrix) -> Self {
+        let mut out = Self::point(matrix.point(self.minimum))
+        for i in 0_usize..8_usize {
+            out = out.include(matrix.point(PoseVector {
+                        if (i & 1_usize) == 0_usize {
+                            self.minimum.x
+                        } else {
+                            self.maximum.x
+                        }
+                        , if (i & 2_usize) == 0_usize {
+                            self.minimum.y
+                        } else {
+                            self.maximum.y
+                        }
+                        , if (i & 4_usize) == 0_usize {
+                            self.minimum.z
+                        } else {
+                            self.maximum.z
+                        }
+                    }
+                    ,
+                ))
+        }
+        ret out
+    }
+    pub fn contains(self: Self, p: PoseVector, epsilon: f32) -> bool {
+        ret p.x >= self.minimum.x - epsilon && p.x <= self.maximum.x + epsilon && p.y >= self.minimum.y - epsilon && p.y <= self.maximum.y + epsilon && p.z >= self.minimum.z - epsilon && p.z <= self.maximum.z + epsilon
+    }
+}
+pub struct ClusterBoneBounds {
+    bone: u32
+    bounds: PoseBounds
+}
+pub struct DeformableCluster {
+    bones: Vec[ClusterBoneBounds]
+}
+/// Bounds enclose every authored morph combination over its allowed range.
+/// Convex skin weights mean the union of the transformed per-bone bounds is
+/// conservative. This does not depend on a particular sampled pose.
+pub fn prepare_deformable_cluster(mesh: SkeletalMesh, vertices: Vec[u32]) -> Result[DeformableCluster, str] {
+    if vertices.len() == 0_usize || vertices.len() > 65536_usize {
+        ret Result::Err("Invalid deformable cluster")
+    }
+    let mut bones = Vec[ClusterBoneBounds]::new()
+    for index in vertices {
+        if index as usize >= mesh.vertices.len() {
+            ret Result::Err("Cluster vertex out of range")
+        }
+        let vertex = mesh.vertices.get_unchecked_borrowed(index as usize)
+        let mut bound = PoseBounds::point(vertex.position)
+        for morph in mesh.morphs {
+            for delta in morph.deltas {
+                if delta.vertex == index {
+                    let a = delta.position.scaled(morph.minimum) let b = delta.position.scaled(morph.maximum)
+                    let range = PoseBounds::point(a).include(b)
+                    bound = PoseBounds {
+                        bound.minimum.add(range.minimum), bound.maximum.add(range.maximum)
+                    }
+                }
+            }
+        }
+        for influence in vertex.influences {
+            if influence.bone as usize >= mesh.inverse_bind.len() {
+                ret Result::Err("Cluster bone out of range")
+            }
+            let local = bound.transformed(mesh.inverse_bind.get_unchecked_borrowed(influence.bone as usize))
+            let mut found = false
+            for i in 0_usize..bones.len() {
+                let old = bones.get_unchecked_borrowed(i) if old.bone == influence.bone {
+                    bones.set(i, ClusterBoneBounds {
+                            old.bone, old.bounds.union(local)
+                        }
+                        ,
+                    ) found = true
+                }
+            }
+            if !found {
+                bones.push(ClusterBoneBounds { influence.bone, local })
+            }
+        }
+    }
+    ret Result::Ok(DeformableCluster { bones })
+}
+pub fn deformable_cluster_bounds(cluster: DeformableCluster, model_pose: Vec[PoseMatrix]) -> Result[PoseBounds, str] {
+    if cluster.bones.len() == 0_usize {
+        ret Result::Err("Empty deformable cluster")
+    }
+    let first = cluster.bones.get_unchecked_borrowed(0_usize)
+    if first.bone as usize >= model_pose.len() {
+        ret Result::Err("Cluster pose mismatch")
+    }
+    let mut out = first.bounds.transformed(model_pose.get_unchecked_borrowed(first.bone as usize))
+    for item in cluster.bones {
+        if item.bone as usize >= model_pose.len() {
+            ret Result::Err("Cluster pose mismatch")
+        }
+        out = out.union(item.bounds.transformed(model_pose.get_unchecked_borrowed(item.bone as usize)))
+    }
+    ret Result::Ok(out)
+}
+pub fn deform_vertex(mesh: SkeletalMesh, index: usize, palette: Vec[PoseMatrix], morph_weights: Vec[f32]) -> Result[DeformedVertex, str] {
+    if index >= mesh.vertices.len() || palette.len() != mesh.inverse_bind.len() || morph_weights.len() != mesh.morphs.len() {
+        ret Result::Err("Deformation layout mismatch")
+    }
+    let vertex = mesh.vertices.get_unchecked_borrowed(index)
+    let mut position = vertex.position let mut normal = vertex.normal
+    for i in 0_usize..mesh.morphs.len() {
+        let morph = mesh.morphs.get_unchecked_borrowed(i) let weight = animation_clamp(morph_weights.get_unchecked_borrowed(i), morph.minimum, morph.maximum)
+        for delta in morph.deltas {
+            if delta.vertex as usize == index {
+                position = position.add(delta.position.scaled(weight)) normal = normal.add(delta.normal.scaled(weight))
+            }
+        }
+    }
+    let mut matrix = PoseMatrix::zero()
+    for influence in vertex.influences {
+        if influence.bone as usize >= palette.len() {
+            ret Result::Err("Skin palette target mismatch")
+        }
+        matrix = matrix.add(palette.get_unchecked_borrowed(influence.bone as usize).scaled(influence.weight))
+    }
+    ret Result::Ok(DeformedVertex { matrix.point(position), matrix.normal(normal) })
+}

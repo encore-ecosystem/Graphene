@@ -1,0 +1,139 @@
+//! Slot-fenced statistics/event copies. Call only on the observation view after acquire.
+import core::vec::Vec
+import mod::events::{ParticleEvent, decode_particle_events}
+import mod::runtime::ParticleStats
+import refrain::rhi::*
+struct VfxReadbackSlot {
+    buffer: GpuBuffer
+    pending: bool
+}
+pub struct ParticleGpuReadback {
+    target: usize
+    slots: Vec[VfxReadbackSlot]
+    collect_events: bool
+    capacity: u64
+    bytes: u64
+    sampled: ParticleStats
+    events: Vec[ParticleEvent]
+    rejected: u64
+    previous: Vec[u32]
+    totals: Vec[u64]
+}
+
+impl for ParticleGpuReadback {
+    pub fn create(device: GraphicsDevice, capacity: u64, bytes: u64, collect_events: bool) -> ParticleGpuReadback<H> {
+        let mut slots = Vec[VfxReadbackSlot]::new()
+        for _index in 0_usize..2_usize {
+            slots.push(VfxReadbackSlot {
+                    device.create_buffer(if collect_events {
+                            262192_u64
+                        } else {
+                            32_u64
+                        }
+                        , buffer_transfer_destination(), true,), false
+                }
+                ,
+            )
+        }
+        ret ParticleGpuReadback<H> {
+            0_usize, slots, collect_events, capacity, bytes, ParticleStats {
+                0_u64, capacity, 0_u64, 0_u64, 0_u64, 0_u64, bytes, 0_u64
+            }
+            , Vec[ParticleEvent]::new(), 0_u64, vec![0_u32, 0_u32, 0_u32, 0_u32], vec![0_u64, 0_u64, 0_u64, 0_u64]
+        }
+    }
+    fn invalidate(self: mut Self&) ->() {
+        let mut slots = Vec[VfxReadbackSlot]::new()
+        for slot in self.slots {
+            slots.push(VfxReadbackSlot { slot.buffer, false })
+        }
+        self.slots = slots self.events = Vec[ParticleEvent]::new()
+    }
+    pub fn reset(self: mut Self&) ->() {
+        self.invalidate()
+        self.previous = vec![0_u32, 0_u32, 0_u32, 0_u32] self.totals = vec![0_u64, 0_u64, 0_u64, 0_u64]
+        self.sampled = ParticleStats {
+            0_u64, self.capacity, 0_u64, 0_u64, 0_u64, 0_u64, self.bytes, 0_u64
+        }
+    }
+    fn extend(self: mut Self&, index: usize, current: u32) -> u64 {
+        let previous = self.previous.get(index).unwrap_or(0_u32)
+        let delta = current - previous
+        let total = self.totals.get(index).unwrap_or(0_u64) +(delta as u64)
+        self.previous.set(index, current) self.totals.set(index, total)
+        ret total
+    }
+    pub fn capture(self: mut Self&, frame: RenderFrame, target: Swapchain, pool: GpuBuffer, events: GpuBuffer) -> bool {
+        let index = frame.slot() as usize
+        if index >= self.slots.len() {
+            ret false
+        }
+        if self.target != target.handle() {
+            // Discard old samples. No old target/fence handle is retained or polled.
+            self.invalidate() self.target = target.handle()
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(index)
+        if !slot.buffer.available() {
+            ret false
+        }
+        if slot.pending {
+            let spawned = self.extend(0_usize, slot.buffer.read_u32(24_u64))
+            let expired = self.extend(1_usize, slot.buffer.read_u32(28_u64))
+            let dropped = self.extend(2_usize, slot.buffer.read_u32(12_u64))
+            let steps = self.extend(3_usize, slot.buffer.read_u32(20_u64))
+            let dropped_events = self.sampled.dropped_events + if self.collect_events {
+                slot.buffer.read_u32(36_u64) as u64
+            } else {
+                0_u64
+            }
+            self.sampled = ParticleStats {
+                slot.buffer.read_u32(0_u64) as u64, self.capacity, spawned, expired, dropped, dropped_events, self.bytes, steps
+            }
+            if self.collect_events {
+                let requested = slot.buffer.read_u32(32_u64)
+                let count = if requested > 4096_u32 {
+                    4096_u32
+                } else {
+                    requested
+                }
+                match decode_particle_events(slot.buffer.read_f32s(48_u64,(count as usize) * 16_usize)) {
+                    Ok(batch) => {
+                        for event in batch {
+                            if self.events.len() < 4096_usize {
+                                self.events.push(event)
+                            } else {
+                                self.rejected += 1_u64
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        self.rejected += 1_u64
+                    }
+                }
+            }
+        }
+        if !frame.copy_buffer(pool, slot.buffer, 0_u64, 0_u64, 32_u64) {
+            ret false
+        }
+        if self.collect_events && !frame.copy_buffer(events, slot.buffer, 0_u64, 32_u64, 262160_u64) {
+            ret false
+        }
+        slot.pending = true self.slots.set(index, slot)
+        ret true
+    }
+    pub fn stats(self: Self&) -> ParticleStats {
+        ret self.sampled
+    }
+    pub fn take_events(self: mut Self&) -> Vec[ParticleEvent] {
+        let events = self.events self.events = Vec[ParticleEvent]::new() ret events
+    }
+    pub fn rejected(self: Self&) -> u64 {
+        ret self.rejected
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        for slot in self.slots {
+            slot.buffer.destroy()
+        }
+        self.slots.clear()
+    }
+}

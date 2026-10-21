@@ -1,0 +1,203 @@
+//! Deterministic transition policy independent of animation sample cadence.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::math::{animation_finite, animation_clamp}
+import mod::player::{playback_floor, playback_time_valid}
+
+pub enum TransitionComparison {
+    Less
+    LessEqual
+    Greater
+    GreaterEqual
+    Equal
+    NotEqual
+}
+pub struct AnimationState {
+    name: str
+    clip: u32
+    duration: f32
+    speed: f32
+    looping: bool
+}
+pub struct AnimationTransition {
+    id: u64
+    from: u32
+    to: u32
+    parameter: u32
+    comparison: TransitionComparison
+    threshold: f32
+    blend_seconds: f32
+    exit_time: f32
+    priority: u32
+    synchronize: bool
+}
+pub struct AnimationStateMachine {
+    version: u32
+    states: Vec[AnimationState]
+    transitions: Vec[AnimationTransition]
+    initial: u32
+}
+pub struct StateBlend {
+    from: u32
+    to: u32
+    from_time: f64
+    to_time: f64
+    weight: f32
+}
+pub struct StateMachinePlayer {
+    state: u32
+    time: f64
+    previous: Option[u32]
+    previous_time: f64
+    elapsed: f32
+    duration: f32
+}
+
+impl for AnimationStateMachine {
+    pub fn validate(self: Self, clip_count: usize, parameter_count: usize) -> Result[bool, str] {
+        if self.version != 1_u32 || self.states.len() == 0_usize || self.states.len() > 4096_usize || self.initial as usize >= self.states.len() || self.transitions.len() > 65536_usize {
+            ret Result::Err("Invalid animation state machine")
+        }
+        for i in 0_usize..self.states.len() {
+            let state = self.states.get_unchecked_borrowed(i)
+            if state.name == "" || state.clip as usize >= clip_count || !(state.duration >= 0_f32 && state.duration <= 86400_f32) || !(state.speed >= - 100_f32 && state.speed <= 100_f32) {
+                ret Result::Err("Invalid animation state")
+            }
+            for j in 0_usize..i {
+                if self.states.get_unchecked_borrowed(j).name == state.name {
+                    ret Result::Err("Duplicate animation state name")
+                }
+            }
+        }
+        for i in 0_usize..self.transitions.len() {
+            let rule = self.transitions.get_unchecked_borrowed(i)
+            if rule.id == 0_u64 || rule.from as usize >= self.states.len() || rule.to as usize >= self.states.len() || rule.from == rule.to || rule.parameter as usize >= parameter_count || !animation_finite(rule.threshold) || !(rule.blend_seconds >= 0_f32 && rule.blend_seconds <= 60_f32) || !(rule.exit_time >= - 1_f32 && rule.exit_time <= 1000000_f32) {
+                ret Result::Err("Invalid animation transition")
+            }
+            for j in 0_usize..i {
+                if self.transitions.get_unchecked_borrowed(j).id == rule.id {
+                    ret Result::Err("Duplicate animation transition ID")
+                }
+            }
+        }
+        ret Result::Ok(true)
+    }
+}
+fn transition_matches(rule: AnimationTransition, value: f32) -> bool {
+    ret match rule.comparison {
+        TransitionComparison::Less => value < rule.threshold TransitionComparison::LessEqual => value <= rule.threshold TransitionComparison::Greater => value > rule.threshold TransitionComparison::GreaterEqual => value >= rule.threshold TransitionComparison::Equal => value == rule.threshold TransitionComparison::NotEqual => value != rule.threshold
+    }
+}
+fn state_time(state: AnimationState, time: f64, delta: f64) -> f64 {
+    let value = time + delta *(state.speed as f64)
+    ret if state.looping {
+        value
+    } elif value < 0_f64 {
+        0_f64
+    } elif value > state.duration as f64 {
+        state.duration as f64
+    } else {
+        value
+    }
+}
+
+impl for StateMachinePlayer {
+    pub fn new(machine: AnimationStateMachine) -> Self {
+        ret Self {
+            machine.initial, 0_f64, Option[u32]::None, 0_f64, 0_f32, 0_f32
+        }
+    }
+    pub fn advance(self: mut Self, machine: AnimationStateMachine, parameters: Vec[f32], delta: f64) -> Result[StateBlend, str] {
+        if self.state as usize >= machine.states.len() || !(delta >= 0_f64 && delta <= 60_f64) {
+            ret Result::Err("Invalid state machine clock")
+        }
+        for value in parameters {
+            if !animation_finite(value) {
+                ret Result::Err("Invalid state machine parameter")
+            }
+        }
+        let state = machine.states.get_unchecked_borrowed(self.state as usize)
+        let time = state_time(state, self.time, delta)
+        if !playback_time_valid(time, state.duration) {
+            ret Result::Err("State machine time range exceeded")
+        }
+        match self.previous {
+            Some(previous) => {
+                if previous as usize >= machine.states.len() {
+                    ret Result::Err("Stale transition state")
+                }
+                self.previous_time = state_time(machine.states.get_unchecked_borrowed(previous as usize), self.previous_time, delta)
+                self.time = time self.elapsed += delta as f32
+                if self.elapsed >= self.duration {
+                    self.previous = Option[u32]::None ret Result::Ok(StateBlend {
+                            self.state, self.state, time, time, 1_f32
+                        }
+                        ,
+                    )
+                }
+                ret Result::Ok(StateBlend {
+                        previous, self.state, self.previous_time, time, animation_clamp(self.elapsed / self.duration, 0_f32, 1_f32)
+                    }
+                    ,
+                )
+            }
+            None => {
+            }
+        }
+        let mut chosen = Option[AnimationTransition]::None
+        for rule in machine.transitions {
+            if rule.from != self.state {
+                continue
+            }
+            if rule.parameter as usize >= parameters.len() || rule.to as usize >= machine.states.len() {
+                ret Result::Err("Invalid transition binding")
+            }
+            let normalized = if state.duration > 0_f32 {
+                time /(state.duration as f64)
+            } else {
+                1_f64
+            }
+            if rule.exit_time >= 0_f32 && normalized < rule.exit_time as f64 {
+                continue
+            }
+            if !transition_matches(rule, parameters.get_unchecked_borrowed(rule.parameter as usize)) {
+                continue
+            }
+            let take = match chosen {
+                Some(old) => rule.priority < old.priority ||(rule.priority == old.priority && rule.id < old.id) None => true
+            }
+            if take {
+                chosen = Option[AnimationTransition]::Some(rule)
+            }
+        }
+        self.time = time
+        match chosen {
+            Some(rule) => {
+                let target = machine.states.get_unchecked_borrowed(rule.to as usize)
+                let phase = if state.duration > 0_f32 {
+                    let n = time /(state.duration as f64) n -(playback_floor(n) as f64)
+                } else {
+                    0_f64
+                }
+                let target_time = if rule.synchronize {
+                    phase *(target.duration as f64)
+                } else {
+                    0_f64
+                }
+                self.state = rule.to self.time = target_time self.elapsed = 0_f32 self.duration = rule.blend_seconds
+                if rule.blend_seconds > 0_f32 {
+                    self.previous = Option[u32]::Some(rule.from) self.previous_time = time ret Result::Ok(StateBlend {
+                            rule.from, rule.to, time, target_time, 0_f32
+                        }
+                        ,
+                    )
+                }
+                ret Result::Ok(StateBlend { rule.to, rule.to, target_time, target_time, 1_f32 })
+            }
+            None => {
+                ret Result::Ok(StateBlend { self.state, self.state, time, time, 1_f32 })
+            }
+        }
+    }
+}

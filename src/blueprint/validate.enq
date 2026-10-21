@@ -1,0 +1,358 @@
+//! Validation is independent of code generation and never mutates the document.
+import core::vec::Vec
+import mod::model::BlueprintLink
+import mod::model::{BlueprintAsset, BlueprintDiagnostic, BlueprintInstance, BlueprintNode, BlueprintType, blueprint_event, blueprint_pin, blueprint_pins}
+
+/// Edge validation does not reject unrelated unfinished inputs in the document.
+pub fn blueprint_connection_error(asset: BlueprintAsset, link: BlueprintLink) -> str {
+    let source = match asset.node(link.source.node) {
+        Some(v) => v None => {
+            ret "Source node no longer exists"
+        }
+    }
+    let target = match asset.node(link.target.node) {
+        Some(v) => v None => {
+            ret "Target node no longer exists"
+        }
+    }
+    let output = match blueprint_pin(source, link.source.pin, true) {
+        Some(v) => v None => {
+            ret "Choose an output pin"
+        }
+    }
+    let input = match blueprint_pin(target, link.target.pin, false) {
+        Some(v) => v None => {
+            ret "Choose an input pin"
+        }
+    }
+    if output.value_type.name() != input.value_type.name() {
+        ret "Pin types must match exactly"
+    }
+    if output.value_type.name() == "exec" {
+        for edge in asset.links {
+            if edge.source.node == link.source.node && edge.source.pin == link.source.pin &&
+            (edge.target.node != link.target.node || edge.target.pin != link.target.pin) {
+                ret "Use Sequence for execution fan-out"
+            }
+        }
+    }
+    let mut pending = vec![link.target.node]
+    let mut visited = Vec[u64]::new()
+    let mut index = 0_usize
+    while index < pending.len() {
+        let node = pending.get(index).unwrap_or(0)
+        if node == link.source.node {
+            ret "This connection would create a cycle"
+        }
+        if !contains(visited, node) {
+            visited.push(node)
+            for edge in asset.links {
+                if edge.source.node == node && !(input.value_type.name() != "exec" && edge.target.node == link.target.node && edge.target.pin == link.target.pin) {
+                    match asset.node(node) {
+                        Some(owner) => {
+                            match blueprint_pin(owner, edge.source.pin, true) {
+                                Some(pin) => {
+                                    if (pin.value_type.name() == "exec") ==(output.value_type.name() == "exec") {
+                                        pending.push(edge.target.node)
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+            }
+        }
+        index += 1
+    }
+    ret ""
+}
+
+fn diagnostic(node: u64, pin: str, message: str) -> BlueprintDiagnostic {
+    ret BlueprintDiagnostic { node, pin, message }
+}
+fn contains(values: Vec[u64], id: u64) -> bool {
+    for value in values {
+        if value == id {
+            ret true
+        }
+    }
+    ret false
+}
+fn numeric(value: BlueprintType) -> bool {
+    ret value.name() == "i32" || value.name() == "f32"
+}
+fn component_operation(operation: str) -> bool {
+    ret operation == "get-position" || operation == "get-rotation" || operation == "get-scale" ||
+    operation == "set-position" || operation == "set-rotation" || operation == "set-scale" ||
+    operation == "add-offset" || operation == "add-rotation" || operation == "get-visible" || operation == "set-visible"
+}
+
+/// Kahn removal is iterative: corrupt or adversarial files cannot exhaust the stack.
+fn acyclic(asset: BlueprintAsset, execution: bool) -> bool {
+    let mut removed = Vec[u64]::new()
+    let mut progress = true
+    while progress {
+        progress = false
+        for node in asset.nodes {
+            if !contains(removed, node.id) {
+                let mut incoming = false
+                for link in asset.links {
+                    if link.target.node == node.id && !contains(removed, link.source.node) {
+                        match asset.node(link.source.node) {
+                            Some(source) => {
+                                match blueprint_pin(source, link.source.pin, true) {
+                                    Some(pin) => {
+                                        if (pin.value_type.name() == "exec") == execution {
+                                            incoming = true
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+                if !incoming {
+                    removed.push(node.id) progress = true
+                }
+            }
+        }
+    }
+    ret removed.len() == asset.nodes.len()
+}
+
+pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
+    let mut errors = Vec[BlueprintDiagnostic]::new()
+    if asset.id == "" || asset.name == "" {
+        errors.push(diagnostic(0, "", "asset identity and name are required"))
+    }
+    let mut component_ids = Vec[u64]::new()
+    let mut roots = 0_u32
+    for component in asset.components {
+        if component.id == 0 || contains(component_ids, component.id) {
+            errors.push(diagnostic(0, "", "component IDs must be unique and nonzero"))
+        }
+        component_ids.push(component.id)
+        if component.kind != "scene" && component.kind != "static-mesh" {
+            errors.push(diagnostic(0, "", "unknown component kind"))
+        }
+        if component.kind == "static-mesh" && component.mesh == "" {
+            errors.push(diagnostic(0, "", "static mesh component requires a mesh asset"))
+        }
+        if component.parent == 0 {
+            roots += 1
+            if component.kind != "scene" {
+                errors.push(diagnostic(0, "", "root must be a scene component"))
+            }
+        } else {
+            let mut cursor = component.parent
+            let mut depth = 0_usize
+            while cursor != 0 && depth <= asset.components.len() {
+                if cursor == component.id {
+                    break
+                }
+                match asset.component(cursor) {
+                    Some(parent) => {
+                        cursor = parent.parent
+                    }
+                    None => {
+                        break
+                    }
+                }
+                depth += 1
+            }
+            if cursor != 0 {
+                errors.push(diagnostic(0, "", "component hierarchy has a cycle or missing parent"))
+            }
+        }
+    }
+    if roots != 1 {
+        errors.push(diagnostic(0, "", "exactly one root component is required"))
+    }
+    let mut property_ids = Vec[u64]::new()
+    let mut property_names = Vec[str]::new()
+    for property in asset.properties {
+        if property.id == 0 || contains(property_ids, property.id) {
+            errors.push(diagnostic(0, "", "property IDs must be unique and nonzero"))
+        }
+        if property.name == "" {
+            errors.push(diagnostic(0, "", "property name is required"))
+        }
+        for name in property_names {
+            if name == property.name {
+                errors.push(diagnostic(0, "", "property names must be unique"))
+            }
+        }
+        property_ids.push(property.id) property_names.push(property.name)
+    }
+    let mut node_ids = Vec[u64]::new()
+    let mut events = Vec[str]::new()
+    for node in asset.nodes {
+        if node.id == 0 || contains(node_ids, node.id) {
+            errors.push(diagnostic(node.id, "", "node IDs must be unique and nonzero"))
+        }
+        node_ids.push(node.id)
+        let operation = node.operation
+        let pins = blueprint_pins(node)
+        if pins.len() == 0 {
+            errors.push(diagnostic(node.id, "", "unknown node operation: " + operation))
+        }
+        if blueprint_event(operation) {
+            if operation != "input-pressed" && operation != "input-released" && node.text != "" {
+                errors.push(diagnostic(node.id, "", "only input events accept an action name"))
+            }
+            let key = operation + ":" + node.text
+            for event in events {
+                if event == key {
+                    errors.push(diagnostic(node.id, "", "duplicate event entry"))
+                }
+            }
+            events.push(key)
+            if (operation == "input-pressed" || operation == "input-released") && node.text == "" {
+                errors.push(diagnostic(node.id, "", "input action name is required"))
+            }
+        }
+        if operation == "get-variable" || operation == "set-variable" {
+            match asset.property(node.reference) {
+                Some(property) => {
+                    if property.default_value.value_type().name() != node.value_type.name() {
+                        errors.push(diagnostic(node.id, "value", "property type does not match node type"))
+                    }
+                }
+                None => {
+                    errors.push(diagnostic(node.id, "value", "referenced property no longer exists"))
+                }
+            }
+        }
+        if component_operation(operation) && node.reference != 0 && asset.component(node.reference).is_none() {
+            errors.push(diagnostic(node.id, "", "referenced component no longer exists"))
+        }
+        if operation == "constant" && node.value.value_type().name() != node.value_type.name() {
+            errors.push(diagnostic(node.id, "value", "constant type mismatch"))
+        }
+        if operation == "equal" && node.value_type.name() == "exec" {
+            errors.push(diagnostic(node.id, "", "execution pins are not comparable values"))
+        }
+        if (operation == "add" || operation == "subtract" || operation == "multiply" || operation == "divide" ||
+            operation == "less" || operation == "greater") && !numeric(node.value_type) {
+            errors.push(diagnostic(node.id, "", "operation requires i32 or f32"))
+        }
+        for pin in pins {
+            if !pin.output && pin.required {
+                let mut count = 0_usize
+                for link in asset.links {
+                    if link.target.node == node.id && link.target.pin == pin.key {
+                        count += 1
+                    }
+                }
+                if count == 0 {
+                    errors.push(diagnostic(node.id, pin.key, "required input is not connected"))
+                }
+                if count > 1 && pin.value_type.name() != "exec" {
+                    errors.push(diagnostic(node.id, pin.key, "data input accepts only one source"))
+                }
+            }
+        }
+    }
+    let mut index = 0_usize
+    for link in asset.links {
+        let source = asset.node(link.source.node)
+        let target = asset.node(link.target.node)
+        match source {
+            Some(source_node) => {
+                match target {
+                    Some(target_node) => {
+                        let from = blueprint_pin(source_node, link.source.pin, true)
+                        let to = blueprint_pin(target_node, link.target.pin, false)
+                        match from {
+                            Some(from_pin) => {
+                                match to {
+                                    Some(to_pin) => {
+                                        if from_pin.value_type.name() != to_pin.value_type.name() {
+                                            errors.push(diagnostic(target_node.id, link.target.pin, "pin types must match exactly"))
+                                        }
+                                        if from_pin.value_type.name() == "exec" {
+                                            let mut count = 0_usize
+                                            for other in asset.links {
+                                                if other.source.node == source_node.id && other.source.pin == link.source.pin {
+                                                    count += 1
+                                                }
+                                            }
+                                            if count > 1 {
+                                                errors.push(diagnostic(source_node.id, link.source.pin, "use Sequence for execution fan-out"))
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        errors.push(diagnostic(target_node.id, link.target.pin, "target input pin does not exist"))
+                                    }
+                                }
+                            }
+                            None => {
+                                errors.push(diagnostic(source_node.id, link.source.pin, "source output pin does not exist"))
+                            }
+                        }
+                    }
+                    None => {
+                        errors.push(diagnostic(link.target.node, link.target.pin, "target node does not exist"))
+                    }
+                }
+            }
+            None => {
+                errors.push(diagnostic(link.source.node, link.source.pin, "source node does not exist"))
+            }
+        }
+        let mut previous = 0_usize
+        while previous < index {
+            match asset.links.get(previous) {
+                Some(other) => {
+                    if other.source.node == link.source.node && other.source.pin == link.source.pin &&
+                    other.target.node == link.target.node && other.target.pin == link.target.pin {
+                        errors.push(diagnostic(link.target.node, link.target.pin, "duplicate link"))
+                    }
+                }
+                None => {
+                }
+            }
+            previous += 1
+        }
+        index += 1
+    }
+    if !acyclic(asset, true) {
+        errors.push(diagnostic(0, "", "execution cycles are not supported"))
+    }
+    if !acyclic(asset, false) {
+        errors.push(diagnostic(0, "", "data cycles are not supported"))
+    }
+    ret errors
+}
+
+/// Orphaned overrides are diagnosed, not discarded or replaced with defaults.
+pub fn validate_blueprint_instance(asset: BlueprintAsset, instance: BlueprintInstance) -> Vec[BlueprintDiagnostic] {
+    let mut errors = Vec[BlueprintDiagnostic]::new()
+    let mut seen = Vec[u64]::new()
+    for override_value in instance.overrides {
+        if contains(seen, override_value.property) {
+            errors.push(diagnostic(0, "", "duplicate property override"))
+        }
+        seen.push(override_value.property)
+        match asset.property(override_value.property) {
+            Some(property) => {
+                if property.default_value.value_type().name() != override_value.value.value_type().name() {
+                    errors.push(diagnostic(0, "", "override type no longer matches property"))
+                }
+            }
+            None => {
+                errors.push(diagnostic(0, "", "orphaned property override"))
+            }
+        }
+    }
+    ret errors
+}

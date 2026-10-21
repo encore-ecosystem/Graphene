@@ -1,0 +1,188 @@
+//! An isolated sphere scene on Luma's Vulkan device; no editor-world mutation.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import luma::{Window, PreparedFrame, ExternalVulkanImage}
+import refrain::environment::frame::*
+import refrain::environment::system::EnvironmentSystem
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::primitive::sphere_mesh
+
+pub struct MaterialPreview {
+    instance: GraphicsInstance
+    device: GraphicsDevice
+    target: Swapchain
+    consumer: usize
+    layout: BindGroupLayout
+    mesh: GpuMesh
+    quad: GpuMesh
+    vertex: ShaderModule
+    fragment: ShaderModule
+    pipeline: RenderPipeline
+    buffers: Vec[GpuBuffer]
+    groups: Vec[BindGroup]
+    width: u32
+    height: u32
+    pending: bool
+}
+
+impl for MaterialPreview {
+    pub fn create(window: Window, vertex: Vec[u32], fragment: Vec[u32]) -> Result[MaterialPreview, str] {
+        let interop = window.vulkan_interop()
+        if !interop.valid() {
+            ret Result::Err("Material preview requires Vulkan interop")
+        }
+        let instance = GraphicsInstance::borrow(interop.instance(), interop.physical_device())
+        let adapter = match instance.preferred_adapter() {
+            Some(value) => value None => {
+                instance.destroy() ret Result::Err("Material preview adapter unavailable")
+            }
+        }
+        let device = GraphicsDevice::borrow_backend(interop.render_device(), adapter)
+        let target = device.create_shared_offscreen_target(1024, 1024)
+        let layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, shader_stage_vertex() | shader_stage_fragment())])
+        let parts = sphere_mesh(1.0, 32, 48).with_uvs().parts()
+        let mesh = device.create_mesh(parts.0, parts.1)
+        let mut vertices = Vec[f32]::new()
+        for p in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
+            for v in vec![p.x(), p.y(), p.z(), 0.0_f32, 0, 1, 1, 1, 1, 0, 0] {
+                vertices.push(v)
+            }
+        }
+        let quad = device.create_mesh(vertices, vec![0_u32, 1, 2, 2, 3, 0])
+        let vs = device.create_shader_module(vertex, shader_stage_vertex())
+        let fs = device.create_shader_module(fragment, shader_stage_fragment())
+        let pipeline = Self::pipeline(device, target, layout, vs, fs)
+        let mut buffers = Vec[GpuBuffer]::new() let mut groups = Vec[BindGroup]::new()
+        for _ in 0..(target.frames_in_flight() as usize) {
+            let buffer = device.create_buffer(208, buffer_uniform(), true)
+            groups.push(device.create_uniform_bind_group(layout, buffer, 0, 208)) buffers.push(buffer)
+        }
+        let preview = MaterialPreview {
+            instance, device, target, interop.swapchain(), layout, mesh, quad, vs, fs, pipeline, buffers, groups, 0, 0, true
+        }
+        let mut available = target.available() && layout.available() && mesh.available() && vs.available() && fs.available() && pipeline.available()
+        for group in preview.groups {
+            available = available && group.available()
+        }
+        if !available {
+            let error = pipeline.error()
+            preview.destroy() ret Result::Err("Unable to allocate material preview resources: " + error)
+        }
+        ret Result::Ok(preview)
+    }
+    fn pipeline(device: GraphicsDevice, target: Swapchain, layout: BindGroupLayout, vertex: ShaderModule, fragment: ShaderModule) -> RenderPipeline {
+        ret device.create_render_pipeline_with_options(target, vertex, fragment,
+            VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0), VertexAttribute::new(1, vertex_format_float32x3(), 12)]),
+            layout, RenderPipelineOptions::depth(),)
+    }
+    pub fn ready(self: Self) -> bool {
+        ret self.target.last_frame_complete() &&(self.consumer == 0 || Swapchain::borrow(self.consumer).last_frame_complete())
+    }
+    pub fn replace(self: Self, vertex: Vec[u32], fragment: Vec[u32]) -> Result[Option[MaterialPreview], str] {
+        if !self.ready() {
+            ret Result::Ok(Option[MaterialPreview]::None)
+        }
+        let vs = self.device.create_shader_module(vertex, shader_stage_vertex())
+        let fs = self.device.create_shader_module(fragment, shader_stage_fragment())
+        let pipeline = Self::pipeline(self.device, self.target, self.layout, vs, fs)
+        if !vs.available() || !fs.available() || !pipeline.available() {
+            let error = pipeline.error() pipeline.destroy() vs.destroy() fs.destroy()
+            ret Result::Err("Material pipeline creation failed: " + error)
+        }
+        self.pipeline.destroy() self.vertex.destroy() self.fragment.destroy()
+        ret Result::Ok(Option[MaterialPreview]::Some(MaterialPreview {
+                    self.instance, self.device, self.target, self.consumer, self.layout, self.mesh, self.quad, vs, fs, pipeline, self.buffers, self.groups, self.width, self.height, true
+                }
+                ,
+            ))
+    }
+    pub fn invalidate(self: Self) -> Self {
+        ret self.updated(self.width, self.height, true)
+    }
+    fn updated(self: Self, width: u32, height: u32, pending: bool) -> Self {
+        ret MaterialPreview {
+            self.instance, self.device, self.target, self.consumer, self.layout, self.mesh, self.quad, self.vertex, self.fragment, self.pipeline, self.buffers, self.groups, width, height, pending
+        }
+    }
+    pub fn pending(self: Self) -> bool {
+        ret self.pending
+    }
+    pub fn compose(self: Self, frame: mut PreparedFrame, yaw: f32, pitch: f32, distance: f32, domain: str, environment: Vec[f32], animated: bool) ->(MaterialPreview, bool) {
+        let slot = match frame.surface("material-preview-surface") {
+            Some(slot) => slot None => {
+                ret(self, true)
+            }
+        }
+        let width = slot.pixel_width() let height = slot.pixel_height()
+        if width == 0 || height == 0 || width > 1024 || height > 1024 {
+            ret(self, false)
+        }
+        let mut next_width = self.width let mut next_height = self.height
+        let mut pending = self.pending || animated || width != self.width || height != self.height
+        if pending && self.ready() {
+            let rendered = self.target.try_acquire_frame()
+            if rendered.available() {
+                let position = Vec3::from_spherical(yaw, pitch).scale(distance)
+                let camera = PerspectiveCamera::new(position, Vec3::zero(), 0.7853982, 0.05, 100)
+                let buffer = self.buffers.get(rendered.slot() as usize)
+                let group = self.groups.get(rendered.slot() as usize)
+                let pass = rendered.begin_render_pass(self.pipeline, 0.028, 0.034, 0.043, 1)
+                let mut success = rendered.set_viewport(0, 0, width, height)
+                match buffer {
+                    Some(buffer) => {
+                        success = success && buffer.write_f32s(0, camera.view_projection((width as f32) /(height as f32)).values()) && buffer.write_f32s(64, vec![position.x(), position.y(), position.z(), if domain == "surface" {
+                                    0.0_f32
+                                } else {
+                                    1.0_f32
+                                }
+                            ],) && buffer.write_f32s(80, environment)
+                    }
+                    None => {
+                        success = false
+                    }
+                }
+                match group {
+                    Some(group) => {
+                        success = success && pass.bind_group(group)
+                    }
+                    None => {
+                        success = false
+                    }
+                }
+                success = success && pass.draw_mesh(if domain == "surface" {
+                        self.mesh
+                    } else {
+                        self.quad
+                    }
+                ) && pass.end() && rendered.present()
+                rendered.destroy()
+                if success {
+                    next_width = width next_height = height pending = false
+                }
+            } else {
+                rendered.destroy()
+            }
+        }
+        let next = self.updated(next_width, next_height, pending)
+        if next_width != width || next_height != height {
+            ret(next, false)
+        }
+        ret(next, frame.submit_external("material-preview-surface", slot.generation(), ExternalVulkanImage::new(self.target.external_image() as u64,
+                    1024, 1024, self.target.external_layout(),).with_region(0, 0, width, height)))
+    }
+    /// The caller first clears Luma's external images, retiring consumer frames.
+    pub fn destroy(self: Self) ->() {
+        self.target.destroy() self.pipeline.destroy()
+        for group in self.groups {
+            group.destroy()
+        }
+        for buffer in self.buffers {
+            buffer.destroy()
+        }
+        self.mesh.destroy() self.quad.destroy() self.layout.destroy() self.vertex.destroy() self.fragment.destroy()
+        self.device.destroy() self.instance.destroy()
+    }
+}

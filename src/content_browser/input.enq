@@ -1,0 +1,609 @@
+//! Content-specific input capture keeps file shortcuts separate from scene history.
+import core::option::Option
+import core::vec::Vec
+import luma::{Event, Window, Widget, WidgetLayout, ReactiveUi, TextEditor, Rect, Point, event_pointer_down, event_pointer_up, event_pointer_move, event_scroll, event_key_down, event_text_input, event_focus_lost, key_enter, key_escape, key_backspace, key_delete, key_home, key_end, key_left, key_right, key_up, key_down, widget_button, widget_icon_button, widget_input}
+import mod::files::{content_parent, content_leaf}
+import mod::model::{ContentBrowser, ContentAsset}
+import mod::model::{content_contains, content_toggled}
+import mod::operations::{content_create, content_rename, content_delete, content_duplicate, content_history, content_stem, content_move_selection}
+import mod::view::{ContentIcons, content_popup}
+import std::os::read_file
+import std::time::perf_counter_ms
+
+fn actions(widget: Widget) -> Vec[str] {
+    let mut result = Vec[str]::new()
+    if !widget.disabled() &&(widget.kind() == widget_button() || widget.kind() == widget_icon_button() ||(widget.kind() == widget_input() &&(widget.id() == "cb-query" || widget.id() == "cb-name"))) && widget.id() != "" {
+        result.push(widget.id())
+    }
+    for child in widget.children() {
+        for id in actions(child) {
+            result.push(id)
+        }
+    }
+    ret result
+}
+fn edit(editor: TextEditor, event: Event, window: Window) -> TextEditor {
+    if event.kind() == event_text_input() {
+        ret editor.insert(event.text())
+    }
+    let key = event.key() let shift = event.shift()
+    if event.control() && key == 97 {
+        ret editor.select_all()
+    }
+    if event.control() &&(key == 99 || key == 120) {
+        if editor.has_selection() {
+            window.set_clipboard(editor.selected_text())
+        }
+        ret if key == 120 {
+            editor.cut()
+        } else {
+            editor
+        }
+    }
+    if event.control() && key == 118 {
+        ret editor.paste(window.clipboard_text())
+    }
+    ret if key == key_backspace() {
+        editor.backspace()
+    } elif key == key_delete() {
+        editor.delete()
+    } elif key == key_left() {
+        editor.move_left(shift)
+    } elif key == key_right() {
+        editor.move_right(shift)
+    } elif key == key_home() {
+        editor.move_home(shift)
+    } elif key == key_end() {
+        editor.move_end(shift)
+    } else {
+        editor
+    }
+}
+fn popup(browser: mut ContentBrowser, kind: str, x: f32, y: f32) ->() {
+    browser.popup = if browser.popup == kind && kind != "context" {
+        ""
+    } else {
+        kind
+    }
+    browser.popup_x = x browser.popup_y = y browser.popup_focus = 0 browser.focus_id = if kind == "folder" || kind == "material" || kind == "blueprint" || kind=="particle" || kind == "rename" || kind == "move" {
+        "cb-name"
+    } else {
+        ""
+    }
+    browser.error = "" browser.dirty = true
+    if kind == "folder" || kind == "material" || kind == "blueprint" || kind=="particle" {
+        browser.name = TextEditor::new(if kind == "folder" {
+                "New Folder"
+            } elif kind == "material" {
+                "M_NewMaterial"
+            } else {
+                "BP_NewBlueprint"
+            }
+        ).select_all()
+    }
+    if kind == "move" {
+        browser.name = TextEditor::new(if browser.directory.byte_len() >= 7 && browser.directory.slice_bytes(0, 7) == "Content" {
+                browser.directory
+            } else {
+                "Content"
+            }
+        ).select_all()
+    }
+    if kind == "rename" {
+        match browser.find(browser.primary) {
+            Some(asset) => {
+                browser.name = TextEditor::new(content_stem(asset)).select_all()
+            }
+            None => {
+            }
+        }
+    }
+}
+fn open(browser: mut ContentBrowser) ->() {
+    match browser.find(browser.primary) {
+        Some(asset) => {
+            browser.popup = "" browser.query_focused = false
+            if asset.kind == "folder" {
+                browser.navigate(asset.path, true)
+            } elif asset.kind == "blueprint" || asset.kind == "material-graph" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "texture" {
+                browser.emit("open", asset.path)
+            } else {
+                if !asset.builtin() && asset.bytes <= 1048576 {
+                    let data = read_file(browser.project + "/" + asset.path)
+                    let count = if data.byte_len() > 65536 {
+                        65536_usize
+                    } else {
+                        data.byte_len()
+                    }
+                    browser.preview = data.slice_bytes(0, count) + if count < data.byte_len() {
+                        "\n… preview truncated at 64 KiB"
+                    } else {
+                        ""
+                    }
+                    browser.popup = "preview"
+                } else {
+                    browser.message = "No text preview for this asset"
+                }
+            }
+            browser.dirty = true
+        }
+        None => {
+        }
+    }
+}
+pub fn content_action(browser: mut ContentBrowser, target: str, window: Window, editable: bool, live: Vec[str]) ->() {
+    if target == "cb-cancel" {
+        browser.popup = "" browser.error = ""
+    } elif target == "cb-confirm" {
+        if editable {
+            if browser.popup == "move" {
+                content_move_selection(browser, live)
+            } elif browser.popup == "rename" {
+                content_rename(browser, live)
+            } elif browser.popup == "delete" {
+                content_delete(browser, live)
+            } else {
+                content_create(browser)
+            }
+        }
+    } elif target == "cb-open" {
+        open(browser)
+    } elif target == "cb-add" {
+        if editable {
+            popup(browser, "add", browser.popup_x, browser.popup_y)
+        }
+    } elif target == "cb-sort" {
+        popup(browser, "sort", browser.popup_x, browser.popup_y)
+    } elif target == "cb-new-folder" || target == "cb-new-material" || target == "cb-new-blueprint" || target=="cb-new-particle" {
+        if editable {
+            popup(browser, if target == "cb-new-folder" {
+                    "folder"
+                } elif target=="cb-new-particle" {"particle"} elif target == "cb-new-material" {
+                    "material"
+                } else {
+                    "blueprint"
+                }
+                , 0, 0,)
+        }
+    } elif target == "cb-rename" {
+        if editable && browser.selection.len() == 1 {
+            popup(browser, "rename", 0, 0)
+        }
+    } elif target == "cb-move" {
+        if editable && browser.selection.len() > 0 {
+            popup(browser, "move", 0, 0)
+        }
+    } elif target == "cb-delete" {
+        if editable && browser.selection.len() > 0 {
+            popup(browser, "delete", 0, 0)
+        }
+    } elif target == "cb-duplicate" {
+        if editable {
+            browser.popup = "" content_duplicate(browser)
+        }
+    } elif target == "cb-file-undo" || target == "cb-file-redo" {
+        if editable {
+            browser.popup = "" content_history(browser, target == "cb-file-redo", live)
+        }
+    } elif target == "cb-import" {
+        if editable {
+            browser.emit("import", "")
+        }
+    } elif target == "cb-refresh" {
+        browser.popup = "" browser.emit("rescan", "") browser.refresh()
+    } elif target == "cb-back" || target == "cb-forward" {
+        browser.go_history(target == "cb-forward")
+    } elif target == "cb-up" {
+        let parent = if browser.directory == "Content" || browser.directory == "game/src" || browser.directory == "@engine" {
+            "@all"
+        } else {
+            content_parent(browser.directory)
+        }
+        browser.navigate(parent, true)
+    } elif target == "cb-view-grid" || target == "cb-view-list" {
+        browser.view = if target == "cb-view-grid" {
+            "grid"
+        } else {
+            "list"
+        }
+        browser.rebuild() browser.save_settings()
+    } elif target == "cb-size-minus" || target == "cb-size-plus" {
+        browser.size = if target == "cb-size-plus" {
+            if browser.size < 96 {
+                96
+            } elif browser.size < 128 {
+                128
+            } else {
+                160
+            }
+        } else {
+            if browser.size > 128 {
+                128
+            } elif browser.size > 96 {
+                96
+            } else {
+                72
+            }
+        }
+        browser.rebuild() browser.save_settings()
+    } elif target == "cb-sources-toggle" {
+        browser.sources = !browser.sources browser.scroll = 0 browser.reset_scroll = true
+    } elif target == "cb-details-toggle" {
+        browser.inspector = !browser.inspector
+    } elif target == "cb-clear" {
+        browser.clear_selection() browser.query = TextEditor::new("") browser.types.clear() browser.rebuild()
+    } elif target == "cb-favorite" {
+        browser.popup = "" browser.toggle_favorite()
+    } elif target == "cb-save-search" {
+        browser.save_search()
+    } elif target == "cb-copy-path" {
+        if browser.primary != "" {
+            window.set_clipboard(browser.primary) browser.message = "Copied " + browser.primary
+        }
+        browser.popup = ""
+    } elif target == "cb-find" {
+        let path = browser.primary let folder = content_parent(path) browser.navigate(if folder == "@engine/Primitives" {
+                folder
+            } else {
+                folder
+            }
+            , true,) browser.select(path, false, false)
+    } elif target == "cb-recursive" {
+        browser.recursive = !browser.recursive browser.rebuild()
+    } elif target == "cb-sort-direction" {
+        browser.descending = !browser.descending browser.popup = "" browser.rebuild()
+    } elif target.contains("cb-sort-") {
+        browser.sort = target.slice_bytes(8, target.byte_len() - 8) browser.popup = "" browser.rebuild()
+    } elif target.contains("cb-source-") {
+        browser.navigate(target.slice_bytes(10, target.byte_len() - 10), true)
+    } elif target.contains("cb-expand-") {
+        browser.expanded = content_toggled(browser.expanded, target.slice_bytes(10, target.byte_len() - 10))
+    } elif target.contains("cb-filter-") {
+        browser.clear_selection() browser.types = content_toggled(browser.types, target.slice_bytes(10, target.byte_len() - 10)) browser.rebuild()
+    } elif target.contains("cb-search-") {
+        let mut index = 0_usize for search in browser.searches {
+            if target == "cb-search-" + index.fmt() {
+                browser.directory = "@all" browser.query = TextEditor::new(search.query) browser.rebuild()
+            }
+            index += 1
+        }
+    }
+    browser.dirty = true
+}
+pub fn content_input(browser: mut ContentBrowser, event: Event, target: str, layout: WidgetLayout, reactive: mut ReactiveUi, window: Window, icons: ContentIcons, editable: bool, live: Vec[str]) -> bool {
+    // Docked contents can overflow a compact host. The visible asset area
+    // and the retained target must participate in routing, including empty rows.
+    let point = Point::new(event.x(), event.y())
+    let panel = match reactive.find_layout("content-browser") {
+        Some(area) => area.bounds() None => Rect::new(0, 0, 0, 0)
+    }
+    let inside = panel.contains(point) || browser.bounds.contains(point) || target.contains("cb-")
+    if event.kind() == event_focus_lost() {
+        if browser.drag_request {
+            browser.emit("cancel-drag", "")
+        }
+        browser.pressed_path = "" browser.pending_open = false browser.drag_request = false
+        browser.query_focused = false browser.focused = false browser.scroll_drag = false browser.popup = "" ret false
+    }
+    if event.kind() == event_key_down() && event.key() == key_escape() && browser.pressed_path != "" {
+        browser.pressed_path = "" browser.pending_open = false browser.drag_request = false
+        browser.emit("cancel-drag", "") browser.dirty = true ret true
+    }
+    if browser.pressed_path != "" && event.kind() == event_pointer_move() {
+        if !event.primary_down() {
+            if browser.drag_request {
+                browser.emit("cancel-drag", "")
+            }
+            browser.pressed_path = "" browser.pending_open = false browser.drag_request = false
+        } elif !browser.drag_request {
+            let dx = event.x() - browser.press_x let dy = event.y() - browser.press_y
+            if dx * dx + dy * dy >= 36 {
+                browser.pending_open = false browser.last_click = ""
+                let asset = browser.find(browser.pressed_path).unwrap_or(ContentAsset::new("", "", "", 0))
+                if editable && (asset.kind == "mesh" || asset.kind == "sound" || asset.kind=="particle-system") {
+                    browser.drag_request = true browser.emit("drag", browser.pressed_path) browser.dirty = true
+                }
+            }
+        }
+    }
+    if browser.pressed_path != "" && event.kind() == event_pointer_up() && event.key() == 1 {
+        let should_open = browser.pending_open && !browser.drag_request
+        browser.pressed_path = "" browser.pending_open = false browser.drag_request = false
+        if should_open {
+            open(browser) ret true
+        }
+        // The main editor owns committing an active placement on release.
+    }
+    if browser.scroll_drag {
+        if event.kind() == event_pointer_move() {
+            match reactive.find_layout("cb-items") {
+                Some(area) => {
+                    let thumb = area.scrollbar_thumb() let travel = area.bounds().height() - thumb.height()
+                    let offset = browser.scroll_start + if travel > 0 {
+                        (event.y() - browser.scroll_y) * area.scroll_max_y() / travel
+                    } else {
+                        0.0_f32
+                    }
+                    browser.scroll = if offset < 0 {
+                        0.0_f32
+                    } elif offset > area.scroll_max_y() {
+                        area.scroll_max_y()
+                    } else {
+                        offset
+                    }
+                    reactive.set_scroll_offset("cb-items", 0, browser.scroll) browser.reset_scroll = true browser.dirty = true
+                }
+                None => {
+                }
+            }
+            ret true
+        }
+        if event.kind() == event_pointer_up() {
+            browser.scroll_drag = false ret true
+        }
+    }
+    if browser.popup != "" {
+        if event.kind() == event_key_down() {
+            if event.key() == key_escape() {
+                browser.popup = "" browser.error = "" browser.dirty = true ret true
+            }
+            if browser.popup == "preview" {
+                if event.control() && event.key() == 99 {
+                    window.set_clipboard(browser.preview)
+                }
+                ret true
+            }
+            if browser.typing() && browser.focus_id == "cb-name" && event.key() != 9 {
+                if event.key() == key_enter() {
+                    content_action(browser, "cb-confirm", window, editable, live)
+                } else {
+                    browser.name = edit(browser.name, event, window) browser.error = "" browser.dirty = true
+                }
+                ret true
+            }
+            let choices = actions(content_popup(browser, icons, Rect::new(8, 8, window.width() as f32 - 16, window.height() as f32 - 16), editable))
+            if choices.len() > 0 &&(event.key() == 9 || event.key() == key_down() || event.key() == key_up()) {
+                let backwards = event.shift() || event.key() == key_up()
+                let mut index = if backwards {
+                    0_usize
+                } else {
+                    choices.len() - 1
+                }
+                for i in 0..choices.len() {
+                    if choices.get(i).unwrap_or("") == browser.focus_id {
+                        index = i
+                    }
+                }
+                browser.popup_focus =(index + if backwards {
+                        choices.len() - 1
+                    } else {
+                        1_usize
+                    }
+                ) % choices.len()
+                browser.focus_id = choices.get(browser.popup_focus).unwrap_or("") browser.dirty = true
+            } elif event.key() == key_enter() || event.key() == 32 {
+                let choice = browser.focus_id if content_contains(choices, choice) {
+                    content_action(browser, choice, window, editable, live)
+                }
+            }
+            ret true
+        }
+        if event.kind() == event_text_input() {
+            if browser.typing() && browser.focus_id == "cb-name" {
+                browser.name = browser.name.insert(event.text()) browser.error = "" browser.dirty = true
+            }
+            ret true
+        }
+        if event.kind() == event_scroll() {
+            let _scrolled = reactive.scroll_at(event.x(), event.y(), - event.wheel_y() * 26) browser.dirty = true ret true
+        }
+        if event.kind() == event_pointer_down() {
+            let popup_bounds = match reactive.find_layout("cb-popup") {
+                Some(area) => area.bounds() None => Rect::new(0, 0, 0, 0)
+            }
+            if popup_bounds.contains(point) {
+                if event.primary_down() && target != "cb-name" && target != "cb-popup" && target != "cb-preview-text" {
+                    content_action(browser, target, window, editable, live)
+                }
+                ret true
+            }
+            let owner = browser.popup
+            browser.popup = "" browser.error = "" browser.dirty = true
+            if (owner == "add" && target == "cb-add") ||(owner == "sort" && target == "cb-sort") {
+                ret true
+            }
+            if !inside {
+                ret true
+            }
+        }
+    }
+    if event.kind() == event_pointer_down() {
+        if !inside && !target.contains("cb-") {
+            browser.focused = false browser.query_focused = false ret false
+        }
+        let secondary =(event.buttons() & 4) != 0
+        if !event.primary_down() && !secondary {
+            ret false
+        }
+        browser.focused = true browser.focus_id = target browser.query_focused = target == "cb-query" && !secondary
+        if target == "cb-query" && !secondary {
+            browser.query = browser.query.select_all() browser.dirty = true ret true
+        }
+        match reactive.find_layout("cb-items") {
+            Some(area) => {
+                if !secondary && area.scrollbar_thumb().contains(Point::new(event.x(), event.y())) {
+                    browser.scroll_drag = true browser.scroll_y = event.y() browser.scroll_start = browser.scroll ret true
+                }
+            }
+            None => {
+            }
+        }
+        if target.contains("cb-item-") {
+            let path = target.slice_bytes(8, target.byte_len() - 8)
+            if secondary {
+                browser.pressed_path = "" browser.pending_open = false
+                if !content_contains(browser.selection, path) {
+                    browser.select(path, false, false)
+                }
+                browser.drag_request = false browser.emit("select", browser.primary)
+                popup(browser, "context", event.x(), event.y())
+            } else {
+                browser.select(path, event.control(), event.shift()) browser.emit("select", path) browser.drag_request = false
+                let now = perf_counter_ms()
+                browser.pressed_path = if !event.control() && !event.shift() {
+                    path
+                } else {
+                    ""
+                }
+                browser.press_x = event.x() browser.press_y = event.y()
+                browser.pending_open = browser.last_click == path && now - browser.last_click_time < 400 && !event.control() && !event.shift()
+                browser.last_click = path browser.last_click_time = now
+            }
+            ret true
+        }
+        if secondary {
+            browser.drag_request = false
+            popup(browser, "add", event.x(), event.y()) ret true
+        }
+        if target == "cb-items" || target == "cb-empty" {
+            browser.selection.clear() browser.primary = "" browser.emit("select", "") browser.dirty = true ret true
+        }
+        if target.contains("cb-") {
+            browser.popup_x = event.x() browser.popup_y = event.y() content_action(browser, target, window, editable, live) ret true
+        }
+    }
+    if event.kind() == event_scroll() && inside {
+        let _scrolled = reactive.scroll_at(event.x(), event.y(), - event.wheel_y() * 36)
+        match reactive.find_layout("cb-items") {
+            Some(area) => {
+                browser.scroll = area.widget().style().layout().scroll().y()
+            }
+            None => {
+            }
+        }
+        browser.dirty = true ret true
+    }
+    if browser.query_focused &&(event.kind() == event_text_input() || event.kind() == event_key_down()) {
+        if event.kind() == event_key_down() &&(event.key() == key_escape() || event.key() == key_enter() || event.key() == 9) {
+            browser.query_focused = false browser.focus_id = "cb-items" browser.dirty = true ret true
+        }
+        browser.clear_selection() browser.query = edit(browser.query, event, window) browser.rebuild() ret true
+    }
+    if browser.focused && event.kind() == event_key_down() {
+        if event.key() == 9 {
+            let choices = actions(mod::view::content_widget(browser, icons, editable))
+            if choices.len() > 0 {
+                let mut index = if event.shift() {
+                    0_usize
+                } else {
+                    choices.len() - 1
+                }
+                for i in 0..choices.len() {
+                    if choices.get(i).unwrap_or("") == browser.focus_id {
+                        index = i
+                    }
+                }
+                browser.focus_id = choices.get((index + if event.shift() {
+                            choices.len() - 1
+                        } else {
+                            1_usize
+                        }
+                    ) % choices.len()).unwrap_or("")
+                browser.query_focused = browser.focus_id == "cb-query" browser.dirty = true
+            }
+            ret true
+        }
+        let key = event.key() let alt =(event.modifiers() & 768) != 0
+        if event.control() && key == 102 {
+            browser.query_focused = true browser.query = browser.query.select_all() browser.dirty = true ret true
+        }
+        if key == 1073741886 {
+            browser.emit("rescan", "") browser.refresh() ret true
+        }
+        if alt &&(key == key_left() || key == key_right()) {
+            browser.go_history(key == key_right()) ret true
+        }
+        if key == key_backspace() ||(alt && key == key_up()) {
+            content_action(browser, "cb-up", window, editable, live) ret true
+        }
+        if event.control() && key == 97 {
+            browser.selection.clear() for asset in browser.visible {
+                browser.selection.push(asset.path)
+            }
+            browser.primary = browser.selection.get(0).unwrap_or("") browser.dirty = true ret true
+        }
+        if event.control() && key == 99 {
+            content_action(browser, "cb-copy-path", window, editable, live) ret true
+        }
+        if event.control() && key == 109 {
+            content_action(browser, "cb-move", window, editable, live) ret true
+        }
+        if event.control() && key == 100 {
+            content_action(browser, "cb-duplicate", window, editable, live) ret true
+        }
+        if event.control() && key == 122 {
+            if editable {
+                content_history(browser, event.shift(), live)
+            }
+            ret true
+        }
+        if key == 1073741883 {
+            content_action(browser, "cb-rename", window, editable, live) ret true
+        }
+        if key == key_delete() {
+            content_action(browser, "cb-delete", window, editable, live) ret true
+        }
+        if key == key_enter() || key == 32 {
+            if browser.focus_id.contains("cb-item-") || browser.focus_id == "cb-items" || browser.focus_id == "" {
+                open(browser)
+            } else {
+                let action = browser.focus_id content_action(browser, action, window, editable, live)
+            }
+            ret true
+        }
+        if key == key_escape() {
+            browser.selection.clear() browser.primary = "" browser.emit("select", "") browser.dirty = true ret true
+        }
+        if key == key_left() || key == key_right() || key == key_up() || key == key_down() || key == key_home() || key == key_end() {
+            if browser.visible.len() == 0 {
+                ret true
+            }
+            let mut index = 0_usize for i in 0..browser.visible.len() {
+                if browser.visible.get(i).unwrap_or(ContentAsset::new("", "", "", 0)).path == browser.primary {
+                    index = i
+                }
+            }
+            let amount = if key == key_up() || key == key_down() {
+                browser.columns()
+            } else {
+                1_usize
+            }
+            index = if key == key_home() {
+                0_usize
+            } elif key == key_end() {
+                browser.visible.len() - 1
+            } elif key == key_left() || key == key_up() {
+                if index < amount {
+                    0_usize
+                } else {
+                    index - amount
+                }
+            } else {
+                if index + amount >= browser.visible.len() {
+                    browser.visible.len() - 1
+                } else {
+                    index + amount
+                }
+            }
+            let path = browser.visible.get(index).unwrap_or(ContentAsset::new("", "", "", 0)).path browser.select(path, false, event.shift()) browser.emit("select", path) browser.drag_request = false
+            let row =(index / browser.columns()) as f32 let top = row * browser.stride()
+            if top < browser.scroll {
+                browser.scroll = top
+            } elif top + browser.stride() > browser.scroll + browser.bounds.height() {
+                browser.scroll = top + browser.stride() - browser.bounds.height()
+            }
+            browser.reset_scroll = true browser.focus_id = "cb-item-" + path browser.dirty = true ret true
+        }
+    }
+    ret false
+}

@@ -5,6 +5,9 @@ import core::vec::Vec
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
 import mod::assets::StandardMaterial
+import mod::native_asset::{asset_source_stamp, load_native_material, save_native_material}
+import mod::texture_asset::texture_path_valid
+import std::os::{read_file, write_file_atomic}
 
 fn parse_decimal(source: str) -> Option[f32] {
     if source.char_len() == 0_usize {
@@ -96,10 +99,24 @@ pub fn material_edit_action(action: str) -> bool {
     ||
     action == "material-metallic-minus" || action == "material-metallic-plus" ||
     action == "material-roughness-minus" || action == "material-roughness-plus" ||
-    action == "material-unlit" || action == "material-double-sided"
+    action == "material-unlit" || action == "material-double-sided" ||
+    action == "material-normal-minus" || action == "material-normal-plus" || action == "material-normal-flip-y"
 }
 
 pub fn edit_default_material(material: StandardMaterial, action: str) -> StandardMaterial {
+    match action {
+        "material-normal-minus" => {
+            ret material.with_normal_scale(material.normal_scale() - 0.1)
+        }
+        "material-normal-plus" => {
+            ret material.with_normal_scale(material.normal_scale() + 0.1)
+        }
+        "material-normal-flip-y" => {
+            ret material.with_normal_flip_y(!material.normal_flip_y())
+        }
+        _ => {
+        }
+    }
     if action == "material-reset" {
         ret StandardMaterial::editor_default()
     }
@@ -135,7 +152,11 @@ pub fn material_asset_stringify(material: StandardMaterial) -> str {
     color_values.push(number(color.x())) color_values.push(number(color.y())) color_values.push(number(color.z()))
     let mut fields = Vec[(str, Json)]::new()
     fields.push(field("format", Json::String("graphene-material")))
-    fields.push(field("version", Json::Number("2")))
+    fields.push(field("version", Json::Number("4")))
+    fields.push(field("base_color_texture", Json::String(material.base_color_texture())))
+    fields.push(field("normal_texture", Json::String(material.normal_texture())))
+    fields.push(field("normal_scale", number(material.normal_scale())))
+    fields.push(field("normal_flip_y", Json::Bool(material.normal_flip_y())))
     fields.push(field("base_color", Json::Array(color_values)))
     fields.push(field("metallic", number(material.metallic())))
     fields.push(field("roughness", number(material.roughness())))
@@ -166,7 +187,7 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                 Option::Some(value) => {
                     match value.as_number() {
                         Option::Some(text) => {
-                            text == "1" || text == "2"
+                            text == "1" || text == "2" || text == "3" || text == "4"
                         }
                         Option::None => {
                             false
@@ -247,6 +268,51 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                 }
                 Option::None => false
             }
+            let texture = match root.get("base_color_texture") {
+                Option::Some(value) => match value.as_str() {
+                    Option::Some(path) => path
+                    Option::None => {
+                        ret Option[StandardMaterial]::None
+                    }
+                }
+                Option::None => ""
+            }
+            if !texture_path_valid(texture) {
+                ret Option[StandardMaterial]::None
+            }
+            let normal = match root.get("normal_texture") {
+                Option::Some(value) => match value.as_str() {
+                    Option::Some(path) => path
+                    Option::None => {
+                        ret Option[StandardMaterial]::None
+                    }
+                }
+                Option::None => ""
+            }
+            if !texture_path_valid(normal) {
+                ret Option[StandardMaterial]::None
+            }
+            let normal_scale = match root.get("normal_scale") {
+                Option::Some(value) => match json_f32(value) {
+                    Option::Some(scale) => scale
+                    Option::None => {
+                        ret Option[StandardMaterial]::None
+                    }
+                }
+                Option::None => 1.0_f32
+            }
+            if !(normal_scale >= 0.0 && normal_scale <= 4.0) {
+                ret Option[StandardMaterial]::None
+            }
+            let flip_y = match root.get("normal_flip_y") {
+                Option::Some(value) => match value.as_bool() {
+                    Option::Some(flag) => flag
+                    Option::None => {
+                        ret Option[StandardMaterial]::None
+                    }
+                }
+                Option::None => false
+            }
             if valid_color {
                 match metallic {
                     Option::Some(metal) => {
@@ -254,7 +320,8 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                             Option::Some(rough) => {
                                 ret Option[StandardMaterial]::Some(StandardMaterial::new(color, metal,
                                         rough,).with_unlit_value(unlit)
-                                    .with_double_sided_value(double_sided))
+                                    .with_double_sided_value(double_sided).with_base_color_texture(texture)
+                                    .with_normal_texture(normal).with_normal_scale(normal_scale).with_normal_flip_y(flip_y))
                             }
                             Option::None => {
                             }
@@ -269,4 +336,45 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
         }
     }
     ret Option[StandardMaterial]::None
+}
+
+/// Loads an independent native material, or migrates the JSON authoring file.
+pub fn load_material_asset_file(path: str) -> Option[StandardMaterial] {
+    if path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" {
+        match load_native_material(path, "") {
+            Result::Ok(material) => {
+                ret Option[StandardMaterial]::Some(material)
+            }
+            Result::Err(_) => {
+                ret Option[StandardMaterial]::None
+            }
+        }
+    }
+    let revision = asset_source_stamp(path)
+    match load_native_material(path + ".gmaterial", revision) {
+        Result::Ok(material) => {
+            ret Option[StandardMaterial]::Some(material)
+        }
+        Result::Err(_) => {
+        }
+    }
+    match material_asset_parse(read_file(path)) {
+        Option::Some(material) => {
+            let _saved = save_native_material(path + ".gmaterial", path, revision, material)
+            ret Option[StandardMaterial]::Some(material)
+        }
+        Option::None => {
+            ret Option[StandardMaterial]::None
+        }
+    }
+}
+pub fn save_material_asset_file(path: str, material: StandardMaterial) -> bool {
+    if path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" {
+        ret save_native_material(path, "", "", material)
+    }
+    if write_file_atomic(path, material_asset_stringify(material) + "\n") != 0 {
+        ret false
+    }
+    ret save_native_material(path + ".gmaterial", path,
+        asset_source_stamp(path), material,)
 }

@@ -1,0 +1,1328 @@
+//! VFX authoring: system/emitter stacks, typed module canvas and isolated preview.
+import core::option::Option
+import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all, read_file}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
+import luma::{CanvasScene, CanvasView, CurveAxes, CurveEdit, CurveEditor, DisplayList, DisplayPoint, Event, InteractionState, Point, PreparedFrame, Rect, Style, StyleSheet, TextEditor, Widget, WidgetLayout, Window, canvas_cubic, canvas_grid, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_scroll, event_text_input, horizontal, key_backspace, key_delete, key_end, key_enter, key_escape, key_home, key_left, key_right, key_tab, property_row, vertical}
+
+import mod::asset::{load_cooked_particles, prepare_particle_system, save_cooked_particles, save_particle_system}
+import mod::codec::{particle_system_parse, particle_system_stringify}
+import mod::compiler::{compile_particle_emitter, vfx_arity, vfx_opcode}
+import mod::document::ParticleDocument
+import mod::model::*
+import mod::presets::{particle_template, particle_templates}
+import mod::preview::ParticlePreview
+import mod::runtime::ParticleStats
+import refrain::content_search::search_matches
+import refrain::scene::json_value::parse_number
+struct VfxEditorBuild {
+    source: str
+    revision: u64
+    asset: ParticleSystem
+    diagnostics: Vec[ParticleDiagnostic]
+}
+fn vfx_editor_compile(source: str, revision: u64) -> sending VfxEditorBuild {
+    let asset = particle_system_parse(source).unwrap_or(ParticleSystem::new(""))
+    let mut diagnostics = Vec[ParticleDiagnostic]::new() for i in 0_usize..asset.emitters.len() {
+        for d in compile_particle_emitter(asset, i).diagnostics {
+            diagnostics.push(d)
+        }
+    }
+    ret VfxEditorBuild {
+        source, revision, asset, diagnostics
+    }
+}
+fn vfx_style(sheet: StyleSheet, name: str) -> Style {
+    ret sheet.style(Widget::panel("").with_classes(name), false, false, false)
+}
+fn vfx_editor_id(id: str) -> bool {
+    ret id.byte_len() >= 4_usize && id.slice_bytes(0_usize, 4_usize) == "vfx-"
+}
+// Overlay geometry stays in the curve's coordinates; only the visible part is painted.
+fn vfx_clip(bounds: Rect, viewport: Rect) -> Rect {
+    let x = if bounds.x() > viewport.x() {
+        bounds.x()
+    } else {
+        viewport.x()
+    }
+    let y = if bounds.y() > viewport.y() {
+        bounds.y()
+    } else {
+        viewport.y()
+    }
+    let right = if bounds.right() < viewport.right() {
+        bounds.right()
+    } else {
+        viewport.right()
+    }
+    let bottom = if bounds.bottom() < viewport.bottom() {
+        bounds.bottom()
+    } else {
+        viewport.bottom()
+    }
+    ret Rect::new(x, y, if right > x {
+            right - x
+        } else {
+            0_f32
+        }
+        , if bottom > y {
+            bottom - y
+        } else {
+            0_f32
+        }
+        ,
+    )
+}
+fn vfx_display(raw: str) -> str {
+    let value = match parse_number(raw) {
+        Some(value) => value None => {
+            ret raw
+        }
+    }
+    if value > 1000000 || value < - 1000000 {
+        ret raw
+    }
+    let magnitude = if value < 0 {
+        - value
+    } else {
+        value
+    }
+    let scaled =(magnitude * 1000_f32 + 0.5_f32) as u64
+    if scaled == 0_u64 && magnitude > 0_f32 {
+        ret raw
+    }
+    let sign = if value < 0_f32 {
+        "-"
+    } else {
+        ""
+    }
+    let whole =(scaled / 1000_u64).fmt()
+    let remainder = scaled % 1000_u64
+    if remainder == 0_u64 {
+        ret sign + whole
+    }
+    let mut fraction =(remainder + 1000_u64).fmt().slice_bytes(1_usize, 3_usize)
+    while fraction.byte_at(fraction.byte_len() - 1_usize) == 48_u8 {
+        fraction = fraction.slice_bytes(0_usize, fraction.byte_len() - 1_usize)
+    }
+    ret sign + whole + "." + fraction
+}
+fn vfx_curve_sample(points: Vec[ParticleCurvePoint], time: f32) -> ParticleValue {
+    let first = points.get(0_usize).unwrap_or(ParticleCurvePoint { 0, ParticleValue::scalar(0) })
+    let mut previous = first
+    for point in points {
+        if point.time > time {
+            let span = point.time - previous.time
+            let fraction = if span > 0 && time > previous.time {
+                (time - previous.time) / span
+            } else {
+                0_f32
+            }
+            ret ParticleValue::vector(previous.value.x +(point.value.x - previous.value.x) * fraction, previous.value.y +(point.value.y - previous.value.y) * fraction, previous.value.z +(point.value.z - previous.value.z) * fraction, previous.value.w +(point.value.w - previous.value.w) * fraction)
+        }
+        previous = point
+    }
+    ret previous.value
+}
+fn vfx_node_bounds(n: ParticleNode) -> Rect {
+    ret Rect::new(n.x, n.y, 200, 144)
+}
+fn vfx_pin(n: ParticleNode, input: u32, output: bool) -> Point {
+    ret Point::new(n.x + if output {
+            200_f32
+        } else {
+            0_f32
+        }
+        , n.y + 54 +(input as f32) * 28,)
+}
+pub struct ParticleEditor {
+    document: ParticleDocument
+    cached: ParticleSystem
+    cached_revision: u64
+    project: str
+    path: str
+    selected_path: str
+    emitter: usize
+    module: usize
+    selection: u64
+    curve: CurveEditor
+    channel: u32
+    view: CanvasView
+    scene: CanvasScene
+    bounds: Rect
+    focus: str
+    editor: TextEditor
+    search: TextEditor
+    dragging: bool
+    panning: bool
+    orbiting: bool
+    pointer: Point
+    start: Point
+    before: str
+    connection: u64
+    worker: Option[JoinHandle[VfxEditorBuild]]
+    attempted: u64
+    pending: Option[ParticleSystem]
+    diagnostics: Vec[ParticleDiagnostic]
+    preview: Option[ParticlePreview<H>]
+    stopped: bool
+    paused: bool
+    time: f32
+    seek: f32
+    yaw: f32
+    pitch: f32
+    distance: f32
+    published: str
+    message: str
+    visible: bool
+    dirty: bool
+    compile_after: u64
+    last_tick: u64
+    last_ui: u64
+    scrubbing: bool
+    seeking: bool
+}
+
+impl for ParticleEditor {
+    pub fn new() -> ParticleEditor<H> {
+        let initial = particle_template("Sparks")
+        ret ParticleEditor<H> {
+            ParticleDocument::new(initial), initial, 0_u64, "", "", "", 0_usize, 0_usize, 0_u64, CurveEditor::new(), 0_u32, CanvasView::new(), CanvasScene::new(), Rect::new(0, 0, 0, 0), "", TextEditor::new(""), TextEditor::new(""), false, false, false, Point::new(0, 0), Point::new(0, 0), "", 0_u64, Option[JoinHandle[VfxEditorBuild]]::None, 18446744073709551615_u64, Option[ParticleSystem]::None, Vec[ParticleDiagnostic]::new(), Option[ParticlePreview<H>]::None, true, false, 0, 0, 0.6_f32, 0.25_f32, 7, "", "", false, true, 0_u64, 0_u64, 0_u64, false, false
+        }
+    }
+    pub fn configure(self: mut Self&, project: str) ->() {
+        if project == self.project {
+            ret()
+        }
+        self.project = project self.path = project + "/Content/VFX/P_Sparks.graphene-particle.json" self.selected_path = "Content/VFX/P_Sparks.graphene-particle.json" self.cached = particle_template("Sparks") self.document = ParticleDocument::new(self.cached) self.cached_revision = 0_u64 self.attempted = 18446744073709551615_u64 self.dirty = true self.stopped = true self.time = 0 self.seek = 0 self.seeking = false self.last_tick = 0_u64 self.pending = Option[ParticleSystem]::None
+        if file_exists(self.path) {
+            match particle_system_parse(read_file(self.path)) {
+                Ok(asset) => {
+                    self.document = ParticleDocument::new(asset) self.cached = asset self.cached_revision = 0_u64
+                }
+                Err(message) => {
+                    self.message = message
+                }
+            }
+        }
+        self.curve.fit(1)
+    }
+    pub fn open(self: mut Self&, path: str) -> bool {
+        if self.document.dirty() {
+            self.message = "Save the current VFX asset before opening another" self.dirty = true ret false
+        }
+        let mut source = read_file(self.project + "/" + path)
+        let mut destination = path
+        if path.byte_len() > 10_usize && path.slice_bytes(path.byte_len() - 10_usize, 10_usize) == ".gparticle" {
+            match load_cooked_particles(self.project + "/" + path) {
+                Ok(cooked) => {
+                    source = cooked.authoring destination = path + ".graphene-particle.json"
+                }
+                Err(message) => {
+                    self.message = message self.dirty = true ret false
+                }
+            }
+        }
+        match particle_system_parse(source) {
+            Ok(asset) => {
+                self.document = ParticleDocument::new(asset) self.cached = asset self.cached_revision = 0_u64 self.path = self.project + "/" + destination self.selected_path = destination self.emitter = 0_usize self.module = 0_usize self.selection = 0_u64 self.attempted = 18446744073709551615_u64 self.stopped = false self.dirty = true ret true
+            }
+            Err(message) => {
+                self.message = message self.dirty = true ret false
+            }
+        }
+    }
+    fn current_emitter(self: Self&) -> ParticleEmitter {
+        ret self.cached.emitters.get(self.emitter).unwrap_or(ParticleEmitter::new(""))
+    }
+    fn current_module(self: Self&) -> ParticleModule {
+        ret self.current_emitter().modules.get(self.module).unwrap_or(ParticleModule::new("", 0_u32))
+    }
+    fn selected_node(self: Self&) -> ParticleNode {
+        for n in self.current_module().nodes {
+            if n.id == self.selection {
+                ret n
+            }
+        }
+        ret ParticleNode::new(0_u64, "", 0, 0)
+    }
+    fn edit(self: mut Self&, asset: ParticleSystem) ->() {
+        if self.document.replace(asset) {
+            self.cached = asset self.cached_revision = self.document.revision()
+            self.compile_after = perf_counter_ms() + 180_u64 self.dirty = true
+        }
+    }
+    fn set_module(self: mut Self&, module: ParticleModule) ->() {
+        let mut asset = self.document.asset() let mut e = asset.emitters.get(self.emitter).unwrap_or(ParticleEmitter::new("")) e.modules.set(self.module, module) asset.emitters.set(self.emitter, e) self.edit(asset)
+    }
+    fn field_value(self: Self&, id: str) -> str {
+        let e = self.current_emitter() let n = self.selected_node()
+        for i in 0_usize..self.cached.parameters.len() {
+            let p = self.cached.parameters.get(i).unwrap_or(ParticleParameter {
+                    "", "", ParticleValue::scalar(0)
+                }
+                ,
+            ) for c in 0_usize..4_usize {
+                if id == "vfx-param-" + i.fmt() + "-" + c.fmt() {
+                    ret p.value.values().get(c).unwrap_or(0).fmt()
+                }
+            }
+        }
+        ret match id {
+            "vfx-rate" => e.rate.fmt() "vfx-life" => e.lifetime.fmt() "vfx-speed" => e.speed.fmt() "vfx-size" => e.size.fmt() "vfx-gravity" => e.gravity.fmt() "vfx-drag" => e.drag.fmt() "vfx-capacity" => e.capacity.fmt() "vfx-burst" => e.burst.fmt() "vfx-duration" => e.duration.fmt() "vfx-delay" => e.delay.fmt() "vfx-value-x" => n.value.x.fmt() "vfx-value-y" => n.value.y.fmt() "vfx-value-z" => n.value.z.fmt() "vfx-value-w" => n.value.w.fmt() "vfx-attribute" => n.attribute.fmt() "vfx-parameter" => n.parameter _ => ""
+        }
+    }
+    fn commit(self: mut Self&) -> bool {
+        if self.focus == "" || self.focus == "vfx-search" ||(self.field_value(self.focus) == "" && self.focus != "vfx-parameter") {
+            ret true
+        }
+        let mut asset = self.document.asset() let mut e = asset.emitters.get(self.emitter).unwrap_or(ParticleEmitter::new(""))
+        let parsed = parse_number(self.editor.value())
+        if parsed.is_none() && self.focus != "vfx-parameter" {
+            self.message = "Enter a finite number" self.dirty = true ret false
+        }
+        let value = parsed.unwrap_or(0_f32)
+        for i in 0_usize..asset.parameters.len() {
+            let mut parameter = asset.parameters.get(i).unwrap_or(ParticleParameter {
+                    "", "vec4", ParticleValue::scalar(0)
+                }
+                ,
+            ) for c in 0_usize..4_usize {
+                if self.focus == "vfx-param-" + i.fmt() + "-" + c.fmt() {
+                    if c == 0_usize {
+                        parameter.value.x = value
+                    } elif c == 1_usize {
+                        parameter.value.y = value
+                    } elif c == 2_usize {
+                        parameter.value.z = value
+                    } else {
+                        parameter.value.w = value
+                    }
+                    asset.parameters.set(i, parameter) self.edit(asset) self.focus = "" ret true
+                }
+            }
+        }
+        if self.focus == "vfx-rate" {
+            e.rate = value
+        } elif self.focus == "vfx-life" {
+            e.lifetime = value
+        } elif self.focus == "vfx-speed" {
+            e.speed = value
+        } elif self.focus == "vfx-size" {
+            e.size = value
+        } elif self.focus == "vfx-gravity" {
+            e.gravity = value
+        } elif self.focus == "vfx-drag" {
+            e.drag = value
+        } elif self.focus == "vfx-capacity" {
+            if value >= 1 && value <= 1048576 {
+                e.capacity = value as u32
+            } else {
+                self.message = "GPU capacity must be 1..1048576" ret false
+            }
+        } elif self.focus == "vfx-burst" {
+            if value >= 0 && value <= 1048576 {
+                e.burst = value as u32
+            }
+        } elif self.focus == "vfx-duration" {
+            e.duration = value
+        } elif self.focus == "vfx-delay" {
+            e.delay = value
+        } else {
+            let mut module = e.modules.get(self.module).unwrap_or(ParticleModule::new("", 0_u32))
+            for i in 0_usize..module.nodes.len() {
+                let mut n = module.nodes.get(i).unwrap_or(ParticleNode::new(0_u64, "", 0, 0)) if n.id == self.selection {
+                    if self.focus == "vfx-value-x" {
+                        n.value.x = value
+                    } elif self.focus == "vfx-value-y" {
+                        n.value.y = value
+                    } elif self.focus == "vfx-value-z" {
+                        n.value.z = value
+                    } elif self.focus == "vfx-value-w" {
+                        n.value.w = value
+                    } elif self.focus == "vfx-attribute" {
+                        if value >= 0 && value <= 7 {
+                            n.attribute = value as u32
+                        }
+                    } elif self.focus == "vfx-parameter" {
+                        n.parameter = self.editor.value()
+                    }
+                    module.nodes.set(i, n)
+                }
+            }
+            e.modules.set(self.module, module)
+        }
+        if e.rate < 0 || e.rate > 10000000 || e.lifetime <= 0 || e.lifetime > 3600 || e.size < 0 || e.drag < 0 || e.duration < 0 || e.delay < 0 {
+            self.message = "Particle settings are outside the valid range" self.dirty = true ret false
+        }
+        asset.emitters.set(self.emitter, e) self.edit(asset) self.focus = "" self.message = "" ret true
+    }
+    pub fn action(self: mut Self&, id: str) -> bool {
+        if (id == "vfx-pause" || id == "vfx-stop") && self.stopped {
+            ret true
+        }
+        if id == "vfx-cpu" && self.current_emitter().renderer != "sprite" {
+            ret true
+        }
+        if !vfx_editor_id(id) {
+            ret false
+        }
+        if id == "vfx-channel-r" || id == "vfx-channel-g" || id == "vfx-channel-b" || id == "vfx-channel-a" {
+            self.channel = if id == "vfx-channel-r" {
+                0_u32
+            } elif id == "vfx-channel-g" {
+                1_u32
+            } elif id == "vfx-channel-b" {
+                2_u32
+            } else {
+                3_u32
+            }
+            self.curve.fit(1) self.dirty = true ret true
+        }
+        if id == "vfx-play" {
+            self.stopped = false self.paused = false self.seeking = false self.seek = 0 self.last_tick = 0_u64
+            if self.preview.is_none() && self.pending.is_none() {
+                self.attempted = 18446744073709551615_u64
+            }
+            match self.preview {
+                Some(p) => {
+                    p.action(4_u32)
+                }
+                None => {
+                }
+            }
+            self.time = 0
+        } elif id == "vfx-pause" {
+            self.paused = !self.paused match self.preview {
+                Some(p) => {
+                    p.action(if self.paused {
+                            0_u32
+                        } else {
+                            1_u32
+                        }
+                    )
+                }
+                None => {
+                }
+            }
+        } elif id == "vfx-stop" {
+            self.stopped = true self.paused = false self.time = 0 self.seek = 0 self.seeking = false self.scrubbing = false
+        } elif id == "vfx-save" {
+            if !self.commit() {
+                ret true
+            }
+            mkdir_all(self.project + "/Content/VFX") if save_particle_system(self.path, self.cached) {
+                self.document.mark_saved() match prepare_particle_system(self.project, self.selected_path) {
+                    Ok(asset) => {
+                        match save_cooked_particles(self.path + ".gparticle", asset) {
+                            Ok(_) => {
+                                self.message = "Saved source and native VFX asset" self.published = self.selected_path
+                            }
+                            Err(message) => {
+                                self.message = message
+                            }
+                        }
+                    }
+                    Err(message) => {
+                        self.message = message
+                    }
+                }
+            } else {
+                self.message = "Unable to save VFX asset"
+            }
+        } elif id == "vfx-undo" {
+            self.document.undo() self.compile_after = 0_u64
+        } elif id == "vfx-redo" {
+            self.document.redo() self.compile_after = 0_u64
+        } elif id == "vfx-compile" {
+            self.attempted = 18446744073709551615_u64 self.compile_after = 0_u64
+        } elif id == "vfx-loop" || id == "vfx-enabled" || id == "vfx-local" || id == "vfx-cpu" || id == "vfx-gpu" {
+            let mut asset = self.document.asset() let mut e = self.current_emitter() if id == "vfx-loop" {
+                e.looping = !e.looping
+            } elif id == "vfx-enabled" {
+                e.enabled = !e.enabled
+            } elif id == "vfx-local" {
+                e.local_space = !e.local_space
+            } else {
+                e.backend = if id == "vfx-cpu" {
+                    "cpu"
+                } else {
+                    "gpu"
+                }
+            }
+            asset.emitters.set(self.emitter, e) self.edit(asset)
+        } elif id == "vfx-add-parameter" {
+            let mut asset = self.document.asset() if asset.parameters.len() < 64_usize {
+                asset.parameters.push(ParticleParameter {
+                        "User.Value" + asset.parameters.len().fmt(), "vec4", ParticleValue::scalar(1)
+                    }
+                    ,
+                ) self.edit(asset)
+            }
+        } elif id == "vfx-add-emitter" {
+            let mut asset = self.document.asset() asset.emitters.push(ParticleEmitter::new("Emitter " + asset.emitters.len().fmt())) self.edit(asset) self.emitter = asset.emitters.len() - 1_usize self.module = 0_usize self.selection = 0_u64
+        } elif id == "vfx-add-module" {
+            let mut asset = self.document.asset() let mut e = self.current_emitter() e.modules.push(ParticleModule::new("New module", 1_u32)) self.module = e.modules.len() - 1_usize asset.emitters.set(self.emitter, e) self.edit(asset) self.selection = 0_u64
+        } elif id == "vfx-toggle-module" {
+            let mut m = self.current_module() m.enabled = !m.enabled self.set_module(m)
+        } elif id == "vfx-module-up" || id == "vfx-module-down" {
+            let mut asset = self.document.asset() let mut e = self.current_emitter() let next = if id == "vfx-module-up" {
+                if self.module > 0_usize {
+                    self.module - 1_usize
+                } else {
+                    self.module
+                }
+            } else {
+                if self.module + 1_usize < e.modules.len() {
+                    self.module + 1_usize
+                } else {
+                    self.module
+                }
+            }
+            let a = e.modules.get(self.module).unwrap_or(ParticleModule::new("", 0_u32)) let b = e.modules.get(next).unwrap_or(a) e.modules.set(self.module, b) e.modules.set(next, a) asset.emitters.set(self.emitter, e) self.module = next self.edit(asset)
+        } elif id == "vfx-delete" {
+            let mut m = self.current_module() let mut nodes = Vec[ParticleNode]::new() let mut links = Vec[ParticleLink]::new() for n in m.nodes {
+                if n.id != self.selection {
+                    nodes.push(n)
+                }
+            }
+            for l in m.links {
+                if l.from != self.selection && l.to != self.selection {
+                    links.push(l)
+                }
+            }
+            m.nodes = nodes m.links = links self.set_module(m) self.selection = 0_u64
+        } elif id == "vfx-copy" {
+            let mut m = self.current_module() let mut n = self.selected_node() if n.id != 0_u64 {
+                let mut next = 1_u64 for old in m.nodes {
+                    if old.id >= next {
+                        next = old.id + 1_u64
+                    }
+                }
+                n.id = next n.x += 40 n.y += 40 m.nodes.push(n) self.set_module(m) self.selection = next
+            }
+        } elif id == "vfx-frame" {
+            self.view = CanvasView::new()
+        } else {
+            for name in particle_templates() {
+                if id == "vfx-template-" + name {
+                    self.edit(particle_template(name)) self.emitter = 0_usize self.module = 0_usize self.selection = 0_u64 self.stopped = false self.paused = false self.seek = 0 self.seeking = false self.last_tick = 0_u64
+                }
+            }
+            let asset = self.cached
+            for i in 0_usize..asset.emitters.len() {
+                if id == "vfx-emitter-" + i.fmt() {
+                    self.emitter = i self.module = 0_usize self.selection = 0_u64
+                }
+            }
+            for i in 0_usize..self.current_emitter().modules.len() {
+                if id == "vfx-module-" + i.fmt() {
+                    self.module = i self.selection = 0_u64
+                }
+            }
+            for stage in 0_usize..8_usize {
+                if id == "vfx-stage-" + stage.fmt() {
+                    let mut m = self.current_module() m.stage = stage as u32 self.set_module(m)
+                }
+            }
+            for op in particle_operations() {
+                if id == "vfx-add-" + op {
+                    let mut m = self.current_module() let mut next = 1_u64 for n in m.nodes {
+                        if n.id >= next {
+                            next = n.id + 1_u64
+                        }
+                    }
+                    let point = self.view.world(self.bounds.width() / 2, self.bounds.height() / 2) let mut node = ParticleNode::new(next, op, point.x(), point.y()) if op == "curve" {
+                        node.points = vec![ParticleCurvePoint {
+                                0, ParticleValue::scalar(1)
+                            }
+                            , ParticleCurvePoint {
+                                1, ParticleValue::scalar(0)
+                            }
+                        ]
+                    }
+                    m.nodes.push(node) self.set_module(m) self.selection = next self.curve.fit(1)
+                }
+            }
+            for i in 0_usize..self.diagnostics.len() {
+                if id == "vfx-diagnostic-" + i.fmt() {
+                    let d = self.diagnostics.get(i).unwrap_or(ParticleDiagnostic {
+                            0_usize, 0_usize, 0_u64, ""
+                        }
+                        ,
+                    ) self.emitter = d.emitter self.module = d.module self.selection = d.node self.view = CanvasView::new()
+                }
+            }
+        }
+        self.dirty = true ret true
+    }
+    fn button(self: Self&, id: str, title: str, active: bool, disabled: bool) -> Widget {
+        ret Widget::button(id, title).with_classes("bp-button vfx-button" + if active {
+                " bp-selected"
+            } else {
+                ""
+            }
+        ).with_checked(active).with_disabled(disabled).with_focus(self.focus == id).with_attribute("aria-pressed", if active {
+                "true"
+            } else {
+                "false"
+            }
+            ,
+        ).with_attribute("title", title)
+    }
+    pub fn widget(self: Self&) -> Widget {
+        let asset = self.cached let e = self.current_emitter() let m = self.current_module() let mut root = Widget::panel("particle-editor").with_classes("blueprint-editor vfx-editor").with_direction(vertical())
+        let mut toolbar = Widget::panel("vfx-toolbar").with_classes("bp-toolbar").with_direction(horizontal()) toolbar.push(Widget::label(asset.name + if self.document.dirty() {
+                    " *"
+                } else {
+                    ""
+                }
+            ).with_classes("bp-document-name"))
+        for item in vec![("save", "Save"),("compile", "Compile"),("undo", "Undo"),("redo", "Redo"),("play", "Play"),("pause", if self.paused {
+                    "Resume"
+                } else {
+                    "Pause"
+                }
+                ,
+            ),("stop", "Stop"),("frame", "Frame")] {
+            toolbar.push(self.button("vfx-" + item.0, item.1,(item.0 == "play" && !self.stopped && !self.paused) ||(item.0 == "pause" && self.paused),(item.0 == "pause" || item.0 == "stop") && self.stopped))
+        }
+        root.push(toolbar)
+        let mut workspace = Widget::panel("vfx-workspace").with_classes("bp-workspace").with_direction(horizontal())
+        let mut stack = Widget::panel("vfx-stack").with_classes("vfx-stack").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        stack.push(Widget::label("SYSTEM · EMITTERS").with_classes("bp-section-label"))
+        for i in 0_usize..asset.emitters.len() {
+            let current = asset.emitters.get(i).unwrap_or(e) stack.push(self.button("vfx-emitter-" + i.fmt(), current.name, i == self.emitter, false))
+        }
+        stack.push(self.button("vfx-add-emitter", "+ Emitter", false, false)) stack.push(Widget::separator())
+        for i in 0_usize..e.modules.len() {
+            let current = e.modules.get(i).unwrap_or(m) stack.push(self.button("vfx-module-" + i.fmt(),(if current.enabled {
+                            ""
+                        } else {
+                            "○ "
+                        }
+                    ) + current.name, i == self.module, false))
+        }
+        stack.push(self.button("vfx-add-module", "+ Module", false, false))
+        for item in vec![("toggle-module", if m.enabled {
+                    "Disable module"
+                } else {
+                    "Enable module"
+                }
+                ,
+            ),("module-up", "Move up"),("module-down", "Move down")] {
+            stack.push(self.button("vfx-" + item.0, item.1, false, e.modules.len() == 0_usize))
+        }
+        stack.push(Widget::label("TEMPLATES").with_classes("bp-section-label")) for name in particle_templates() {
+            stack.push(self.button("vfx-template-" + name, name, false, false))
+        }
+        workspace.push(stack)
+        workspace.push(Widget::canvas("vfx-canvas").with_classes("blueprint-canvas").with_focus(self.focus == "vfx-canvas").with_attribute("tabindex", "0").with_attribute("data-luma-raw-input", "true").with_attribute("aria-label", "VFX module graph; drag nodes, connect pins, F to frame, Delete to remove selection"))
+        let mut sidebar = Widget::panel("vfx-sidebar").with_classes("bp-sidebar vfx-sidebar").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        sidebar.push((if self.preview.is_some() && !self.stopped {
+                    Widget::render_surface("vfx-preview-surface")
+                } else {
+                    Widget::panel("vfx-preview-surface")
+                }
+            ).with_classes("vfx-preview"))
+        sidebar.push(Widget::label("Orbit: drag · Zoom: wheel · " + vfx_display((((self.time * 10) as u32) as f32 / 10).fmt()) + " s").with_classes("bp-muted"))
+        match self.preview {
+            Some(preview) => {
+                let stats = preview.stats() let cells = preview.fluid_cells() sidebar.push(Widget::label((if cells > 0_u64 {
+                                cells.fmt() + " fluid cells"
+                            } else {
+                                stats.alive.fmt() + " / " + stats.capacity.fmt() + " particles"
+                            }
+                        ) + " · " + vfx_display(((stats.bytes as f32) / 1048576_f32).fmt()) + " MiB").with_classes("bp-muted"))
+            }
+            None => {
+            }
+        }
+        sidebar.push(Widget::slider("vfx-timeline", self.time / 10).with_classes("vfx-timeline").with_focus(self.focus == "vfx-timeline").with_attribute("aria-valuemin", "0").with_attribute("aria-valuemax", "10").with_attribute("aria-valuenow", self.time.fmt()).with_attribute("aria-label", "Preview time, 0 to 10 seconds"))
+        let mut backend = Widget::panel("vfx-backends").with_direction(horizontal()) backend.push(self.button("vfx-gpu", "GPU", e.backend == "gpu", false)) backend.push(self.button("vfx-cpu", "CPU", e.backend == "cpu", e.renderer != "sprite")) backend.push(self.button("vfx-loop", "Loop", e.looping, false)) backend.push(self.button("vfx-local", "Local", e.local_space, false)) sidebar.push(backend)
+        for row in vec![("rate", "Spawn / s"),("burst", "Burst"),("life", "Lifetime · s"),("speed", "Speed · m/s"),("size", "Size · m"),("gravity", "Gravity · m/s²"),("drag", "Drag"),("capacity", "Capacity"),("duration", "Duration · s"),("delay", "Delay · s")] {
+            let id = "vfx-" + row.0 sidebar.push(property_row("vfx-row-" + row.0, row.1, Widget::input(id, if self.focus == id {
+                            self.editor.value()
+                        } else {
+                            vfx_display(self.field_value(id))
+                        }
+                        ,
+                    ).with_classes("bp-input").with_focus(self.focus == id)))
+        }
+        if self.selection != 0_u64 {
+            let n = self.selected_node() sidebar.push(Widget::label("NODE · " + n.operation).with_classes("bp-section-label")) for item in vec!["x", "y", "z", "w"] {
+                let id = "vfx-value-" + item sidebar.push(property_row("vfx-value-row-" + item, item, Widget::input(id, if self.focus == id {
+                                self.editor.value()
+                            } else {
+                                vfx_display(self.field_value(id))
+                            }
+                            ,
+                        ).with_classes("bp-input").with_focus(self.focus == id)))
+            }
+            for row in vec![("attribute", "Attribute · 0…7"),("parameter", "Parameter name")] {
+                let id = "vfx-" + row.0 sidebar.push(property_row("vfx-node-" + row.0, row.1, Widget::input(id, if self.focus == id {
+                                self.editor.value()
+                            } else {
+                                vfx_display(self.field_value(id))
+                            }
+                            ,
+                        ).with_classes("bp-input").with_focus(self.focus == id)))
+            }
+            sidebar.push(self.button("vfx-copy", "Duplicate node", false, false)) sidebar.push(self.button("vfx-delete", "Delete node", false, false))
+        }
+        if self.selected_node().operation == "curve" {
+            let mut channels = Widget::panel("vfx-channels").with_direction(horizontal()) let names = vec!["r", "g", "b", "a"]
+            for i in 0_usize..4_usize {
+                let name = names.get(i).unwrap_or("r") channels.push(self.button("vfx-channel-" + name, name, self.channel ==(i as u32), false))
+            }
+            sidebar.push(channels)
+            sidebar.push(Widget::canvas("vfx-curve").with_classes("vfx-curve").with_attribute("data-luma-raw-input", "true").with_focus(self.curve.focused()).with_attribute("aria-label", "Value over time; double click to add, drag to move, Delete to remove"))
+        }
+        sidebar.push(Widget::label("SYSTEM PARAMETERS").with_classes("bp-section-label"))
+        for i in 0_usize..asset.parameters.len() {
+            let p = asset.parameters.get(i).unwrap_or(ParticleParameter {
+                    "", "vec4", ParticleValue::scalar(0)
+                }
+                ,
+            ) sidebar.push(Widget::label(p.name).with_classes("bp-muted")) for c in 0_usize..4_usize {
+                let id = "vfx-param-" + i.fmt() + "-" + c.fmt() sidebar.push(property_row(id + "-row", vec!["X", "Y", "Z", "W"].get(c).unwrap_or(""), Widget::input(id, if self.focus == id {
+                                self.editor.value()
+                            } else {
+                                vfx_display(p.value.values().get(c).unwrap_or(0).fmt())
+                            }
+                            ,
+                        ).with_classes("bp-input").with_focus(self.focus == id)))
+            }
+        }
+        sidebar.push(self.button("vfx-add-parameter", "+ Parameter", false, asset.parameters.len() >= 64_usize))
+        sidebar.push(Widget::label("EXECUTION STAGE").with_classes("bp-section-label")) let stages = vec!["Particle Spawn", "Particle Update", "System Spawn", "System Update", "Emitter Spawn", "Emitter Update", "Events", "Simulation"] for i in 0_usize..stages.len() {
+            sidebar.push(self.button("vfx-stage-" + i.fmt(), stages.get(i).unwrap_or(""),(i as u32) == m.stage, e.modules.len() == 0_usize))
+        }
+        sidebar.push(Widget::input("vfx-search", self.search.value()).with_classes("bp-input").with_focus(self.focus == "vfx-search").with_attribute("aria-label", "Find module operations"))
+        for op in particle_operations() {
+            if search_matches(self.search.value(), op) {
+                sidebar.push(self.button("vfx-add-" + op, "+ " + op, false, e.modules.len() == 0_usize))
+            }
+        }
+        workspace.push(sidebar) root.push(workspace)
+        for i in 0_usize..self.diagnostics.len() {
+            let d = self.diagnostics.get(i).unwrap_or(ParticleDiagnostic {
+                    0_usize, 0_usize, 0_u64, ""
+                }
+                ,
+            ) root.push(self.button("vfx-diagnostic-" + i.fmt(), d.message, false, false))
+        }
+        root.push(Widget::label(if self.message != "" {
+                    self.message
+                } else {
+                    "Connect pins · Middle drag: pan · F: frame · Ctrl+S: save · Ctrl+Z: undo"
+                }
+            ).with_classes("bp-muted")) ret root
+    }
+    pub fn canvas(self: mut Self&, bounds: Rect, sheet: StyleSheet) -> CanvasScene {
+        self.bounds = bounds let m = self.current_module() let mut scene = CanvasScene::new() let grid = vfx_style(sheet, "bp-grid") let a = self.view.world(0, 0) let b = self.view.world(bounds.width(), bounds.height()) scene = scene.with_background(Rect::new(a.x(), a.y(), b.x() - a.x(), b.y() - a.y()), canvas_grid(self.view, bounds, grid.foreground(), grid.background()))
+        let pin = vfx_style(sheet, "bp-pin-vec3")
+        for link in m.links {
+            let mut source = ParticleNode::new(0_u64, "", 0, 0) let mut target = source for n in m.nodes {
+                if n.id == link.from {
+                    source = n
+                }
+                if n.id == link.to {
+                    target = n
+                }
+            }
+            let a = vfx_pin(source, 0_u32, true) let b = vfx_pin(target, link.input, false) let mut paint = DisplayList::new() paint.path(canvas_cubic(DisplayPoint::new(a.x(), a.y()), DisplayPoint::new(a.x() + 70, a.y()), DisplayPoint::new(b.x() - 70, b.y()), DisplayPoint::new(b.x(), b.y()), 24), 1.7_f32, pin.foreground(), false) scene.add(0_u64, Rect::new(if a.x() < b.x() {
+                        a.x() - 80
+                    } else {
+                        b.x() - 80
+                    }
+                    , if a.y() < b.y() {
+                        a.y() - 4
+                    } else {
+                        b.y() - 4
+                    }
+                    , if a.x() < b.x() {
+                        b.x() - a.x() + 160
+                    } else {
+                        a.x() - b.x() + 160
+                    }
+                    , if a.y() < b.y() {
+                        b.y() - a.y() + 8
+                    } else {
+                        a.y() - b.y() + 8
+                    }
+                    ,
+                ), paint, false)
+        }
+        for n in m.nodes {
+            let style = vfx_style(sheet, "bp-node" + if self.selection == n.id {
+                    " selected"
+                } else {
+                    ""
+                }
+                ,
+            ) let mut paint = DisplayList::new() paint.round_rect(vfx_node_bounds(n), style.radius(), style.background(), true) paint.round_rect(vfx_node_bounds(n), style.radius(), style.border_color(), false) paint.styled_text(n.x + 12, n.y + 10, n.operation, vfx_style(sheet, "bp-node-title")) for input in 0_usize..(vfx_arity(vfx_opcode(n.operation)) as usize) {
+                let p = vfx_pin(n, input as u32, false) paint.round_rect(Rect::new(p.x() - 4, p.y() - 4, 8, 8), 4, pin.foreground(), true) paint.styled_text(p.x() + 12, p.y() - 7, "Input " + input.fmt(), vfx_style(sheet, "bp-node-label"))
+            }
+            let p = vfx_pin(n, 0_u32, true) paint.round_rect(Rect::new(p.x() - 4, p.y() - 4, 8, 8), 4, pin.foreground(), true) paint.styled_text(n.x + 128, n.y + 47, n.kind, vfx_style(sheet, "bp-node-label")) scene.add(n.id, vfx_node_bounds(n), paint, true)
+        }
+        self.scene = scene ret scene
+    }
+    fn curve_points(self: Self&) -> Vec[Point] {
+        let mut points = Vec[Point]::new() for p in self.selected_node().points {
+            points.push(Point::new(p.time, if self.channel == 0_u32 {
+                        p.value.x
+                    } elif self.channel == 1_u32 {
+                        p.value.y
+                    } elif self.channel == 2_u32 {
+                        p.value.z
+                    } else {
+                        p.value.w
+                    }
+                    ,
+                ))
+        }
+        ret points
+    }
+    fn curve_edit(self: mut Self&, index: usize, point: Point, insert: bool, remove: bool) ->() {
+        let mut m = self.current_module()
+        for ni in 0_usize..m.nodes.len() {
+            let mut node = m.nodes.get(ni).unwrap_or(ParticleNode::new(0_u64, "", 0, 0)) if node.id != self.selection {
+                continue
+            }
+            let t = if point.x() < 0 {
+                0_f32
+            } elif point.x() > 1 {
+                1_f32
+            } else {
+                point.x()
+            }
+            let mut points = Vec[ParticleCurvePoint]::new()
+            let mut added = false
+            for pi in 0_usize..node.points.len() {
+                let mut p = node.points.get(pi).unwrap_or(ParticleCurvePoint {
+                        0, ParticleValue::scalar(0)
+                    }
+                    ,
+                )
+                if insert && !added && p.time > t {
+                    let mut value = vfx_curve_sample(node.points, t) if self.channel == 0_u32 {
+                        value.x = point.y()
+                    } elif self.channel == 1_u32 {
+                        value.y = point.y()
+                    } elif self.channel == 2_u32 {
+                        value.z = point.y()
+                    } else {
+                        value.w = point.y()
+                    }
+                    points.push(ParticleCurvePoint {
+                            t, value
+                        }
+                        ,
+                    ) added = true
+                }
+                if pi == index && !insert {
+                    if remove {
+                        continue
+                    }
+                    let low = if pi > 0_usize {
+                        node.points.get(pi - 1_usize).unwrap_or(p).time + 0.00001_f32
+                    } else {
+                        0_f32
+                    }
+                    let high = if pi + 1_usize < node.points.len() {
+                        node.points.get(pi + 1_usize).unwrap_or(p).time - 0.00001_f32
+                    } else {
+                        1_f32
+                    }
+                    p.time = if t < low {
+                        low
+                    } elif t > high {
+                        high
+                    } else {
+                        t
+                    }
+                    if self.channel == 0_u32 {
+                        p.value.x = point.y()
+                    } elif self.channel == 1_u32 {
+                        p.value.y = point.y()
+                    } elif self.channel == 2_u32 {
+                        p.value.z = point.y()
+                    } else {
+                        p.value.w = point.y()
+                    }
+                }
+                points.push(p)
+            }
+            if insert && !added {
+                let mut value = vfx_curve_sample(node.points, t)
+                if self.channel == 0_u32 {
+                    value.x = point.y()
+                } elif self.channel == 1_u32 {
+                    value.y = point.y()
+                } elif self.channel == 2_u32 {
+                    value.z = point.y()
+                } else {
+                    value.w = point.y()
+                }
+                points.push(ParticleCurvePoint { t, value })
+            }
+            if points.len() > 0_usize && points.len() <= 4096_usize {
+                node.points = points m.nodes.set(ni, node)
+            }
+        }
+        self.set_module(m)
+    }
+    fn seek_to(self: mut Self&, time: f32) ->() {
+        let destination = if time < 0 {
+            0_f32
+        } elif time > 10 {
+            10_f32
+        } else {
+            time
+        }
+        if destination < self.time || self.stopped {
+            self.time = 0
+            match self.preview {
+                Some(p) => {
+                    p.action(4_u32)
+                }
+                None => {
+                    self.attempted = 18446744073709551615_u64
+                }
+            }
+        }
+        match self.preview {
+            Some(p) => {
+                p.action(1_u32)
+            }
+            None => {
+            }
+        }
+        self.seek = destination self.seeking = true self.stopped = false self.last_tick = 0_u64 self.dirty = true
+    }
+    pub fn input(self: mut Self&, event: Event, target: str, layout: WidgetLayout) -> bool {
+        if self.scrubbing &&(event.kind() == event_pointer_move() || event.kind() == event_pointer_up()) {
+            match layout.find_bounds("vfx-timeline") {
+                Some(bounds) => {
+                    if bounds.width() > 0 {
+                        self.seek_to(10 *(event.x() - bounds.x()) / bounds.width())
+                    }
+                }
+                None => {
+                }
+            }
+            if event.kind() == event_pointer_up() {
+                self.scrubbing = false
+            }
+            ret true
+        }
+        if event.kind() == event_key_down() && self.focus == "vfx-timeline" {
+            if event.key() == key_left() {
+                self.seek_to(self.time - 0.1_f32) ret true
+            }
+            if event.key() == key_right() {
+                self.seek_to(self.time + 0.1_f32) ret true
+            }
+            if event.key() == key_home() {
+                self.seek_to(0) ret true
+            }
+            if event.key() == key_end() {
+                self.seek_to(10) ret true
+            }
+        }
+        let sidebar = layout.find_bounds("vfx-sidebar").unwrap_or(Rect::new(0, 0, 0, 0))
+        let pointer = Point::new(event.x(), event.y())
+        if event.kind() == event_pointer_down() && target != "vfx-curve" {
+            self.curve.focus(false)
+        }
+        match layout.find_bounds("vfx-curve") {
+            Some(bounds) => {
+                let visible_pointer = bounds.contains(pointer) && sidebar.contains(pointer)
+                if event.kind() == event_pointer_down() && visible_pointer {
+                    if !self.commit() {
+                        ret true
+                    }
+                    self.focus = "vfx-curve" self.curve.focus(true) self.dirty = true
+                }
+                let keyboard = event.kind() == event_key_down() && self.focus == "vfx-curve"
+                if self.selected_node().operation == "curve" &&(visible_pointer || self.curve.active() || keyboard) {
+                    match self.curve.input(event, self.curve_points(), bounds) {
+                        Ignored => {
+                        }
+                        View => {
+                            self.dirty = true ret true
+                        }
+                        Begin(_) => {
+                            self.document.begin_gesture() self.dirty = true ret true
+                        }
+                        Move(change) => {
+                            self.curve_edit(change.index, change.point, false, false) ret true
+                        }
+                        Insert(point) => {
+                            self.curve_edit(0_usize, point, true, false) ret true
+                        }
+                        Remove(index) => {
+                            self.curve_edit(index, Point::new(0, 0), false, true) ret true
+                        }
+                        Commit => {
+                            self.document.end_gesture() ret true
+                        }
+                        Cancel => {
+                            self.document.cancel_gesture() ret true
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        let canvas = layout.find_bounds("vfx-canvas").unwrap_or(Rect::new(0, 0, 0, 0)) let preview = layout.find_bounds("vfx-preview-surface").unwrap_or(Rect::new(0, 0, 0, 0)) let point = Point::new(event.x(), event.y())
+        if event.kind() == event_focus_lost() {
+            self.document.cancel_gesture() self.dragging = false self.panning = false self.orbiting = false self.scrubbing = false self.connection = 0_u64 self.focus = "" ret false
+        }
+        if event.kind() == event_pointer_down() && vfx_editor_id(target) && !canvas.contains(point) && !preview.contains(point) {
+            if !self.commit() {
+                ret true
+            }
+            self.focus = target
+            if self.field_value(target) != "" || target == "vfx-parameter" {
+                self.editor = TextEditor::new(self.field_value(target)).select_all() self.dirty = true ret true
+            }
+            if target == "vfx-search" {
+                self.dirty = true ret true
+            }
+            if target == "vfx-timeline" {
+                let bounds = layout.find_bounds(target).unwrap_or(preview)
+                if bounds.width() > 0 {
+                    self.scrubbing = true self.seek_to(10 *(event.x() - bounds.x()) / bounds.width())
+                }
+                ret true
+            }
+            ret self.action(target)
+        }
+        if event.kind() == event_key_down() && vfx_editor_id(self.focus) {
+            if event.control() && event.key() == 115 {
+                ret self.action("vfx-save")
+            }
+            if event.control() && event.key() == 122 {
+                ret self.action(if event.shift() {
+                        "vfx-redo"
+                    } else {
+                        "vfx-undo"
+                    }
+                )
+            }
+            if event.key() == key_escape() {
+                self.document.cancel_gesture() self.dragging = false self.panning = false self.orbiting = false self.focus = "" self.connection = 0_u64 self.dirty = true ret true
+            }
+            if event.key() == key_tab() {
+                let previous_focus = self.focus
+                if !self.commit() {
+                    ret true
+                }
+                let state = InteractionState::new().with_focus(previous_focus)
+                self.focus =(if event.shift() {
+                        state.focus_previous(self.widget())
+                    } else {
+                        state.focus_next(self.widget())
+                    }
+                ).focused()
+                self.curve.focus(self.focus == "vfx-curve")
+                self.editor = TextEditor::new(self.field_value(self.focus)).select_all() self.dirty = true ret true
+            }
+            if (event.key() == key_enter() || event.key() == 32) && self.field_value(self.focus) == "" && self.focus != "vfx-search" && self.focus != "vfx-canvas" && self.focus != "vfx-parameter" && self.focus != "vfx-curve" && self.focus != "vfx-timeline" {
+                ret self.action(self.focus)
+            }
+            if event.key() == key_enter() {
+                self.commit() self.dirty = true ret true
+            }
+            if self.focus == "vfx-canvas" {
+                if event.key() == key_delete() {
+                    ret self.action("vfx-delete")
+                }
+                if event.key() == 102 {
+                    ret self.action("vfx-frame")
+                }
+                ret true
+            }
+        }
+        if (event.kind() == event_key_down() || event.kind() == event_text_input()) && vfx_editor_id(self.focus) && self.focus != "vfx-canvas" && self.focus != "vfx-curve" && self.focus != "vfx-timeline" {
+            let mut text = if self.focus == "vfx-search" {
+                self.search
+            } else {
+                self.editor
+            }
+            if event.kind() == event_text_input() {
+                text = text.insert(event.text())
+            } elif event.control() && event.key() == 97 {
+                text = text.select_all()
+            } elif event.key() == key_backspace() {
+                text = text.backspace()
+            } elif event.key() == key_delete() {
+                text = text.delete()
+            } elif event.key() == key_left() {
+                text = text.move_left(event.shift())
+            } elif event.key() == key_right() {
+                text = text.move_right(event.shift())
+            } elif event.key() == key_home() {
+                text = text.move_home(event.shift())
+            } elif event.key() == key_end() {
+                text = text.move_end(event.shift())
+            }
+            if self.focus == "vfx-search" {
+                self.search = text
+            } else {
+                self.editor = text
+            }
+            self.dirty = true ret true
+        }
+        if preview.contains(point) && event.kind() == event_scroll() {
+            self.distance *= if event.wheel_y() > 0 {
+                0.9_f32
+            } else {
+                1.1_f32
+            }
+            if self.distance < 0.3_f32 {
+                self.distance = 0.3_f32
+            }
+            if self.distance > 200 {
+                self.distance = 200
+            }
+            ret true
+        }
+        if event.kind() == event_pointer_down() && preview.contains(point) {
+            self.orbiting = true self.pointer = point self.focus = "vfx-canvas" ret true
+        }
+        if event.kind() == event_pointer_down() && canvas.contains(point) {
+            self.commit() self.focus = "vfx-canvas" self.pointer = point self.start = point self.before = particle_system_stringify(self.cached)
+            let local = self.view.world(point.x() - canvas.x(), point.y() - canvas.y())
+            if event.key() == 2 || event.key() == 3 {
+                self.panning = true ret true
+            }
+            for n in self.current_module().nodes {
+                let p = vfx_pin(n, 0_u32, true) let dx = p.x() - local.x() let dy = p.y() - local.y() if dx * dx + dy * dy < 100 {
+                    self.connection = n.id ret true
+                }
+            }
+            self.selection = self.scene.hit(self.view, point.x() - canvas.x(), point.y() - canvas.y()).unwrap_or(0_u64) self.curve.fit(1) self.dragging = self.selection != 0_u64 if self.dragging {
+                self.document.begin_gesture()
+            }
+            self.dirty = true ret true
+        }
+        if event.kind() == event_pointer_move() {
+            let dx = point.x() - self.pointer.x() let dy = point.y() - self.pointer.y() self.pointer = point
+            if self.orbiting {
+                self.yaw -= dx * 0.01_f32 self.pitch += dy * 0.01_f32 if self.pitch > 1.5_f32 {
+                    self.pitch = 1.5_f32
+                }
+                if self.pitch < - 1.5_f32 {
+                    self.pitch = - 1.5_f32
+                }
+                ret true
+            }
+            if self.panning {
+                self.view = self.view.pan(dx, dy) ret true
+            }
+            if self.dragging {
+                let mut m = self.current_module() let a = self.view.world(0, 0) let b = self.view.world(dx, dy) for i in 0_usize..m.nodes.len() {
+                    let mut n = m.nodes.get(i).unwrap_or(ParticleNode::new(0_u64, "", 0, 0)) if n.id == self.selection {
+                        n.x += b.x() - a.x() n.y += b.y() - a.y() m.nodes.set(i, n)
+                    }
+                }
+                self.set_module(m) ret true
+            }
+        }
+        if event.kind() == event_pointer_up() &&(self.dragging || self.panning || self.orbiting || self.connection != 0_u64) {
+            if self.connection != 0_u64 {
+                let mut m = self.current_module() let local = self.view.world(point.x() - canvas.x(), point.y() - canvas.y()) for n in m.nodes {
+                    for input in 0_usize..(vfx_arity(vfx_opcode(n.operation)) as usize) {
+                        let p = vfx_pin(n, input as u32, false) let dx = p.x() - local.x() let dy = p.y() - local.y() if dx * dx + dy * dy < 144 && n.id != self.connection {
+                            let mut links = Vec[ParticleLink]::new() for edge in m.links {
+                                if edge.to != n.id || edge.input !=(input as u32) {
+                                    links.push(edge)
+                                }
+                            }
+                            links.push(ParticleLink {
+                                    self.connection, n.id, input as u32
+                                }
+                                ,
+                            ) m.links = links
+                        }
+                    }
+                }
+                self.set_module(m)
+            }
+            self.document.end_gesture() self.connection = 0_u64 self.dragging = false self.panning = false self.orbiting = false ret true
+        }
+        if event.kind() == event_scroll() && canvas.contains(point) {
+            self.view = self.view.zoom_at(if event.wheel_y() > 0 {
+                    1.1_f32
+                } else {
+                    0.9_f32
+                }
+                , point.x() - canvas.x(), point.y() - canvas.y(),) ret true
+        }
+        if event.kind() == event_pointer_down() && !vfx_editor_id(target) {
+            self.commit() self.focus = "" self.curve.focus(false) self.dirty = true
+        }
+        ret false
+    }
+    pub fn take_published(self: mut Self&) -> str {
+        let published = self.published self.published = "" ret published
+    }
+    pub fn tick(self: mut Self&, window: Window, visible: bool) -> bool {
+        self.visible = visible
+        if self.cached_revision != self.document.revision() {
+            self.cached = self.document.asset() self.cached_revision = self.document.revision() self.dirty = true
+        }
+        let now = perf_counter_ms()
+        let done = match self.worker {
+            Some(w) => w.is_finished() None => false
+        }
+        if done {
+            match self.worker {
+                Some(w) => {
+                    let build = w.join() if build.revision == self.document.revision() && build.source == particle_system_stringify(self.cached) {
+                        self.diagnostics = build.diagnostics if self.diagnostics.len() == 0_usize {
+                            self.pending = Option[ParticleSystem]::Some(build.asset) self.message = "Compiled"
+                        } else {
+                            self.message = "Compilation failed · last working effect retained"
+                        }
+                        self.dirty = true
+                    }
+                }
+                None => {
+                }
+            }
+            self.worker = Option[JoinHandle[VfxEditorBuild]]::None
+        }
+        if visible && self.worker.is_none() && self.attempted != self.document.revision() && now >= self.compile_after {
+            self.attempted = self.document.revision() self.worker = Option[JoinHandle[VfxEditorBuild]]::Some(spawn vfx_editor_compile(particle_system_stringify(self.cached), self.document.revision()))
+        }
+        let ready = match self.preview {
+            Some(p) => p.ready() None => true
+        }
+        if ready && self.stopped && self.preview.is_some() {
+            match self.preview {
+                Some(p) => {
+                    window.clear_external_vulkan_images() p.destroy()
+                }
+                None => {
+                }
+            }
+            self.preview = Option[ParticlePreview<H>]::None self.dirty = true
+        }
+        if ready && !self.stopped {
+            match self.pending {
+                Some(asset) => {
+                    // Publish only a complete replacement. Failed GPU allocation keeps the last working preview.
+                    match ParticlePreview::create(window, asset) {
+                        Ok(replacement) => {
+                            match self.preview {
+                                Some(old) => {
+                                    window.clear_external_vulkan_images() old.destroy()
+                                }
+                                None => {
+                                }
+                            }
+                            if self.paused {
+                                replacement.action(0_u32)
+                            }
+                            self.preview = Option[ParticlePreview<H>]::Some(replacement) self.time = 0 self.last_tick = 0_u64
+                        }
+                        Err(message) => {
+                            self.message = message + " · last working effect retained"
+                        }
+                    }
+                    self.pending = Option[ParticleSystem]::None self.dirty = true
+                }
+                None => {
+                }
+            }
+        }
+        if visible && !self.stopped &&(!self.paused || self.seeking) && now - self.last_ui >= 100_u64 {
+            self.last_ui = now self.dirty = true
+        }
+        let changed = self.dirty self.dirty = false ret changed
+    }
+    pub fn needs_tick(self: Self&) -> bool {
+        ret self.worker.is_some() ||(self.stopped && self.preview.is_some()) ||(self.visible &&((!self.stopped &&(!self.paused || self.seeking)) || self.pending.is_some()))
+    }
+    pub fn compose(self: mut Self&, frame: PreparedFrame, layout: WidgetLayout, sheet: StyleSheet) -> PreparedFrame {
+        let bounds = match layout.find_bounds("vfx-canvas") {
+            Some(b) => b None => {
+                ret frame
+            }
+        }
+        let mut out = frame.with_canvas_at(self.canvas(bounds, sheet), self.view, bounds)
+        match layout.find_bounds("vfx-curve") {
+            Some(curve_bounds) => {
+                let points = self.curve_points() out = out.with_foreground_overlay(self.curve.display(points, points, curve_bounds, vfx_style(sheet, "g-lod-curve-surface"), vfx_style(sheet, "g-lod-curve-accent"), vfx_style(sheet, "g-lod-curve-text"), CurveAxes {
+                            "Normalized age", "Value", "", "", 1
+                        }
+                        ,
+                    ), vfx_clip(curve_bounds, layout.find_bounds("vfx-sidebar").unwrap_or(curve_bounds)))
+            }
+            None => {
+            }
+        }
+        let now = perf_counter_ms() let mut delta = if self.last_tick == 0_u64 {
+            0.016666667_f32
+        } else {
+            ((now - self.last_tick) as f32) / 1000
+        }
+        if delta > 0.1_f32 {
+            delta = 0.1_f32
+        }
+        if self.paused || self.stopped {
+            delta = 0
+        }
+        if self.seeking && self.seek > self.time {
+            delta = if self.seek - self.time > 0.25_f32 {
+                0.25_f32
+            } else {
+                self.seek - self.time
+            }
+        }
+        if self.scrubbing && !self.seeking {
+            delta = 0
+        }
+        match self.preview {
+            Some(p) => {
+                if p.ready() && p.compose(out, self.yaw, self.pitch, self.distance, delta) {
+                    self.time += delta self.last_tick = now
+                    if self.seeking && self.time + 0.000001_f32 >= self.seek {
+                        self.seeking = false
+                        if self.paused {
+                            p.action(0_u32)
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret out
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        match self.worker {
+            Some(w) => {
+                w.join()
+            }
+            None => {
+            }
+        }
+        self.worker = Option[JoinHandle[VfxEditorBuild]]::None match self.preview {
+            Some(p) => {
+                p.destroy()
+            }
+            None => {
+            }
+        }
+        self.preview = Option[ParticlePreview<H>]::None
+    }
+}

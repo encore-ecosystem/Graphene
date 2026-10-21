@@ -1,0 +1,269 @@
+//! Offline bridge: copy bounded POD records, close native parser, validate Encore assets.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{LocalTransform, PoseVector, PoseRotation, PoseMatrix, animation_finite}
+import mod::model::*
+extern fn graphene_animation_open(path: str) -> usize
+extern fn graphene_animation_error(handle: usize) -> str
+extern fn graphene_animation_close(handle: usize) ->()
+extern fn graphene_animation_count(handle: usize, kind: u32, owner: usize) -> usize
+extern fn graphene_animation_integer(handle: usize, kind: u32, owner: usize, element: usize) -> u32
+extern fn graphene_animation_number(handle: usize, kind: u32, owner: usize, element: usize, component: usize) -> f32
+extern fn graphene_animation_name(handle: usize, kind: u32, owner: usize) -> str
+pub import mod::material::{AnimationSourceImage, AnimationSourceMaterial}
+pub struct AnimationSource {
+    skeleton: Skeleton
+    mesh: SkeletalMesh
+    clips: Vec[AnimationClip]
+    materials: Vec[AnimationSourceMaterial]
+    warnings: Vec[str]
+}
+#attr(safe)
+fn number(h: usize, kind: u32, index: usize, component: usize) -> f32 {
+    ret graphene_animation_number(h, kind, index, 0_usize, component)
+}
+#attr(safe)
+fn triple(h: usize, kind: u32, index: usize, element: usize, start: usize) -> PoseVector {
+    ret PoseVector {
+        graphene_animation_number(h, kind, index, element, start), graphene_animation_number(h, kind, index, element, start + 1_usize), graphene_animation_number(h, kind, index, element, start + 2_usize)
+    }
+}
+#attr(safe)
+fn four(h: usize, kind: u32, index: usize, element: usize, start: usize) -> AnimationValue {
+    ret AnimationValue {
+        graphene_animation_number(h, kind, index, element, start), graphene_animation_number(h, kind, index, element, start + 1_usize), graphene_animation_number(h, kind, index, element, start + 2_usize), graphene_animation_number(h, kind, index, element, start + 3_usize)
+    }
+}
+#attr(safe)
+fn source_image(h: usize, index: usize, normal: bool) -> AnimationSourceImage {
+    let kind = if normal {
+        22_u32
+    } else {
+        21_u32
+    }
+    let count = graphene_animation_count(h, kind, index) let mut pixels = Vec[u32]::with_capacity(count)
+    for i in 0_usize..count {
+        pixels.push(graphene_animation_integer(h, kind + 2_u32, index, i))
+    }
+    ret AnimationSourceImage {
+        graphene_animation_integer(h, kind, index, 0_usize), graphene_animation_integer(h, kind, index, 1_usize), pixels, graphene_animation_integer(h, 25_u32, index, if normal {
+                1_usize
+            } else {
+                0_usize
+            }
+            ,
+        ) != 0_u32
+    }
+}
+#attr(safe)
+fn copy_source(h: usize, identity: str) -> Result[AnimationSource, str] {
+    let mut bones = Vec[SkeletonBone]::with_capacity(graphene_animation_count(h, 0_u32, 0_usize))
+    let mut inverse_bind = Vec[PoseMatrix]::with_capacity(graphene_animation_count(h, 0_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 0_u32, 0_usize) {
+        let q = four(h, 0_u32, i, 0_usize, 3_usize)
+        bones.push(SkeletonBone {
+                graphene_animation_name(h, 0_u32, i), graphene_animation_integer(h, 0_u32, i, 0_usize) as i32, LocalTransform {
+                    triple(h, 0_u32, i, 0_usize, 0_usize), PoseRotation {
+                        q.x, q.y, q.z, q.w
+                    }
+                    , triple(h, 0_u32, i, 0_usize, 7_usize)
+                }
+            }
+            ,
+        )
+        inverse_bind.push(PoseMatrix {
+                number(h, 2_u32, i, 0_usize), number(h, 2_u32, i, 4_usize), number(h, 2_u32, i, 8_usize), number(h, 2_u32, i, 12_usize), number(h, 2_u32, i, 1_usize), number(h, 2_u32, i, 5_usize), number(h, 2_u32, i, 9_usize), number(h, 2_u32, i, 13_usize), number(h, 2_u32, i, 2_usize), number(h, 2_u32, i, 6_usize), number(h, 2_u32, i, 10_usize), number(h, 2_u32, i, 14_usize)
+            }
+            ,
+        )
+    }
+    let skeleton = Skeleton {
+        1_u32, identity, "Imported skeleton", bones, Vec[SkeletonSocket]::new()
+    }
+    skeleton.validate()?
+    let mut vertices = Vec[SkinVertex]::with_capacity(graphene_animation_count(h, 1_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 1_u32, 0_usize) {
+        let mut influences = Vec[SkinInfluence]::with_capacity(graphene_animation_count(h, 9_u32, i))
+        for k in 0_usize..graphene_animation_count(h, 9_u32, i) {
+            influences.push(SkinInfluence {
+                    graphene_animation_integer(h, 1_u32, i, k), number(h, 3_u32, i, k)
+                }
+                ,
+            )
+        }
+        vertices.push(SkinVertex {
+                triple(h, 1_u32, i, 0_usize, 0_usize), triple(h, 1_u32, i, 0_usize, 3_usize), four(h, 1_u32, i, 0_usize, 6_usize), AnimationValue {
+                    number(h, 1_u32, i, 10_usize), number(h, 1_u32, i, 11_usize), 0_f32, 0_f32
+                }
+                , influences
+            }
+            ,
+        )
+    }
+    let mut indices = Vec[u32]::with_capacity(graphene_animation_count(h, 2_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 2_u32, 0_usize) {
+        indices.push(graphene_animation_integer(h, 2_u32, i, 0_usize))
+    }
+    let mut sections = Vec[SkinSection]::with_capacity(graphene_animation_count(h, 3_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 3_u32, 0_usize) {
+        sections.push(SkinSection {
+                graphene_animation_name(h, 3_u32, i), graphene_animation_integer(h, 3_u32, i, 0_usize), graphene_animation_integer(h, 3_u32, i, 1_usize), graphene_animation_name(h, 10_u32, i)
+            }
+            ,
+        )
+    }
+    let mut morphs = Vec[MorphTarget]::with_capacity(graphene_animation_count(h, 4_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 4_u32, 0_usize) {
+        let mut deltas = Vec[MorphDelta]::with_capacity(graphene_animation_count(h, 8_u32, i))
+        for k in 0_usize..graphene_animation_count(h, 8_u32, i) {
+            deltas.push(MorphDelta {
+                    graphene_animation_integer(h, 8_u32, i, k), triple(h, 8_u32, i, k, 0_usize), triple(h, 8_u32, i, k, 3_usize), triple(h, 8_u32, i, k, 6_usize)
+                }
+                ,
+            )
+        }
+        let weight = number(h, 4_u32, i, 0_usize)
+        morphs.push(MorphTarget {
+                graphene_animation_name(h, 4_u32, i), if weight < 0_f32 {
+                    weight
+                } else {
+                    0_f32
+                }
+                , if weight > 1_f32 {
+                    weight
+                } else {
+                    1_f32
+                }
+                , weight, deltas
+            }
+            ,
+        )
+    }
+    let mut mesh = SkeletalMesh {
+        1_u32, identity + ":mesh", identity, "Imported mesh", vertices, indices, inverse_bind, sections, morphs
+    }
+    mesh.validate(skeleton)?
+    let mut clips = Vec[AnimationClip]::with_capacity(graphene_animation_count(h, 5_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 5_u32, 0_usize) {
+        let mut tracks = Vec[AnimationTrack]::with_capacity(graphene_animation_count(h, 6_u32, i))
+        let first = graphene_animation_integer(h, 5_u32, i, 0_usize) as usize
+        for k in 0_usize..graphene_animation_count(h, 6_u32, i) {
+            let index = first + k
+            let mut keys = Vec[AnimationKey]::with_capacity(graphene_animation_count(h, 7_u32, index))
+            for j in 0_usize..graphene_animation_count(h, 7_u32, index) {
+                keys.push(AnimationKey {
+                        graphene_animation_number(h, 7_u32, index, j, 0_usize), four(h, 7_u32, index, j, 1_usize), four(h, 7_u32, index, j, 5_usize), four(h, 7_u32, index, j, 9_usize)
+                    }
+                    ,
+                )
+            }
+            let path = match graphene_animation_integer(h, 6_u32, index, 1_usize) {
+                0_u32 => TrackPath::Translation 1_u32 => TrackPath::Rotation 2_u32 => TrackPath::Scale _ => TrackPath::Morph
+            }
+            let interpolation = match graphene_animation_integer(h, 6_u32, index, 2_usize) {
+                0_u32 => KeyInterpolation::Step 1_u32 => KeyInterpolation::Linear _ => KeyInterpolation::CubicSpline
+            }
+            tracks.push(AnimationTrack {
+                    graphene_animation_integer(h, 6_u32, index, 0_usize), path, interpolation, keys
+                }
+                ,
+            )
+        }
+        let name = graphene_animation_name(h, 5_u32, i)
+        let mut occurrence = 0_usize
+        for previous in clips {
+            if previous.name == name {
+                occurrence += 1_usize
+            }
+        }
+        let clip = AnimationClip {
+            1_u32, identity + ":clip:" + name.byte_len().fmt() + ":" + name + ":" + occurrence.fmt(), identity, name, number(h, 5_u32, i, 0_usize), tracks, Vec[AnimationNotify]::new()
+        }
+        clip.validate(skeleton, mesh.morphs.len())?
+        clips.push(clip)
+    }
+    extend_morph_ranges(mesh, clips)?
+    let mut materials = Vec[AnimationSourceMaterial]::with_capacity(graphene_animation_count(h, 20_u32, 0_usize))
+    for i in 0_usize..graphene_animation_count(h, 20_u32, 0_usize) {
+        materials.push(AnimationSourceMaterial {
+                graphene_animation_name(h, 20_u32, i), four(h, 20_u32, i, 0_usize, 0_usize), number(h, 20_u32, i, 4_usize), number(h, 20_u32, i, 5_usize), number(h, 20_u32, i, 6_usize), number(h, 20_u32, i, 7_usize) > 0.5_f32, number(h, 20_u32, i, 8_usize) > 0.5_f32, number(h, 20_u32, i, 9_usize) as u32, number(h, 20_u32, i, 10_usize), source_image(h, i, false), source_image(h, i, true)
+            }
+            ,
+        )
+    }
+    for material in materials {
+        material.validate()?
+    }
+    let mut warnings = Vec[str]::new()
+    if number(h, 11_u32, 0_usize, 0_usize) > 0_f32 {
+        warnings.push("Skin influences were pruned to eight per vertex; maximum discarded weight: " + number(h, 11_u32, 0_usize, 0_usize).fmt())
+    }
+    ret Result::Ok(AnimationSource { skeleton, mesh, clips, materials, warnings })
+}
+/// Identity is supplied by the asset database and reused on reimport, rather
+/// than deriving skeleton compatibility from the mutable source filename.
+#attr(safe)
+pub fn decode_animation_source(path: str, identity: str) -> Result[AnimationSource, str] {
+    if identity == "" {
+        ret Result::Err("Animation source requires a stable identity")
+    }
+    let handle = graphene_animation_open(path)
+    let error = graphene_animation_error(handle)
+    if error != "" {
+        graphene_animation_close(handle) ret Result::Err(error)
+    }
+    let result = copy_source(handle, identity)
+    graphene_animation_close(handle)
+    ret result
+}
+
+/// Hermite segments are cubic Beziers. Their four control values enclose every
+/// interpolated weight, including overshoot between authored keys.
+fn extend_morph_ranges(mesh: mut SkeletalMesh, clips: Vec[AnimationClip]) -> Result[bool, str] {
+    for clip in clips {
+        for track in clip.tracks {
+            let morph = match track.path {
+                TrackPath::Morph => true _ => false
+            }
+            if !morph {
+                continue
+            }
+            let mut target = mesh.morphs.get_unchecked_borrowed(track.target as usize)
+            for i in 0_usize..track.keys.len() {
+                let key = track.keys.get_unchecked_borrowed(i)
+                target.minimum = if key.value.x < target.minimum {
+                    key.value.x
+                } else {
+                    target.minimum
+                }
+                target.maximum = if key.value.x > target.maximum {
+                    key.value.x
+                } else {
+                    target.maximum
+                }
+                match track.interpolation {
+                    KeyInterpolation::CubicSpline => {
+                        if i + 1_usize < track.keys.len() {
+                            let next = track.keys.get_unchecked_borrowed(i + 1_usize) let span =(next.time - key.time) / 3_f32
+                            for value in vec![key.value.x + span * key.outgoing.x, next.value.x - span * next.incoming.x] {
+                                if !animation_finite(value) {
+                                    ret Result::Err("Morph interpolation exceeds finite asset bounds")
+                                }
+                                if value < target.minimum {
+                                    target.minimum = value
+                                }
+                                if value > target.maximum {
+                                    target.maximum = value
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            mesh.morphs.set(track.target as usize, target)
+        }
+    }
+    ret Result::Ok(true)
+}

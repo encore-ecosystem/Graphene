@@ -1,0 +1,233 @@
+import core::option::Option
+import core::vec::Vec
+import graphene::autolod_settings::AutoLodSettings
+import graphene::{LodInterpolation, LodGroups, LodGroup, LodCurvePoint, EditorUiState}
+import luma::TextEditor
+import std::os::{mkdir_all, read_file, write_file}
+import std::time::perf_counter_ns
+
+fn main() -> u32 {
+    let root = "/tmp/graphene-lod-groups-" + perf_counter_ns().fmt()
+    if mkdir_all(root) != 0 {
+        ret 1
+    }
+    let mut ui = EditorUiState::new()
+    ui.lod_groups.sync(root, Vec::new())
+    ui.lod_groups.begin("default")
+    ui.lod_groups.action("lod-new")
+    let id = ui.lod_groups.selected
+    if id == "default" || ui.lod_groups.catalog.groups.len() != 1 {
+        ret 2
+    }
+    ui.lod_groups.focus_field("lod-name")
+    ui.lod_groups.editor = TextEditor::new("Rocks")
+    ui.lod_groups.action("lod-add-point")
+    if ui.lod_groups.group().name != "Rocks" || ui.lod_groups.group().curve.len() != 5 {
+        ret 3
+    }
+    ui.lod_groups.focus_field("lod-triangles-0")
+    ui.lod_groups.editor = TextEditor::new("75")
+    ui.lod_groups.action("lod-apply")
+    if !ui.lod_groups.take_applied() || ui.lod_groups.catalog.resolve(id).evaluate(1) != 0.75_f32 {
+        ret 4
+    }
+    let saved = read_file(root + "/Config/LODGroups.json")
+    ui.lod_groups.begin(id)
+    ui.lod_groups.focus_field("lod-triangles-0")
+    ui.lod_groups.editor = TextEditor::new("80")
+    ui.lod_groups.action("lod-add-point")
+    if ui.lod_groups.catalog.resolve(id).evaluate(1) != 0.75_f32 {
+        ret 5
+    }
+    ui.lod_groups.cancel()
+    if ui.lod_groups.group().evaluate(1) != 0.75_f32 || read_file(root + "/Config/LODGroups.json") != saved {
+        ret 6
+    }
+    ui.lod_groups.begin(id)
+    ui.lod_groups.focus_field("lod-name")
+    ui.lod_groups.editor = TextEditor::new("Stone")
+    ui.lod_groups.action("lod-apply")
+    if !ui.lod_groups.take_applied() || LodGroups::load(root).resolve(id).name != "Stone" {
+        ret 7
+    }
+    ui.lod_groups.usage = vec![id]
+    ui.lod_groups.asset_paths = vec![root + "/Stone.gmesh"]
+    let policy = AutoLodSettings { true, id }
+    if !policy.save(root + "/Stone.gmesh") {
+        ret 8
+    }
+    ui.lod_groups.action("lod-delete")
+    if ui.lod_groups.draft.find(id).is_none() {
+        ret 9
+    }
+    ui.lod_groups.begin("default")
+    ui.lod_groups.action("lod-delete")
+    if ui.lod_groups.draft.find("default").is_none() {
+        ret 10
+    }
+    ui.lod_groups.action("lod-duplicate")
+    ui.lod_groups.focus_field("lod-name")
+    ui.lod_groups.editor = TextEditor::new(" default ")
+    ui.lod_groups.action("lod-apply")
+    if ui.lod_groups.take_applied() || read_file(root + "/Config/LODGroups.json") == "" {
+        ret 11
+    }
+    let tiny = LodGroup::constant("tiny", "Tiny", 0.00001_f32)
+    if !tiny.valid() || LodGroup::constant("zero", "Zero", 0).valid() || LodGroup::constant("over", "Over", 1.01_f32).valid() {
+        ret 19
+    }
+    let mut catalog = LodGroups::defaults() catalog.groups.push(tiny)
+    if !LodGroups::decode(catalog.encode()).valid() || LodGroups::decode("{\"version\":4,\"groups\":[]}").error == "" {
+        ret 20
+    }
+    let invalid = LodGroup {
+        "bad", "Bad", vec![LodCurvePoint { 0.1_f32, 4.0_f32 }, LodCurvePoint {
+                0.2_f32, 8.0_f32
+            }
+        ]
+        , LodInterpolation::Linear
+    }
+    if invalid.valid() || !LodGroups::decode(saved).valid() {
+        ret 12
+    }
+    let legacy = AutoLodSettings::decode("{\"enabled\":false,\"target_error\":4}")
+    if legacy.enabled || LodGroups::defaults().resolve(legacy.group_id).evaluate(0.5_f32) != 0.5_f32 {
+        ret 13
+    }
+    if !legacy.save(root + "/Legacy.gmesh") || AutoLodSettings::load(root + "/Legacy.gmesh").group_id != legacy.group_id {
+        ret 14
+    }
+    ui.lod_groups.cancel() ui.lod_groups.begin("default")
+    for _ in 0_usize..8_usize {
+        ui.lod_groups.action("lod-add-point")
+    }
+    if ui.lod_groups.group().curve.len() != 8 {
+        ret 16
+    }
+    for _ in 0_usize..8_usize {
+        ui.lod_groups.action("lod-remove-0")
+    }
+    if ui.lod_groups.group().curve.len() != 2 || ui.lod_groups.catalog.resolve("default").curve.len() != 4 {
+        ret 17
+    }
+    let mut migration = LodGroups::defaults()
+    migration.groups.push(LodGroup::constant("custom", "Legacy 16", 0.5_f32))
+    if !migration.migrate_legacy("legacy-16") || !migration.valid() || migration.resolve("legacy-16").evaluate(0.5_f32) > 0.101_f32 || migration.resolve("legacy-16").evaluate(0.5_f32) < 0.099_f32 || migration.migrate_legacy("legacy-bad") {
+        ret 18
+    }
+    let old = "{\"version\":1,\"groups\":[{\"id\":\"default\",\"name\":\"Default\",\"curve\":[{\"screen_coverage\":0.5,\"error_px\":1},{\"screen_coverage\":0.01,\"error_px\":32}]}]}"
+    write_file(root + "/Config/LODGroups.json", old)
+    let converted = LodGroups::load(root)
+    if !converted.valid() || converted.resolve("default").evaluate(1) != 1 || converted.resolve("default").evaluate(1000) < 0.0199_f32 || converted.resolve("default").evaluate(1000) > 0.0201_f32 || !converted.save(root) || read_file(root + "/Config/LODGroups.before-distance.json") != old || LodGroups::needs_migration(root) {
+        ret 21
+    }
+    if !converted.save(root) || read_file(root + "/Config/LODGroups.before-distance.json") != old {
+        ret 22
+    }
+    let v2 = "{\"version\":2,\"groups\":[{\"id\":\"default\",\"name\":\"Default\",\"curve\":[{\"screen_coverage\":0.5,\"triangle_ratio\":1},{\"screen_coverage\":0.2,\"triangle_ratio\":0.5},{\"screen_coverage\":0.05,\"triangle_ratio\":0.1},{\"screen_coverage\":0,\"triangle_ratio\":0.02}]}]}"
+    write_file(root + "/Config/LODGroups.json", v2)
+    let distance_catalog = LodGroups::load(root)
+    if !distance_catalog.valid() || distance_catalog.resolve("default").curve.get_unchecked_borrowed(0).distance != 10 || distance_catalog.resolve("default").evaluate(30) < 0.499_f32 || distance_catalog.resolve("default").evaluate(30) > 0.501_f32 || distance_catalog.resolve("default").curve.get_unchecked_borrowed(3).distance != 600 || !distance_catalog.save(root) {
+        ret 23
+    }
+    if read_file(root + "/Config/LODGroups.before-distance.json") != old || read_file(root + "/Config/LODGroups.before-distance.2.json") != v2 || read_file(root + "/Config/LODGroups.json").contains("\"screen_coverage\"") {
+        ret 24
+    }
+    ui.lod_groups.cancel() ui.lod_groups.begin("default")
+    ui.lod_groups.focus_field("lod-distance-0") ui.lod_groups.editor = TextEditor::new("12") ui.lod_groups.action("lod-apply")
+    if !ui.lod_groups.take_applied() || ui.lod_groups.catalog.resolve("default").curve.get_unchecked_borrowed(0).distance != 12 {
+        ret 25
+    }
+    let negative = LodGroup {
+        "negative", "Negative", vec![LodCurvePoint { - 1.0_f32, 1.0_f32 }, LodCurvePoint {
+                10.0_f32, 0.5_f32
+            }
+        ]
+        , LodInterpolation::Linear
+    }
+    let duplicate_distance = LodGroup {
+        "same", "Same", vec![LodCurvePoint { 10.0_f32, 1.0_f32 }, LodCurvePoint {
+                10.0_f32, 0.5_f32
+            }
+        ]
+        , LodInterpolation::Linear
+    }
+    let extreme = LodGroup {
+        "large", "Large", vec![LodCurvePoint { 0.0_f32, 1.0_f32 }, LodCurvePoint {
+                300000000000000000000000000000000000000.0_f32, 0.1_f32
+            }
+        ]
+        , LodInterpolation::Linear
+    }
+    let overflow = LodGroup {
+        "overflow", "Overflow", vec![LodCurvePoint {
+                0.0_f32, 1.0_f32
+            }
+            , LodCurvePoint {
+                extreme.curve.get_unchecked_borrowed(1).distance * 2.0_f32, 0.1_f32
+            }
+        ]
+        , LodInterpolation::Linear
+    }
+    if negative.valid() || duplicate_distance.valid() || !extreme.valid() || overflow.valid() {
+        ret 26
+    }
+    ui.lod_groups.draft.groups.push(extreme) ui.lod_groups.selected = extreme.id ui.lod_groups.action("lod-add-point")
+    if !ui.lod_groups.group().valid() || ui.lod_groups.group().curve.len() != 3 {
+        ret 27
+    }
+    write_file(root + "/Config/LODGroups.json", "corrupted")
+    let broken = LodGroups::load(root)
+    if broken.error == "" || broken.save(root) || read_file(root + "/Config/LODGroups.json") != "corrupted" {
+        ret 15
+    }
+    let mut smooth = LodGroup::defaults() smooth.interpolation = LodInterpolation::Smooth
+    let linear = LodGroup::defaults()
+    if !smooth.valid() || smooth.evaluate(10) != 1 || smooth.evaluate(30) != 0.5_f32 || smooth.evaluate(100) != 0.1_f32 || smooth.evaluate(0) != 1 || smooth.evaluate(1000) != 0.02_f32 {
+        ret 30
+    }
+    let mut previous = 1.0_f32
+    for sample in 0_usize..3001_usize {
+        let distance =(sample as f32) / 10
+        let value = smooth.evaluate(distance)
+        if !(value > 0 && value <= previous && value <= 1) {
+            ret 31
+        }
+        previous = value
+    }
+    if smooth.evaluate(20) == linear.evaluate(20) {
+        ret 32
+    }
+    let mut modes = LodGroups::defaults() modes.groups.push(smooth)
+    // Use a distinct ID for a valid roundtrip catalog.
+    let mut custom = modes.groups.get_unchecked_borrowed(1) custom.id = "smooth" custom.name = "Smooth"
+    modes.groups.set(1, custom)
+    let decoded = LodGroups::decode(modes.encode())
+    if !decoded.valid() || !decoded.resolve("smooth").interpolation.smooth() || decoded.resolve("default").interpolation.smooth() {
+        ret 33
+    }
+    let old_distance = "{\"version\":3,\"groups\":[{\"id\":\"default\",\"name\":\"Default\",\"curve\":[{\"distance\":10,\"triangle_ratio\":1},{\"distance\":300,\"triangle_ratio\":0.1}]}]}"
+    let v3 = LodGroups::decode(old_distance)
+    if !v3.valid() || v3.resolve("default").interpolation.smooth() {
+        ret 34
+    }
+    let mut flat = LodGroup::constant("flat", "Flat", 0.5_f32) flat.interpolation = LodInterpolation::Smooth
+    if flat.evaluate(100) != 0.5_f32 {
+        ret 35
+    }
+    ui.lod_groups.cancel() ui.lod_groups.begin("default")
+    let original_mode = ui.lod_groups.group().interpolation.smooth()
+    ui.lod_groups.action("lod-smooth")
+    if !ui.lod_groups.group().interpolation.smooth() || ui.lod_groups.catalog.resolve("default").interpolation.smooth() != original_mode {
+        ret 36
+    }
+    ui.lod_groups.action("lod-undo")
+    if ui.lod_groups.group().interpolation.smooth() != original_mode {
+        ret 37
+    }
+    ui.lod_groups.action("lod-redo")
+    if !ui.lod_groups.group().interpolation.smooth() {
+        ret 38
+    }
+    ret 0
+}

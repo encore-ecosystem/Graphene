@@ -1,0 +1,87 @@
+//! Project assets are authored JSON; native build products stay under target/.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::codec::{blueprint_parse, blueprint_stringify}
+import mod::model::BlueprintAsset
+import mod::simulation::{BlueprintClass, load_blueprint_classes}
+import refrain::automation_transport::automation_capability_token
+import refrain::scene::world::Scene
+import std::os::{file_exists, mkdir_all, read_dir, read_file, write_file_atomic}
+import std::path::Path
+
+pub fn blueprint_compile_classes(project: str, scene: Scene, open_path: str, open_asset: BlueprintAsset) -> Result[Vec[BlueprintClass], str] {
+    let existing = load_blueprint_classes(project, scene)?
+    let mut classes = Vec[BlueprintClass]::new()
+    let mut included = false
+    for class in existing {
+        if open_path != "" && class.path == Path::new(open_path).resolve().as_str() {
+            classes.push(BlueprintClass { class.path, open_asset }) included = true
+        } else {
+            classes.push(class)
+        }
+    }
+    if open_path != "" && !included {
+        classes.push(BlueprintClass {
+                Path::new(open_path).resolve().as_str(), open_asset
+            }
+            ,
+        )
+    }
+    ret Result[Vec[BlueprintClass], str]::Ok(classes)
+}
+
+pub struct BlueprintFile {
+    path: str
+    name: str
+    error: str
+}
+pub fn discover_blueprints(project: str) -> Vec[BlueprintFile] {
+    let root = Path::new(project).resolve().join("Content/Blueprints")
+    let mut files = Vec[BlueprintFile]::new()
+    let suffix = ".graphene-blueprint.json"
+    for name in read_dir(root.as_str()) {
+        if name.byte_len() > suffix.byte_len() && name.slice(name.byte_len() - suffix.byte_len(), suffix.byte_len()) == suffix {
+            let path = root.join(name).as_str()
+            match blueprint_parse(read_file(path)) {
+                Ok(asset) => {
+                    files.push(BlueprintFile { path, asset.name, "" })
+                }
+                Err(error) => {
+                    files.push(BlueprintFile { path, name, error })
+                }
+            }
+        }
+    }
+    ret files
+}
+pub fn save_blueprint(path: str, asset: BlueprintAsset) -> Result[(), str] {
+    if write_file_atomic(path, blueprint_stringify(asset)) != 0 {
+        ret Result[(), str]::Err("unable to save Blueprint: " + path)
+    }
+    ret Result[(), str]::Ok(())
+}
+pub fn create_blueprint(project: str) -> Result[BlueprintFile, str] {
+    ret create_named_blueprint(project, "New Blueprint")
+}
+pub fn create_named_blueprint(project: str, title: str) -> Result[BlueprintFile, str] {
+    if title == "" {
+        ret Result[BlueprintFile, str]::Err("Blueprint name is required")
+    }
+    let root = Path::new(project).resolve().join("Content/Blueprints")
+    if mkdir_all(root.as_str()) != 0 {
+        ret Result[BlueprintFile, str]::Err("unable to create Blueprint asset directory")
+    }
+    let token = automation_capability_token()
+    if token.byte_len() < 32 {
+        ret Result[BlueprintFile, str]::Err("unable to allocate a Blueprint identity")
+    }
+    let name = "BP_" + token
+    let asset = BlueprintAsset::new(name, title)
+    let path = root.join(name + ".graphene-blueprint.json").as_str()
+    if file_exists(path) {
+        ret Result[BlueprintFile, str]::Err("Blueprint identity collision")
+    }
+    save_blueprint(path, asset)?
+    ret Result[BlueprintFile, str]::Ok(BlueprintFile { path, asset.name, "" })
+}

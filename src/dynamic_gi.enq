@@ -1,3 +1,4 @@
+import mod::rhi::buffer_transfer_destination
 //! Residency and temporal policy for Graphene Dynamic GI.
 
 import core::option::Option
@@ -97,8 +98,8 @@ impl for GpuDynamicGi {
         let scene_bytes =((8_usize + max_spheres * 12_usize) as u64) * 4_u64
         let surface_bytes =(max_samples as u64) * 12_u64 * 4_u64
         let history_bytes =(max_samples as u64) * 4_u64 * 4_u64
-        let scene_buffer = device.create_buffer(scene_bytes, buffer_storage(), true)
-        let surface_buffer = device.create_buffer(surface_bytes, buffer_storage(), true)
+        let scene_buffer = device.create_buffer(scene_bytes, buffer_storage() | buffer_transfer_destination(), true)
+        let surface_buffer = device.create_buffer(surface_bytes, buffer_storage() | buffer_transfer_destination(), true)
         let history_buffer = device.create_buffer(history_bytes, buffer_storage(), true)
         let filtered_buffer = device.create_buffer(history_bytes, buffer_storage(), true)
         let temporal_position_buffer = device.create_buffer(
@@ -370,8 +371,8 @@ impl for GpuDynamicGi {
             surface_values.push(sample.albedo.z())
             surface_values.push(1.0_f32)
         }
-        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
-        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let uploaded = frame.update_f32s(self.scene_buffer, 0_u64, scene_values) &&
+        frame.update_f32s(self.surface_buffer, 0_u64, surface_values)
         let traced = uploaded && frame.dispatch_compute(
             self.pipeline, self.group,
             ((sample_count + 63_usize) / 64_usize) as u32, 1_u32, 1_u32,) &&
@@ -425,8 +426,8 @@ impl for GpuDynamicGi {
             surface_values.push(sample.albedo.z())
             surface_values.push(1.0_f32)
         }
-        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
-        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let uploaded = frame.update_f32s(self.scene_buffer, 0_u64, scene_values) &&
+        frame.update_f32s(self.surface_buffer, 0_u64, surface_values)
         let traced = uploaded && frame.dispatch_compute(
             self.ray_pipeline, self.ray_group,
             ((sample_count + 63_usize) / 64_usize) as u32,
@@ -510,8 +511,8 @@ impl for GpuDynamicGi {
             surface_values.push(0.0_f32)
             placeholder += 1_usize
         }
-        let uploaded = self.scene_buffer.write_f32s(0_u64, scene_values) &&
-        self.surface_buffer.write_f32s(0_u64, surface_values)
+        let uploaded = frame.update_f32s(self.scene_buffer, 0_u64, scene_values) &&
+        frame.update_f32s(self.surface_buffer, 0_u64, surface_values)
         let placed = uploaded && frame.dispatch_compute(
             self.screen_probe_pipeline, self.ray_group,
             ((screen_count + 63_usize) / 64_usize) as u32,

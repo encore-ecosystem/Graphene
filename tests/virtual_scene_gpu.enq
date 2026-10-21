@@ -1,20 +1,9 @@
+import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
-import core::fmt::Debug
+import graphene::{DeviceFeatures, GpuVirtualGeometry, GraphicsInstance, VirtualGeometryInstance, buffer_storage, build_virtual_geometry, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_occlusion_counts, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error}
+import linalg::{Mat4, Vec3}
 import std::io::println
-import graphene:: {
-    DeviceFeatures, GpuVirtualGeometry, GraphicsInstance,
-    VirtualGeometryInstance, buffer_storage, build_virtual_geometry,
-    gpu_virtual_geometry_candidate_count,
-    gpu_virtual_geometry_main_visible_count,
-    gpu_virtual_geometry_occlusion_counts,
-    gpu_virtual_geometry_post_candidate_count,
-    gpu_virtual_geometry_post_visible_count,
-    gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error
-}
-import linalg:: {
-    Mat4, Vec3
-}
 
 fn main() -> u32 {
     let instance = GraphicsInstance::create()
@@ -75,7 +64,9 @@ fn main() -> u32 {
                 let disoccluded_x = if frame_index >= 6_u32 {
                     3.0_f32
                 } else {
-                    0.0_f32
+                    // Off-axis planar triangles remain front-facing. The old
+                    // cos(coneAngle) view test incorrectly rejected them.
+                    0.25_f32
                 }
                 scene_instances.push(VirtualGeometryInstance::new(
                         Mat4::trs(Vec3::new(disoccluded_x, 0.0_f32, - 3.5_f32),
@@ -105,14 +96,26 @@ fn main() -> u32 {
                 gpu_virtual_geometry_draw(virtual_scene, pass)
                 let ended = drawn && pass.end()
                 let presented = ended && frame.present()
-                rendered = culled && pass_ready && drawn && ended && presented
+                // Counter assertions need the current GPU submission, rather
+                // than the preceding slot's asynchronous telemetry.
+                let completed = presented && target.wait_readback()
+                rendered = culled && pass_ready && drawn && ended && completed
                 frame.destroy()
                 let frame_occlusion =
-                    gpu_virtual_geometry_occlusion_counts(virtual_scene)
+                gpu_virtual_geometry_occlusion_counts(virtual_scene)
                 let frame_main = frame_occlusion.get(0_usize).unwrap_or(0_u32)
                 let frame_post = frame_occlusion.get(1_usize).unwrap_or(0_u32)
                 let frame_candidates =
-                    frame_occlusion.get(2_usize).unwrap_or(0_u32)
+                frame_occlusion.get(2_usize).unwrap_or(0_u32)
+                // Bounding volumes do not establish occlusion coverage: the
+                // small rear triangle must remain a candidate, including after
+                // the front instance moves. No raster-depth HZB exists yet.
+                rendered = rendered && frame_main >=(if frame_index < 6_u32 {
+                        2_u32
+                    } else {
+                        1_u32
+                    }
+                ) && frame_candidates == 0_u32
                 if frame_main > maximum_main_visible {
                     maximum_main_visible = frame_main
                 }
@@ -127,18 +130,18 @@ fn main() -> u32 {
             let main_visible = maximum_main_visible
             let post_visible = maximum_post_visible
             let post_candidates = maximum_post_candidates
-            rendered = rendered && post_candidates > 0_u32 &&
-            post_visible > 0_u32 && main_visible > 0_u32
+            rendered = rendered && post_candidates == 0_u32 &&
+            post_visible == 0_u32 && main_visible >= 2_u32
             if !rendered {
                 println("virtual scene target=" + Debug::fmt(target_ready) +
-                " geometry=" + Debug::fmt(geometry_ready) +
-                " candidates=" + Debug::fmt(
-                    gpu_virtual_geometry_candidate_count(virtual_scene)) +
-                " main=" + Debug::fmt(main_visible) +
-                " post=" + Debug::fmt(post_visible) + "/" +
-                Debug::fmt(post_candidates) +
-                " drawError=" + Debug::fmt(
-                    gpu_virtual_geometry_record_error(virtual_scene)))
+                    " geometry=" + Debug::fmt(geometry_ready) +
+                    " candidates=" + Debug::fmt(
+                        gpu_virtual_geometry_candidate_count(virtual_scene)) +
+                    " main=" + Debug::fmt(main_visible) +
+                    " post=" + Debug::fmt(post_visible) + "/" +
+                    Debug::fmt(post_candidates) +
+                    " drawError=" + Debug::fmt(
+                        gpu_virtual_geometry_record_error(virtual_scene)))
             }
             gpu_virtual_geometry_destroy(virtual_scene)
             gi_history.destroy()

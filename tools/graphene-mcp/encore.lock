@@ -1,0 +1,89 @@
+version = 2
+
+[[packages]]
+name = "graphene"
+ref = "path@../.."
+version = "0.1.0"
+
+[[packages]]
+name = "json"
+ref = "index@json"
+version = "0.0.0"
+archive = "http://127.0.0.1:8137/archives/7fed457c838e555cd4df0bbcf8eb92caed7ac2de55bce8e7efaf0833d3d2ff19.tar.gz"
+checksum = "7fed457c838e555cd4df0bbcf8eb92caed7ac2de55bce8e7efaf0833d3d2ff19"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "std"
+ref = "index@std@0.0.0"
+version = "0.0.0"
+archive = "http://127.0.0.1:8137/archives/3eb888e4e1596945f8b51d30919d414ecd69d182b26729d37b66670a2c6e852e.tar.gz"
+checksum = "3eb888e4e1596945f8b51d30919d414ecd69d182b26729d37b66670a2c6e852e"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "core"
+ref = "sys@core"
+version = "0.0.0"
+
+[[packages]]
+name = "linalg"
+ref = "index@linalg"
+version = "0.0.0"
+archive = "http://127.0.0.1:8137/archives/d09ec7d5976bf9df40d5c37bb838b4214e17bff84886db2d624568ff2f400aaa.tar.gz"
+checksum = "d09ec7d5976bf9df40d5c37bb838b4214e17bff84886db2d624568ff2f400aaa"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "vulkan"
+ref = "index@vulkan@0.1.1"
+version = "0.1.1"
+archive = "http://127.0.0.1:8137/archives/ac4f241696781f826cde23dff4b82c58fecd8364f3cef5ebe68942610149afa6.tar.gz"
+checksum = "ac4f241696781f826cde23dff4b82c58fecd8364f3cef5ebe68942610149afa6"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "luma"
+ref = "index@luma@0.0.1"
+version = "0.0.1"
+features = ["fonts"]
+archive = "http://127.0.0.1:8137/archives/19949d6154ca0125beeb2d3ced9cdf0482ae36880ab1a2756b655fa52ceb607d.tar.gz"
+checksum = "19949d6154ca0125beeb2d3ced9cdf0482ae36880ab1a2756b655fa52ceb607d"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "sdl"
+ref = "index@sdl@0.1.0"
+version = "0.1.0"
+archive = "http://127.0.0.1:8137/archives/fdefa574e8ef5770c5912d5102aaffa4d4d0ef7ce263ffa665026675d6ce3a96.tar.gz"
+checksum = "fdefa574e8ef5770c5912d5102aaffa4d4d0ef7ce263ffa665026675d6ce3a96"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "gpu"
+ref = "index@gpu@0.1.1"
+version = "0.1.1"
+archive = "http://127.0.0.1:8137/archives/5a54fc0446b9d3d29e0fdd718b49c682578313fc4db979a716906905049e95b0.tar.gz"
+checksum = "5a54fc0446b9d3d29e0fdd718b49c682578313fc4db979a716906905049e95b0"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "platform"
+ref = "sys@platform"
+version = "0.0.0"
+
+[[packages]]
+name = "color"
+ref = "index@color"
+version = "0.0.0"
+archive = "http://127.0.0.1:8137/archives/e1b883aabe52e4a79a6b02c507ea627ce4696bd67fb42b56b051036a4f19059c.tar.gz"
+checksum = "e1b883aabe52e4a79a6b02c507ea627ce4696bd67fb42b56b051036a4f19059c"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "ui_native"
+ref = "workspace@ui_native"
+version = "0.0.0"
+source = "embedded@luma"
+path = "workspace/ui_native"
+distribution-checksum = "19949d6154ca0125beeb2d3ced9cdf0482ae36880ab1a2756b655fa52ceb607d"

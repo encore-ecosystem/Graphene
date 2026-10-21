@@ -1,0 +1,83 @@
+//! Compact, tool-specific snap choices. Menus never participate in viewport layout.
+import core::option::Option
+import core::vec::Vec
+import luma::{Widget, horizontal, vertical}
+import mod::editor_gesture::GizmoSnap
+import mod::editor_guides::gizmo_step_label
+
+pub fn snap_tool_name(tool: str) -> str {
+    ret if tool == "rotate" {
+        "Rotation"
+    } elif tool == "scale" {
+        "Scale"
+    } else {
+        "Translation"
+    }
+}
+
+pub fn snap_step_label(step: f32, tool: str) -> str {
+    ret gizmo_step_label(step) + if tool == "rotate" {
+        "°"
+    } elif tool == "move" {
+        " u"
+    } else {
+        ""
+    }
+}
+
+pub fn snap_step_values(tool: str) -> Vec[f32] {
+    ret if tool == "rotate" {
+        vec![1.0_f32, 5, 10, 15, 30, 45, 90]
+    } elif tool == "scale" {
+        vec![0.01_f32, 0.05, 0.1, 0.25, 0.5, 1]
+    } else {
+        vec![0.01_f32, 0.1, 0.5, 1, 5, 10, 50, 100]
+    }
+}
+
+pub fn snap_value_action(action: str) -> Option[(str, f32)] {
+    for tool in vec!["move", "rotate", "scale"] {
+        for value in snap_step_values(tool) {
+            if action == "snap-value-" + tool + "-" + gizmo_step_label(value) {
+                ret Option[(str, f32)]::Some((tool, value))
+            }
+        }
+    }
+    ret Option[(str, f32)]::None
+}
+
+pub fn snap_step_grid(tool: str, settings: GizmoSnap) -> Widget {
+    let values = snap_step_values(tool)
+    let mut grid = Widget::panel("snap-grid-" + tool).with_classes("g-snap-grid").with_direction(vertical())
+    let mut index = 0_usize
+    while index < values.len() {
+        let mut row = Widget::panel("").with_classes("g-snap-row").with_direction(horizontal())
+        for column in 0..2 {
+            let position = index + column
+            if position < values.len() {
+                let value = values.get(position).unwrap_or(1)
+                let id = "snap-value-" + tool + "-" + gizmo_step_label(value)
+                let selected = value == settings.step(tool)
+                row.push(Widget::button(id, snap_step_label(value, tool)).with_classes("g-snap-choice" +
+                        if selected {
+                            " state-active"
+                        } else {
+                            ""
+                        }
+                    )
+                    .with_attribute("role", "menuitemradio").with_attribute("aria-checked", if selected {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                        ,
+                    ))
+            } else {
+                row.push(Widget::panel("").with_classes("g-snap-empty"))
+            }
+        }
+        grid.push(row)
+        index = index + 2
+    }
+    ret grid
+}

@@ -1,0 +1,122 @@
+//! Scene camera projection and editor Pilot pose conversion.
+import core::option::Option
+import linalg::Vec3
+import mod::editor_camera::EditorCameraState
+import mod::editor_gesture::gizmo_angle
+import mod::scene::camera::PerspectiveCamera
+import mod::scene::transform::Transform
+import mod::scene::world::Scene
+
+pub fn scene_camera(scene: Scene, id: u64) -> Option[PerspectiveCamera] {
+    match scene.get(id) {
+        Some(entity) => {
+            match entity.component() {
+                Camera(settings) => {
+                    match scene.world_matrix(id) {
+                        Some(world) => {
+                            let position = world.transform_point(Vec3::zero())
+                            let forward = world.transform_point(Vec3::new(0.0_f32, 0.0_f32, - 1.0_f32)).sub(position).normalized()
+                            let up = world.transform_point(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32)).sub(position).normalized()
+                            ret Option[PerspectiveCamera]::Some(PerspectiveCamera::new(position, position.add(forward), settings.fov * 0.017453292_f32, settings.near, settings.far).with_up(up))
+                        }
+                        None => {
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        None => {
+        }
+    }
+    ret Option[PerspectiveCamera]::None
+}
+pub fn first_scene_camera(scene: Scene) -> u64 {
+    let mut found = 0_u64
+    for entity in scene.entities() {
+        if entity.component().kind() == "camera" && scene.world_visible(entity.id()) &&(found == 0_u64 || entity.id() < found) {
+            found = entity.id()
+        }
+    }
+    ret found
+}
+pub fn load_scene_camera(camera: mut EditorCameraState, scene: Scene, id: u64) -> bool {
+    match scene_camera(scene, id) {
+        Some(view) => {
+            let backward = view.position().sub(view.target()).normalized()
+            camera.position = view.position() camera.target = view.target() camera.distance = 1.0_f32
+            camera.yaw = gizmo_angle(backward.x(), backward.z())
+            camera.pitch = gizmo_angle(backward.y(), Vec3::new(backward.x(), 0.0_f32, backward.z()).length())
+            match scene.get(id) {
+                Some(entity) => {
+                    match entity.component() {
+                        Camera(settings) => {
+                            camera.fov = settings.fov * 0.017453292_f32
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            ret true
+        }
+        None => {
+            ret false
+        }
+    }
+}
+pub fn piloted_transform(camera: EditorCameraState, scene: Scene, id: u64) -> Option[Transform] {
+    match scene.get(id) {
+        Some(entity) => {
+            let mut roll = 0.0_f32
+            match scene.world_matrix(id) {
+                Some(matrix) => {
+                    match matrix.decompose_trs() {
+                        Some(parts) => {
+                            roll = parts.1.z()
+                        }
+                        None => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            let desired = Transform::new(camera.position, Vec3::new( - camera.pitch, camera.yaw, roll), entity.transform().scale())
+            if entity.parent().is_none() {
+                ret Option[Transform]::Some(desired)
+            }
+            let world = Transform::new(camera.position, Vec3::new( - camera.pitch, camera.yaw, roll), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)).matrix()
+            let local = match entity.parent() {
+                Some(parent) => {
+                    match scene.world_matrix(parent) {
+                        Some(matrix) => {
+                            match matrix.inverse_affine() {
+                                Some(inverse) => inverse.mul(world) None => {
+                                    ret Option[Transform]::None
+                                }
+                            }
+                        }
+                        None => {
+                            ret Option[Transform]::None
+                        }
+                    }
+                }
+                None => world
+            }
+            match local.decompose_trs() {
+                Some(parts) => {
+                    ret Option[Transform]::Some(Transform::new(parts.0, parts.1, entity.transform().scale()))
+                }
+                None => {
+                }
+            }
+        }
+        None => {
+        }
+    }
+    ret Option[Transform]::None
+}

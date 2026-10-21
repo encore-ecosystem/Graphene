@@ -1,0 +1,113 @@
+//! Explicit std430 ABI packing; GPU buffers never contain Encore object layouts.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{PoseMatrix, PoseVector}
+import mod::model::{SkeletalMesh, AnimationValue}
+extern fn graphene_animation_f32_bits(value: f32) -> u32
+#attr(safe)
+fn bits(value: f32) -> u32 {
+    ret graphene_animation_f32_bits(value)
+}
+fn vector(out: mut Vec[u32], v: PoseVector, w: f32) ->() {
+    out.push(bits(v.x)) out.push(bits(v.y)) out.push(bits(v.z)) out.push(bits(w))
+}
+fn four(out: mut Vec[u32], v: AnimationValue) ->() {
+    out.push(bits(v.x)) out.push(bits(v.y)) out.push(bits(v.z)) out.push(bits(v.w))
+}
+pub struct PackedSkinSource {
+    vertices: Vec[u32]
+    spans: Vec[u32]
+    deltas: Vec[u32]
+    delta_count: u32
+}
+pub fn pack_skin_source(mesh: SkeletalMesh) -> PackedSkinSource {
+    let mut vertices = Vec[u32]::with_capacity(mesh.vertices.len() * 32_usize)
+    let mut counts = Vec[u32]::with_capacity(mesh.vertices.len()) for _i in 0_usize..mesh.vertices.len() {
+        counts.push(0_u32)
+    }
+    for vertex in mesh.vertices {
+        vector(vertices, vertex.position, 1_f32) vector(vertices, vertex.normal, 0_f32) four(vertices, vertex.tangent) four(vertices, vertex.uv)
+        for i in 0_usize..8_usize {
+            vertices.push(if i < vertex.influences.len() {
+                    vertex.influences.get_unchecked_borrowed(i).bone
+                } else {
+                    0_u32
+                }
+            )
+        }
+        for i in 0_usize..8_usize {
+            vertices.push(bits(if i < vertex.influences.len() {
+                        vertex.influences.get_unchecked_borrowed(i).weight
+                    } else {
+                        0_f32
+                    }
+                ))
+        }
+    }
+    for morph in mesh.morphs {
+        for delta in morph.deltas {
+            let i = delta.vertex as usize counts.set(i, counts.get_unchecked_borrowed(i) + 1_u32)
+        }
+    }
+    let mut spans = Vec[u32]::with_capacity(mesh.vertices.len() * 2_usize) let mut offset = 0_u32 let mut cursor = Vec[u32]::with_capacity(mesh.vertices.len())
+    for count in counts {
+        spans.push(offset) spans.push(count) cursor.push(offset) offset += count
+    }
+    let mut deltas = Vec[u32]::with_capacity((offset as usize) * 16_usize)
+    for _i in 0_usize..(offset as usize) * 16_usize {
+        deltas.push(0_u32)
+    }
+    for target in 0_usize..mesh.morphs.len() {
+        for delta in mesh.morphs.get_unchecked_borrowed(target).deltas {
+            let index = delta.vertex as usize let at =(cursor.get_unchecked_borrowed(index) as usize) * 16_usize
+            cursor.set(index, cursor.get_unchecked_borrowed(index) + 1_u32)
+            for component in 0_usize..3_usize {
+                let p = if component == 0_usize {
+                    delta.position.x
+                } elif component == 1_usize {
+                    delta.position.y
+                } else {
+                    delta.position.z
+                }
+                let n = if component == 0_usize {
+                    delta.normal.x
+                } elif component == 1_usize {
+                    delta.normal.y
+                } else {
+                    delta.normal.z
+                }
+                let t = if component == 0_usize {
+                    delta.tangent.x
+                } elif component == 1_usize {
+                    delta.tangent.y
+                } else {
+                    delta.tangent.z
+                }
+                deltas.set(at + component, bits(p)) deltas.set(at + 4_usize + component, bits(n)) deltas.set(at + 8_usize + component, bits(t))
+            }
+            deltas.set(at + 12_usize, target as u32)
+        }
+    }
+    ret PackedSkinSource { vertices, spans, deltas, offset }
+}
+pub fn append_pose_matrix(values: mut Vec[f32], m: PoseMatrix) ->() {
+    values.push(m.m00) values.push(m.m01) values.push(m.m02) values.push(m.m03)
+    values.push(m.m10) values.push(m.m11) values.push(m.m12) values.push(m.m13)
+    values.push(m.m20) values.push(m.m21) values.push(m.m22) values.push(m.m23)
+}
+
+import mod::deform::DeformableCluster
+pub struct PackedDeformableBounds {
+    words: Vec[u32]
+    spans: Vec[u32]
+}
+pub fn pack_deformable_bounds(clusters: Vec[DeformableCluster]) -> PackedDeformableBounds {
+    let mut words = Vec[u32]::new() let mut spans = Vec[u32]::with_capacity(clusters.len() * 2_usize)
+    for cluster in clusters {
+        spans.push((words.len() / 12_usize) as u32) spans.push(cluster.bones.len() as u32)
+        for entry in cluster.bones {
+            vector(words, entry.bounds.minimum, 0_f32) vector(words, entry.bounds.maximum, 0_f32) words.push(entry.bone) words.push(0_u32) words.push(0_u32) words.push(0_u32)
+        }
+    }
+    ret PackedDeformableBounds { words, spans }
+}

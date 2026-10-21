@@ -1,0 +1,70 @@
+//! The editor's four live panels share Luma's movable tab/split workspace.
+import graphene::editor_docking::{create_editor_docks, editor_dock_shell}
+import luma::{Body, Html, DockNodeId, DockPlacement, PanelId, Rect, StyleSheet, UiBindings, UiContext, Widget, WindowId, layout_widget, vertical}
+import std::os::read_file
+
+fn main() -> u32 {
+    let main = WindowId::new(1)
+    let upper = Widget::panel("upper").with_child(Widget::panel("hierarchy").with_classes("editor-panel g-hierarchy"))
+    .with_child(Widget::panel("viewport").with_child(Widget::render_surface("viewport-surface")))
+    .with_child(Widget::panel("details-panel").with_classes("editor-panel g-inspector").with_child(Widget::input("transform-x", "42")))
+    let lower = Widget::panel("lower").with_child(Widget::panel("content-browser").with_classes("editor-panel g-content-browser"))
+    let view = Html::new().with_child(Body::new("root").with_classes("graphene-editor").with_direction(vertical())
+        .with_child(Widget::panel("menu-bar").with_flex(24, 0))
+        .with_child(upper).with_child(Widget::button("dock-splitter-bottom", ""))
+        .with_child(lower).with_child(Widget::panel("status").with_flex(24, 0)))
+    let mut bindings = UiBindings::new(UiContext::new())
+    let mut host = create_editor_docks(bindings, view, main, Rect::new(0, 24, 1440, 852))
+    let workspace = host.workspace()
+    let shell = editor_dock_shell(view)
+    if shell.find("upper").is_some() || shell.find("lower").is_some() ||
+    shell.find("dock-splitter-bottom").is_some() || shell.find("menu-bar").is_none() || shell.find("status").is_none() {
+        ret 1
+    }
+    let root = bindings.mount(shell)
+    let tree = bindings.tree()
+    let area = tree.find(root, "editor-dock-workspace").unwrap_or(root)
+    if !host.attach_window(main, area) || !host.commit() ||
+    !host.resize_geometry(main, Rect::new(0, 24, 1440, 852)) {
+        ret 2
+    }
+    let editor = tree.find(root, "transform-x").unwrap_or(root)
+    let outliner = workspace.location(PanelId::new("outliner")).unwrap_or(DockNodeId::empty())
+    if !workspace.dock(PanelId::new("details"), outliner, DockPlacement::Center, 1) || !host.commit() {
+        ret 3
+    }
+    if !tree.find(root, "transform-x").unwrap_or(root).same(editor) {
+        ret 4
+    }
+    let viewport = PanelId::new("viewport")
+    let content = workspace.location(PanelId::new("content")).unwrap_or(DockNodeId::empty())
+    let top = match workspace.window(main) { Some(window) => window.root() None => { ret 9 } }
+    let _enlarged = workspace.resize(top, 0.4)
+    if !workspace.dock(viewport, content, DockPlacement::Center, 0) || !host.commit() ||
+    !workspace.activate(PanelId::new("content")) || !host.commit() ||
+    !host.resize_geometry(main, Rect::new(0, 24, 1440, 852)) {
+        ret 5
+    }
+    let snapshot = tree.snapshot(root).unwrap_or(shell)
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let layout = layout_widget(sheet.apply(snapshot, "", "", ""), Rect::new(0, 0, 1440, 900))
+    if layout.find_bounds("viewport-surface").is_some() || tree.find(root, "viewport-surface").is_none() {
+        ret 6
+    }
+    let panel = match layout.find_bounds("content-browser") { Some(bounds) => bounds None => { ret 10 } }
+    let container = match layout.find_bounds("luma-dock-panel-content") { Some(bounds) => bounds None => { ret 11 } }
+    if panel.height() <= 270 || panel.height() != container.height() || panel.width() != container.width() {
+        ret 12
+    }
+    if !workspace.activate(viewport) || !host.commit() {
+        ret 7
+    }
+    let snapshot = tree.snapshot(root).unwrap_or(shell)
+    let layout = layout_widget(sheet.apply(snapshot, "", "", ""), Rect::new(0, 0, 1440, 900))
+    if layout.find_bounds("viewport-surface").is_none() {
+        ret 8
+    }
+    host.dispose()
+    let _released = bindings.unmount(root)
+    ret 0
+}

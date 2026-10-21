@@ -1,0 +1,284 @@
+//! Lowers validated DAGs into typed Encore functions and direct control flow.
+//! The C shim is the only public ABI; generated Encore symbols are private details.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, stringify}
+import mod::model::*
+import mod::validate::validate_blueprint
+
+pub struct BlueprintSourceRange {
+    asset: str
+    node: u64
+    first_line: usize
+    last_line: usize
+}
+pub struct BlueprintGenerated {
+    source: str
+    registry: str
+    ranges: Vec[BlueprintSourceRange]
+}
+fn id(value: u64) -> str {
+    ret Debug::fmt(value)
+}
+fn index(value: usize) -> str {
+    ret Debug::fmt(value)
+}
+fn quote(value: str) -> str {
+    ret stringify(Json::String(value))
+}
+fn type_name(value_type: BlueprintType) -> str {
+    ret match value_type {
+        Bool => "bool" I32 => "i32" F32 => "f32" String => "str" Vector => "BpVector"
+        Actor => "u64" Component => "u64" Exec => "()"
+    }
+}
+fn literal(value: BlueprintValue) -> str {
+    ret match value {
+        Bool(value) => if value {
+            "true"
+        } else {
+            "false"
+        }
+        I32(value) => "(" + Debug::fmt(value) + "_i32)"
+        F32(value) => "(" + Debug::fmt(value) + "_f32)"
+        String(value) => quote(value)
+        Actor(value) => id(value) + "_u64"
+        Component(value) => id(value) + "_u64"
+        Vector(value) => "BpVector { " + Debug::fmt(value.x()) + "_f32, " + Debug::fmt(value.y()) + "_f32, " + Debug::fmt(value.z()) + "_f32 }"
+    }
+}
+fn variable(asset: BlueprintAsset, property_id: u64) -> str {
+    let mut position = 0_usize
+    for property in asset.properties {
+        if property.id == property_id {
+            ret index(position) + "_u32"
+        }
+        position += 1
+    }
+    ret "0_u32"
+}
+fn function_name(prefix: str, node: u64) -> str {
+    ret prefix + "n" + id(node)
+}
+fn output_name(prefix: str, node: u64, pin: str) -> str {
+    ret prefix + "v" + id(node) + "_" + pin
+}
+fn input_expression(asset: BlueprintAsset, prefix: str, node: u64, pin: str) -> str {
+    for link in asset.links {
+        if link.target.node == node && link.target.pin == pin {
+            ret output_name(prefix, link.source.node, link.source.pin) + "(s, h, dt)"
+        }
+    }
+    // Generation is only called after full validation.
+    ret "INVALID_UNCONNECTED_INPUT"
+}
+fn next_statement(asset: BlueprintAsset, prefix: str, node: u64, pin: str) -> str {
+    for link in asset.links {
+        if link.source.node == node && link.source.pin == pin {
+            ret "    " + function_name(prefix, link.target.node) + "(s, h, dt)\n"
+        }
+    }
+    ret ""
+}
+fn property_read(asset: BlueprintAsset, node: BlueprintNode) -> str {
+    let slot = variable(asset, node.reference)
+    ret match node.value_type {
+        Bool => "gbp_get_bool(s, " + slot + ")"
+        I32 => "gbp_get_i32(s, " + slot + ")"
+        F32 => "gbp_get_f32(s, " + slot + ", 0_u32)"
+        String => "gbp_get_string(s, " + slot + ")"
+        Actor => "gbp_get_id(s, " + slot + ")"
+        Component => "gbp_get_id(s, " + slot + ")"
+        Vector => "BpVector { gbp_get_f32(s, " + slot + ", 0_u32), gbp_get_f32(s, " + slot + ", 1_u32), gbp_get_f32(s, " + slot + ", 2_u32) }"
+        Exec => "INVALID_EXEC_PROPERTY"
+    }
+}
+fn property_write(slot: str, value_type: BlueprintType, expression: str) -> str {
+    let head = "    let value = " + expression + "\n    if !gbp_ok(s) { ret () }\n"
+    ret head + match value_type {
+        Bool => "    gbp_set_bool(s, " + slot + ", value)\n"
+        I32 => "    gbp_set_i32(s, " + slot + ", value)\n"
+        F32 => "    gbp_set_f32(s, " + slot + ", 0_u32, value)\n"
+        String => "    gbp_set_string(s, " + slot + ", value)\n"
+        Actor => "    gbp_set_id(s, " + slot + ", value)\n"
+        Component => "    gbp_set_id(s, " + slot + ", value)\n"
+        Vector => "    gbp_set_f32(s, " + slot + ", 0_u32, value.x)\n    gbp_set_f32(s, " + slot + ", 1_u32, value.y)\n    gbp_set_f32(s, " + slot + ", 2_u32, value.z)\n"
+        Exec => "INVALID_EXEC_PROPERTY\n"
+    }
+}
+fn transform_field(operation: str) -> str {
+    if operation == "get-position" || operation == "set-position" || operation == "add-offset" {
+        ret "0_u32"
+    }
+    if operation == "get-rotation" || operation == "set-rotation" || operation == "add-rotation" {
+        ret "1_u32"
+    }
+    ret "2_u32"
+}
+fn expression(asset: BlueprintAsset, prefix: str, node: BlueprintNode, pin: str) -> str {
+    let operation = node.operation
+    if operation == "constant" {
+        ret literal(node.value)
+    }
+    if operation == "tick" {
+        ret "dt"
+    }
+    if operation == "get-variable" {
+        ret property_read(asset, node)
+    }
+    if operation == "make-vector" {
+        ret "BpVector { " + input_expression(asset, prefix, node.id, "x") + ", " + input_expression(asset, prefix, node.id, "y") + ", " + input_expression(asset, prefix, node.id, "z") + " }"
+    }
+    if operation == "break-vector" {
+        ret "(" + input_expression(asset, prefix, node.id, "value") + ")." + pin
+    }
+    if operation == "get-visible" {
+        ret "gbp_visible(s, h, " + id(node.reference) + "_u64, " + id(node.id) + "_u64)"
+    }
+    if operation == "get-position" || operation == "get-rotation" || operation == "get-scale" {
+        let call = "gbp_transform(s, h, " + id(node.reference) + "_u64, " + transform_field(operation)
+        let tail = ", " + id(node.id) + "_u64)"
+        ret "BpVector { " + call + ", 0_u32" + tail + ", " + call + ", 1_u32" + tail + ", " + call + ", 2_u32" + tail + " }"
+    }
+    if operation == "not" {
+        ret "!" + input_expression(asset, prefix, node.id, "value")
+    }
+    let a = input_expression(asset, prefix, node.id, "a")
+    let b = input_expression(asset, prefix, node.id, "b")
+    if operation == "divide" {
+        ret "gbp_div_" + node.value_type.name() + "(s, " + a + ", " + b + ", " + id(node.id) + "_u64)"
+    }
+    let operator = match operation {
+        "add" => "+" "subtract" => "-" "multiply" => "*" "equal" => "=="
+        "less" => "<" "greater" => ">" "and" => "&&" "or" => "||" _ => "INVALID_OPERATOR"
+    }
+    if operation == "equal" && node.value_type.name() == "vec3" {
+        ret "(" + a + ".x == " + b + ".x && " + a + ".y == " + b + ".y && " + a + ".z == " + b + ".z)"
+    }
+    ret "(" + a + " " + operator + " " + b + ")"
+}
+fn execution(asset: BlueprintAsset, prefix: str, node: BlueprintNode) -> str {
+    let operation = node.operation
+    let mut body = "    if !gbp_ok(s) { ret () }\n"
+    if operation == "branch" {
+        body += "    let condition = " + input_expression(asset, prefix, node.id, "condition") + "\n    if !gbp_ok(s) { ret () }\n    if condition {\n" +
+        next_statement(asset, prefix, node.id, "true") + "    } else {\n" + next_statement(asset, prefix, node.id, "false") + "    }\n"
+        ret body
+    }
+    if operation == "sequence" {
+        ret body + next_statement(asset, prefix, node.id, "first") + next_statement(asset, prefix, node.id, "second")
+    }
+    if operation == "set-variable" {
+        body += property_write(variable(asset, node.reference), node.value_type, input_expression(asset, prefix, node.id, "value"))
+    }
+    if operation == "print" || operation == "set-visible" {
+        body += "    let value = " + input_expression(asset, prefix, node.id, "value") + "\n    if !gbp_ok(s) { ret () }\n"
+        if operation == "print" {
+            body += "    gbp_print(s, h, value, " + id(node.id) + "_u64)\n"
+        } else {
+            body += "    gbp_set_visible(s, h, " + id(node.reference) + "_u64, value, " + id(node.id) + "_u64)\n"
+        }
+    }
+    if operation == "set-position" || operation == "set-rotation" || operation == "set-scale" || operation == "add-offset" || operation == "add-rotation" {
+        body += "    let value = " + input_expression(asset, prefix, node.id, "value") + "\n    if !gbp_ok(s) { ret () }\n"
+        let additive = if operation == "add-offset" || operation == "add-rotation" {
+            "true"
+        } else {
+            "false"
+        }
+        body += "    gbp_set_transform(s, h, " + id(node.reference) + "_u64, " + transform_field(operation) + ", value.x, value.y, value.z, " + additive + ", " + id(node.id) + "_u64)\n"
+    }
+    ret body + next_statement(asset, prefix, node.id, "then")
+}
+fn source_header() -> str {
+    ret "//! Generated Blueprint program; edit its source asset instead.\nstruct BpVector { x: f32 y: f32 z: f32 }\n" +
+    "extern fn gbp_ok(s: usize) -> bool\nextern fn gbp_get_bool(s: usize, p: u32) -> bool\nextern fn gbp_get_i32(s: usize, p: u32) -> i32\nextern fn gbp_get_f32(s: usize, p: u32, axis: u32) -> f32\nextern fn gbp_get_string(s: usize, p: u32) -> str\nextern fn gbp_get_id(s: usize, p: u32) -> u64\n" +
+    "extern fn gbp_set_bool(s: usize, p: u32, v: bool) -> ()\nextern fn gbp_set_i32(s: usize, p: u32, v: i32) -> ()\nextern fn gbp_set_f32(s: usize, p: u32, axis: u32, v: f32) -> ()\nextern fn gbp_set_string(s: usize, p: u32, v: str) -> ()\nextern fn gbp_set_id(s: usize, p: u32, v: u64) -> ()\n" +
+    "extern fn gbp_transform(s: usize, h: usize, c: u64, field: u32, axis: u32, node: u64) -> f32\nextern fn gbp_visible(s: usize, h: usize, c: u64, node: u64) -> bool\nextern fn gbp_set_visible(s: usize, h: usize, c: u64, value: bool, node: u64) -> ()\nextern fn gbp_set_transform(s: usize, h: usize, c: u64, field: u32, x: f32, y: f32, z: f32, add: bool, node: u64) -> ()\nextern fn gbp_print(s: usize, h: usize, value: str, node: u64) -> ()\nextern fn gbp_div_i32(s: usize, a: i32, b: i32, node: u64) -> i32\nextern fn gbp_div_f32(s: usize, a: f32, b: f32, node: u64) -> f32\n"
+}
+fn line_count(source: str) -> usize {
+    let mut count = 1_usize let mut position = 0_usize
+    while position < source.byte_len() {
+        if source.byte_at(position) == 10 {
+            count += 1
+        }
+        position += 1
+    }
+    ret count
+}
+fn mangled(name: str) -> str {
+    // This private linkage is generated alongside the source, never exposed to hosts.
+    ret "__encore_m6772617068656e655f626c75657072696e745f70726f6772616d406c69622e656e71__" + name
+}
+fn c_type(value_type: BlueprintType) -> str {
+    ret match value_type {
+        Bool => "1" I32 => "2" F32 => "3" String => "4" Vector => "5" Actor => "6" Component => "7" Exec => "0"
+    }
+}
+pub fn generate_blueprints(assets: Vec[BlueprintAsset]) -> Result[BlueprintGenerated, str] {
+    let mut source = source_header()
+    let mut registry = ""
+    let mut classes = "static const gbp_class gbp_classes[] = {\n"
+    let mut ranges = Vec[BlueprintSourceRange]::new()
+    let mut class_index = 0_usize
+    if assets.len() == 0 {
+        ret Result[BlueprintGenerated, str]::Err("no Blueprint classes to compile")
+    }
+    for asset in assets {
+        let errors = validate_blueprint(asset)
+        if errors.len() != 0 {
+            ret Result[BlueprintGenerated, str]::Err("invalid Blueprint: " + asset.name)
+        }
+        let prefix = "c" + index(class_index)
+        let init = prefix + "_init"
+        source += "pub fn " + init + "(s: usize, h: usize, dt: f32) -> () {\n"
+        let mut slot = 0_usize
+        let mut property_table = "static const gbp_property " + prefix + "_properties[] = {\n"
+        for property in asset.properties {
+            source += property_write(index(slot) + "_u32", property.default_value.value_type(), literal(property.default_value))
+            property_table += "{UINT64_C(" + id(property.id) + "), " + c_type(property.default_value.value_type()) + "},\n"
+            slot += 1
+        }
+        source += "}\n"
+        if slot == 0 {
+            property_table += "{0, 0},\n"
+        }
+        registry += property_table + "};\nextern void " + mangled(init) + "(uintptr_t, uintptr_t, float);\n"
+        let mut event_count = 0_usize
+        let mut event_table = "static const gbp_event " + prefix + "_events[] = {\n"
+        for node in asset.nodes {
+            let first = line_count(source)
+            let mut has_execution = blueprint_event(node.operation)
+            for pin in blueprint_pins(node) {
+                if !pin.output && pin.value_type.name() == "exec" {
+                    has_execution = true
+                }
+            }
+            if has_execution {
+                let name = function_name(prefix, node.id)
+                source += "pub fn " + name + "(s: usize, h: usize, dt: f32) -> () {\n" + execution(asset, prefix, node) + "}\n"
+                if blueprint_event(node.operation) {
+                    registry += "extern void " + mangled(name) + "(uintptr_t, uintptr_t, float);\n"
+                    event_table += "{" + quote(node.operation) + ", " + quote(node.text) + ", " + mangled(name) + "},\n"
+                    event_count += 1
+                }
+            }
+            for pin in blueprint_pins(node) {
+                if pin.output && pin.value_type.name() != "exec" {
+                    source += "fn " + output_name(prefix, node.id, pin.key) + "(s: usize, h: usize, dt: f32) -> " + type_name(pin.value_type) + " {\n    ret " + expression(asset, prefix, node, pin.key) + "\n}\n"
+                }
+            }
+            ranges.push(BlueprintSourceRange { asset.id, node.id, first, line_count(source) - 1 })
+        }
+        if event_count == 0 {
+            event_table += "{NULL, NULL, NULL},\n"
+        }
+        registry += event_table + "};\n"
+        classes += "{" + quote(asset.id) + ", " + index(slot) + ", " + prefix + "_properties, " + index(event_count) + ", " + prefix + "_events, " + mangled(init) + "},\n"
+        class_index += 1
+    }
+    registry += classes + "};\n#define GBP_CLASS_COUNT " + index(class_index) + "\n"
+    ret Result[BlueprintGenerated, str]::Ok(BlueprintGenerated { source, registry, ranges })
+}

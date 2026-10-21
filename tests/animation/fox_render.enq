@@ -1,0 +1,194 @@
+//! Real imported character crowd through the same runtime and VG skin path.
+import core::vec::Vec
+import graphene::animation::cook::{CookedSkeletalMesh, SkinGeometrySection, prepare_skeletal_geometry, skeletal_gpu_bind_mesh}
+import graphene::animation::gpu::{SkinGpuCache, SkinFrameInstance}
+import graphene::animation::gpu_section::SkinGpuSection
+import graphene::animation::math::PoseMatrix
+import graphene::animation::model::{Skeleton, SkeletalMesh, AnimationClip}
+import graphene::animation::pose::AnimationPose
+import graphene::animation::runtime::{AnimationWorld, AnimationLibraryId, AnimationInstanceId, PoseSnapshot, AnimationStats, AnimationFailure}
+import graphene::animation::source::{AnimationSource, AnimationSourceMaterial, AnimationSourceImage, decode_animation_source}
+import graphene::rhi::*
+import graphene::scene::camera::PerspectiveCamera
+import graphene::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_draw, gpu_virtual_geometry_pipeline, gpu_virtual_geometry_destroy, gpu_virtual_geometry_error, gpu_virtual_geometry_selected_triangle_count}
+import linalg::{Mat4, Vec3}
+import std::io::println
+import std::os::write_file
+import std::time::perf_counter_ns
+extern fn encore_vk_target_readback(target: usize, attachment: u32, destination: usize, capacity: usize) -> usize
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+#attr(safe)
+fn capture(target: Swapchain, path: str) -> u64 {
+    let size =(target.width() as usize) *(target.height() as usize) * 4_usize
+    let mut bytes = Vec[u8]::with_capacity(size) for _i in 0_usize..size {
+        bytes.push(0_u8)
+    }
+    unsafe {
+        let pointer = bytes.as_ptr() unsafe ehir {
+            address: usize = pcast pointer: u8 *, usize
+        }
+        if encore_vk_target_readback(target.handle(), 0_u32, address, size) != size {
+            ret 0_u64
+        }
+    }
+    let mut sum = 0_u64 let mut rgb = Vec[u8]::with_capacity(size / 4_usize * 3_usize)
+    for i in 0_usize..size / 4_usize {
+        for c in vec![2_usize, 1_usize, 0_usize] {
+            let v = bytes.get_unchecked_borrowed(i * 4_usize + c) sum += v as u64 rgb.push(v)
+        }
+    }
+    unsafe {
+        write_file(path, "P6\n" + target.width().fmt() + " " + target.height().fmt() + "\n255\n" + graphene_asset_bytes(rgb.as_ptr(), rgb.len()))
+    }
+    ret sum
+}
+pub fn check_fox(device: GraphicsDevice, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> u32 {
+    let source = match decode_animation_source("FIXTURE_ROOT/Fox.glb", "fox-crowd") {
+        Ok(s) => s Err(e) => {
+            println(e) ret 30_u32
+        }
+    }
+    let cooked = match prepare_skeletal_geometry(source.mesh, source.skeleton, source.clips) {
+        Ok(c) => c Err(e) => {
+            println(e) ret 31_u32
+        }
+    }
+    let section = cooked.sections.get_unchecked_borrowed(0_usize)
+    let material = source.materials.get_unchecked_borrowed(0_usize)
+    for count in vec![100_usize, 1000_usize] {
+        let mut world = AnimationWorld::new()
+        let library = match world.register_library(source.skeleton, source.mesh, source.clips) {
+            Ok(id) => id Err(e) => {
+                println(e) ret 32_u32
+            }
+        }
+        let mut ids = Vec[AnimationInstanceId]::with_capacity(count)
+        for i in 0_usize..count {
+            let id = match world.instantiate_registered(library, 1_u32) {
+                Ok(id) => id Err(e) => {
+                    println(e) ret 33_u32
+                }
+            }
+            if world.seek(id,(i as f64) *(source.clips.get_unchecked_borrowed(1_usize).duration as f64) /(count as f64)).is_err() {
+                ret 34_u32
+            }
+            ids.push(id)
+        }
+        let mut cache = match SkinGpuCache::create(device, source.skeleton, source.mesh, count) {
+            Ok(c) => c Err(e) => {
+                println(e) ret 35_u32
+            }
+        }
+        let mut binding = match SkinGpuSection::create(device, cache, section) {
+            Ok(b) => b Err(e) => {
+                println(e) ret 36_u32
+            }
+        }
+        let target = device.create_shared_offscreen_target(512_u32, 512_u32)
+        let data = skeletal_gpu_bind_mesh(source.mesh) let values = data.vertices() let mut packed = Vec[f32]::new()
+        for index in section.geometry.vertex_indices() {
+            for c in 0_usize..11_usize {
+                packed.push(values.get_unchecked_borrowed((index as usize) * 11_usize + c))
+            }
+        }
+        let mut geometry = GpuVirtualGeometry::create_skinned(device, target, section.geometry, packed, count, gi_scene, gi_surfaces, gi_history, material.base_image.pixels, material.base_image.width, material.base_image.height, binding)
+        if !geometry.is_ready() {
+            println(gpu_virtual_geometry_error(geometry)) ret 37_u32
+        }
+        geometry.set_autolod_enabled(false)
+        let side = if count == 100_usize {
+            10_usize
+        } else {
+            32_usize
+        }
+        let camera = PerspectiveCamera::new(if count == 100_usize {
+                Vec3::new(10_f32, 14_f32, 20_f32)
+            } else {
+                Vec3::new(30_f32, 40_f32, 60_f32)
+            }
+            , Vec3::new(0_f32, 0.3_f32, 0_f32), 0.9_f32, 0.05_f32, 1000_f32,)
+        let mut render_instances = Vec[VirtualGeometryInstance]::with_capacity(count)
+        for i in 0_usize..count {
+            let x =((i % side) as f32 -(side as f32 - 1_f32) * 0.5_f32) * 1.6_f32
+            let z =((i / side) as f32 -(side as f32 - 1_f32) * 0.5_f32) * 1.6_f32
+            render_instances.push(VirtualGeometryInstance::new(Mat4::trs(Vec3::new(x, 0_f32, z), Vec3::zero(), Vec3::new(0.01_f32, 0.01_f32, 0.01_f32)), Vec3::new(material.base_color.x, material.base_color.y, material.base_color.z), material.metallic, material.roughness, material.unlit))
+        }
+        let mut staged = Vec[SkinFrameInstance]::with_capacity(count) let mut total_cpu = 0_u64 let mut first_sum = 0_u64 let mut changed = false
+        for frame_index in 1_usize..5_usize {
+            let start = perf_counter_ns()
+            let stats = match world.advance(frame_index as u64, 0.033333333333_f64) {
+                Ok(s) => s Err(e) => {
+                    println(e) ret 38_u32
+                }
+            }
+            if stats.instances != count as u32 || stats.failed != 0_u32 {
+                ret 39_u32
+            }
+            let elapsed = perf_counter_ns() - start if frame_index > 1_usize {
+                total_cpu += elapsed
+            }
+            staged.clear()
+            for id in ids {
+                let snapshot = match world.snapshot(id) {
+                    Ok(s) => s Err(e) => {
+                        println(e) ret 40_u32
+                    }
+                }
+                let palette = match world.palette(snapshot) {
+                    Ok(p) => p Err(e) => {
+                        println(e) ret 41_u32
+                    }
+                }
+                let model = match world.model(snapshot) {
+                    Ok(p) => p Err(e) => {
+                        println(e) ret 42_u32
+                    }
+                }
+                let morphs = match world.morphs(snapshot) {
+                    Ok(p) => p Err(e) => {
+                        println(e) ret 43_u32
+                    }
+                }
+                staged.push(SkinFrameInstance {
+                        id.key(), palette, model, morphs, world.history_valid(snapshot).unwrap_or(false)
+                    }
+                    ,
+                )
+            }
+            if cache.stage(frame_index as u64, staged).is_err() {
+                ret 44_u32
+            }
+            let frame = target.acquire_frame()
+            if !gpu_virtual_geometry_record_debug(geometry, frame, camera.view_projection(1_f32), camera.position(), render_instances, 1000_f32, Vec3::new( - 0.3_f32, - 0.8_f32, - 0.4_f32), Vec3::new(1_f32, 0.97_f32, 0.92_f32), 1.2_f32, Vec3::new(0.25_f32, 0.25_f32, 0.25_f32), 512_f32, 0_u32, 1_u32) {
+                println("Fox VG recording failed") ret 45_u32
+            }
+            let pass = frame.begin_render_pass(gpu_virtual_geometry_pipeline(geometry), 0_f32, 0_f32, 0_f32, 1_f32)
+            if !gpu_virtual_geometry_draw(geometry, pass) || !pass.end() || !frame.present() || !frame.destroy() || !target.wait_readback() {
+                ret 46_u32
+            }
+            if gpu_virtual_geometry_selected_triangle_count(geometry) <(source.mesh.indices.len() / 3_usize * count / 2_usize) as u32 {
+                println("Unexpected missing crowd geometry") ret 47_u32
+            }
+            let sum = capture(target, "FIXTURE_ROOT/fox-" + count.fmt() + "-" + frame_index.fmt() + ".ppm")
+            if sum < 1000_u64 {
+                ret 48_u32
+            }
+            if frame_index == 1_usize {
+                first_sum = sum
+            } else {
+                if sum != first_sum {
+                    changed = true
+                }
+            }
+        }
+        if !changed {
+            ret 49_u32
+        }
+        println("Fox crowd " + count.fmt() + ": CPU pose ns/frame=" +(total_cpu / 3_u64).fmt() + ", source triangles=" +(source.mesh.indices.len() / 3_usize * count).fmt())
+        if !gpu_virtual_geometry_destroy(geometry) || !binding.destroy() || !cache.destroy() {
+            ret 50_u32
+        }
+        target.destroy()
+    }
+    ret 0_u32
+}

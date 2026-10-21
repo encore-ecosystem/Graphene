@@ -1,0 +1,87 @@
+//! Presentation metadata for the existing, closed native operation catalog.
+import core::vec::Vec
+import linalg::Vec3
+import mod::model::{BlueprintNode, BlueprintType, BlueprintValue}
+
+pub struct OperationInfo {
+    key: str
+    title: str
+    category: str
+    icon: str
+    description: str
+}
+pub fn blueprint_operations() -> Vec[str] {
+    ret vec!["construction", "begin-play", "tick", "input-pressed", "input-released", "constant", "get-variable", "set-variable", "add", "subtract", "multiply", "divide", "equal", "less", "greater", "and", "or", "not", "make-vector", "break-vector", "branch", "sequence", "get-position", "get-rotation", "get-scale", "set-position", "set-rotation", "set-scale", "add-offset", "add-rotation", "get-visible", "set-visible", "print"]
+}
+pub fn operation_info(key: str) -> OperationInfo {
+    let metadata = match key {
+        "construction" =>("Construction", "Events", "hammer", "Initialize an actor while constructing its instance.")
+        "begin-play" =>("Begin Play", "Events", "play", "Run once when simulation begins.")
+        "tick" =>("Tick", "Events", "timer", "Run every simulation step. Delta is elapsed seconds.")
+        "input-pressed" =>("Input Pressed", "Events", "keyboard", "Run when a configured input action is pressed.")
+        "input-released" =>("Input Released", "Events", "keyboard", "Run when a configured input action is released.")
+        "constant" =>("Constant", "Values", "hash", "A typed value shared with connected nodes.")
+        "get-variable" =>("Get Variable", "Variables", "variable", "Read a property of this Blueprint instance.")
+        "set-variable" =>("Set Variable", "Variables", "variable", "Write a property of this Blueprint instance.")
+        "add" =>("Add", "Math", "plus", "Add two numbers of the same type.")
+        "subtract" =>("Subtract", "Math", "minus", "Subtract B from A.")
+        "multiply" =>("Multiply", "Math", "x", "Multiply two numbers.")
+        "divide" =>("Divide", "Math", "divide", "Divide A by B.")
+        "equal" =>("Equal", "Logic", "equal", "Compare two values for equality.")
+        "less" =>("Less Than", "Logic", "chevron-left", "Test whether A is less than B.")
+        "greater" =>("Greater Than", "Logic", "chevron-right", "Test whether A is greater than B.")
+        "and" =>("And", "Logic", "git-merge", "True when both inputs are true.")
+        "or" =>("Or", "Logic", "git-branch", "True when either input is true.")
+        "not" =>("Not", "Logic", "circle-slash", "Invert a boolean.")
+        "make-vector" =>("Make Vector", "Vectors", "move-3d", "Build a vector from X, Y and Z.")
+        "break-vector" =>("Break Vector", "Vectors", "split", "Read the X, Y and Z components.")
+        "branch" =>("Branch", "Flow", "git-branch", "Choose True or False from a condition.")
+        "sequence" =>("Sequence", "Flow", "list-ordered", "Execute First, then Second.")
+        "get-position" =>("Get Position", "Transform", "move-3d", "Read actor or component position.")
+        "get-rotation" =>("Get Rotation", "Transform", "rotate-3d", "Read rotation in radians.")
+        "get-scale" =>("Get Scale", "Transform", "scale-3d", "Read actor or component scale.")
+        "set-position" =>("Set Position", "Transform", "move-3d", "Replace actor or component position.")
+        "set-rotation" =>("Set Rotation", "Transform", "rotate-3d", "Replace rotation in radians.")
+        "set-scale" =>("Set Scale", "Transform", "scale-3d", "Replace actor or component scale.")
+        "add-offset" =>("Add Offset", "Transform", "move-3d", "Move by a vector offset.")
+        "add-rotation" =>("Add Rotation", "Transform", "rotate-3d", "Add a rotation in radians.")
+        "get-visible" =>("Get Visibility", "Appearance", "eye", "Read actor or component visibility.")
+        "set-visible" =>("Set Visibility", "Appearance", "eye", "Change actor or component visibility.")
+        "print" =>("Print", "Debug", "terminal", "Write text to the simulation log.")
+        _ =>(key, "Unknown", "circle-help", "Unknown operation.")
+    }
+    ret OperationInfo { key, metadata.0, metadata.1, metadata.2, metadata.3 }
+}
+pub fn blueprint_default(kind: str) -> BlueprintValue {
+    ret match kind {
+        "bool" => BlueprintValue::Bool(false) "i32" => BlueprintValue::I32(0)
+        "str" => BlueprintValue::String("") "vec3" => BlueprintValue::Vector(Vec3::zero())
+        "actor" => BlueprintValue::Actor(0) "component" => BlueprintValue::Component(0)
+        _ => BlueprintValue::F32(0)
+    }
+}
+pub fn operation_types(key: str) -> Vec[str] {
+    if key == "constant" || key == "equal" {
+        ret vec!["bool", "i32", "f32", "str", "vec3", "actor", "component"]
+    }
+    if key == "add" || key == "subtract" || key == "multiply" || key == "divide" || key == "less" || key == "greater" {
+        ret vec!["i32", "f32"]
+    }
+    ret Vec[str]::new()
+}
+pub fn operation_node(id: u64, key: str) -> BlueprintNode {
+    let mut kind = BlueprintType::F32
+    if key == "and" || key == "or" || key == "not" || key == "get-visible" || key == "set-visible" {
+        kind = BlueprintType::Bool
+    }
+    if key == "make-vector" || key == "break-vector" || key.contains("position") || key.contains("rotation") || key.contains("scale") || key == "add-offset" {
+        kind = BlueprintType::Vector
+    }
+    if key == "print" {
+        kind = BlueprintType::String
+    }
+    if key == "construction" || key == "begin-play" || key == "tick" || key == "input-pressed" || key == "input-released" || key == "sequence" || key == "branch" {
+        kind = BlueprintType::Exec
+    }
+    ret BlueprintNode::new(id, key, kind)
+}

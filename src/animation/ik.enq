@@ -1,0 +1,170 @@
+//! Deterministic IK kernels. Graph/Control Rig use the same solver as tests.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{PoseVector, PoseRotation, animation_sqrt, animation_clamp}
+
+pub struct TwoBoneSolution {
+    root: PoseVector
+    middle: PoseVector
+    tip: PoseVector
+    reached: bool
+}
+pub fn solve_two_bone(root: PoseVector, middle: PoseVector, tip: PoseVector, target: PoseVector, pole: PoseVector) -> Result[TwoBoneSolution, str] {
+    if !root.finite() || !middle.finite() || !tip.finite() || !target.finite() || !pole.finite() {
+        ret Result::Err("Non-finite IK input")
+    }
+    let upper = middle.sub(root).length() let lower = tip.sub(middle).length()
+    if upper < 0.000001_f32 || lower < 0.000001_f32 {
+        ret Result::Err("Zero-length two-bone chain")
+    }
+    let offset = target.sub(root) let distance = offset.length()
+    let direction = if distance > 0.000001_f32 {
+        offset.scaled(1_f32 / distance)
+    } else {
+        tip.sub(root).normalized()
+    }
+    let forward = if direction.length() > 0.5_f32 {
+        direction
+    } else {
+        PoseVector { 1_f32, 0_f32, 0_f32 }
+    }
+    let mut side = pole.sub(root).sub(forward.scaled(pole.sub(root).dot(forward))).normalized()
+    if side.length() < 0.5_f32 {
+        side = middle.sub(root).sub(forward.scaled(middle.sub(root).dot(forward))).normalized()
+    }
+    if side.length() < 0.5_f32 {
+        let axis = if forward.x < 0.9_f32 && forward.x > - 0.9_f32 {
+            PoseVector {
+                1_f32, 0_f32, 0_f32
+            }
+        } else {
+            PoseVector {
+                0_f32, 1_f32, 0_f32
+            }
+        }
+        side = axis.sub(forward.scaled(axis.dot(forward))).normalized()
+    }
+    let minimum = if upper > lower {
+        upper - lower
+    } else {
+        lower - upper
+    }
+    let maximum = upper + lower
+    // Equal-length chains may fold completely back onto their root.
+    if distance < 0.000001_f32 && minimum < 0.000001_f32 {
+        ret Result::Ok(TwoBoneSolution {
+                root, root.add(side.scaled(upper)), root, true
+            }
+            ,
+        )
+    }
+    let d = animation_clamp(distance, if minimum > 0.000001_f32 {
+            minimum
+        } else {
+            0.000001_f32
+        }
+        , maximum,)
+    let along =(upper * upper - lower * lower + d * d) /(2_f32 * d)
+    let height = animation_sqrt(if upper * upper > along * along {
+            upper * upper - along * along
+        } else {
+            0_f32
+        }
+    )
+    ret Result::Ok(TwoBoneSolution {
+            root, root.add(forward.scaled(along)).add(side.scaled(height)), root.add(forward.scaled(d)), distance >= minimum - 0.00001_f32 && distance <= maximum + 0.00001_f32
+        }
+        ,
+    )
+}
+pub struct FabrikSolution {
+    points: Vec[PoseVector]
+    reached: bool
+    iterations: u32
+}
+/// Forward/backward positional solve. The input is copied deliberately, so an
+/// unsuccessful solve never corrupts an upstream pose or the authoring rig.
+pub fn solve_fabrik(input: Vec[PoseVector], target: PoseVector, tolerance: f32, maximum_iterations: u32) -> Result[FabrikSolution, str] {
+    if input.len() < 2_usize || input.len() > 4096_usize || !target.finite() || !(tolerance > 0_f32 && tolerance <= 1_f32) || maximum_iterations == 0_u32 || maximum_iterations > 256_u32 {
+        ret Result::Err("Invalid FABRIK configuration")
+    }
+    let mut points = Vec[PoseVector]::with_capacity(input.len()) let mut lengths = Vec[f32]::with_capacity(input.len() - 1_usize)
+    let mut total = 0_f32
+    for i in 0_usize..input.len() {
+        let p = input.get_unchecked_borrowed(i) if !p.finite() {
+            ret Result::Err("Non-finite FABRIK point")
+        }
+        points.push(p) if i > 0_usize {
+            let length = p.sub(input.get_unchecked_borrowed(i - 1_usize)).length() if length < 0.000001_f32 {
+                ret Result::Err("Zero-length FABRIK bone")
+            }
+            lengths.push(length) total += length
+        }
+    }
+    let root = points.get_unchecked_borrowed(0_usize) let last = points.len() - 1_usize
+    if target.sub(root).length() >= total {
+        let direction = target.sub(root).normalized()
+        for i in 1_usize..points.len() {
+            points.set(i, points.get_unchecked_borrowed(i - 1_usize).add(direction.scaled(lengths.get_unchecked_borrowed(i - 1_usize))))
+        }
+        let reached = points.get_unchecked_borrowed(last).sub(target).length() <= tolerance
+        ret Result::Ok(FabrikSolution { points, reached, 0_u32 })
+    }
+    let mut iterations = 0_u32
+    while points.get_unchecked_borrowed(last).sub(target).length() > tolerance && iterations < maximum_iterations {
+        points.set(last, target)
+        let mut i = last
+        while i > 0_usize {
+            i -= 1_usize let next = points.get_unchecked_borrowed(i + 1_usize)
+            let offset = points.get_unchecked_borrowed(i).sub(next)
+            let direction = if offset.length() > 0.000001_f32 {
+                offset.normalized()
+            } else {
+                input.get_unchecked_borrowed(i).sub(input.get_unchecked_borrowed(i + 1_usize)).normalized()
+            }
+            points.set(i, next.add(direction.scaled(lengths.get_unchecked_borrowed(i))))
+        }
+        points.set(0_usize, root)
+        for j in 1_usize..points.len() {
+            let previous = points.get_unchecked_borrowed(j - 1_usize) let offset = points.get_unchecked_borrowed(j).sub(previous)
+            let direction = if offset.length() > 0.000001_f32 {
+                offset.normalized()
+            } else {
+                input.get_unchecked_borrowed(j).sub(input.get_unchecked_borrowed(j - 1_usize)).normalized()
+            }
+            points.set(j, previous.add(direction.scaled(lengths.get_unchecked_borrowed(j - 1_usize))))
+        }
+        iterations += 1_u32
+    }
+    let reached = points.get_unchecked_borrowed(last).sub(target).length() <= tolerance
+    ret Result::Ok(FabrikSolution { points, reached, iterations })
+}
+/// Cone-limited orientation correction. The weight is applied after the limit.
+pub fn solve_look_at(origin: PoseVector, forward: PoseVector, target: PoseVector, maximum_turn_cosine: f32, weight: f32) -> Result[PoseRotation, str] {
+    if !origin.finite() || !forward.finite() || !target.finite() || !(maximum_turn_cosine >= - 1_f32 && maximum_turn_cosine <= 1_f32) || !(weight >= 0_f32 && weight <= 1_f32) {
+        ret Result::Err("Invalid look-at configuration")
+    }
+    let a = forward.normalized() let b = target.sub(origin).normalized()
+    if a.length() < 0.5_f32 || b.length() < 0.5_f32 {
+        ret Result::Ok(PoseRotation::identity())
+    }
+    let cosine = a.dot(b)
+    let mut desired = b
+    if cosine < maximum_turn_cosine {
+        let mut side = b.sub(a.scaled(cosine)).normalized()
+        if side.length() < 0.5_f32 {
+            let axis = if a.x < 0.9_f32 && a.x > - 0.9_f32 {
+                PoseVector {
+                    1_f32, 0_f32, 0_f32
+                }
+            } else {
+                PoseVector {
+                    0_f32, 1_f32, 0_f32
+                }
+            }
+            side = axis.sub(a.scaled(axis.dot(a))).normalized()
+        }
+        desired = a.scaled(maximum_turn_cosine).add(side.scaled(animation_sqrt(1_f32 - maximum_turn_cosine * maximum_turn_cosine)))
+    }
+    ret Result::Ok(PoseRotation::identity().slerp(PoseRotation::between(a, desired), weight))
+}

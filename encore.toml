@@ -5,7 +5,5 @@ description = "Graphene real-time engine and editor"
 readme = "README.md"
 licence = "MIT"
 build = "build.enq"
-dependencies = ["index@std@^1.0.1", "index@json@^1.0.0", "index@linalg@^0.1.1", "index@vulkan_native@^0.1.0", "index@luma@^0.2.1"]
-
-[target.x86_64-unknown-linux-gnu]
-link-args = ["-Wl,--allow-multiple-definition"]
+encore = ">=0.1.6"
+dependencies = ["index@std@0.0.5", "index@json@0.0.3", "index@linalg@0.0.1", "index@binary@0.1.0", "path@../Vulkan", "path@../Luma", "path@../SDL", "path@../GPU", "path@../Audio", "index@serialize"]

@@ -1,0 +1,87 @@
+//! Runtime assets use Encore binary serialization inside the GAS1 envelope.
+import binary::{encode, decode}
+import core::result::Result
+import core::vec::Vec
+import mod::cook::{CookedSkeletalMesh, prepare_skeletal_geometry}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip}
+import refrain::native_asset::{save_animation_payload, load_animation_payload}
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+#attr(safe)
+fn byte_string(data: Vec[u8]) -> str {
+    ret graphene_asset_bytes(data.as_ptr(), data.len())
+}
+fn bytes(data: str) -> Vec[u8] {
+    let mut out = Vec[u8]::with_capacity(data.byte_len()) for i in 0_usize..data.byte_len() {
+        out.push(data.byte_at(i))
+    }
+    ret out
+}
+pub fn save_skeleton(path: str, source: str, revision: str, asset: Skeleton) -> Result[bool, str] {
+    asset.validate()?
+    let data = match encode(asset) {
+        Ok(data) => data Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    if !save_animation_payload(path, "skeleton", source, revision, byte_string(data)) {
+        ret Result::Err("Unable to save skeleton")
+    }
+    ret Result::Ok(true)
+}
+pub fn load_skeleton(path: str, revision: str) -> Result[Skeleton, str] {
+    let data = load_animation_payload(path, "skeleton", revision)?
+    let asset = match decode[Skeleton](bytes(data)) {
+        Ok(asset) => asset Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    asset.validate()? ret Result::Ok(asset)
+}
+pub fn save_skeletal_mesh(path: str, source: str, revision: str, asset: SkeletalMesh, skeleton: Skeleton, clips: Vec[AnimationClip]) -> Result[bool, str] {
+    let cooked = prepare_skeletal_geometry(asset, skeleton, clips)?
+    ret save_cooked_skeletal_mesh(path, source, revision, cooked, skeleton)
+}
+pub fn save_cooked_skeletal_mesh(path: str, source: str, revision: str, cooked: CookedSkeletalMesh, skeleton: Skeleton) -> Result[bool, str] {
+    cooked.validate(skeleton)?
+    let data = match encode(cooked) {
+        Ok(data) => data Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    if !save_animation_payload(path, "skeletal-mesh", source, revision, byte_string(data)) {
+        ret Result::Err("Unable to save skeletal mesh")
+    }
+    ret Result::Ok(true)
+}
+pub fn load_skeletal_mesh(path: str, revision: str, skeleton: Skeleton) -> Result[CookedSkeletalMesh, str] {
+    skeleton.validate()?
+    let data = load_animation_payload(path, "skeletal-mesh", revision)?
+    let asset = match decode[CookedSkeletalMesh](bytes(data)) {
+        Ok(asset) => asset Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    asset.validate(skeleton)? ret Result::Ok(asset)
+}
+pub fn save_animation_clip(path: str, source: str, revision: str, asset: AnimationClip, skeleton: Skeleton, morph_count: usize) -> Result[bool, str] {
+    skeleton.validate()? asset.validate(skeleton, morph_count)?
+    let data = match encode(asset) {
+        Ok(data) => data Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    if !save_animation_payload(path, "animation-clip", source, revision, byte_string(data)) {
+        ret Result::Err("Unable to save animation clip")
+    }
+    ret Result::Ok(true)
+}
+pub fn load_animation_clip(path: str, revision: str, skeleton: Skeleton, morph_count: usize) -> Result[AnimationClip, str] {
+    skeleton.validate()?
+    let data = load_animation_payload(path, "animation-clip", revision)?
+    let asset = match decode[AnimationClip](bytes(data)) {
+        Ok(asset) => asset Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    asset.validate(skeleton, morph_count)? ret Result::Ok(asset)
+}

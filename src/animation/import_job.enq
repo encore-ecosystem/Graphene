@@ -1,0 +1,75 @@
+//! One explicit offline import, owned by the editor until its background task joins.
+import core::option::Option
+import core::result::Result
+import mod::character::{CharacterAsset, import_character}
+import std::path::Path
+import std::thread::JoinHandle
+struct ImportedCharacter {
+    project: str
+    path: str
+    result: Result[bool, str]
+}
+fn run(project: str, source: str) -> sending ImportedCharacter {
+    let name = Path::new(source).stem().unwrap_or("")
+    let result: Result[bool, str] = match import_character(project, source, name) {
+        Ok(_) => Result::Ok(true) Err(error) => Result::Err(error)
+    }
+    ret ImportedCharacter { project, "Content/Characters/" + name + ".gcharacter", result }
+}
+pub struct CharacterImporter {
+    worker: Option[JoinHandle[ImportedCharacter]]
+    project: str
+    published: str
+    message: str
+}
+
+impl for CharacterImporter {
+    pub fn new() -> CharacterImporter<H> {
+        ret CharacterImporter<H> {
+            Option[JoinHandle[ImportedCharacter]]::None, "", "", ""
+        }
+    }
+    pub fn start(self: mut Self&, project: str, source: str) -> bool {
+        if self.worker.is_some() {
+            ret false
+        }
+        self.project = project self.published = "" self.message = ""
+        self.worker = Option[JoinHandle[ImportedCharacter]]::Some(spawn run(project, source)) ret true
+    }
+    pub fn busy(self: Self&) -> bool {
+        ret self.worker.is_some()
+    }
+    pub fn poll(self: mut Self&, project: str) -> bool {
+        if !match self.worker {
+            Some(w) => w.is_finished() None => false
+        }
+        {
+            ret false
+        }
+        let worker = match self.worker {
+            Some(w) => w None => {
+                ret false
+            }
+        }
+        self.worker = Option[JoinHandle[ImportedCharacter]]::None
+        let result = worker.join()
+        if result.project != project {
+            ret false
+        }
+        match result.result {
+            Ok(_) => {
+                self.published = result.path self.message = "Imported " + result.path
+            }
+            Err(error) => {
+                self.published = "" self.message = error
+            }
+        }
+        ret true
+    }
+    pub fn published(self: Self&) -> str {
+        ret self.published
+    }
+    pub fn message(self: Self&) -> str {
+        ret self.message
+    }
+}

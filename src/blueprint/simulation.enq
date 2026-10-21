@@ -1,0 +1,341 @@
+//! Authoring state is never mutated by Play. Generated components belong to
+//! this disposable runtime scene and disappear with their owning instance.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::codec::{blueprint_parse, blueprint_semantic_source}
+import mod::input::load_blueprint_input
+import mod::model::*
+import mod::native::{BlueprintModule, BlueprintRuntimeInstance}
+import mod::validate::{validate_blueprint, validate_blueprint_instance}
+import refrain::runtime::{RuntimeConfig, RuntimeSession, RuntimeTransform, World, PhysicsWorld, InputSnapshot, InputMap}
+import refrain::scene::transform::Transform
+import refrain::scene::world::Scene
+import std::os::{file_exists, read_file}
+import std::path::Path
+
+pub struct BlueprintClass {
+    path: str
+    asset: BlueprintAsset
+}
+pub struct BlueprintRuntimeDiagnostic {
+    actor: u64
+    node: u64
+    message: str
+}
+pub struct BlueprintComponentBinding {
+    component: u64
+    entity: u64
+    mesh: str
+    material: str
+}
+struct LiveBlueprint {
+    actor: u64
+    instance: BlueprintRuntimeInstance
+    components: Vec[BlueprintComponentBinding]
+    active: bool
+}
+pub struct BlueprintSimulation {
+    module: Option[BlueprintModule]
+    session: RuntimeSession
+    scene: Scene
+    instances: Vec[LiveBlueprint]
+    diagnostics: Vec[BlueprintRuntimeDiagnostic]
+    logs: str
+    input_map: InputMap
+    keys: Vec[u32]
+}
+pub fn blueprint_class_semantic(classes: Vec[BlueprintClass]) -> str {
+    let mut semantic = ""
+    for class in classes {
+        semantic += blueprint_semantic_source(class.asset) + "\n"
+    }
+    ret semantic
+}
+pub fn load_blueprint_classes(project: str, scene: Scene) -> Result[Vec[BlueprintClass], str] {
+    let root = Path::new(project).resolve()
+    let mut classes = Vec[BlueprintClass]::new()
+    for actor in scene.entities() {
+        match actor.blueprint() {
+            Some(instance) => {
+                let path = root.join(instance.asset).resolve().as_str()
+                let base = root.as_str() + "/"
+                if path.byte_len() <= base.byte_len() || path.slice(0, base.byte_len()) != base {
+                    ret Result[Vec[BlueprintClass], str]::Err("Blueprint path leaves the project: " + instance.asset)
+                }
+                let mut found = false
+                for class in classes {
+                    if class.path == path {
+                        found = true
+                    }
+                }
+                if !found {
+                    if !file_exists(path) {
+                        ret Result[Vec[BlueprintClass], str]::Err("Blueprint asset not found: " + instance.asset)
+                    }
+                    let asset = blueprint_parse(read_file(path))?
+                    if validate_blueprint(asset).len() != 0 {
+                        ret Result[Vec[BlueprintClass], str]::Err("invalid Blueprint: " + instance.asset)
+                    }
+                    for class in classes {
+                        if class.asset.id == asset.id {
+                            ret Result[Vec[BlueprintClass], str]::Err("duplicate Blueprint class identity")
+                        }
+                    }
+                    classes.push(BlueprintClass { path, asset })
+                }
+            }
+            None => {
+            }
+        }
+    }
+    ret Result[Vec[BlueprintClass], str]::Ok(classes)
+}
+fn copy_scene(source: Scene) -> Scene {
+    let mut scene = Scene::new()
+    for entity in source.entities() {
+        scene.create_entity_with_id(entity.id(), entity.name(), entity.transform())
+        scene.set_visible(entity.id(), entity.visible()) scene.set_renderable(entity.id(), entity.renderable())
+        scene.set_blueprint(entity.id(), entity.blueprint())
+        scene.set_component(entity.id(), entity.component())
+    }
+    for entity in source.entities() {
+        scene.set_parent(entity.id(), entity.parent())
+    }
+    ret scene
+}
+
+impl for BlueprintSimulation {
+    pub fn new() -> BlueprintSimulation {
+        let config = RuntimeConfig::defaults()
+        ret BlueprintSimulation {
+            Option[BlueprintModule]::None, RuntimeSession::new(config, World::new(), PhysicsWorld::new(config.gravity())),
+            Scene::new(), Vec[LiveBlueprint]::new(), Vec[BlueprintRuntimeDiagnostic]::new(), "", InputMap::new(), Vec[u32]::new()
+        }
+    }
+    pub fn scene(self: Self) -> Scene {
+        ret self.scene
+    }
+    pub fn diagnostics(self: Self) -> Vec[BlueprintRuntimeDiagnostic] {
+        ret self.diagnostics
+    }
+    pub fn take_log(self: mut Self) -> str {
+        let log = self.logs self.logs = "" ret log
+    }
+    pub fn component_bindings(self: Self) -> Vec[BlueprintComponentBinding] {
+        let mut bindings = Vec[BlueprintComponentBinding]::new()
+        for live in self.instances {
+            for binding in live.components {
+                bindings.push(binding)
+            }
+        }
+        ret bindings
+    }
+    pub fn stop(self: mut Self) ->() {
+        for live in self.instances {
+            let _destroyed = live.instance.destroy()
+        }
+        self.instances = Vec[LiveBlueprint]::new()
+        match self.module {
+            Some(module) => {
+                let _closed = module.close()
+            }
+            None => {
+            }
+        }
+        self.module = Option[BlueprintModule]::None
+        self.scene = Scene::new()
+        self.keys = Vec[u32]::new()
+    }
+    pub fn start(self: mut Self, project: str, authoring: Scene, library: str, semantic: str, classes: Vec[BlueprintClass]) -> Result[(), str] {
+        self.stop()
+        self.input_map = load_blueprint_input(project)?
+        if blueprint_class_semantic(classes) != semantic {
+            ret Result[(), str]::Err("Blueprints changed since Compile")
+        }
+        let mut world = World::new()
+        let config = RuntimeConfig::defaults()
+        self.scene = copy_scene(authoring)
+        self.diagnostics = Vec[BlueprintRuntimeDiagnostic]::new() self.logs = ""
+        if classes.len() > 0 {
+            self.module = Option[BlueprintModule]::Some(BlueprintModule::open(library)?)
+        }
+        for actor in authoring.entities() {
+            let transform = actor.transform()
+            world.spawn_actor_with_id(actor.id(), actor.name(), RuntimeTransform::new(transform.position(), transform.rotation(), transform.scale()))
+            match actor.blueprint() {
+                Some(instance) => {
+                    let path = Path::new(project).resolve().join(instance.asset).resolve().as_str()
+                    let mut class = Option[BlueprintAsset]::None
+                    for candidate in classes {
+                        if candidate.path == path {
+                            class = Option[BlueprintAsset]::Some(candidate.asset)
+                        }
+                    }
+                    let asset = match class {
+                        Some(asset) => asset None => {
+                            self.stop() ret Result[(), str]::Err("Blueprint class is missing")
+                        }
+                    }
+                    if validate_blueprint_instance(asset, instance).len() != 0 {
+                        self.stop() ret Result[(), str]::Err("Blueprint instance overrides are invalid")
+                    }
+                    let module = match self.module {
+                        Some(module) => module None => {
+                            self.stop() ret Result[(), str]::Err("Blueprint module is missing")
+                        }
+                    }
+                    let native = match module.instantiate(asset, instance, transform) {
+                        Ok(native) => native Err(error) => {
+                            self.stop() ret Result[(), str]::Err(error)
+                        }
+                    }
+                    let mut bindings = Vec[BlueprintComponentBinding]::new()
+                    // Root actor is a non-rendered owner, never a duplicate mesh.
+                    self.scene.set_renderable(actor.id(), Option::None)
+                    for component in asset.components {
+                        let entity = self.scene.create_entity(actor.name() + "/" + component.name, component.transform)
+                        self.scene.set_visible(entity, component.visible)
+                        bindings.push(BlueprintComponentBinding {
+                                component.id, entity, component.mesh, component.material
+                            }
+                            ,
+                        )
+                    }
+                    for component in asset.components {
+                        let mut entity = 0_u64 let mut parent = actor.id()
+                        for binding in bindings {
+                            if binding.component == component.id {
+                                entity = binding.entity
+                            }
+                            if binding.component == component.parent {
+                                parent = binding.entity
+                            }
+                        }
+                        self.scene.set_parent(entity, Option[u64]::Some(parent))
+                    }
+                    self.instances.push(LiveBlueprint { actor.id(), native, bindings, true })
+                }
+                None => {
+                }
+            }
+        }
+        for actor in authoring.entities() {
+            world.set_parent(actor.id(), actor.parent())
+        }
+        self.session = RuntimeSession::new(config, world, PhysicsWorld::new(config.gravity()))
+        self.dispatch("construction", "", 0)
+        self.dispatch("begin-play", "", 0)
+        self.sync()
+        ret Result[(), str]::Ok(())
+    }
+    fn dispatch(self: mut Self, kind: str, action: str, delta: f32) ->() {
+        let mut position = 0_usize
+        for live in self.instances {
+            if live.active {
+                if !live.instance.invoke(kind, action, delta) {
+                    let message = live.instance.error()
+                    self.diagnostics.push(BlueprintRuntimeDiagnostic {
+                            live.actor, live.instance.error_node(), if message == "" {
+                                "Blueprint lifecycle call was rejected"
+                            } else {
+                                message
+                            }
+                        }
+                        ,
+                    )
+                    self.instances.set(position, LiveBlueprint {
+                            live.actor, live.instance, live.components, false
+                        }
+                        ,
+                    )
+                }
+                self.logs += live.instance.take_log()
+            }
+            position += 1
+        }
+    }
+    pub fn input_action(self: mut Self, action: str, pressed: bool) ->() {
+        self.dispatch(if pressed {
+                "input-pressed"
+            } else {
+                "input-released"
+            }
+            , action, 0,)
+    }
+    pub fn input_key(self: mut Self, key: u32, down: bool) ->() {
+        let mut was_down = false
+        let mut keys = Vec[u32]::new()
+        for previous in self.keys {
+            if previous == key {
+                was_down = true
+            } else {
+                keys.push(previous)
+            }
+        }
+        if was_down == down {
+            ret()
+        }
+        if down {
+            keys.push(key)
+        }
+        self.keys = keys
+        let input = if down {
+            InputSnapshot::empty().with_pressed(key)
+        } else {
+            InputSnapshot::empty().with_released(key)
+        }
+        for action in self.input_map.actions() {
+            if self.input_map.pressed(action, input) {
+                self.input_action(action, true)
+            }
+            if self.input_map.released(action, input) {
+                self.input_action(action, false)
+            }
+        }
+    }
+    pub fn release_input(self: mut Self) ->() {
+        let keys = self.keys
+        for key in keys {
+            self.input_key(key, false)
+        }
+    }
+    pub fn tick(self: mut Self, elapsed: f32, input: InputSnapshot) ->() {
+        let frame = self.session.begin_frame(elapsed, input)
+        self.dispatch("tick", "", frame.delta_seconds())
+        self.sync()
+        self.session.finish_frame(frame)
+        for actor in self.session.world().actor_ids() {
+            match self.session.world().transform(actor) {
+                Some(value) => {
+                    self.scene.set_transform(actor, Transform::new(value.position(), value.rotation(), value.scale()))
+                }
+                None => {
+                }
+            }
+        }
+    }
+    fn sync(self: mut Self) ->() {
+        for live in self.instances {
+            match live.instance.transform(0) {
+                Some(value) => {
+                    self.scene.set_transform(live.actor, value)
+                    self.session.set_transform(live.actor, RuntimeTransform::new(value.position(), value.rotation(), value.scale()))
+                }
+                None => {
+                }
+            }
+            self.scene.set_visible(live.actor, live.instance.visible(0))
+            for binding in live.components {
+                match live.instance.transform(binding.component) {
+                    Some(value) => {
+                        self.scene.set_transform(binding.entity, value)
+                    }
+                    None => {
+                    }
+                }
+                self.scene.set_visible(binding.entity, live.instance.visible(binding.component))
+            }
+        }
+    }
+}

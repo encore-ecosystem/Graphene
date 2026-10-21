@@ -1,0 +1,276 @@
+//! Visible selection silhouette, independent of actor materials and topology.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import mod::animation::scene::SceneAnimation
+import mod::animation::scene_gpu::{SceneCharacters,CharacterRenderView}
+import linalg::Mat4
+import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
+import mod::renderer::SceneRenderer
+import mod::rhi::*
+import mod::scene::camera::PerspectiveCamera
+import mod::scene::light::DirectionalLight
+import mod::scene::renderable::{MaterialId, Renderable, RenderItem}
+import mod::shaders::selection::{selection_mask_vert_spirv, selection_mask_frag_spirv, selection_outline_vert_spirv, selection_outline_frag_spirv}
+
+struct MaskViews {
+    target: Swapchain
+    silhouette: Swapchain
+    images: Vec[usize]
+    silhouette_images: Vec[usize]
+    textures: Vec[GpuTexture]
+    silhouette_textures: Vec[GpuTexture]
+    groups: Vec[BindGroup]
+}
+pub struct SelectionOutline {
+    device: GraphicsDevice
+    views: MaskViews
+    retired: Vec[MaskViews]
+    mask_layout: BindGroupLayout
+    outline_layout: BindGroupLayout
+    mask_pipeline: RenderPipeline
+    outline_pipeline: RenderPipeline
+    shaders: Vec[ShaderModule]
+    renderer: SceneRenderer
+    silhouette_renderer: SceneRenderer
+    materials: MaterialAssets
+    selected: MaterialId
+    unselected: MaterialId
+    uniforms: Vec[GpuBuffer]
+    sampler: GpuSampler
+    quad: GpuMesh
+    frame_count: u32
+    ready: bool
+}
+fn mask_views(target: Swapchain, silhouette: Swapchain) -> MaskViews {
+    ret MaskViews {
+        target, silhouette, Vec[usize]::new(), Vec[usize]::new(), Vec[GpuTexture]::new(), Vec[GpuTexture]::new(), Vec[BindGroup]::new()
+    }
+}
+fn destroy_views(views: MaskViews) ->() {
+    for group in views.groups {
+        group.destroy()
+    }
+    for texture in views.textures {
+        texture.destroy()
+    }
+    for texture in views.silhouette_textures {
+        texture.destroy()
+    }
+    views.target.destroy()
+    views.silhouette.destroy()
+    ret()
+}
+/// All visible actors participate in depth, so foreground actors mask the
+/// selection. Adjacent selected actors form one silhouette without inner seams.
+pub fn selection_mask_items(items: Vec[RenderItem], selected: Vec[u64], on: MaterialId, off: MaterialId) -> Vec[RenderItem] {
+    let mut result = Vec[RenderItem]::new()
+    for item in items {
+        let mut chosen = false
+        for entity in selected {
+            if entity == item.entity() {
+                chosen = true
+            }
+        }
+        result.push(RenderItem::new(item.entity(), Renderable::new(item.mesh(), if chosen {
+                        on
+                    } else {
+                        off
+                    }
+                    ,
+                ), item.world()))
+    }
+    ret result
+}
+
+/// Selection-only geometry retains the complete silhouette behind occluders.
+pub fn selection_silhouette_items(items: Vec[RenderItem], selected: Vec[u64], material: MaterialId) -> Vec[RenderItem] {
+    let mut result = Vec[RenderItem]::new()
+    for item in items {
+        let mut chosen = false
+        for entity in selected {
+            if entity == item.entity() {
+                chosen = true
+            }
+        }
+        if chosen {
+            result.push(RenderItem::new(item.entity(), Renderable::new(item.mesh(), material), item.world()))
+        }
+    }
+    ret result
+}
+
+impl for SelectionOutline {
+    pub fn create(device: GraphicsDevice, composition: Swapchain, width: u32, height: u32) -> SelectionOutline<H> {
+        let target = device.create_shared_offscreen_target(width, height)
+        let silhouette = device.create_shared_offscreen_target(width, height)
+        let mask_layout = device.create_bind_group_layout(vec![
+                BindGroupLayoutEntry::uniform(0, shader_stage_vertex()),
+                BindGroupLayoutEntry::storage(1, shader_stage_vertex())],)
+        let outline_layout = device.create_bind_group_layout(vec![
+                BindGroupLayoutEntry::uniform(0, shader_stage_fragment()),
+                BindGroupLayoutEntry::texture_sampler(1, shader_stage_fragment()),
+                BindGroupLayoutEntry::texture_sampler(2, shader_stage_fragment())],)
+        let mv = device.create_shader_module(selection_mask_vert_spirv(), shader_stage_vertex())
+        let mf = device.create_shader_module(selection_mask_frag_spirv(), shader_stage_fragment())
+        let ov = device.create_shader_module(selection_outline_vert_spirv(), shader_stage_vertex())
+        let of = device.create_shader_module(selection_outline_frag_spirv(), shader_stage_fragment())
+        let vertex_layout = VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0)])
+        // Double-sided depth reproduces flat meshes and mirrored transforms.
+        let mask_pipeline = device.create_render_pipeline_with_options(target, mv, mf, vertex_layout, mask_layout, RenderPipelineOptions::depth())
+        let outline_pipeline = device.create_render_pipeline_with_options(composition, ov, of, vertex_layout, outline_layout,
+            RenderPipelineOptions::opaque().with_depth_attachment(true),)
+        let frame_count = composition.frames_in_flight()
+        let renderer = SceneRenderer::create(device, mask_layout, target.frames_in_flight(), mask_pipeline, mask_pipeline)
+        let silhouette_renderer = SceneRenderer::create(device, mask_layout, silhouette.frames_in_flight(), mask_pipeline, mask_pipeline)
+        let mut materials = MaterialAssets::new()
+        let selected = materials.add(StandardMaterial::new(Vec3::new(1, 1, 1), 0, 1).with_unlit())
+        let unselected = materials.add(StandardMaterial::new(Vec3::zero(), 0, 1).with_unlit())
+        let mut uniforms = Vec[GpuBuffer]::new()
+        let mut slot = 0_u32
+        while slot < frame_count {
+            uniforms.push(device.create_buffer(16, buffer_uniform(), true))
+            slot += 1
+        }
+        let sampler = device.create_sampler()
+        let mut vertices = Vec[f32]::new()
+        for point in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
+            for value in vec![point.x(), point.y(), point.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32, 0_f32, 0_f32] {
+                vertices.push(value)
+            }
+        }
+        let quad = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 0_u32, 2_u32, 3_u32])
+        ret SelectionOutline<H> {
+            device, mask_views(target, silhouette), Vec[MaskViews]::new(), mask_layout, outline_layout,
+            mask_pipeline, outline_pipeline, vec![mv, mf, ov, of], renderer, silhouette_renderer, materials, selected, unselected,
+            uniforms, sampler, quad, frame_count, false
+        }
+    }
+    pub fn available(self: Self&) -> bool {
+        ret self.views.target.available() && self.views.silhouette.available() && self.mask_pipeline.available() && self.outline_pipeline.available() && self.renderer.available() && self.silhouette_renderer.available() && self.quad.available()
+    }
+    /// Called before submitting a viewport frame, on the same graphics queue.
+    pub fn prepare(self: mut Self&, items: Vec[RenderItem], selected: Vec[u64], camera: PerspectiveCamera,
+        light: DirectionalLight, meshes: MeshAssets, width: u32, height: u32, consumers_complete: bool,characters: mut SceneCharacters<H>,animation: SceneAnimation<H>,source_selected: Vec[u64],gi_scene: GpuBuffer,gi_surfaces: GpuBuffer,gi_history: GpuBuffer,) -> bool {
+        self.ready = false
+        if consumers_complete {
+            let mut pending = Vec[MaskViews]::new()
+            for views in self.retired {
+                if views.target.last_frame_complete() && views.silhouette.last_frame_complete() {
+                    destroy_views(views)
+                } else {
+                    pending.push(views)
+                }
+            }
+            self.retired = pending
+        }
+        if selected.len() == 0 {
+            ret true
+        }
+        if width > self.views.target.width() || height > self.views.target.height() {
+            if self.retired.len() >= 3 {
+                ret false
+            }
+            let target = self.device.create_shared_offscreen_target(((width + 63) / 64) * 64,((height + 63) / 64) * 64)
+            let silhouette = self.device.create_shared_offscreen_target(((width + 63) / 64) * 64,((height + 63) / 64) * 64)
+            if !target.available() || !silhouette.available() {
+                target.destroy() silhouette.destroy()
+                ret false
+            }
+            self.retired.push(self.views)
+            self.views = mask_views(target, silhouette)
+        }
+        let frame = self.views.target.try_acquire_frame()
+        if !frame.available() {
+            frame.destroy() ret false
+        }
+        let ordered = frame.sampled_color_barrier()
+        let character_ready=characters.prepare_selection(animation,frame,CharacterRenderView{self.views.target,camera,width,height,1_u32,false,Mat4::identity(),light,Vec3::zero(),Vec[f32]::new(),0_u32,GpuTexture::unavailable()},source_selected,false,gi_scene,gi_surfaces,gi_history)
+        let pass = frame.begin_render_pass(self.mask_pipeline, 0, 1, 1, 1)
+        let recorded = character_ready && ordered && frame.set_viewport(0, 0, width, height) && self.renderer.render_items(
+            selection_mask_items(items, selected, self.selected, self.unselected), camera, light, meshes, self.materials,
+            pass, frame.slot(),(width as f32) /(height as f32),) && characters.draw_selection(pass,frame.slot(),false)
+        let submitted = recorded && pass.end() && frame.present()
+        frame.destroy()
+        if !submitted {
+            ret false
+        }
+        // A distinct renderer owns distinct per-frame uniform/instance buffers:
+        // neither pending pass can be overwritten by the other's uploads.
+        let silhouette_frame = self.views.silhouette.try_acquire_frame()
+        if !silhouette_frame.available() {
+            silhouette_frame.destroy() ret false
+        }
+        let silhouette_ordered = silhouette_frame.sampled_color_barrier()
+        let silhouette_character_ready=characters.prepare_selection(animation,silhouette_frame,CharacterRenderView{self.views.silhouette,camera,width,height,1_u32,false,Mat4::identity(),light,Vec3::zero(),Vec[f32]::new(),0_u32,GpuTexture::unavailable()},source_selected,true,gi_scene,gi_surfaces,gi_history)
+        let silhouette_pass = silhouette_frame.begin_render_pass(self.mask_pipeline, 0, 1, 1, 1)
+        let silhouette_recorded = silhouette_character_ready && silhouette_ordered && silhouette_frame.set_viewport(0, 0, width, height) && self.silhouette_renderer.render_items(
+            selection_silhouette_items(items, selected, self.selected), camera, light, meshes, self.materials,
+            silhouette_pass, silhouette_frame.slot(),(width as f32) /(height as f32),) && characters.draw_selection(silhouette_pass,silhouette_frame.slot(),true)
+        let silhouette_submitted = silhouette_recorded && silhouette_pass.end() && silhouette_frame.present()
+        silhouette_frame.destroy()
+        self.ready = silhouette_submitted
+        ret silhouette_submitted
+    }
+    pub fn composite(self: mut Self&, frame: RenderFrame, slot: u32, x: u32, y: u32, width: u32, height: u32) -> bool {
+        if !self.ready {
+            ret true
+        }
+        let image = self.views.target.external_image()
+        let silhouette_image = self.views.silhouette.external_image()
+        let mut image_index = 0_usize
+        while image_index < self.views.images.len() {
+            if self.views.images.get(image_index).unwrap_or(0) == image && self.views.silhouette_images.get(image_index).unwrap_or(0) == silhouette_image {
+                break
+            }
+            image_index += 1
+        }
+        if image_index == self.views.images.len() {
+            let texture = self.device.borrow_sampled_texture(image, self.views.target.width(), self.views.target.height(), format_bgra8_unorm(), texture_layout_shader_read())
+            let silhouette_texture = self.device.borrow_sampled_texture(silhouette_image, self.views.silhouette.width(), self.views.silhouette.height(), format_bgra8_unorm(), texture_layout_shader_read())
+            if !texture.available() || !silhouette_texture.available() {
+                texture.destroy() silhouette_texture.destroy()
+                ret false
+            }
+            self.views.images.push(image) self.views.textures.push(texture)
+            self.views.silhouette_images.push(silhouette_image) self.views.silhouette_textures.push(silhouette_texture)
+            for uniform in self.uniforms {
+                let group = self.device.create_buffer_textures_bind_group_many(self.outline_layout, vec![0_u32], vec![uniform], vec![0_u64], vec![16_u64], vec![1_u32, 2_u32], vec![silhouette_texture, texture], vec![self.sampler, self.sampler])
+                if !group.available() {
+                    ret false
+                }
+                self.views.groups.push(group)
+            }
+        }
+        let uniform = match self.uniforms.get(slot as usize) {
+            Option::Some(value) => value Option::None => {
+                ret false
+            }
+        }
+        let group = match self.views.groups.get(image_index *(self.frame_count as usize) +(slot as usize)) {
+            Option::Some(value) => value Option::None => {
+                ret false
+            }
+        }
+        let uploaded = uniform.write_f32s(0, vec![x as f32, y as f32, width as f32, height as f32])
+        let pass = frame.continue_render_pass(self.outline_pipeline)
+        ret uploaded && pass.available() && pass.bind_group(group) && pass.draw_mesh(self.quad)
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        for views in self.retired {
+            destroy_views(views)
+        }
+        self.retired.clear()
+        destroy_views(self.views)
+        for uniform in self.uniforms {
+            uniform.destroy()
+        }
+        self.quad.destroy() self.sampler.destroy() self.renderer.destroy() self.silhouette_renderer.destroy()
+        self.mask_pipeline.destroy() self.outline_pipeline.destroy()
+        self.mask_layout.destroy() self.outline_layout.destroy()
+        for shader in self.shaders {
+            shader.destroy()
+        }
+        ret()
+    }
+}

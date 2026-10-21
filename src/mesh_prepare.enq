@@ -1,0 +1,47 @@
+//! CPU-only mesh preparation shared by importers and built-in geometry.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import mod::scene::primitive::MeshData
+import mod::virtual_geometry::{VirtualGeometry, build_virtual_geometry_lods_with_attributes}
+
+/// Prepares shared CPU geometry once, at asset import rather than GPU upload.
+pub fn prepare_mesh_geometry(data: MeshData) -> VirtualGeometry {
+    let data = data.with_uvs()
+    let values = data.vertices()
+    let indices = data.indices()
+    let stride =(data.stride() / 4_u32) as usize
+    let mut positions = Vec[Vec3]::new()
+    if stride >= 3_usize {
+        let mut offset = 0_usize
+        while offset + 2_usize < values.len() {
+            let mut x = 0.0_f32
+            let mut y = 0.0_f32
+            let mut z = 0.0_f32
+            match values.get(offset) {
+                Option::Some(value) => {
+                    x = value
+                }
+                Option::None => {
+                }
+            }
+            match values.get(offset + 1_usize) {
+                Option::Some(value) => {
+                    y = value
+                }
+                Option::None => {
+                }
+            }
+            match values.get(offset + 2_usize) {
+                Option::Some(value) => {
+                    z = value
+                }
+                Option::None => {
+                }
+            }
+            positions.push(Vec3::new(x, y, z))
+            offset += stride
+        }
+    }
+    ret build_virtual_geometry_lods_with_attributes(positions, indices, values, stride, 64, 126)
+}

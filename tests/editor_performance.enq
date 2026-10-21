@@ -1,0 +1,27 @@
+import graphene::PerformancePanel
+
+fn performance_controls_are_available_before_first_frame() -> bool {
+    let panel = PerformancePanel::new()
+    let view = panel.widget()
+    ret view.find("perf-history").is_some() && view.find("perf-timeline").is_some() &&
+    view.find("perf-live").is_some() && view.find("perf-clear").is_some() &&
+    view.find("perf-budget-60").is_some() && view.find("perf-hierarchy").is_some()
+}
+fn performance_controls_are_session_only_actions() -> bool {
+    let mut panel = PerformancePanel::new()
+    ret panel.action("perf-budget-144") && panel.action("perf-budget-30") &&
+    panel.action("perf-hierarchy") && panel.action("perf-live") && panel.action("perf-clear") &&
+    !panel.action("delete") && !panel.running()
+}
+
+fn main() -> u32 {
+    let controls = performance_controls_are_available_before_first_frame()
+    let actions = performance_controls_are_session_only_actions()
+    if !controls {
+        ret 1_u32
+    }
+    if !actions {
+        ret 2_u32
+    }
+    ret 0_u32
+}

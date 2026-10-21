@@ -1,0 +1,134 @@
+//! Authoring/IR/native/runtime regression checks, independent of the editor window.
+import core::vec::Vec
+import graphene::particles::asset::{save_particle_system, load_particle_system, load_cooked_particles}
+import graphene::particles::model::{ParticleLink, ParticleNode}
+import graphene::particles::presets::{particle_template, particle_templates}
+import graphene::{ParticleDocument, ParticleWorld, ParticleParameters, ParticleValue, ParticleEmitterHandle, ParticleStopMode, compile_particle_emitter, particle_system_parse, particle_system_stringify}
+import std::io::println
+import std::os::{mkdir_all, remove_file}
+fn main() -> u32 {
+    for name in particle_templates() {
+        let asset = particle_template(name)
+        let program = compile_particle_emitter(asset, 0_usize)
+        if !program.valid() {
+            for d in program.diagnostics {
+                println(d.message)
+            }
+            ret 1_u32
+        }
+        let decoded = match particle_system_parse(particle_system_stringify(asset)) {
+            Ok(a) => a Err(e) => {
+                println(e) ret 2_u32
+            }
+        }
+        if particle_system_stringify(decoded) != particle_system_stringify(asset) {
+            println("Round-trip mismatch: " + name) ret 3_u32
+        }
+        if name == "Gas 2D" || name == "Smoke 3D" || name == "Fire 3D" || name == "Liquid" || name == "Shallow Water" {
+            continue
+        }
+        let handle = match ParticleEmitterHandle::open(asset.emitters.get(0_usize).unwrap_or(graphene::ParticleEmitter::new("")), program, 7_u32) {
+            Ok(h) => h Err(e) => {
+                println(e) ret 4_u32
+            }
+        }
+        for _i in 0_usize..60_usize {
+            handle.tick(0.016666667_f32)
+        }
+        if handle.count() == 0_usize || handle.stats().steps != 60_u64 {
+            ret 5_u32
+        }
+        let expected_events = handle.events().len() / 16_usize
+        match handle.drain_events() {
+            Ok(events) => {
+                if events.len() != expected_events {
+                    ret 22_u32
+                }
+            }
+            Err(_) => {
+                ret 23_u32
+            }
+        }
+        match handle.drain_events() {
+            Ok(events) => {
+                if events.len() != 0_usize {
+                    ret 24_u32
+                }
+            }
+            Err(_) => {
+                ret 25_u32
+            }
+        }
+        handle.action(0_u32) let time = handle.time() handle.tick(1) if handle.time() != time {
+            ret 6_u32
+        }
+        handle.action(1_u32) handle.action(2_u32) for _i in 0_usize..600_usize {
+            handle.tick(0.016666667_f32)
+        }
+        if !handle.finished() || handle.count() != 0_usize {
+            ret 7_u32
+        }
+        handle.action(4_u32) if handle.stats().spawned != 0_u64 || handle.time() != 0 {
+            ret 8_u32
+        }
+        handle.close() if handle.tick(1) {
+            ret 9_u32
+        }
+    }
+    let mut doc = ParticleDocument::new(particle_template("Sparks"))
+    let mut asset = doc.asset() let mut e = asset.emitters.get(0_usize).unwrap_or(graphene::ParticleEmitter::new("")) e.rate = 777 asset.emitters.set(0_usize, e)
+    if doc.asset().emitters.get(0_usize).unwrap_or(e).rate == 777 {
+        ret 10_u32
+    }
+    doc.replace(asset) if !doc.dirty() {
+        ret 20_u32
+    }
+    doc.undo() if doc.dirty() {
+        ret 21_u32
+    }
+    if doc.asset().emitters.get(0_usize).unwrap_or(e).rate == 777 {
+        ret 11_u32
+    }
+    doc.redo() if doc.asset().emitters.get(0_usize).unwrap_or(e).rate != 777 {
+        ret 12_u32
+    }
+    let mut bad = doc.asset() let mut be = bad.emitters.get(0_usize).unwrap_or(e) let mut m = be.modules.get(0_usize).unwrap_or(graphene::ParticleModule::new("", 0_u32)) m.links.push(ParticleLink {
+            3_u64, 3_u64, 0_u32
+        }
+        ,
+    ) be.modules.set(0_usize, m) bad.emitters.set(0_usize, be) if compile_particle_emitter(bad, 0_usize).valid() {
+        ret 13_u32
+    }
+    let project = "target/vfx/asset-fixture" mkdir_all(project + "/Content/VFX") let path = "Content/VFX/test.graphene-particle.json"
+    if !save_particle_system(project + "/" + path, doc.asset()) {
+        ret 14_u32
+    }
+    match load_particle_system(project, path) {
+        Ok(_) => {
+        }
+        Err(e) => {
+            println(e) ret 15_u32
+        }
+    }
+    remove_file(project + "/" + path)
+    match load_cooked_particles(project + "/" + path + ".gparticle") {
+        Ok(a) => {
+            if a.programs.len() != 1_usize {
+                ret 16_u32
+            }
+        }
+        Err(e) => {
+            println(e) ret 17_u32
+        }
+    }
+    let mut world = ParticleWorld::new() let parameters = ParticleParameters::new() let handle = match world.instantiate(doc.asset(), parameters) {
+        Ok(h) => h Err(_) => {
+            ret 18_u32
+        }
+    }
+    world.tick(0.1_f32) world.pause(handle) world.resume(handle) world.restart(handle) world.stop(handle, ParticleStopMode::Kill) if !world.remove(handle) || world.remove(handle) {
+        ret 19_u32
+    }
+    world.close()
+    println("VFX assets, graphs, lifecycle, isolated history and native cooking passed") ret 0_u32
+}

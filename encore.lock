@@ -2,73 +2,91 @@ version = 2
 
 [[packages]]
 name = "std"
-ref = "index@std@^1.0.1"
-version = "1.0.1"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/std-v1.0.1/std-1.0.1.tar.gz"
-checksum = "fd9ff75770e3472d889b07661681011e64a88092181b55656546314b073a786c"
+ref = "index@std@0.0.5"
+version = "0.0.5"
+archive = "http://127.0.0.1:8137/archives/afc9dec339ff611549b23cbe3430576d88b843dc35b1321a75af25e3997c000f.tar.gz"
+checksum = "afc9dec339ff611549b23cbe3430576d88b843dc35b1321a75af25e3997c000f"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "json"
-ref = "index@json@^1.0.0"
-version = "1.0.0"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/packages-v0.1.4/json-1.0.0.tar.gz"
-checksum = "74f32edb64067e32f2d410e87632d9ad020a47cb9fd85de7aa95fd9a9ee59c74"
+ref = "index@json@0.0.3"
+version = "0.0.3"
+archive = "http://127.0.0.1:8137/archives/018cce6bcbca73c3aa1afa26d0ec09156b1cf0c915e2e0334e07207588f55258.tar.gz"
+checksum = "018cce6bcbca73c3aa1afa26d0ec09156b1cf0c915e2e0334e07207588f55258"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "linalg"
-ref = "index@linalg@^0.1.1"
-version = "0.1.1"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/linalg-v0.1.1/linalg-0.1.1.tar.gz"
-checksum = "6da0e67aaf161889e05a72804dce04bbf155d1016231fe4062f4ab95a1ea66e8"
+ref = "index@linalg@0.0.1"
+version = "0.0.1"
+archive = "http://127.0.0.1:8137/archives/50b20218e37dc4065faa64e61bc36f8d5ecd8fcb834d120cb8368677f5461842.tar.gz"
+checksum = "50b20218e37dc4065faa64e61bc36f8d5ecd8fcb834d120cb8368677f5461842"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
-name = "vulkan_native"
-ref = "index@vulkan_native@^0.1.0"
+name = "binary"
+ref = "index@binary@0.1.0"
 version = "0.1.0"
-archive = "https://github.com/encore-ecosystem/Luma/releases/download/vulkan_native-v0.1.0/vulkan_native-0.1.0.tar.gz"
-checksum = "f7afc3e810c43d899a6b69c032c3df3b88413186fb59d9ff4af56aa5d663ae53"
+archive = "http://127.0.0.1:8137/archives/1b704ca6c502bc9f8ec5c72da70444b0e8a999e4c8783133725f16d85c2671a7.tar.gz"
+checksum = "1b704ca6c502bc9f8ec5c72da70444b0e8a999e4c8783133725f16d85c2671a7"
+registry = "http://127.0.0.1:8137/index"
+
+[[packages]]
+name = "vulkan"
+ref = "path@../Vulkan"
+version = "0.1.1"
 
 [[packages]]
 name = "luma"
-ref = "index@luma@^0.2.1"
-version = "0.2.1"
+ref = "path@../Luma"
+version = "0.0.1"
 features = ["fonts"]
-archive = "https://github.com/encore-ecosystem/Luma/releases/download/luma-v0.2.1/luma-0.2.1.tar.gz"
-checksum = "7fa5a7fec2fb02b58f8fb2f643710e6b5e49e3d72705a07e0828d1a09ba76685"
+
+[[packages]]
+name = "sdl"
+ref = "path@../SDL"
+version = "0.1.0"
+
+[[packages]]
+name = "gpu"
+ref = "path@../GPU"
+version = "0.1.1"
+
+[[packages]]
+name = "audio"
+ref = "path@../Audio"
+version = "0.1.0"
+
+[[packages]]
+name = "serialize"
+ref = "index@serialize@0.1.0"
+version = "0.1.0"
+archive = "http://127.0.0.1:8137/archives/99bd9f2e570d776c545866ebc4c93c864b125d043ec67b83988265a61108bd6a.tar.gz"
+checksum = "99bd9f2e570d776c545866ebc4c93c864b125d043ec67b83988265a61108bd6a"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "core"
 ref = "sys@core"
-version = "0.1.0"
+version = "0.0.0"
 
 [[packages]]
 name = "platform"
 ref = "sys@platform"
-version = "0.1.0"
+version = "0.0.0"
 
 [[packages]]
 name = "color"
-ref = "index@color@^0.1.0"
-version = "0.1.0"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/packages-v0.1.4/color-0.1.0.tar.gz"
-checksum = "9f99713dda0a02c08afb8b6e3688be8ad77e426719e8f749a0d798cb1b5f2abb"
-
-[[packages]]
-name = "geometry"
-ref = "index@geometry@^0.1.0"
-version = "0.1.0"
-archive = "https://github.com/encore-ecosystem/encore-index/releases/download/packages-v0.1.4/geometry-0.1.0.tar.gz"
-checksum = "38a1f3430cdf4552e8713a8ace35851465c1683d7040f1dbecf53fa3b8223ebb"
+ref = "index@color"
+version = "0.0.0"
+archive = "http://127.0.0.1:8137/archives/e1b883aabe52e4a79a6b02c507ea627ce4696bd67fb42b56b051036a4f19059c.tar.gz"
+checksum = "e1b883aabe52e4a79a6b02c507ea627ce4696bd67fb42b56b051036a4f19059c"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "ui_native"
 ref = "workspace@ui_native"
-version = "0.1.0"
+version = "0.0.0"
 source = "embedded@luma"
 path = "workspace/ui_native"
-distribution-checksum = "7fa5a7fec2fb02b58f8fb2f643710e6b5e49e3d72705a07e0828d1a09ba76685"
-
-[[packages]]
-name = "core"
-ref = "path@../core"
-version = "0.1.0"

@@ -1,0 +1,403 @@
+//! Queue-ordered SoA simulation. No per-frame GPU-to-CPU readback.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import linalg::Vec3
+
+import mod::events::ParticleEvent
+import mod::fluid::FluidGpu
+import mod::model::*
+import mod::readback::ParticleGpuReadback
+import mod::runtime::{ParticleEmitterHandle, ParticleStats, particle_program_valid}
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+extern fn graphene_vfx_shader_length(shader: u32) -> u32
+extern fn graphene_vfx_shader_word(shader: u32, index: u32) -> u32
+pub fn particle_spirv(shader: u32) -> Vec[u32] {
+    let mut words = Vec[u32]::new()
+    unsafe {
+        let count = graphene_vfx_shader_length(shader) for i in 0_usize..(count as usize) {
+            words.push(graphene_vfx_shader_word(shader, i as u32))
+        }
+    }
+    ret words
+}
+struct VfxRenderPipeline {
+    target: usize
+    signature: u64
+    pipeline: RenderPipeline
+}
+// Inline slots keep owning handles contiguous; see PROBLEMS.md / Encore #147.
+pub struct ParticleGpuSlot {
+    emitter: ParticleGpuEmitter<H>
+}
+pub struct ParticleGpuEmitter {
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    compute: ComputePipeline
+    shaders: Vec[ShaderModule]
+    attributes: GpuBuffer
+    pool: GpuBuffer
+    program: GpuBuffer
+    commands: GpuBuffer
+    events: GpuBuffer
+    uniform: GpuBuffer
+    group: BindGroup
+    indices: GpuBuffer
+    pipelines: Vec[VfxRenderPipeline]
+    relative: Vec3
+    emitter: ParticleEmitter
+    initialized: bool
+    paused: bool
+    emitting: bool
+    reset: bool
+    clock: f32
+    cycle: f32
+    accumulator: f32
+    fraction: f32
+    burst: u32
+    generation: u32
+    next: u32
+    parameters: Vec[f32]
+    cpu: Option[ParticleEmitterHandle]
+    count: u32
+    fluid: Option[FluidGpu<H>]
+    observer: Option[ParticleGpuReadback<H>]
+}
+
+impl for ParticleGpuEmitter {
+    pub fn create(device: GraphicsDevice, emitter: ParticleEmitter, program: ParticleProgram, seed: u32, parameters: Vec[ParticleParameter]) -> Result[ParticleGpuEmitter<H>, str] {
+        if !particle_program_valid(program) {
+            ret Result::Err("Invalid particle graph")
+        }
+        let stages = shader_stage_compute() | shader_stage_vertex()
+        let layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, stages), BindGroupLayoutEntry::storage(1, stages), BindGroupLayoutEntry::storage(2, stages), BindGroupLayoutEntry::storage(3, shader_stage_compute()), BindGroupLayoutEntry::storage(4, shader_stage_compute()), BindGroupLayoutEntry::storage(5, shader_stage_compute())])
+        let shader = device.create_shader_module(particle_spirv(0_u32), shader_stage_compute())
+        let vertex = device.create_shader_module(particle_spirv(1_u32), shader_stage_vertex()) let fragment = device.create_shader_module(particle_spirv(2_u32), shader_stage_fragment())
+        let compute = device.create_compute_pipeline(shader, layout)
+        let usage = buffer_storage() | buffer_transfer_destination() | buffer_transfer_source()
+        let attributes = device.create_buffer((emitter.capacity as u64) * 128_u64 + 256_u64, usage, false)
+        let pool = device.create_buffer((emitter.capacity as u64) * 12_u64 + 32_u64, usage, false)
+        let bytecode = device.create_buffer((program.words.len() as u64) * 4_u64, usage, true)
+        let commands = device.create_buffer(24_u64, usage | buffer_indirect(), false)
+        let events = device.create_buffer(262160_u64, usage, false)
+        let uniform = device.create_buffer(1248_u64, buffer_uniform() | buffer_transfer_destination(), false)
+        let indices = device.create_buffer(24_u64, buffer_index(), true)
+        let uploaded = indices.write_u32s(0_u64, vec![0_u32, 1_u32, 2_u32, 2_u32, 1_u32, 3_u32]) && bytecode.write_f32s(0_u64, program.words)
+        let group = device.create_buffer_bind_group_many(layout, vec![0_u32, 1_u32, 2_u32, 3_u32, 4_u32, 5_u32], vec![uniform, attributes, pool, bytecode, commands, events], vec![0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64], vec![1248_u64, attributes.size(), pool.size(), bytecode.size(), 24_u64, events.size()])
+        let mut cpu = Option[ParticleEmitterHandle]::None
+        if emitter.backend == "cpu" {
+            let handle = ParticleEmitterHandle::open(emitter, program, seed)? cpu = Option[ParticleEmitterHandle]::Some(handle)
+        }
+        let configured = emitter.runtime_copy(seed)
+        let mut instance = ParticleGpuEmitter<H> {
+            device, layout, compute, vec![shader, vertex, fragment], attributes, pool, bytecode, commands, events, uniform, group, indices, Vec[VfxRenderPipeline]::new(), emitter.position, configured, false, false, true, false, 0, 0, 0, 0, emitter.burst, 0_u32, 1_u32, Vec[f32]::new(), cpu, 0_u32, Option[FluidGpu<H>]::None, Option[ParticleGpuReadback<H>]::None
+        }
+        if !uploaded || !group.available() || !compute.available() {
+            instance.destroy() ret Result::Err("Unable to allocate particle GPU resources")
+        }
+        if emitter.renderer == "gas-3d" || emitter.renderer == "gas-2d" || emitter.renderer == "liquid" || emitter.renderer == "shallow-water" {
+            match FluidGpu::create(device, emitter, parameters, seed) {
+                Ok(fluid) => {
+                    instance.fluid = Option[FluidGpu<H>]::Some(fluid)
+                }
+                Err(message) => {
+                    instance.destroy() ret Result::Err(message)
+                }
+            }
+        }
+        ret Result::Ok(instance)
+    }
+    fn values(self: Self&, camera: PerspectiveCamera, aspect: f32, mode: u32, spawn_count: u32) -> Vec[f32] {
+        let mut values = camera.view_projection(aspect).values()
+        let forward = camera.target().sub(camera.position()).normalized() let right = forward.cross(camera.up).normalized() let up = right.cross(forward).normalized()
+        for v in vec![right, up, camera.position(), self.emitter.position] {
+            values.push(v.x()) values.push(v.y()) values.push(v.z()) values.push(0)
+        }
+        for v in vec![self.emitter.direction.x(), self.emitter.direction.y(), self.emitter.direction.z(), self.emitter.speed, self.emitter.color.x, self.emitter.color.y, self.emitter.color.z, self.emitter.color.w, self.emitter.gravity, self.emitter.drag, self.emitter.lifetime, self.emitter.size, self.clock, 0.016666667_f32, if self.cpu.is_some() {
+                self.count as f32
+            } else {
+                self.emitter.capacity as f32
+            }
+            ,(self.emitter.seed & 65535_u32) as f32, mode as f32, spawn_count as f32,(self.next & 65535_u32) as f32, if self.emitter.local_space {
+                1_f32
+            } else {
+                0_f32
+            }
+            ,(self.emitter.seed >> 16_u32) as f32,(self.next >> 16_u32) as f32,(self.generation & 65535_u32) as f32,(self.generation >> 16_u32) as f32] {
+            values.push(v)
+        }
+        for i in 0_usize..256_usize {
+            values.push(self.parameters.get(i).unwrap_or(0))
+        }
+        ret values
+    }
+    fn dispatch(self: Self&, frame: RenderFrame, camera: PerspectiveCamera, aspect: f32, mode: u32, spawn_count: u32, groups: u32) -> bool {
+        ret frame.update_f32s(self.uniform, 0_u64, self.values(camera, aspect, mode, spawn_count)) && frame.dispatch_compute(self.compute, self.group, groups, 1_u32, 1_u32) && frame.compute_barrier()
+    }
+    pub fn prepare(self: mut Self&, frame: RenderFrame, camera: PerspectiveCamera, aspect: f32, delta: f32) -> bool {
+        match self.fluid {
+            Some(fluid) => {
+                ret fluid.prepare(frame, camera, aspect, delta)
+            }
+            None => {
+            }
+        }
+        let groups =(self.emitter.capacity + 127_u32) / 128_u32
+        if !self.initialized || self.reset {
+            match self.observer {
+                Some(observer) => {
+                    observer.reset()
+                }
+                None => {
+                }
+            }
+            self.clock = 0 self.cycle = 0 self.fraction = 0 self.accumulator = 0 self.burst = self.emitter.burst self.next = 1_u32 self.generation = 0_u32
+            if !self.dispatch(frame, camera, aspect, 0_u32, 0_u32, groups) || !self.dispatch(frame, camera, aspect, 5_u32, 0_u32, 1_u32) {
+                ret false
+            }
+            self.initialized = true self.reset = false self.clock = 0 self.cycle = 0 self.fraction = 0 self.accumulator = 0 self.burst = self.emitter.burst self.next = 1_u32 self.generation = 0_u32
+        }
+        match self.cpu {
+            Some(cpu) => {
+                cpu.tick(delta) self.count = cpu.count() as u32
+                if self.count == 0_u32 {
+                    ret frame.fill_buffer(self.commands, 4_u64, 4_u64, 0_u32) && frame.transfer_storage_barrier()
+                }
+                ret frame.update_f32s(self.attributes, 0_u64, cpu.particles()) && self.dispatch(frame, camera, aspect, 8_u32, self.count,(self.count + 127_u32) / 128_u32)
+            }
+            None => {
+            }
+        }
+        if !self.paused && delta > 0 && delta < 10 {
+            self.accumulator += if delta > 0.25_f32 {
+                0.25_f32
+            } else {
+                delta
+            }
+        }
+        if !frame.fill_buffer(self.events, 0_u64, 8_u64, 0_u32) || !frame.transfer_storage_barrier() {
+            ret false
+        }
+        let mut steps = 0_u32
+        while self.accumulator + 0.0000001_f32 >= 0.016666667_f32 && steps < 15_u32 {
+            self.accumulator -= 0.016666667_f32 if self.accumulator < 0 {
+                self.accumulator = 0
+            }
+            self.clock += 0.016666667_f32 self.cycle += 0.016666667_f32 steps += 1_u32
+            if !frame.fill_buffer(self.pool, 0_u64, 4_u64, 0_u32) || !frame.transfer_storage_barrier() {
+                ret false
+            }
+            if !self.dispatch(frame, camera, aspect, 6_u32, 0_u32, 1_u32) || !self.dispatch(frame, camera, aspect, 1_u32, 0_u32, groups) {
+                ret false
+            }
+            let mut spawn_count = 0_u32
+            if self.emitting && self.cycle >= self.emitter.delay &&(self.emitter.duration <= 0 || self.cycle < self.emitter.duration + self.emitter.delay) {
+                self.fraction += self.emitter.rate * 0.016666667_f32 spawn_count = self.fraction as u32 self.fraction -= spawn_count as f32 spawn_count += self.burst self.burst = 0_u32
+            }
+            if spawn_count > 0_u32 {
+                if !self.dispatch(frame, camera, aspect, 3_u32, spawn_count, 1_u32) || !self.dispatch(frame, camera, aspect, 2_u32, spawn_count,(spawn_count + 127_u32) / 128_u32) {
+                    ret false
+                }
+                let previous = self.next self.next += spawn_count if self.next < previous {
+                    self.generation += 1_u32
+                }
+            }
+            if !self.dispatch(frame, camera, aspect, 4_u32, 0_u32, 1_u32) {
+                ret false
+            }
+            if self.emitter.duration > 0 && self.cycle >= self.emitter.duration + self.emitter.delay {
+                if self.emitter.looping {
+                    self.cycle = 0 self.burst = self.emitter.burst if !self.dispatch(frame, camera, aspect, 7_u32, 0_u32, 1_u32) {
+                        ret false
+                    }
+                } else {
+                    self.emitting = false
+                }
+            }
+        }
+        // Camera transforms change even while simulation is paused.
+        ret frame.update_f32s(self.uniform, 0_u64, self.values(camera, aspect, 4_u32, 0_u32))
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame, target: Swapchain) -> bool {
+        match self.fluid {
+            Some(fluid) => {
+                ret fluid.record(frame, target)
+            }
+            None => {
+            }
+        }
+        let mut selected = self.pipelines.len()
+        for i in 0_usize..self.pipelines.len() {
+            let p = self.pipelines.get_unchecked_borrowed(i) if p.target == target.handle() && p.signature == target.render_signature() {
+                selected = i break
+            }
+        }
+        if selected == self.pipelines.len() {
+            let vertex = self.shaders.get(1_usize).unwrap_or(ShaderModule::unavailable()) let fragment = self.shaders.get(2_usize).unwrap_or(ShaderModule::unavailable())
+            let pipeline = self.device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::empty(), self.layout, RenderPipelineOptions::depth().with_depth_write(false).with_alpha_blending())
+            self.pipelines.push(VfxRenderPipeline {
+                    target.handle(), target.render_signature(), pipeline
+                }
+                ,
+            )
+        }
+        let p = self.pipelines.get_unchecked_borrowed(selected) let pass = frame.continue_render_pass(p.pipeline)
+        ret pass.bind_group(self.group) && pass.bind_index_buffer(self.indices) && pass.draw_indexed_indirect_count(self.commands, 0_u64, self.commands, 20_u64, 1_u32)
+    }
+    pub fn observe(self: mut Self&, frame: RenderFrame, target: Swapchain) -> bool {
+        if self.fluid.is_some() || self.cpu.is_some() {
+            ret true
+        }
+        if self.observer.is_none() {
+            self.observer = Option[ParticleGpuReadback<H>]::Some(ParticleGpuReadback::create(self.device, self.emitter.capacity as u64, self.attributes.size() + self.pool.size() + self.program.size() + self.commands.size() + self.events.size() + self.uniform.size() + self.indices.size() + 524384_u64, true))
+        }
+        match self.observer {
+            Some(observer) => {
+                ret observer.capture(frame, target, self.pool, self.events)
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+    pub fn fluid_cells(self: Self&) -> u64 {
+        ret match self.fluid {
+            Some(fluid) => fluid.cells() None => 0_u64
+        }
+    }
+    pub fn stats(self: Self&) -> ParticleStats {
+        match self.cpu {
+            Some(cpu) => {
+                ret cpu.stats()
+            }
+            None => {
+            }
+        }
+        match self.observer {
+            Some(observer) => {
+                ret observer.stats()
+            }
+            None => {
+            }
+        }
+        let mut fluid_bytes = 0_u64
+        match self.fluid {
+            Some(fluid) => {
+                fluid_bytes = fluid.bytes()
+            }
+            None => {
+            }
+        }
+        ret ParticleStats {
+            0_u64, self.emitter.capacity as u64, 0_u64, 0_u64, 0_u64, 0_u64, self.attributes.size() + self.pool.size() + self.program.size() + self.commands.size() + self.events.size() + self.uniform.size() + self.indices.size() + fluid_bytes, 0_u64
+        }
+    }
+    pub fn take_events(self: mut Self&) -> Vec[ParticleEvent] {
+        match self.cpu {
+            Some(cpu) => {
+                ret cpu.drain_events().unwrap_or(Vec[ParticleEvent]::new())
+            }
+            None => {
+            }
+        }
+        match self.observer {
+            Some(observer) => {
+                ret observer.take_events()
+            }
+            None => {
+                ret Vec[ParticleEvent]::new()
+            }
+        }
+    }
+    pub fn action(self: mut Self&, action: u32) ->() {
+        match self.fluid {
+            Some(fluid) => {
+                fluid.action(action)
+            }
+            None => {
+            }
+        }
+        match self.cpu {
+            Some(cpu) => {
+                cpu.action(action)
+            }
+            None => {
+            }
+        }
+        if action == 0_u32 {
+            self.paused = true
+        } elif action == 1_u32 {
+            self.paused = false
+        } elif action == 2_u32 {
+            self.emitting = false
+        } elif action == 3_u32 {
+            self.emitting = false self.reset = true
+        } elif action == 4_u32 {
+            self.emitting = true self.paused = false self.reset = true
+        }
+    }
+    pub fn set_parameters(self: mut Self&, values: Vec[f32]) ->() {
+        self.parameters = values match self.cpu {
+            Some(cpu) => {
+                cpu.parameters(values)
+            }
+            None => {
+            }
+        }
+    }
+    pub fn set_origin(self: mut Self&, origin: Vec3) ->() {
+        match self.fluid {
+            Some(fluid) => {
+                fluid.set_origin(origin)
+            }
+            None => {
+            }
+        }
+        self.emitter.position = origin.add(self.relative) match self.cpu {
+            Some(cpu) => {
+                cpu.configure(self.emitter)
+            }
+            None => {
+            }
+        }
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        match self.observer {
+            Some(observer) => {
+                observer.destroy()
+            }
+            None => {
+            }
+        }
+        self.observer = Option[ParticleGpuReadback<H>]::None
+        match self.fluid {
+            Some(fluid) => {
+                fluid.destroy()
+            }
+            None => {
+            }
+        }
+        self.fluid = Option[FluidGpu<H>]::None
+        match self.cpu {
+            Some(cpu) => {
+                cpu.close()
+            }
+            None => {
+            }
+        }
+        self.cpu = Option[ParticleEmitterHandle]::None
+        for p in self.pipelines {
+            p.pipeline.destroy()
+        }
+        self.pipelines.clear() self.group.destroy() self.compute.destroy()
+        for b in vec![self.attributes, self.pool, self.program, self.commands, self.events, self.uniform, self.indices] {
+            b.destroy()
+        }
+        for s in self.shaders {
+            s.destroy()
+        }
+        self.shaders.clear() self.layout.destroy()
+    }
+}

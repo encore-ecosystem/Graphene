@@ -1,0 +1,20 @@
+{
+  "format": "graphene-weather-preset",
+  "version": 1,
+  "name": "snow",
+  "weather": {
+    "cloudiness": 0.85,
+    "rain": 0,
+    "snow": 0.8,
+    "fog": 0.3,
+    "wind": [
+      2,
+      0,
+      0.5
+    ],
+    "temperature": -6,
+    "wetness": 0,
+    "snowCoverage": 0,
+    "storm": 0
+  }
+}

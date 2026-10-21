@@ -1,0 +1,116 @@
+//! Import runs on an asset worker. Native sound playback streams a checked range.
+import audio::prepare
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, parse}
+import mod::model::sound_path_valid
+import refrain::content_browser::path::{content_leaf, content_name_valid, lower, ends}
+import refrain::native_asset::{asset_source_stamp, save_native_sound, native_sound_header, NativeSound}
+import refrain::scene::json_value::parse_number
+import std::os::{mkdir_all, file_exists, read_file, remove_file, write_file_atomic}
+import std::path::Path
+import std::time::perf_counter_ns
+
+pub struct SoundImport {
+    project: str
+    path: str
+    error: str
+}
+pub fn sound_source_supported(path: str) -> bool {
+    let n = lower(path)
+    ret ends(n, ".wav") || ends(n, ".flac") || ends(n, ".mp3") || ends(n, ".ogg")
+}
+pub fn import_sound(project: str, source: str) -> SoundImport {
+    let mut result = SoundImport { project, "", "" }
+    let leaf = content_leaf(source)
+    if !sound_source_supported(source) || !content_name_valid(leaf) {
+        result.error = "Unsupported sound filename or format" ret result
+    }
+    let mut stem = leaf
+    for suffix in vec![".wav", ".flac", ".mp3", ".ogg"] {
+        if ends(lower(stem), suffix) {
+            stem = stem.slice_bytes(0, stem.byte_len() - suffix.byte_len())
+        }
+    }
+    if mkdir_all(project + "/Content/Audio") != 0 || mkdir_all(project + "/.graphene/audio") != 0 {
+        result.error = "Unable to create audio directory" ret result
+    }
+    let relative = "Content/Audio/" + stem + ".gsound"
+    let destination = project + "/" + relative
+    let provenance = Path::new(source).resolve().as_str()
+    if file_exists(destination) {
+        match native_sound_header(destination, false) {
+            Ok(h) => {
+                if h.source != provenance {
+                    result.error = "Another source already owns this sound asset" ret result
+                }
+            }
+            Err(_) => {
+                result.error = "Existing destination is not a valid sound asset" ret result
+            }
+        }
+    }
+    let temporary = project + "/.graphene/audio/import-" + perf_counter_ns().fmt()
+    let wav = temporary + ".wav" let peaks = temporary + ".json"
+    match prepare(source, wav, peaks) {
+        Err(error) => {
+            result.error = error.message() ret result
+        }
+        Ok(_) => {
+        }
+    }
+    let revision = asset_source_stamp(provenance)
+    if !save_native_sound(destination, provenance, revision, wav) || write_file_atomic(destination + ".waveform.json", read_file(peaks)) != 0 {
+        result.error = "Unable to save native sound asset"
+    }
+    remove_file(wav) remove_file(peaks)
+    if result.error == "" {
+        result.path = relative
+    }
+    ret result
+}
+pub fn load_sound(project: str, relative: str) -> Result[NativeSound, str] {
+    if !sound_path_valid(relative) || relative == "" || !ends(relative, ".gsound") {
+        ret Result::Err("Choose a native .gsound asset")
+    }
+    ret native_sound_header(project + "/" + relative, true)
+}
+pub fn waveform(project: str, relative: str) -> Vec[f32] {
+    let mut samples = Vec[f32]::new()
+    let values = match parse(read_file(project + "/" + relative + ".waveform.json")) {
+        Ok(root) => {
+            match root {
+                Json::Array(values) => values
+                _ => {
+                    ret samples
+                }
+            }
+        }
+        Err(_) => {
+            ret samples
+        }
+    }
+    let step = if values.len() > 512 {
+        values.len() / 512
+    } else {
+        1_usize
+    }
+    let mut i = 0_usize
+    while i < values.len() && samples.len() < 512 {
+        let value = values.get(i).unwrap_or(Json::Null)
+        let n = match value.as_number() {
+            Some(text) => parse_number(text).unwrap_or(0) None => 0.0_f32
+        }
+        samples.push(if n >= 0 && n <= 1 {
+                n
+            } elif n > 1 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        )
+        i += step
+    }
+    ret samples
+}

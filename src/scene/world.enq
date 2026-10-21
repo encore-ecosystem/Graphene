@@ -1,17 +1,33 @@
 import core::option::Option
 import core::vec::Vec
+import json::{parse, stringify}
 import linalg::{Mat4, Vec3}
+import mod::component::SceneComponent
 import mod::renderable::{RenderItem, Renderable}
 import mod::transform::Transform
+import refrain::blueprint::codec::{blueprint_instance_json, blueprint_instance_parse}
+import refrain::blueprint::model::BlueprintInstance
 
 pub struct Entity {
-    id: u64 name: str transform: Transform parent: Option[u64] visible: bool renderable: Option[Renderable]
+    id: u64
+    name: str
+    transform: Transform
+    parent: Option[u64]
+    visible: bool
+    renderable: Option[Renderable]
+    blueprint_source: str
+    component: SceneComponent
 }
 pub struct Scene {
-    entities: Vec[Entity] next_id: u64
+    entities: Vec[Entity]
+    next_id: u64
+    revision: u64
 }
 
 impl for Entity {
+    pub fn component(self: Self) -> SceneComponent {
+        ret self.component
+    }
     pub fn id(self: Self) -> u64 {
         ret self.id
     }
@@ -30,13 +46,36 @@ impl for Entity {
     pub fn renderable(self: Self) -> Option[Renderable] {
         ret self.renderable
     }
+    pub fn blueprint(self: Self) -> Option[BlueprintInstance] {
+        if self.blueprint_source == "" {
+            ret Option[BlueprintInstance]::None
+        }
+        match parse(self.blueprint_source) {
+            Ok(value) => {
+                match blueprint_instance_parse(value) {
+                    Ok(instance) => {
+                        ret Option[BlueprintInstance]::Some(instance)
+                    }
+                    Err(_) => {
+                    }
+                }
+            }
+            Err(_) => {
+            }
+        }
+        ret Option[BlueprintInstance]::None
+    }
 }
 
 impl for Scene {
     pub fn new() -> Scene {
         ret Scene {
-            Vec[Entity]::new(), 1_u64
+            Vec[Entity]::new(), 1_u64, 1_u64
         }
+    }
+    /// Monotonic invalidation token for render snapshots; scene files omit it.
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
     }
     pub fn len(self: Self) -> usize {
         ret self.entities.len()
@@ -45,16 +84,18 @@ impl for Scene {
         ret self.entities
     }
     pub fn create_entity(self: mut Self, name: str, transform: Transform) -> u64 {
+        self.revision += 1_u64
         let id = self.next_id
         self.create_entity_with_id(id, name, transform)
         ret id
     }
     pub fn create_entity_with_id(self: mut Self, id: u64, name: str, transform: Transform) -> bool {
+        self.revision += 1_u64
         if id == 0_u64 || self.get(id).is_some() {
             ret false
         }
         self.entities.push(Entity {
-                id, name, transform, Option[u64]::None, true, Option[Renderable]::None
+                id, name, transform, Option[u64]::None, true, Option[Renderable]::None, "", SceneComponent::None
             }
             ,
         )
@@ -63,7 +104,41 @@ impl for Scene {
         }
         ret true
     }
+    fn index_of(self: Self, id: u64) -> usize {
+        if id > 0_u64 && id <= self.entities.len() as u64 {
+            match self.entities.get((id - 1_u64) as usize) {
+                Some(entity) => {
+                    if entity.id == id {
+                        ret(id - 1_u64) as usize
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        let mut index = 0_usize
+        for entity in self.entities {
+            if entity.id == id {
+                ret index
+            }
+            index += 1_usize
+        }
+        ret self.entities.len()
+    }
     pub fn get(self: Self, id: u64) -> Option[Entity] {
+        // Dense actor IDs are the common path. Retain sparse/imported IDs
+        // and deletion semantics through the existing checked fallback.
+        if id > 0_u64 && id <= self.entities.len() as u64 {
+            match self.entities.get((id - 1_u64) as usize) {
+                Some(entity) => {
+                    if entity.id == id {
+                        ret Option[Entity]::Some(entity)
+                    }
+                }
+                None => {
+                }
+            }
+        }
         let mut index = 0_usize
         while index < self.entities.len() {
             match self.entities.get(index) {
@@ -80,6 +155,7 @@ impl for Scene {
         ret Option[Entity]::None
     }
     pub fn remove(self: mut Self, id: u64) -> bool {
+        self.revision += 1_u64
         let mut found = false
         let mut remaining = Vec[Entity]::new()
         for entity in self.entities {
@@ -100,7 +176,7 @@ impl for Scene {
                 }
                 remaining.push(Entity {
                         entity.id, entity.name, entity.transform, parent,
-                        entity.visible, entity.renderable
+                        entity.visible, entity.renderable, entity.blueprint_source, entity.component
                     }
                     ,)
             }
@@ -111,13 +187,14 @@ impl for Scene {
         ret found
     }
     pub fn set_transform(self: mut Self, id: u64, transform: Transform) -> bool {
-        let mut index = 0_usize
+        self.revision += 1_u64
+        let mut index = self.index_of(id)
         while index < self.entities.len() {
             match self.entities.get(index) {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable
+                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component
                             }
                             ,)
                         ret true
@@ -131,16 +208,17 @@ impl for Scene {
         ret false
     }
     pub fn rename(self: mut Self, id: u64, name: str) -> bool {
+        self.revision += 1_u64
         if name == "" {
             ret false
         }
-        let mut index = 0_usize
+        let mut index = self.index_of(id)
         while index < self.entities.len() {
             match self.entities.get(index) {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, name, entity.transform, entity.parent, entity.visible, entity.renderable
+                                entity.id, name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component
                             }
                             ,)
                         ret true
@@ -154,13 +232,14 @@ impl for Scene {
         ret false
     }
     pub fn set_visible(self: mut Self, id: u64, visible: bool) -> bool {
-        let mut index = 0_usize
+        self.revision += 1_u64
+        let mut index = self.index_of(id)
         while index < self.entities.len() {
             match self.entities.get(index) {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable
+                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component
                             }
                             ,)
                         ret true
@@ -174,6 +253,7 @@ impl for Scene {
         ret false
     }
     pub fn set_parent(self: mut Self, id: u64, parent: Option[u64]) -> bool {
+        self.revision += 1_u64
         if id == 0_u64 {
             ret false
         }
@@ -230,13 +310,13 @@ impl for Scene {
             Option::None => {
             }
         }
-        let mut index = 0_usize
+        let mut index = self.index_of(id)
         while index < self.entities.len() {
             match self.entities.get(index) {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable
+                                entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component
                             }
                             ,)
                         ret true
@@ -250,6 +330,7 @@ impl for Scene {
         ret false
     }
     pub fn set_parent_keep_world(self: mut Self, id: u64, parent: Option[u64]) -> bool {
+        self.revision += 1_u64
         match self.world_matrix(id) {
             Option::Some(world) => {
                 let mut local = Option[Mat4]::Some(world)
@@ -416,14 +497,15 @@ impl for Scene {
         ret cursor.is_none()
     }
     pub fn set_renderable(self: mut Self, id: u64, renderable: Option[Renderable]) -> bool {
-        let mut index = 0_usize
+        self.revision += 1_u64
+        let mut index = self.index_of(id)
         while index < self.entities.len() {
             match self.entities.get(index) {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
                                 entity.id, entity.name, entity.transform, entity.parent, entity.visible,
-                                renderable
+                                renderable, entity.blueprint_source, entity.component
                             }
                             ,)
                         ret true
@@ -436,10 +518,49 @@ impl for Scene {
         }
         ret false
     }
+    pub fn set_blueprint(self: mut Self, id: u64, instance: Option[BlueprintInstance]) -> bool {
+        self.revision += 1_u64
+        let source = match instance {
+            Some(value) => stringify(blueprint_instance_json(value)) None => ""
+        }
+        let mut index = 0_usize
+        for entity in self.entities {
+            if entity.id == id {
+                self.entities.set(index, Entity {
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, source, entity.component
+                    }
+                    ,
+                )
+                ret true
+            }
+            index += 1
+        }
+        ret false
+    }
+    pub fn set_component(self: mut Self, id: u64, component: SceneComponent) -> bool {
+        self.revision += 1_u64
+        if !component.valid() {
+            ret false
+        }
+        let index = self.index_of(id)
+        match self.entities.get(index) {
+            Some(entity) => {
+                self.entities.set(index, Entity {
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, component
+                    }
+                    ,
+                )
+                ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
     pub fn visible_render_items(self: Self) -> Vec[RenderItem] {
         let mut items = Vec[RenderItem]::new()
         for entity in self.entities {
-            if self.world_visible(entity.id) {
+            if self.world_visible(entity.id) && entity.component.kind() == "" {
                 match entity.renderable {
                     Option::Some(renderable) => {
                         if renderable.valid() {

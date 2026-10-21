@@ -1,0 +1,106 @@
+//! Environment shader ABI: 32 vec4s in the reserved tail of the shared lighting block.
+import core::vec::Vec
+import linalg::Vec3
+import mod::model::bounded
+import mod::system::EnvironmentFrame
+import std::math::{sin, cos}
+
+impl for EnvironmentFrame {
+    pub fn sun_direction(self: Self) -> Vec3 {
+        let phase =(self.time_hours - 6) * 0.2617994_f32
+        ret Vec3::new(cos(phase), sin(phase), 0.28_f32).normalized()
+    }
+    pub fn ambient(self: Self) -> Vec3 {
+        let daylight = bounded(self.sun_direction().y() * 2, 0, 1)
+        ret Vec3::new(0.13_f32, 0.19_f32, 0.3_f32).scale((0.02_f32 + daylight *(1 - self.weather.cloudiness * 0.45_f32)) * self.sky_light.intensity)
+    }
+    pub fn has_precipitation(self: Self) -> bool {
+        if self.global_weather.rain > 0 || self.global_weather.snow > 0 {
+            ret true
+        }
+        for volume in self.volumes {
+            if volume.weather.rain > 0 || volume.weather.snow > 0 {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn needs_shelter(self: Self) -> bool {
+        if self.has_precipitation() || self.global_weather.wetness > 0 || self.global_weather.snow_coverage > 0 {
+            ret true
+        }
+        for volume in self.volumes {
+            if volume.weather.wetness > 0 || volume.weather.snow_coverage > 0 {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn shader_values(self: Self) -> Vec[f32] {
+        let mut data = self.values()
+        let w = self.global_weather
+        let weather = vec![w.cloudiness, w.rain, w.snow, w.fog, w.wind.x(), w.wind.y(), w.wind.z(), w.temperature, w.wetness, w.snow_coverage]
+        for i in 0..weather.len() {
+            data.set(4 + i, weather.get(i).unwrap_or(0))
+        }
+        data.set(36, self.volumes.len() as f32)
+        while data.len() < 2112 {
+            data.push(0)
+        }
+        let mut index = 0_usize
+        for volume in self.volumes {
+            if index < 64 {
+                let mut packed = vec![volume.center.x(), volume.center.y(), volume.center.z(), volume.feather]
+                for axis in volume.gradients() {
+                    packed.push(axis.x()) packed.push(axis.y()) packed.push(axis.z()) packed.push(0)
+                }
+                let local = volume.weather
+                for value in vec![local.cloudiness, local.rain, local.snow, local.fog, local.wind.x(), local.wind.y(), local.wind.z(), local.temperature, local.wetness, local.snow_coverage, local.storm, 0.0_f32, 0, 0, 0, 0] {
+                    packed.push(value)
+                }
+                for i in 0..packed.len() {
+                    data.set(40 + index * 32 + i, packed.get(i).unwrap_or(0))
+                }
+            }
+            index += 1
+        }
+        ret data
+    }
+    pub fn values(self: Self) -> Vec[f32] {
+        let w = self.weather let sun = self.sun_direction() let ambient = self.ambient()
+        let mut values = vec![if self.enabled {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+            , if self.atmosphere.style == "stylized" {
+                1.0_f32
+            } elif self.atmosphere.style == "hdri" {
+                2.0_f32
+            } else {
+                0.0_f32
+            }
+            , self.time_hours, self.elapsed,
+            w.cloudiness, w.rain, w.snow, w.fog, w.wind.x(), w.wind.y(), w.wind.z(), w.temperature, w.wetness, w.snow_coverage, self.lightning, self.atmosphere.intensity,
+            sun.x(), sun.y(), sun.z(), self.atmosphere.turbidity, self.clouds.density, self.clouds.altitude, self.clouds.thickness, self.clouds.intensity,
+            self.fog.density * self.fog.intensity, self.fog.altitude, self.fog.thickness, self.atmosphere.quality as f32, ambient.x(), ambient.y(), ambient.z(), self.sky_light.intensity]
+        while values.len() < 128 {
+            values.push(0.0_f32)
+        }
+        values.set(33, if self.atmosphere.sun != 0 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+            ,
+        )
+        values.set(34, if self.atmosphere.moon != 0 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+            ,
+        )
+        ret values
+    }
+}

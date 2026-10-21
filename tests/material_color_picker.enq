@@ -1,0 +1,75 @@
+import core::option::Option
+import graphene::material_graph::*
+import graphene::material_graph::editor::MaterialEditor
+import luma::{Event, Rect, StyleSheet, Widget, layout_widget, event_pointer_down, event_pointer_up, WidgetLayout, vertical}
+import std::os::read_file
+import std::time::perf_counter_ms
+fn click() -> Event {
+    ret Event { event_pointer_down(), 0, 0, 0, 0, 1, 0, 0, 0, 0, "", 0 }
+}
+fn popup_layout(editor: MaterialEditor, sheet: StyleSheet) -> WidgetLayout {
+    let view = Widget::panel("test-root").with_direction(vertical()).with_child(editor.widget())
+    let anchor = layout_widget(sheet.apply(view, "", "", ""), Rect::new(0, 0, 1200, 900))
+    ret layout_widget(sheet.apply(view.with_child(editor.popup(1200, 900, anchor)), "", "", ""), Rect::new(0, 0, 1200, 900))
+}
+fn click_on(id: str, layout: WidgetLayout) -> Event {
+    let b = layout.find_bounds(id).unwrap_or(Rect::new(0, 0, 0, 0))
+    ret Event {
+        event_pointer_down(), b.x() + b.width() / 2, b.y() + b.height() / 2, 0, 0, 1, 0, 0, 0, 0, "", 0
+    }
+}
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let mut editor = MaterialEditor::new() editor.open(f "target/color-picker-test-{perf_counter_ms()}", sheet)
+    let bounds = Rect::new(0, 0, 850, 700) let preview = Rect::new(0, 0, 0, 0)
+    let _select = editor.input(Event { event_pointer_down(), 100, 90, 0, 0, 1, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet)
+    let _release = editor.input(Event { event_pointer_up(), 100, 90, 0, 0, 0, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet)
+    if editor.widget().find("mg-color-open").is_none() {
+        ret 1
+    }
+    let original = editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value
+    let _open = editor.input(click(), "mg-color-open", bounds, preview, sheet)
+    if !editor.popup_open() {
+        ret 2
+    }
+    let layout = popup_layout(editor, sheet)
+    let picker = layout.find_bounds("mg-picker").unwrap_or(Rect::new(0, 0, 0, 0))
+    if picker.width() != 320 || picker.height() != 384 || editor.widget().find("mg-value-0").is_some() {
+        ret 8
+    }
+    let _hex = editor.color_input(click_on("mg-picker-value-6", layout), "mg-picker-value-6", layout, sheet)
+    let _text = editor.color_input(Event::text_input("#00FF00"), "", layout, sheet)
+    let _enter = editor.color_input(Event::key_down(13, 0), "", layout, sheet)
+    if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.y() != 1 {
+        ret 3
+    }
+    // Cancelling discards all live updates from this dialog.
+    let _cancel = editor.color_input(Event::key_down(27, 0), "", layout, sheet)
+    let reverted = editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value
+    if editor.popup_open() || reverted.x() != original.x() || reverted.y() != original.y() {
+        ret 4
+    }
+    let _open_again = editor.input(click(), "mg-color-open", bounds, preview, sheet)
+    let _field = editor.color_input(click_on("mg-picker-value-6", layout), "mg-picker-value-6", layout, sheet)
+    let _new = editor.color_input(Event::text_input("#FF0000"), "", layout, sheet)
+    let _accept = editor.color_input(click_on("mg-picker-ok", layout), "mg-picker-ok", layout, sheet)
+    if editor.popup_open() || editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.x() != 1 {
+        ret 5
+    }
+    let _undo = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet)
+    let undone = editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value
+    if undone.x() != original.x() || undone.y() != original.y() {
+        ret 6
+    }
+    let _redo = editor.input(Event::key_down(122, 195), "", bounds, preview, sheet)
+    if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.x() != 1 {
+        ret 7
+    }
+    let _outside_open = editor.input(click(), "mg-color-open", bounds, preview, sheet)
+    let outside_layout = popup_layout(editor, sheet)
+    let _outside = editor.color_input(click(), "material-canvas", outside_layout, sheet)
+    if editor.popup_open() {
+        ret 9
+    }
+    ret 0
+}

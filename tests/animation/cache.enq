@@ -1,0 +1,157 @@
+//! Real Encore/RHI packing -> VG-selected vertex requests -> GPU cache reuse.
+import core::vec::Vec
+import graphene::animation::gpu::{SkinGpuCache, SkinFrameInstance, animation_spirv}
+import graphene::animation::math::{PoseMatrix, animation_abs}
+import graphene::animation::model::{Skeleton, SkeletalMesh, AnimationClip}
+import graphene::animation::pose::{AnimationPose, model_pose, skin_palette}
+import graphene::animation::sample::sample_clip
+import graphene::animation::source::{AnimationSource, decode_animation_source}
+import graphene::rhi::*
+import std::io::println
+extern fn graphene_animation_f32_bits(value: f32) -> u32
+#attr(safe)
+fn bits(value: f32) -> u32 {
+    ret graphene_animation_f32_bits(value)
+}
+fn state(source: AnimationSource, time: f32, key: u64) -> SkinFrameInstance {
+    let mut pose = AnimationPose::rest(source.skeleton, source.mesh.morphs.len())
+    pose = sample_clip(source.clips.get_unchecked_borrowed(0_usize), time, pose).unwrap_or(pose)
+    let mut model = Vec[PoseMatrix]::new() model = model_pose(source.skeleton, pose, model).unwrap_or(model)
+    let mut palette = Vec[PoseMatrix]::new() palette = skin_palette(model, source.mesh, palette).unwrap_or(palette)
+    ret SkinFrameInstance { key, palette, model, vec![time], true }
+}
+fn main() -> u32 {
+    let source = match decode_animation_source("FIXTURE_ROOT/fixtures/rig.glb", "gpu-cache-test") {
+        Ok(s) => s Err(e) => {
+            println(e) ret 1_u32
+        }
+    }
+    let instance = GraphicsInstance::create()
+    let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 2_u32
+        }
+    }
+    let device = instance.create_device(adapter)
+    if !device.available() {
+        ret 3_u32
+    }
+    let mut cache = match SkinGpuCache::create(device, source.skeleton, source.mesh, 1_usize) {
+        Ok(c) => c Err(e) => {
+            println(e) ret 4_u32
+        }
+    }
+    let targets = vec![device.create_offscreen_target(8_u32, 8_u32), device.create_offscreen_target(8_u32, 8_u32)]
+    let request_shader = device.create_shader_module(animation_spirv(2_u32), shader_stage_compute()) let dispatch_shader = device.create_shader_module(animation_spirv(8_u32), shader_stage_compute())
+    let mut entries = Vec[BindGroupLayoutEntry]::new() let bindings = vec![0_u32, 1_u32, 13_u32, 15_u32, 16_u32, 17_u32]
+    for binding in bindings {
+        entries.push(BindGroupLayoutEntry::storage(binding, shader_stage_compute()))
+    }
+    let layout = device.create_bind_group_layout(entries)
+    let request_pipeline = device.create_compute_pipeline(request_shader, layout) let dispatch_pipeline = device.create_compute_pipeline(dispatch_shader, layout)
+    let maximum_candidates = 1_usize
+    let visible_base = 64_usize + 16_usize + 12_usize + 28_usize
+    let indirect_base = visible_base + maximum_candidates * 4_usize + 1_usize + 6134_usize
+    let mut stream_words = Vec[u32]::with_capacity(indirect_base + 16_usize)
+    for _i in 0_usize..indirect_base + 16_usize {
+        stream_words.push(0_u32)
+    }
+    stream_words.set(0_usize, 1_u32) stream_words.set(1_usize, 1_u32) stream_words.set(2_usize, 1_u32) stream_words.set(39_usize, bits(1_f32))
+    stream_words.set(64_usize + 10_usize, bits(0_f32)) stream_words.set(64_usize + 15_usize, bits(3_f32))
+    stream_words.set(visible_base, 0_u32) stream_words.set(visible_base + 1_usize, 0_u32) stream_words.set(indirect_base, 1_u32)
+    let stream = device.create_buffer((stream_words.len() as u64) * 4_u64, buffer_storage(), true)
+    if !stream.write_u32s(0_u64, stream_words) {
+        ret 5_u32
+    }
+    let mut packed = Vec[f32]::new() for vertex in 0_usize..3_usize {
+        for k in 0_usize..11_usize {
+            packed.push(if k == 6_usize {
+                    vertex as f32
+                } else {
+                    0_f32
+                }
+            )
+        }
+    }
+    let vertices = device.create_buffer(132_u64, buffer_storage(), true) vertices.write_f32s(0_u64, packed)
+    let config = device.create_buffer(48_u64, buffer_storage() | buffer_transfer_destination(), false)
+    let buffers = vec![stream, vertices, config, cache.tags_buffer(), cache.dispatch_buffer(), cache.requests_buffer()]
+    let mut ranges = Vec[u64]::new() let mut offsets = Vec[u64]::new() for buffer in buffers {
+        ranges.push(buffer.size()) offsets.push(0_u64)
+    }
+    let group = device.create_buffer_bind_group_many(layout, bindings, buffers, offsets, ranges)
+    let readback = device.create_buffer(224_u64, buffer_transfer_destination(), true)
+    if !group.available() || !dispatch_pipeline.available() || !request_pipeline.available() {
+        ret 6_u32
+    }
+    for logical in 1_usize..4_usize {
+        let time = if logical == 1_usize {
+            0_f32
+        } else {
+            1_f32
+        }
+        let serial = if logical == 3_usize {
+            4_u64
+        } else {
+            logical as u64
+        }
+        if cache.stage(serial, vec![state(source, time, 42_u64)]).is_err() {
+            ret 7_u32
+        }
+        for view in 0_usize..2_usize {
+            let target = targets.get_unchecked_borrowed(view) let frame = target.acquire_frame()
+            if cache.upload(frame).is_err() {
+                ret 8_u32
+            }
+            let mut configuration = cache.geometry_configuration()
+            configuration.push(1_u32) configuration.push(1_u32) configuration.push(1_u32) configuration.push(1_u32)
+            configuration.push(cache.instance_history().get_unchecked_borrowed(0_usize)) configuration.push(0_u32) configuration.push(0_u32) configuration.push(0_u32)
+            if !frame.update_u32s(config, 0_u64, configuration) || !cache.record_selected(frame, group, dispatch_pipeline, request_pipeline) || !frame.copy_buffer(cache.cache_buffer(), readback, 0_u64, 0_u64, 192_u64) || !frame.copy_buffer(cache.dispatch_buffer(), readback, 0_u64, 192_u64, 32_u64) {
+                ret 9_u32
+            }
+            if cache.destroy() {
+                ret 10_u32
+            }
+            if !frame.present() || !frame.destroy() || !target.wait_readback() {
+                ret 11_u32
+            }
+            let values = readback.read_f32s(0_u64, 48_usize)
+            let requests = readback.read_u32(204_u64)
+            if requests != if view == 0_usize {
+                3_u32
+            } else {
+                0_u32
+            }
+            {
+                println("Unexpected skin request count: " + requests.fmt()) ret 12_u32
+            }
+            if logical == 1_usize {
+                if animation_abs(values.get_unchecked_borrowed(0_usize)) > 0.0001_f32 || values.get_unchecked_borrowed(15_usize) != 0_f32 {
+                    ret 13_u32
+                }
+            } else {
+                if animation_abs(values.get_unchecked_borrowed(0_usize) - 2.5_f32) > 0.0001_f32 || animation_abs(values.get_unchecked_borrowed(1_usize) - 0.5_f32) > 0.0001_f32 || animation_abs(values.get_unchecked_borrowed(34_usize) - 2_f32) > 0.0001_f32 {
+                    ret 14_u32
+                }
+                if logical == 2_usize {
+                    if values.get_unchecked_borrowed(15_usize) != 1_f32 || animation_abs(values.get_unchecked_borrowed(12_usize)) > 0.0001_f32 {
+                        ret 15_u32
+                    }
+                } else {
+                    if values.get_unchecked_borrowed(15_usize) != 0_f32 || animation_abs(values.get_unchecked_borrowed(12_usize) - values.get_unchecked_borrowed(0_usize)) > 0.0001_f32 {
+                        ret 16_u32
+                    }
+                }
+            }
+        }
+    }
+    for target in targets {
+        target.destroy()
+    }
+    if !cache.destroy() {
+        ret 17_u32
+    }
+    group.destroy() request_pipeline.destroy() dispatch_pipeline.destroy() request_shader.destroy() dispatch_shader.destroy() layout.destroy() stream.destroy() vertices.destroy() config.destroy() readback.destroy() device.destroy() instance.destroy()
+    println("Encore skin cache: selected requests, two-view reuse, previous morph pose, missing-history rejection, completion retirement: PASS")
+    ret 0_u32
+}

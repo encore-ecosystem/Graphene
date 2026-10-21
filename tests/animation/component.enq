@@ -1,0 +1,40 @@
+import graphene::animation::component::{SkeletalMeshComponent, CharacterMorphControl, character_path_valid, skeletal_component_json, skeletal_component_parse}
+import json::{Json, parse, stringify}
+fn main() -> u32 {
+    let mut c = SkeletalMeshComponent::defaults()
+    c.asset = "Content/Characters/Fox.gcharacter" c.clip = "fox:Walk" c.speed = - 0.5_f32 c.start_time = 2_f32 c.looping = false c.preview = false
+    c.morphs.push(CharacterMorphControl{"Blink",0.75_f32})
+    let decoded = match skeletal_component_parse(skeletal_component_json(c)) {
+        Some(v) => v None => {
+            ret 1_u32
+        }
+    }
+    if decoded.asset != c.asset || decoded.clip != c.clip || decoded.speed != c.speed || decoded.start_time != 2_f32 || decoded.looping || decoded.preview {
+        ret 2_u32
+    }
+    if decoded.morphs.len()!=1_usize || decoded.morphs.get_unchecked_borrowed(0_usize).name!="Blink" || decoded.morphs.get_unchecked_borrowed(0_usize).weight!=0.75_f32{ret 8_u32}
+    for path in vec!["/tmp/test.gcharacter", "Content/../Fox.gcharacter", "Content/./Fox.gcharacter", "Content//Fox.gcharacter", "Content/Fox.glb", "Content/Fox.gcharacter/", "Content/\\Fox.gcharacter"] {
+        if character_path_valid(path) {
+            ret 3_u32
+        }
+    }
+    for text in vec!["null", "[]", "{\"speed\":\"1\"}", "{\"preview\":1}", "{\"clip\":false}", "{\"speed\":17}", "{\"startTime\":-1}","{\"morphs\":{}}","{\"morphs\":[{\"name\":\"Blink\",\"weight\":\"1\"}]}","{\"morphs\":[{\"name\":\"\",\"weight\":0}]}","{\"morphs\":[{\"name\":\"Blink\",\"weight\":0},{\"name\":\"Blink\",\"weight\":1}]}"] {
+        let value = match parse(text) {
+            Ok(v) => v Err(_) => {
+                ret 4_u32
+            }
+        }
+        if skeletal_component_parse(value).is_some() {
+            ret 5_u32
+        }
+    }
+    let defaults = match parse("{}") {
+        Ok(v) => v Err(_) => {
+            ret 6_u32
+        }
+    }
+    if skeletal_component_parse(defaults).is_none() {
+        ret 7_u32
+    }
+    ret 0_u32
+}

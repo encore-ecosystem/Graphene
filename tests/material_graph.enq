@@ -1,0 +1,144 @@
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import graphene::material_graph::*
+import linalg::Vec3
+import std::io::println
+
+fn expect(value: bool, message: str) -> bool {
+    if !value {
+        println(message)
+    }
+    ret value
+}
+fn main() -> u32 {
+    let graph = MaterialGraph::default()
+    let mut document = MaterialDocument::new(graph)
+    let semantic = document.semantic()
+    let generated = generate_material(graph)
+    if !expect(generated.diagnostics.len() == 0 && generated.expressions == 2, "default graph compilation") {
+        ret 1
+    }
+    let source = material_graph_stringify(graph, false)
+    let decoded = match material_graph_parse(source) {
+        Some(g) => g None => {
+            ret 2
+        }
+    }
+    if !expect(decoded.name == graph.name && decoded.nodes.len() == 3 && decoded.links.len() == 2 && decoded.node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.z() > 0.799, "graph round trip") {
+        ret 3
+    }
+    let _move = document.execute(MaterialCommand::Set(graph.node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).at(99, 110)))
+    if !expect(document.semantic() == semantic && document.dirty(), "layout must not change compilation identity") {
+        ret 4
+    }
+    let _undo = document.execute(MaterialCommand::Undo)
+    if !expect(!document.dirty(), "undo restores saved state") {
+        ret 5
+    }
+    let _start = document.execute(MaterialCommand::BeginGesture)
+    let _first = document.execute(MaterialCommand::Set(graph.node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).at(100, 100)))
+    let _second = document.execute(MaterialCommand::Set(graph.node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).at(200, 200)))
+    let _finish = document.execute(MaterialCommand::CommitGesture)
+    let _undo_gesture = document.execute(MaterialCommand::Undo)
+    if !expect(!document.dirty() && !document.can_undo(), "drag must be one undo operation") {
+        ret 6
+    }
+    let _redo_gesture = document.execute(MaterialCommand::Redo)
+    if !expect(document.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).x == 200, "redo drag") {
+        ret 7
+    }
+    let invalid = MaterialLink {
+        MaterialEndpoint { 1, "value" }, MaterialEndpoint { 3, "metallic" }
+    }
+    if !expect(document.execute(MaterialCommand::Connect(invalid)).is_err(), "color to scalar must fail") {
+        ret 8
+    }
+    let _add = document.execute(MaterialCommand::Add(MaterialNode::new(4, "multiply", 0, 0)))
+    let _connect = document.execute(MaterialCommand::Connect(MaterialLink {
+                MaterialEndpoint {
+                    2, "value"
+                }
+                , MaterialEndpoint {
+                    4, "a"
+                }
+            }
+            ,
+        ))
+    if !expect(document.execute(MaterialCommand::Connect(MaterialLink {
+                    MaterialEndpoint {
+                        4, "value"
+                    }
+                    , MaterialEndpoint {
+                        4, "b"
+                    }
+                }
+                ,
+            )).is_err(), "self cycle must fail") {
+        ret 9
+    }
+    let _add_color = document.execute(MaterialCommand::Add(MaterialNode::new(5, "multiply", 0, 0).with_kind("vec3")))
+    let _scalar_promotion = document.execute(MaterialCommand::Connect(MaterialLink {
+                MaterialEndpoint {
+                    2, "value"
+                }
+                , MaterialEndpoint {
+                    5, "a"
+                }
+            }
+            ,
+        ))
+    let _output = document.execute(MaterialCommand::Connect(MaterialLink {
+                MaterialEndpoint {
+                    5, "value"
+                }
+                , MaterialEndpoint {
+                    3, "base_color"
+                }
+            }
+            ,
+        ))
+    let promoted = generate_material(document.graph())
+    if !expect(promoted.diagnostics.len() == 0 && promoted.source.contains("vec3(m_2)"), "scalar broadcast lowering") {
+        ret 10
+    }
+    if !expect(!promoted.source.contains("m_4"), "unreachable expressions must not be generated") {
+        ret 11
+    }
+    let _set = document.execute(MaterialCommand::Set(MaterialNode::new(2, "scalar", 0, 0).with_value(Vec3::new(0.7, 0, 0))))
+    if !expect(document.semantic() != semantic, "value changes compilation identity") {
+        ret 12
+    }
+    let before = material_graph_stringify(document.graph(), false)
+    let _delete_output = document.execute(MaterialCommand::Delete(vec![3]))
+    if !expect(material_graph_stringify(document.graph(), false) == before, "output node is protected") {
+        ret 13
+    }
+    let _add_other = document.execute(MaterialCommand::Add(MaterialNode::new(6, "add", 0, 0)))
+    let _forward = document.execute(MaterialCommand::Connect(MaterialLink {
+                MaterialEndpoint {
+                    4, "value"
+                }
+                , MaterialEndpoint {
+                    6, "a"
+                }
+            }
+            ,
+        ))
+    if !expect(document.execute(MaterialCommand::Connect(MaterialLink {
+                    MaterialEndpoint {
+                        6, "value"
+                    }
+                    , MaterialEndpoint {
+                        4, "b"
+                    }
+                }
+                ,
+            )).is_err(), "indirect cycle must fail") {
+        ret 14
+    }
+    if !expect(material_spirv("bad").is_err(), "truncated SPIR-V must fail") {
+        ret 15
+    }
+    ret 0
+}

@@ -1,0 +1,152 @@
+//! Independent preview world. Destruction follows both producer and UI consumer fences.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import linalg::Vec3
+import luma::{ExternalVulkanImage, PreparedFrame, Window}
+
+import mod::compiler::compile_particle_emitter
+import mod::gpu::{ParticleGpuEmitter, ParticleGpuSlot, particle_spirv}
+import mod::model::*
+import mod::runtime::ParticleStats
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+pub struct ParticlePreview {
+    instance: GraphicsInstance
+    device: GraphicsDevice
+    target: Swapchain
+    consumer: usize
+    emitters: Vec[ParticleGpuSlot]
+    clear: RenderPipeline
+    layout: BindGroupLayout
+    shaders: Vec[ShaderModule]
+}
+
+impl for ParticlePreview {
+    pub fn create(window: Window, asset: ParticleSystem) -> Result[ParticlePreview<H>, str] {
+        let interop = window.vulkan_interop() if !interop.valid() {
+            ret Result::Err("VFX preview requires Vulkan")
+        }
+        let instance = GraphicsInstance::borrow(interop.instance(), interop.physical_device())
+        let adapter = match instance.preferred_adapter() {
+            Some(a) => a None => {
+                instance.destroy() ret Result::Err("VFX preview adapter unavailable")
+            }
+        }
+        let device = GraphicsDevice::borrow_backend(interop.render_device(), adapter) let target = device.create_shared_offscreen_target(1024, 1024)
+        let layout = device.create_bind_group_layout(Vec[BindGroupLayoutEntry]::new())
+        // No draw uses this pipeline: it defines the clear/load pass signature.
+        let vertex = device.create_shader_module(particle_spirv(1_u32), shader_stage_vertex())
+        let fragment = device.create_shader_module(particle_spirv(2_u32), shader_stage_fragment())
+        let mut preview = ParticlePreview<H> {
+            instance, device, target, interop.swapchain(), Vec[ParticleGpuSlot]::new(), RenderPipeline::unavailable(), layout, vec![vertex, fragment]
+        }
+        for i in 0_usize..asset.emitters.len() {
+            let emitter = asset.emitters.get(i).unwrap_or(ParticleEmitter::new("")) if !emitter.enabled {
+                continue
+            }
+            match ParticleGpuEmitter::create(device, emitter, compile_particle_emitter(asset, i), asset.seed ^ emitter.seed, asset.parameters) {
+                Ok(e) => {
+                    let mut parameters = Vec[f32]::new() for p in asset.parameters {
+                        for v in p.value.values() {
+                            parameters.push(v)
+                        }
+                    }
+                    e.set_parameters(parameters) preview.emitters.push(ParticleGpuSlot { e })
+                }
+                Err(message) => {
+                    preview.destroy() ret Result::Err(message)
+                }
+            }
+        }
+        // A compatible clear pipeline with the emitter layout is retained independently.
+        match preview.emitters.get(0_usize) {
+            Some(e) => {
+                preview.clear = device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::empty(), e.emitter.layout, RenderPipelineOptions::depth().with_depth_write(false).with_alpha_blending())
+            }
+            None => {
+                preview.destroy() ret Result::Err("Add an enabled emitter to preview this system")
+            }
+        }
+        if !preview.clear.available() {
+            preview.destroy() ret Result::Err("Unable to create VFX preview pipeline")
+        }
+        ret Result::Ok(preview)
+    }
+    pub fn ready(self: Self&) -> bool {
+        ret self.target.last_frame_complete() &&(self.consumer == 0_usize || Swapchain::borrow(self.consumer).last_frame_complete())
+    }
+    pub fn action(self: Self&, action: u32) ->() {
+        for slot in self.emitters {
+            let emitter = slot.emitter
+            emitter.action(action)
+        }
+    }
+    pub fn compose(self: mut Self&, frame: mut PreparedFrame, yaw: f32, pitch: f32, distance: f32, delta: f32) -> bool {
+        let slot = match frame.surface("vfx-preview-surface") {
+            Some(s) => s None => {
+                ret false
+            }
+        }
+        let width = slot.pixel_width() let height = slot.pixel_height() if width == 0_u32 || height == 0_u32 || width > 1024_u32 || height > 1024_u32 {
+            ret false
+        }
+        if self.ready() {
+            let rendered = self.target.try_acquire_frame()
+            if rendered.available() {
+                let camera = PerspectiveCamera::new(Vec3::from_spherical(yaw, pitch).scale(distance).add(Vec3::new(0, 1, 0)), Vec3::new(0, 1, 0), 0.7853982_f32, 0.05_f32, 1000)
+                let mut success = rendered.sampled_color_barrier()
+                for slot in self.emitters {
+                    let emitter = slot.emitter
+                    success = emitter.prepare(rendered, camera,(width as f32) /(height as f32), delta) && success
+                    success = emitter.observe(rendered, self.target) && success
+                    emitter.take_events()
+                }
+                let pass = rendered.begin_render_pass(self.clear, 0.012_f32, 0.016_f32, 0.024_f32, 1)
+                success = rendered.set_viewport(0, 0, width, height) && success
+                for slot in self.emitters {
+                    let emitter = slot.emitter
+                    success = emitter.record(rendered, self.target) && success
+                }
+                success = pass.end() && success if !success || !rendered.present() {
+                    rendered.destroy() ret false
+                }
+                rendered.destroy()
+            } else {
+                rendered.destroy() ret false
+            }
+        } else {
+            ret false
+        }
+        ret frame.submit_external("vfx-preview-surface", slot.generation(), ExternalVulkanImage::new(self.target.external_image() as u64, 1024, 1024, self.target.external_layout()).with_region(0, 0, width, height))
+    }
+    pub fn fluid_cells(self: Self&) -> u64 {
+        let mut cells = 0_u64
+        for slot in self.emitters {
+            cells += slot.emitter.fluid_cells()
+        }
+        ret cells
+    }
+    pub fn stats(self: Self&) -> ParticleStats {
+        let mut total = ParticleStats { 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64 }
+        for slot in self.emitters {
+            let stats = slot.emitter.stats()
+            total.alive += stats.alive total.capacity += stats.capacity total.spawned += stats.spawned total.expired += stats.expired total.dropped += stats.dropped total.dropped_events += stats.dropped_events total.bytes += stats.bytes
+            if stats.steps > total.steps {
+                total.steps = stats.steps
+            }
+        }
+        ret total
+    }
+    pub fn destroy(self: Self&) ->() {
+        self.target.destroy() self.clear.destroy() for slot in self.emitters {
+            let emitter = slot.emitter
+            emitter.destroy()
+        }
+        for shader in self.shaders {
+            shader.destroy()
+        }
+        self.layout.destroy() self.device.destroy() self.instance.destroy()
+    }
+}

@@ -1,0 +1,299 @@
+//! Strict versioned JSON encoding; semantic encoding omits editor coordinates.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import mod::model::*
+import refrain::scene::json_value::{parse_number, vec3_json, json_vec3}
+import refrain::scene::transform::Transform
+
+pub fn blueprint_value_json(value: BlueprintValue) -> Json {
+    let payload = match value {
+        Bool(value) => Json::Bool(value) I32(value) => Json::Number(Debug::fmt(value))
+        F32(value) => Json::Number(Debug::fmt(value)) String(value) => Json::String(value)
+        Vector(value) => vec3_json(value) Actor(value) => Json::Number(Debug::fmt(value))
+        Component(value) => Json::Number(Debug::fmt(value))
+    }
+    ret Json::Object(vec![field("type", Json::String(value.value_type().name())), field("value", payload)])
+}
+pub fn blueprint_json_field(value: Json, key: str) -> Result[Json, str] {
+    match value.get(key) {
+        Some(found) => {
+            ret Result[Json, str]::Ok(found)
+        }
+        None => {
+        }
+    }
+    ret Result[Json, str]::Err("missing field: " + key)
+}
+pub fn blueprint_json_text(value: Json, key: str) -> Result[str, str] {
+    match blueprint_json_field(value, key)?.as_str() {
+        Some(text) => {
+            ret Result[str, str]::Ok(text)
+        }
+        None => {
+        }
+    }
+    ret Result[str, str]::Err("expected string: " + key)
+}
+pub fn blueprint_json_id(value: Json, key: str) -> Result[u64, str] {
+    match blueprint_json_field(value, key)?.as_number() {
+        Some(number) => {
+            if number.byte_len() == 0 {
+                ret Result[u64, str]::Err("empty integer: " + key)
+            }
+            let mut id = 0_u64
+            let mut index = 0_usize
+            while index < number.byte_len() {
+                let byte = number.byte_at(index)
+                if byte < 48 || byte > 57 {
+                    ret Result[u64, str]::Err("expected unsigned integer: " + key)
+                }
+                let digit =(byte - 48) as u64
+                if id > 1844674407370955161_u64 ||(id == 1844674407370955161_u64 && digit > 5) {
+                    ret Result[u64, str]::Err("integer overflow: " + key)
+                }
+                id = id * 10 + digit
+                index += 1
+            }
+            ret Result[u64, str]::Ok(id)
+        }
+        None => {
+        }
+    }
+    ret Result[u64, str]::Err("expected unsigned integer: " + key)
+}
+fn array_field(value: Json, key: str) -> Result[Vec[Json], str] {
+    match blueprint_json_field(value, key)?.as_array() {
+        Some(values) => {
+            ret Result[Vec[Json], str]::Ok(values)
+        }
+        None => {
+        }
+    }
+    ret Result[Vec[Json], str]::Err("expected array: " + key)
+}
+fn boolean_field(value: Json, key: str) -> Result[bool, str] {
+    match blueprint_json_field(value, key)?.as_bool() {
+        Some(flag) => {
+            ret Result[bool, str]::Ok(flag)
+        }
+        None => {
+        }
+    }
+    ret Result[bool, str]::Err("expected boolean: " + key)
+}
+fn float_field(value: Json, key: str) -> Result[f32, str] {
+    match blueprint_json_field(value, key)?.as_number() {
+        Some(number) => {
+            match parse_number(number) {
+                Some(value) => {
+                    if value <= 340282346638528859811704183484516925440.0_f32 && value >= - 340282346638528859811704183484516925440.0_f32 {
+                        ret Result[f32, str]::Ok(value)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        None => {
+        }
+    }
+    ret Result[f32, str]::Err("expected finite f32: " + key)
+}
+pub fn blueprint_value_parse(value: Json) -> Result[BlueprintValue, str] {
+    let kind = blueprint_json_text(value, "type")?
+    let payload = blueprint_json_field(value, "value")?
+    match kind {
+        "bool" => {
+            ret Result[BlueprintValue, str]::Ok(BlueprintValue::Bool(boolean_field(value, "value")?))
+        }
+        "f32" => {
+            ret Result[BlueprintValue, str]::Ok(BlueprintValue::F32(float_field(value, "value")?))
+        }
+        "str" => {
+            ret Result[BlueprintValue, str]::Ok(BlueprintValue::String(blueprint_json_text(value, "value")?))
+        }
+        "actor" => {
+            ret Result[BlueprintValue, str]::Ok(BlueprintValue::Actor(blueprint_json_id(value, "value")?))
+        }
+        "component" => {
+            ret Result[BlueprintValue, str]::Ok(BlueprintValue::Component(blueprint_json_id(value, "value")?))
+        }
+        "i32" => {
+            match payload.as_number() {
+                Some(text) => {
+                    let negative = text.byte_len() > 0 && text.byte_at(0) == 45
+                    let digits = if negative {
+                        text.slice(1, text.byte_len() - 1)
+                    } else {
+                        text
+                    }
+                    let parsed = blueprint_json_id(Json::Object(vec![field("value", Json::Number(digits))]), "value")?
+                    let limit = if negative {
+                        2147483648_u64
+                    } else {
+                        2147483647_u64
+                    }
+                    if parsed <= limit {
+                        let signed = if negative {
+                            -(parsed as i64)
+                        } else {
+                            parsed as i64
+                        }
+                        ret Result[BlueprintValue, str]::Ok(BlueprintValue::I32(signed as i32))
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        "vec3" => {
+            match json_vec3(payload) {
+                Some(vector) => {
+                    ret Result[BlueprintValue, str]::Ok(BlueprintValue::Vector(vector))
+                }
+                None => {
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    ret Result[BlueprintValue, str]::Err("invalid Blueprint value: " + kind)
+}
+fn number(value: u64) -> Json {
+    ret Json::Number(Debug::fmt(value))
+}
+fn endpoint_json(endpoint: BlueprintEndpoint) -> Json {
+    ret Json::Object(vec![field("node", number(endpoint.node)), field("pin", Json::String(endpoint.pin))])
+}
+fn endpoint_parse(value: Json) -> Result[BlueprintEndpoint, str] {
+    ret Result[BlueprintEndpoint, str]::Ok(BlueprintEndpoint {
+            blueprint_json_id(value, "node")?, blueprint_json_text(value, "pin")?
+        }
+        ,
+    )
+}
+pub fn blueprint_instance_json(instance: BlueprintInstance) -> Json {
+    let mut overrides = Vec[Json]::new()
+    for item in instance.overrides {
+        overrides.push(Json::Object(vec![field("property", number(item.property)), field("value", blueprint_value_json(item.value))]))
+    }
+    ret Json::Object(vec![field("asset", Json::String(instance.asset)), field("overrides", Json::Array(overrides))])
+}
+pub fn blueprint_instance_parse(value: Json) -> Result[BlueprintInstance, str] {
+    let asset = blueprint_json_text(value, "asset")?
+    let mut overrides = Vec[BlueprintOverride]::new()
+    for item in array_field(value, "overrides")? {
+        overrides.push(BlueprintOverride {
+                blueprint_json_id(item, "property")?, blueprint_value_parse(blueprint_json_field(item, "value")?)?
+            }
+            ,
+        )
+    }
+    ret Result[BlueprintInstance, str]::Ok(BlueprintInstance { asset, overrides })
+}
+pub fn blueprint_json(asset: BlueprintAsset, layout: bool) -> Json {
+    let mut components = Vec[Json]::new()
+    for component in asset.components {
+        components.push(Json::Object(vec![field("id", number(component.id)), field("parent", number(component.parent)),
+                    field("name", Json::String(component.name)), field("kind", Json::String(component.kind)),
+                    field("position", vec3_json(component.transform.position())), field("rotation", vec3_json(component.transform.rotation())),
+                    field("scale", vec3_json(component.transform.scale())), field("mesh", Json::String(component.mesh)),
+                    field("material", Json::String(component.material)), field("visible", Json::Bool(component.visible))],))
+    }
+    let mut properties = Vec[Json]::new()
+    for property in asset.properties {
+        properties.push(Json::Object(vec![field("id", number(property.id)), field("name", Json::String(property.name)), field("default", blueprint_value_json(property.default_value))]))
+    }
+    let mut nodes = Vec[Json]::new()
+    for node in asset.nodes {
+        let mut fields = vec![field("id", number(node.id)), field("operation", Json::String(node.operation)),
+            field("type", Json::String(node.value_type.name())), field("reference", number(node.reference)),
+            field("text", Json::String(node.text)), field("value", blueprint_value_json(node.value))]
+        if layout {
+            fields.push(field("x", Json::Number(Debug::fmt(node.x)))) fields.push(field("y", Json::Number(Debug::fmt(node.y))))
+        }
+        nodes.push(Json::Object(fields))
+    }
+    let mut links = Vec[Json]::new()
+    for link in asset.links {
+        links.push(Json::Object(vec![field("from", endpoint_json(link.source)), field("to", endpoint_json(link.target))]))
+    }
+    ret Json::Object(vec![field("format", Json::String("graphene-blueprint")), field("version", number(1_u64)),
+            field("id", Json::String(asset.id)), field("name", Json::String(asset.name)), field("components", Json::Array(components)),
+            field("properties", Json::Array(properties)), field("nodes", Json::Array(nodes)), field("links", Json::Array(links))],)
+}
+pub fn blueprint_stringify(asset: BlueprintAsset) -> str {
+    ret stringify(blueprint_json(asset, true)) + "\n"
+}
+pub fn blueprint_semantic_source(asset: BlueprintAsset) -> str {
+    ret stringify(blueprint_json(asset, false))
+}
+pub fn blueprint_parse(source: str) -> Result[BlueprintAsset, str] {
+    let root = match parse(source) {
+        Ok(root) => root Err(error) => {
+            ret Result[BlueprintAsset, str]::Err(error.message())
+        }
+    }
+    if blueprint_json_text(root, "format")? != "graphene-blueprint" || blueprint_json_id(root, "version")? != 1 {
+        ret Result[BlueprintAsset, str]::Err("unsupported Blueprint format/version")
+    }
+    let mut asset = BlueprintAsset {
+        blueprint_json_text(root, "id")?, blueprint_json_text(root, "name")?,
+        Vec[BlueprintComponent]::new(), Vec[BlueprintProperty]::new(), Vec[BlueprintNode]::new(), Vec[BlueprintLink]::new()
+    }
+    for component in array_field(root, "components")? {
+        let position = match json_vec3(blueprint_json_field(component, "position")?) {
+            Some(vector) => vector None => {
+                ret Result[BlueprintAsset, str]::Err("invalid component position")
+            }
+        }
+        let rotation = match json_vec3(blueprint_json_field(component, "rotation")?) {
+            Some(vector) => vector None => {
+                ret Result[BlueprintAsset, str]::Err("invalid component rotation")
+            }
+        }
+        let scale = match json_vec3(blueprint_json_field(component, "scale")?) {
+            Some(vector) => vector None => {
+                ret Result[BlueprintAsset, str]::Err("invalid component scale")
+            }
+        }
+        asset.components.push(BlueprintComponent {
+                blueprint_json_id(component, "id")?, blueprint_json_id(component, "parent")?,
+                blueprint_json_text(component, "name")?, blueprint_json_text(component, "kind")?, Transform::new(position, rotation, scale),
+                blueprint_json_text(component, "mesh")?, blueprint_json_text(component, "material")?, boolean_field(component, "visible")?
+            }
+            ,)
+    }
+    for property in array_field(root, "properties")? {
+        asset.properties.push(BlueprintProperty {
+                blueprint_json_id(property, "id")?, blueprint_json_text(property, "name")?, blueprint_value_parse(blueprint_json_field(property, "default")?)?
+            }
+            ,
+        )
+    }
+    for node in array_field(root, "nodes")? {
+        let value_type = match BlueprintType::parse(blueprint_json_text(node, "type")?) {
+            Some(kind) => kind None => {
+                ret Result[BlueprintAsset, str]::Err("unknown pin type")
+            }
+        }
+        asset.nodes.push(BlueprintNode {
+                blueprint_json_id(node, "id")?, blueprint_json_text(node, "operation")?, value_type,
+                blueprint_json_id(node, "reference")?, blueprint_json_text(node, "text")?, blueprint_value_parse(blueprint_json_field(node, "value")?)?,
+                float_field(node, "x")?, float_field(node, "y")?
+            }
+            ,)
+    }
+    for link in array_field(root, "links")? {
+        asset.links.push(BlueprintLink {
+                endpoint_parse(blueprint_json_field(link, "from")?)?, endpoint_parse(blueprint_json_field(link, "to")?)?
+            }
+            ,
+        )
+    }
+    ret Result[BlueprintAsset, str]::Ok(asset)
+}

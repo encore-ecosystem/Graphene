@@ -1,0 +1,168 @@
+//! Project-owned file boundaries and cached, bounded asset discovery.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::model::{ContentAsset, ContentScan}
+import std::os::{read_dir, read_file, file_exists, mkdir_all, write_file_atomic, copy_file}
+import std::path::Path
+
+import refrain::project_files::project_file_info
+extern fn graphene_content_move(root: str, source: str, destination: str) -> bool
+
+#attr(safe)
+pub fn content_stat(root: str, relative: str) -> u64 {
+    ret project_file_info(root, relative)
+}
+#attr(safe)
+fn move_file(root: str, source: str, destination: str) -> bool {
+    unsafe {
+        ret graphene_content_move(root, source, destination)
+    }
+}
+pub fn content_move(root: str, source: str, destination: str) -> bool {
+    let mut pairs = Vec[(str, str)]::new()
+    pairs.push((source, destination))
+    if ends(source,".graphene-particle.json") {pairs.push((source+".gparticle",destination+".gparticle"))}
+    if ends(lower(source), ".gsound") { pairs.push((source + ".waveform.json", destination + ".waveform.json")) }
+    if ends(lower(source), ".obj") {
+        pairs.push((source + ".gmesh", destination + ".gmesh"))
+        pairs.push((source + ".autolod", destination + ".autolod"))
+        let from = source.slice_bytes(0, source.byte_len() - 4)
+        let to = destination.slice_bytes(0, destination.byte_len() - 4)
+        for suffix in vec![".gtexture", ".texture", ".rgba"] {
+            pairs.push((from + suffix, to + suffix))
+        }
+    } elif ends(lower(source), ".gmesh") {
+        pairs.push((source + ".autolod", destination + ".autolod"))
+        let from = source.slice_bytes(0, source.byte_len() - 6)
+        let to = destination.slice_bytes(0, destination.byte_len() - 6)
+        pairs.push((from + ".autolod", to + ".autolod"))
+        let from_base = if ends(lower(from), ".obj") {
+            from.slice_bytes(0, from.byte_len() - 4)
+        } else {
+            from
+        }
+        let to_base = if ends(lower(to), ".obj") {
+            to.slice_bytes(0, to.byte_len() - 4)
+        } else {
+            to
+        }
+        pairs.push((from_base + ".gtexture", to_base + ".gtexture"))
+        pairs.push((from_base + ".gmaterial", to_base + ".gmaterial"))
+    } elif ends(lower(source), ".png") || ends(lower(source), ".hdr") {
+        pairs.push((source + ".gtexture", destination + ".gtexture"))
+    } elif ends(source, ".graphene-material.json") {
+        pairs.push((source + ".gmaterial", destination + ".gmaterial"))
+    }
+    let mut present = Vec[(str, str)]::new()
+    for pair in pairs {
+        if content_stat(root, pair.0) != 0 {
+            if content_stat(root, pair.1) != 0 {
+                ret false
+            }
+            present.push(pair)
+        }
+    }
+    if present.len() == 0 {
+        ret false
+    }
+    let mut applied = Vec[(str, str)]::new()
+    for pair in present {
+        if !move_file(root, pair.0, pair.1) {
+            for previous in applied {
+                let _restored = move_file(root, previous.1, previous.0)
+            }
+            ret false
+        }
+        applied.push(pair)
+    }
+    ret true
+}
+fn native_companion(root: str, path: str) -> bool {
+    if ends(path,".gparticle") {ret file_exists(root+"/"+path.slice_bytes(0,path.byte_len()-10_usize))}
+    if ends(path, ".gsound.waveform.json") { ret true }
+    if ends(path, ".gmesh") {
+        ret file_exists(root + "/" + path.slice_bytes(0, path.byte_len() - 6))
+    }
+    if ends(path, ".gmaterial") {
+        ret file_exists(root + "/" + path.slice_bytes(0, path.byte_len() - 10))
+    }
+    if ends(path, ".gtexture") {
+        let base = path.slice_bytes(0, path.byte_len() - 9)
+        ret file_exists(root + "/" + base) || file_exists(root + "/" + base + ".obj") || file_exists(root + "/" + base + ".OBJ") || file_exists(root + "/" + base + ".gmesh") || file_exists(root + "/" + base + ".obj.gmesh")
+    }
+    ret false
+}
+
+pub import mod::path::*
+fn scan_directory(root: str, relative: str, depth: u32, entries: mut Vec[ContentAsset]) ->() {
+    if depth > 16 || entries.len() >= 16384 {
+        ret()
+    }
+    for name in read_dir(root + "/" + relative) {
+        if name != "" && name.slice_bytes(0, 1) != "." {
+            let path = relative + "/" + name let info = content_stat(root, path)
+            let directory = info == 2
+            let kind = if directory {
+                "folder"
+            } else {
+                content_kind(path)
+            }
+            if info != 0 && !native_companion(root, path) && !ends(name, ".autolod") && !ends(name, ".rgba") && !ends(name, ".texture") && entries.len() < 16384 {
+                entries.push(ContentAsset::new(path, content_name(path, kind), kind, info >> 2))
+                if directory {
+                    scan_directory(root, path, depth + 1, entries)
+                }
+            }
+        }
+    }
+}
+pub fn scan_content(project: str) -> sending ContentScan {
+    let mut entries = vec![ContentAsset::new("@engine/Primitives", "Primitives", "folder", 0),
+        ContentAsset::new("@engine/Primitives/Cube", "Cube", "mesh", 0),
+        ContentAsset::new("@engine/Primitives/Plane", "Plane", "mesh", 0),
+        ContentAsset::new("@engine/Primitives/Sphere", "Sphere", "mesh", 0)]
+    if project != "" {
+        entries.push(ContentAsset::new("Content", "Content", "folder", 0))
+        scan_directory(project, "Content", 0, entries)
+        if content_stat(project, "game/src") == 2 {
+            entries.push(ContentAsset::new("game/src", "Source", "folder", 0))
+            scan_directory(project, "game/src", 0, entries)
+        }
+    }
+    ret ContentScan { project, entries }
+}
+pub fn content_unique_path(project: str, directory: str, stem: str, suffix: str) -> str {
+    let mut number = 0_usize
+    while number < 10000 {
+        let path = directory + "/" + stem + if number == 0 {
+            ""
+        } else {
+            "_" + number.fmt()
+        }
+        + suffix
+        if !file_exists(project + "/" + path) {
+            ret path
+        }
+        number += 1
+    }
+    ret ""
+}
+/// Names and project-relative paths are checked against serialized references.
+/// Referenced files remain available; this browser never rewrites a scene behind the editor.
+pub fn content_referencer(project: str, target: ContentAsset, entries: Vec[ContentAsset], live_references: Vec[str]) -> str {
+    for reference in live_references {
+        if reference == target.path || reference == content_leaf(target.path) ||(target.kind == "folder" && reference.contains(target.path + "/")) {
+            ret "the open scene"
+        }
+    }
+    for asset in entries {
+        if asset.path != target.path &&(asset.kind == "scene" || asset.kind == "material" || asset.kind == "material-graph" || asset.kind == "blueprint") && asset.bytes < 4194304 {
+            let data = read_file(project + "/" + asset.path)
+            if data.contains(target.path) ||(target.kind == "mesh" && data.contains("\"" + content_leaf(target.path) + "\"")) {
+                ret asset.path
+            }
+        }
+    }
+    ret ""
+}

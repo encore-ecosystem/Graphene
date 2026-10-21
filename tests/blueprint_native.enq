@@ -1,0 +1,212 @@
+//! Compile a real native graph, load it, and run isolated actor instances.
+import core::vec::Vec
+import graphene::blueprint::*
+import graphene::runtime::InputSnapshot
+import graphene::scene::transform::Transform
+import graphene::scene::world::Scene
+import std::io::eprintln
+import std::os::read_file
+import std::path::Path
+import std::thread::JoinHandle
+
+fn tick_worker(instance: BlueprintRuntimeInstance) -> bool {
+    for _index in 0_usize..64_usize {
+        if !instance.invoke("tick", "", 0.001) {
+            ret false
+        }
+    }
+    ret true
+}
+
+fn main() -> u32 {
+    let asset = rotator_blueprint()
+    let fixture = match blueprint_parse(read_file("tests/fixtures/blueprints/Content/Blueprints/BP_Rotator.graphene-blueprint.json")) {
+        Ok(value) => value Err(error) => {
+            eprintln(error) ret 22
+        }
+    }
+    if blueprint_semantic_source(fixture) != blueprint_semantic_source(asset) {
+        ret 23
+    }
+    for diagnostic in validate_blueprint(asset) {
+        eprintln(diagnostic.message) ret 1
+    }
+    let compiler = blueprint_compiler_path()
+    let build = match prepare_blueprint_build(".", "native/blueprint", compiler, vec![asset]) {
+        Ok(build) => build Err(error) => {
+            eprintln(error) ret 2
+        }
+    }
+    if !build.cached && run_blueprint_build(build.compiler, build.directory, build.library, build.receipt, build.key) != 0 {
+        eprintln("generated build failed: " + build.directory) ret 3
+    }
+    let module = match BlueprintModule::open(build.library) {
+        Ok(module) => module Err(error) => {
+            eprintln(error) ret 4
+        }
+    }
+    let instance = BlueprintInstance {
+        "Content/Blueprints/Rotator.graphene-blueprint.json", Vec[BlueprintOverride]::new()
+    }
+    let fast = BlueprintInstance {
+        instance.asset, vec![BlueprintOverride {
+                1, BlueprintValue::F32(4)
+            }
+        ]
+    }
+    let a = match module.instantiate(asset, instance, Transform::identity()) {
+        Ok(value) => value Err(error) => {
+            eprintln(error) ret 5
+        }
+    }
+    let b = match module.instantiate(asset, fast, Transform::identity()) {
+        Ok(value) => value Err(error) => {
+            eprintln(error) ret 6
+        }
+    }
+    if module.close() {
+        ret 7
+    }
+    if !a.invoke("construction", "", 0) || !b.invoke("construction", "", 0) {
+        ret 8
+    }
+    if !a.invoke("begin-play", "", 0) || !b.invoke("begin-play", "", 0) {
+        ret 9
+    }
+    if a.invoke("begin-play", "", 0) {
+        ret 10
+    }
+    if !a.invoke("tick", "", 0.5) || !b.invoke("tick", "", 0.5) {
+        eprintln(a.error()) eprintln(b.error()) ret 11
+    }
+    let first = a.transform(0).unwrap_or(Transform::identity()).rotation().y()
+    let second = b.transform(0).unwrap_or(Transform::identity()).rotation().y()
+    if first != 0.5 || second != 2 {
+        ret 12
+    }
+    if !a.invoke("input-pressed", "ToggleVisibility", 0) || a.visible(0) || !b.visible(0) {
+        ret 13
+    }
+    if !a.invoke("input-pressed", "ToggleVisibility", 0) || !a.visible(0) {
+        ret 24
+    }
+    let mut workers = Vec[JoinHandle[bool]]::new()
+    for _worker in 0_usize..4_usize {
+        workers.push(spawn tick_worker(a))
+    }
+    for worker in workers {
+        if !worker.join() {
+            ret 25
+        }
+    }
+    if !a.destroy() || !b.destroy() || !module.close() {
+        ret 14
+    }
+    if a.invoke("tick", "", 1) || a.destroy() || module.close() {
+        ret 15
+    }
+    let mut authoring = Scene::new()
+    let first_actor = authoring.create_entity("Slow", Transform::identity())
+    let second_actor = authoring.create_entity("Fast", Transform::identity())
+    authoring.set_blueprint(first_actor, Option[BlueprintInstance]::Some(instance))
+    authoring.set_blueprint(second_actor, Option[BlueprintInstance]::Some(fast))
+    let classes = vec![BlueprintClass { Path::new(instance.asset).resolve().as_str(), asset }]
+    let mut simulation = BlueprintSimulation::new()
+    match simulation.start(".", authoring, build.library, build.semantic, classes) {
+        Ok(_) => {
+        }
+        Err(error) => {
+            eprintln(error) ret 16
+        }
+    }
+    simulation.tick(0.1, InputSnapshot::empty())
+    let runtime_scene = simulation.scene()
+    if runtime_scene.len() != 6 || authoring.len() != 2 {
+        ret 17
+    }
+    match runtime_scene.get(first_actor) {
+        Some(actor) => {
+            if actor.transform().rotation().y() != 0.1 {
+                ret 18
+            }
+        }
+        None => {
+            ret 19
+        }
+    }
+    match authoring.get(first_actor) {
+        Some(actor) => {
+            if actor.transform().rotation().y() != 0 {
+                ret 20
+            }
+        }
+        None => {
+            ret 21
+        }
+    }
+    simulation.stop()
+    for _cycle in 0_usize..3_usize {
+        match simulation.start(".", authoring, build.library, build.semantic, classes) {
+            Ok(_) => {
+            }
+            Err(error) => {
+                eprintln(error) ret 26
+            }
+        }
+        simulation.tick(0.1, InputSnapshot::empty())
+        simulation.stop()
+        if simulation.scene().len() != 0 || authoring.len() != 2 {
+            ret 27
+        }
+    }
+    match prepare_blueprint_build(".", "native/blueprint", compiler, vec![asset]) {
+        Ok(cached) => {
+            if !cached.cached || cached.key != build.key {
+                ret 28
+            }
+        }
+        Err(error) => {
+            eprintln(error) ret 29
+        }
+    }
+    let example = "tests/fixtures/blueprints"
+    let example_classes = vec![BlueprintClass {
+            Path::new(example).resolve().join(instance.asset).as_str(), asset
+        }
+    ]
+    match simulation.start(example, authoring, build.library, build.semantic, example_classes) {
+        Ok(_) => {
+        }
+        Err(error) => {
+            eprintln(error) ret 30
+        }
+    }
+    simulation.input_key(32, true)
+    simulation.input_key(32, true)
+    simulation.tick(0, InputSnapshot::empty())
+    match simulation.scene().get(first_actor) {
+        Some(actor) => {
+            if actor.visible() {
+                ret 31
+            }
+        }
+        None => {
+            ret 32
+        }
+    }
+    simulation.release_input()
+    simulation.input_key(32, true)
+    simulation.tick(0, InputSnapshot::empty())
+    match simulation.scene().get(first_actor) {
+        Some(actor) => {
+            if !actor.visible() {
+                ret 33
+            }
+        }
+        None => {
+            ret 34
+        }
+    }
+    simulation.stop()
+    ret 0
+}

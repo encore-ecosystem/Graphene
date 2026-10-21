@@ -1,0 +1,399 @@
+//! Deterministic weather, interrupted transitions and world-space volume blending.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import mod::model::{EnvironmentComponent, WeatherSample, bounded, mix, weather_equal}
+import mod::preset::{WeatherSequence, load_weather_sequence}
+import refrain::scene::component::SceneComponent
+import refrain::scene::world::Scene
+
+pub struct WeatherVolume {
+    id: u64
+    priority: f32
+    center: Vec3
+    axes: Vec[Vec3]
+    feather: f32
+    weather: WeatherSample
+}
+
+impl for WeatherVolume {
+    pub fn weight(self: Self, position: Vec3) -> f32 {
+        let delta = position.sub(self.center)
+        let mut edge = 1000000.0_f32
+        for axis in self.gradients() {
+            let size_squared = axis.dot(axis)
+            if size_squared < 0.000000000001_f32 {
+                ret 0
+            }
+            let coordinate = delta.dot(axis)
+            let distance = if coordinate < 0 {
+                1 + coordinate
+            } else {
+                1 - coordinate
+            }
+            // Axes encode a half extent, so feather scales consistently with transforms.
+            let world_distance = distance / axis.length()
+            if world_distance < edge {
+                edge = world_distance
+            }
+        }
+        if edge < 0 {
+            ret 0
+        }
+        if self.feather <= 0 {
+            ret 1
+        }
+        let t = bounded(edge / self.feather, 0, 1)
+        ret t * t *(3 - 2 * t)
+    }
+    /// Reciprocal basis remains correct under rotated nonuniform parent scales (shear).
+    pub fn gradients(self: Self) -> Vec[Vec3] {
+        let x = self.axes.get(0).unwrap_or(Vec3::zero())
+        let y = self.axes.get(1).unwrap_or(Vec3::zero())
+        let z = self.axes.get(2).unwrap_or(Vec3::zero())
+        let determinant = x.dot(y.cross(z))
+        if determinant > - 0.00000001_f32 && determinant < 0.00000001_f32 {
+            ret vec![Vec3::zero(), Vec3::zero(), Vec3::zero()]
+        }
+        ret vec![y.cross(z).scale(1 / determinant), z.cross(x).scale(1 / determinant), x.cross(y).scale(1 / determinant)]
+    }
+}
+pub struct EnvironmentFrame {
+    enabled: bool
+    atmosphere: EnvironmentComponent
+    clouds: EnvironmentComponent
+    fog: EnvironmentComponent
+    sky_light: EnvironmentComponent
+    controller: EnvironmentComponent
+    weather: WeatherSample
+    global_weather: WeatherSample
+    volumes: Vec[WeatherVolume]
+    time_hours: f32
+    elapsed: f32
+    lightning: f32
+}
+pub struct EnvironmentSystem {
+    project: str
+    sequence: WeatherSequence
+    sequence_path: str
+    source_revision: u64
+    source_controller: u64
+    enabled: bool
+    atmosphere: EnvironmentComponent
+    clouds: EnvironmentComponent
+    fog: EnvironmentComponent
+    sky_light: EnvironmentComponent
+    controller: EnvironmentComponent
+    volumes: Vec[WeatherVolume]
+    base_volumes: Vec[WeatherVolume]
+    weather: WeatherSample
+    start: WeatherSample
+    target: WeatherSample
+    transition_elapsed: f32
+    transition_duration: f32
+    elapsed: f32
+    time_hours: f32
+    random_state: u32
+    sequence_index: u32
+    next_weather: f32
+    lightning: f32
+    next_flash: f32
+    active: bool
+}
+
+impl for EnvironmentSystem {
+    pub fn new() -> EnvironmentSystem<H> {
+        let clear = WeatherSample::clear()
+        let mut clouds = EnvironmentComponent::new("cloud-layer") clouds.intensity = 0
+        let mut fog = EnvironmentComponent::new("height-fog") fog.intensity = 0
+        let mut sky_light = EnvironmentComponent::new("sky-light") sky_light.intensity = 0
+        ret EnvironmentSystem<H> {
+            "", WeatherSequence::empty(), "", 0, 0, false, EnvironmentComponent::new("sky-atmosphere"), clouds, fog, sky_light,
+            EnvironmentComponent::new("weather-controller"), Vec[WeatherVolume]::new(), Vec[WeatherVolume]::new(), clear, clear, clear, 0, 0, 0, 14, 1, 0, 60, 0, 8, false
+        }
+    }
+    /// Rebuild authored state only on scene changes; ticking never mutates the scene.
+    pub fn configure(self: mut Self&, scene: Scene) ->() {
+        if self.source_revision == scene.revision() {
+            ret()
+        }
+        self.source_revision = scene.revision()
+        let mut atmosphere_id = 0_u64
+        for actor in scene.entities() {
+            if scene.world_visible(actor.id()) && actor.component().kind() == "sky-atmosphere" &&(atmosphere_id == 0 || actor.id() < atmosphere_id) {
+                atmosphere_id = actor.id()
+            }
+        }
+        self.enabled = atmosphere_id > 0
+        if !self.enabled {
+            self.active = false ret()
+        }
+        let mut next = Self::new()
+        match scene.get(atmosphere_id) {
+            Some(actor) => {
+                match actor.component() {
+                    Environment(c) => {
+                        next.atmosphere = c
+                    }
+                    _ => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        let mut cloud_id = 0_u64 let mut fog_id = 0_u64 let mut sky_light_id = 0_u64
+        for actor in scene.entities() {
+            if scene.world_visible(actor.id()) {
+                match actor.component() {
+                    Environment(component) => {
+                        if actor.id() == atmosphere_id {
+                            next.atmosphere = component
+                        }
+                        if component.kind == "cloud-layer" && component.controller == next.atmosphere.controller &&(cloud_id == 0 || actor.id() < cloud_id) {
+                            cloud_id = actor.id() next.clouds = component
+                        }
+                        if component.kind == "height-fog" && component.controller == next.atmosphere.controller &&(fog_id == 0 || actor.id() < fog_id) {
+                            fog_id = actor.id() next.fog = component
+                        }
+                        if component.kind == "sky-light" && component.controller == next.atmosphere.controller &&(sky_light_id == 0 || actor.id() < sky_light_id) {
+                            sky_light_id = actor.id() next.sky_light = component
+                        }
+                        if component.kind == "weather-volume" {
+                            match scene.world_matrix(actor.id()) {
+                                Some(matrix) => {
+                                    let center = matrix.transform_point(Vec3::zero())
+                                    let axes = vec![matrix.transform_point(Vec3::new(0.5_f32, 0, 0)).sub(center), matrix.transform_point(Vec3::new(0, 0.5_f32, 0)).sub(center), matrix.transform_point(Vec3::new(0, 0, 0.5_f32)).sub(center)]
+                                    next.volumes.push(WeatherVolume {
+                                            actor.id(), component.priority, center, axes, component.blend_distance, component.weather
+                                        }
+                                        ,
+                                    )
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+        }
+        // Stable layering: low priorities first, equal priorities ordered by stable ID.
+        for end in 0..next.volumes.len() {
+            for index in 1..(next.volumes.len() - end) {
+                let a = next.volumes.get(index - 1).unwrap_or(WeatherVolume {
+                        0, 0, Vec3::zero(), Vec[Vec3]::new(), 0, WeatherSample::clear()
+                    }
+                    ,
+                )
+                let b = next.volumes.get(index).unwrap_or(a)
+                if a.priority > b.priority ||(a.priority == b.priority && a.id > b.id) {
+                    next.volumes.set(index - 1, b) next.volumes.set(index, a)
+                }
+            }
+        }
+        if next.volumes.len() > 64 {
+            let mut active = Vec[WeatherVolume]::new() let start = next.volumes.len() - 64 for i in start..next.volumes.len() {
+                active.push(next.volumes.get_unchecked_borrowed(i))
+            }
+            next.volumes = active
+        }
+        for light_id in vec![next.atmosphere.sun, next.atmosphere.moon] {
+            let valid = match scene.get(light_id) {
+                Some(actor) => actor.component().kind() == "directional-light" && scene.world_visible(light_id) None => false
+            }
+            if !valid {
+                if next.atmosphere.sun == light_id {
+                    next.atmosphere.sun = 0
+                }
+                if next.atmosphere.moon == light_id {
+                    next.atmosphere.moon = 0
+                }
+            }
+        }
+        let controller_id = next.atmosphere.controller
+        match scene.get(controller_id) {
+            Some(actor) => {
+                if scene.world_visible(controller_id) {
+                    match actor.component() {
+                        Environment(component) => {
+                            if component.kind == "weather-controller" {
+                                next.controller = component
+                            }
+                        }
+                        _ => {
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        let previous = self.controller
+        let same_controller = self.source_controller == controller_id
+        let previous_volumes = self.volumes
+        self.atmosphere = next.atmosphere self.clouds = next.clouds self.fog = next.fog self.sky_light = next.sky_light self.volumes = Vec[WeatherVolume]::new()
+        self.base_volumes = Vec[WeatherVolume]::new()
+        for volume in next.volumes {
+            self.base_volumes.push(volume)
+            let mut current = WeatherVolume {
+                volume.id, volume.priority, volume.center, vec![volume.axes.get(0).unwrap_or(Vec3::zero()), volume.axes.get(1).unwrap_or(Vec3::zero()), volume.axes.get(2).unwrap_or(Vec3::zero())], volume.feather, volume.weather
+            }
+            if same_controller && self.active {
+                for old in previous_volumes {
+                    if old.id == volume.id {
+                        current.weather.wetness = old.weather.wetness
+                        current.weather.snow_coverage = old.weather.snow_coverage
+                    }
+                }
+            }
+            self.volumes.push(current)
+        }
+        self.controller = next.controller self.source_controller = controller_id
+        let sequence_path = if self.controller.sequence != "" && self.controller.sequence.byte_len() > 8 && self.controller.sequence.slice_bytes(0, 8) == "Content/" && !self.controller.sequence.contains("..") && !self.controller.sequence.contains("\\") && !self.controller.sequence.contains(":") {
+            self.project + "/" + self.controller.sequence
+        } else {
+            ""
+        }
+        if sequence_path != self.sequence_path {
+            self.sequence_path = sequence_path self.sequence = WeatherSequence::empty() if sequence_path != "" {
+                match load_weather_sequence(sequence_path) {
+                    Ok(sequence) => {
+                        self.sequence = sequence
+                    }
+                    Err(_) => {
+                    }
+                }
+            }
+        }
+        if !same_controller || !self.active {
+            self.reset()
+        } else {
+            if previous.time_hours != self.controller.time_hours {
+                self.time_hours = self.controller.time_hours
+            }
+            if previous.seed != self.controller.seed {
+                self.random_state = self.controller.seed
+            }
+            if previous.mode != self.controller.mode {
+                self.next_weather = self.elapsed + 60 self.sequence_index = 0
+            }
+            if !weather_equal(previous.weather, self.controller.weather) {
+                let _transitioned = self.transition_to(self.controller.weather, self.controller.transition)
+            }
+        }
+    }
+    pub fn set_project(self: mut Self&, project: str) ->() {
+        if self.project != project {
+            self.project = project self.sequence_path = "" self.sequence = WeatherSequence::empty() self.invalidate()
+        }
+    }
+    pub fn invalidate(self: mut Self&) ->() {
+        self.source_revision = 0 self.source_controller = 0 self.active = false
+    }
+    pub fn revision(self: Self&) -> u64 {
+        ret self.source_revision
+    }
+    pub fn enabled(self: Self&) -> bool {
+        ret self.enabled
+    }
+    pub fn active(self: Self&) -> bool {
+        ret self.active
+    }
+    pub fn animating(self: Self&, playing: bool) -> bool {
+        ret self.enabled &&(playing || self.controller.preview)
+    }
+    pub fn reset(self: mut Self&) ->() {
+        self.volumes = Vec[WeatherVolume]::new()
+        for volume in self.base_volumes {
+            self.volumes.push(volume)
+        }
+        self.weather = self.controller.weather self.start = self.weather self.target = self.weather
+        self.time_hours = self.controller.time_hours self.elapsed = 0 self.transition_elapsed = 0 self.transition_duration = 0
+        self.random_state = self.controller.seed self.sequence_index = 0 self.next_weather = 60 self.lightning = 0 self.next_flash = 8
+    }
+    pub fn set_active(self: mut Self&, value: bool) ->() {
+        if self.active && !value {
+            self.reset()
+        }
+        self.active = value
+    }
+    pub fn transition_to(self: mut Self&, preset: WeatherSample, duration: f32) -> bool {
+        if !preset.valid() || duration < 0 || duration > 86400 {
+            ret false
+        }
+        self.start = self.weather self.target = preset self.transition_elapsed = 0 self.transition_duration = duration
+        if duration == 0 {
+            self.weather = preset
+        }
+        ret true
+    }
+    fn random(self: mut Self&) -> f32 {
+        self.random_state =(((self.random_state as u64) * 1664525_u64 + 1013904223_u64) % 4294967296_u64) as u32
+        ret self.random_state as f32 / 4294967296.0_f32
+    }
+    /// Integrate in bounded substeps so pause/resume cannot produce huge accumulation spikes.
+    pub fn tick(self: mut Self&, dt: f32) ->() {
+        if !self.active || !(dt > 0 && dt <= 60) {
+            ret()
+        }
+        let mut remaining = dt
+        while remaining > 0 {
+            let step = bounded(remaining, 0, 0.1_f32)
+            self.integrate(step) remaining -= step
+        }
+    }
+    fn integrate(self: mut Self&, dt: f32) ->() {
+        self.elapsed += dt self.time_hours += dt * 24 / self.controller.day_duration
+        while self.time_hours >= 24 {
+            self.time_hours -= 24
+        }
+        let sequence_active = self.controller.mode == "sequence" && self.sequence.keys.len() > 0
+        if sequence_active {
+            match self.sequence.sample(self.elapsed) {
+                Some(sample) => {
+                    let wetness = self.weather.wetness let snow = self.weather.snow_coverage self.weather = sample self.weather.wetness = wetness self.weather.snow_coverage = snow self.transition_duration = 0
+                }
+                None => {
+                }
+            }
+        }
+        if self.controller.mode != "manual" && !sequence_active && self.elapsed >= self.next_weather {
+            let presets = vec!["clear", "overcast", "rain", "storm", "snow"]
+            let index = if self.controller.mode == "random" {
+                (self.random() * 5) as usize
+            } else {
+                (self.sequence_index % 5) as usize
+            }
+            let _changed = self.transition_to(WeatherSample::preset(presets.get(index).unwrap_or("clear")), self.controller.transition)
+            self.sequence_index += 1 self.next_weather += 60
+        }
+        if self.transition_duration > 0 {
+            self.transition_elapsed += dt
+            let t = bounded(self.transition_elapsed / self.transition_duration, 0, 1)
+            self.weather = self.start.blend(self.target, t * t *(3 - 2 * t))
+        }
+        // Surface coverage remains authored data; weather does not accumulate it.
+        self.lightning = bounded(self.lightning - dt * 5, 0, 1)
+        if self.elapsed >= self.next_flash {
+            if self.weather.storm > 0.1_f32 {
+                self.lightning = self.weather.storm
+            }
+            self.next_flash = self.elapsed + 4 + self.random() * 12
+        }
+    }
+    pub fn sample(self: Self&, position: Vec3) -> WeatherSample {
+        let mut sample = self.weather
+        for volume in self.volumes {
+            sample = sample.blend(volume.weather, volume.weight(position))
+        }
+        ret sample
+    }
+    pub fn frame(self: Self&, position: Vec3) -> EnvironmentFrame {
+        ret EnvironmentFrame {
+            self.enabled, self.atmosphere, self.clouds, self.fog, self.sky_light, self.controller, self.sample(position), self.weather, self.volumes, self.time_hours, self.elapsed, self.lightning
+        }
+    }
+}

@@ -1,0 +1,27 @@
+#version 460
+layout(local_size_x=64) in;
+struct Affine {vec4 x,y,z;};
+struct BoneBound {vec4 minimum,maximum;uvec4 bone;};
+struct BoundRequest {uvec4 data;}; // first,count,model palette base,output index
+struct Bound {vec4 center_radius;vec4 minimum,maximum;};
+layout(set=0,binding=0,std430) readonly buffer Info {uint request_count,bound_count,palette_count,output_count;} info;
+layout(set=0,binding=1,std430) readonly buffer BoneBounds {BoneBound values[];} bone_bounds;
+layout(set=0,binding=2,std430) readonly buffer Models {Affine values[];} models;
+layout(set=0,binding=3,std430) readonly buffer Requests {BoundRequest values[];} requests;
+layout(set=0,binding=4,std430) writeonly buffer Output {Bound values[];} output_bounds;
+layout(set=0,binding=5,std430) buffer Status {uint invalid;} status;
+void main() {
+    uint index=gl_GlobalInvocationID.x+gl_GlobalInvocationID.y*gl_NumWorkGroups.x*64u;if(index>=info.request_count)return;
+    uvec4 r=requests.values[index].data;
+    if(r.x>info.bound_count || r.y==0 || r.y>info.bound_count-r.x || r.w>=info.output_count || r.z>=info.palette_count){atomicAdd(status.invalid,1);return;}
+    vec3 low=vec3(3.402823466e38),high=-low;
+    for(uint i=0;i<r.y;i++) {
+        BoneBound b=bone_bounds.values[r.x+i];
+        if(b.bone.x>=info.palette_count-r.z){atomicAdd(status.invalid,1);return;}
+        Affine m=models.values[r.z+b.bone.x];vec3 center=(b.minimum.xyz+b.maximum.xyz)*0.5,extent=(b.maximum.xyz-b.minimum.xyz)*0.5;
+        vec4 c=vec4(center,1);vec3 p=vec3(dot(m.x,c),dot(m.y,c),dot(m.z,c));
+        vec3 e=vec3(dot(abs(m.x.xyz),extent),dot(abs(m.y.xyz),extent),dot(abs(m.z.xyz),extent));
+        low=min(low,p-e);high=max(high,p+e);
+    }
+    output_bounds.values[r.w]=Bound(vec4((low+high)*0.5,length((high-low)*0.5)),vec4(low,0),vec4(high,0));
+}

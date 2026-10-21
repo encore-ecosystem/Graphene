@@ -1,0 +1,18 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn selection_mask_vert_spirv() -> Vec[u32] {
+    ret builtin_spirv(852193729_u32)
+}
+
+pub fn selection_mask_frag_spirv() -> Vec[u32] {
+    ret builtin_spirv(2043047690_u32)
+}
+
+pub fn selection_outline_vert_spirv() -> Vec[u32] {
+    ret builtin_spirv(211681041_u32)
+}
+
+pub fn selection_outline_frag_spirv() -> Vec[u32] {
+    ret builtin_spirv(1200677338_u32)
+}

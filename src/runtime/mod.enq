@@ -304,6 +304,27 @@ fn contains_key(values: Vec[u32], key: u32) -> bool {
     ret false
 }
 
+fn copy_keys(values: Vec[u32]) -> Vec[u32] {
+    let mut copy = Vec[u32]::new()
+    for value in values {
+        copy.push(value)
+    }
+    ret copy
+}
+
+#attr(test)
+fn input_snapshots_preserve_previous_frame() -> bool {
+    let empty = InputSnapshot::empty()
+    let pressed = empty.with_pressed(26_u32)
+    let another = pressed.with_pressed(4_u32)
+    let released = pressed.with_released(26_u32)
+    ret !empty.key_down(26_u32) && !empty.key_pressed(26_u32) &&
+    pressed.key_down(26_u32) && pressed.key_pressed(26_u32) &&
+    !pressed.key_down(4_u32) && !pressed.key_pressed(4_u32) &&
+    another.key_down(4_u32) && another.key_pressed(4_u32) &&
+    !pressed.key_released(26_u32) && released.key_released(26_u32)
+}
+
 impl for InputSnapshot {
     pub fn empty() -> InputSnapshot {
         ret InputSnapshot {
@@ -311,21 +332,27 @@ impl for InputSnapshot {
         }
     }
     pub fn with_down(self: Self, key: u32) -> InputSnapshot {
-        let mut next = self
+        let mut next = InputSnapshot {
+            copy_keys(self.down), self.pressed, self.released
+        }
         if !contains_key(next.down, key) {
             next.down.push(key)
         }
         ret next
     }
     pub fn with_pressed(self: Self, key: u32) -> InputSnapshot {
-        let mut next = self
+        let mut next = InputSnapshot {
+            self.down, copy_keys(self.pressed), self.released
+        }
         if !contains_key(next.pressed, key) {
             next.pressed.push(key)
         }
         ret next.with_down(key)
     }
     pub fn with_released(self: Self, key: u32) -> InputSnapshot {
-        let mut next = self
+        let mut next = InputSnapshot {
+            self.down, self.pressed, copy_keys(self.released)
+        }
         if !contains_key(next.released, key) {
             next.released.push(key)
         }
@@ -355,6 +382,15 @@ impl for InputMap {
     pub fn bind_key(self: mut Self, action: str, key: u32) ->() {
         self.bindings.push(InputBinding::new(action, key, 1.0_f32))
         ret()
+    }
+    pub fn actions(self: Self) -> Vec[str] {
+        let mut actions = Vec[str]::new()
+        for binding in self.bindings {
+            let mut known = false
+            for action in actions { if action == binding.action() { known = true } }
+            if !known { actions.push(binding.action()) }
+        }
+        ret actions
     }
     pub fn bind_axis_key(self: mut Self, action: str, key: u32, scale: f32) ->() {
         self.bindings.push(InputBinding::new(action, key, scale))
@@ -492,6 +528,12 @@ impl for World {
             ,
         )
         ret id
+    }
+    pub fn spawn_actor_with_id(self: mut Self, id: u64, name: str, transform: RuntimeTransform) -> bool {
+        if id == 0 || self.contains(id) { ret false }
+        self.actors.push(Actor { id, name, transform, Option[u64]::None, true })
+        if id >= self.next_id { self.next_id = id + 1 }
+        ret true
     }
     pub fn despawn_actor(self: mut Self, id: u64) -> bool {
         let index = actor_index(self.actors, id)
@@ -950,7 +992,18 @@ impl for RuntimeSession {
         ret()
     }
     pub fn tick(self: mut Self, elapsed_seconds: f32, input: InputSnapshot) -> RuntimeFrame {
-        let frame = self.clock.begin_frame(elapsed_seconds, input)
+        let frame = self.begin_frame(elapsed_seconds, input)
+        self.finish_frame(frame)
+        ret frame
+    }
+    /// Behavior systems run between begin_frame and finish_frame, before physics.
+    pub fn begin_frame(self: mut Self, elapsed_seconds: f32, input: InputSnapshot) -> RuntimeFrame {
+        ret self.clock.begin_frame(elapsed_seconds, input)
+    }
+    pub fn set_transform(self: mut Self, actor: u64, transform: RuntimeTransform) -> bool {
+        ret self.world.set_transform(actor, transform)
+    }
+    pub fn finish_frame(self: mut Self, frame: RuntimeFrame) -> () {
         let mut runtime_world = self.world
         let mut simulation = self.physics
         let mut fixed_step = 0_u32
@@ -960,6 +1013,6 @@ impl for RuntimeSession {
         }
         self.world = runtime_world
         self.physics = simulation
-        ret frame
+        ret ()
     }
 }

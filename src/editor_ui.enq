@@ -1,0 +1,93 @@
+import mod::content_browser::ContentBrowser
+import mod::editor_actor_details::ActorDetails
+import mod::editor_lod_groups::LodGroupEditor
+import mod::editor_mesh_details::MeshDetails
+import mod::render_settings::RenderSettings
+//! Session-only presentation state. It never enters scene history or layout files.
+import core::vec::Vec
+
+pub struct EditorUiState {
+    render_settings: RenderSettings
+    aa_sample_counts: u32
+    reconstruction_capabilities: u32
+    reconstruction_status: str
+    browser: ContentBrowser
+    actors: ActorDetails
+    mesh: MeshDetails
+    lod_groups: LodGroupEditor
+    sections: Vec[str]
+    popup: str
+    focused: str
+    pressed: str
+}
+
+impl for EditorUiState {
+    pub fn new() -> Self {
+        ret Self {
+            RenderSettings::defaults(), 1_u32, 0_u32, "", ContentBrowser::new(), ActorDetails::new(), MeshDetails::new(), LodGroupEditor::new(), vec!["ui-section-autolod", "ui-section-component", "ui-section-transform", "ui-section-surface"], "", "", ""
+        }
+    }
+    pub fn expanded(self: Self, id: str) -> bool {
+        for section in self.sections {
+            if section == id {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn toggle_section(self: mut Self, id: str) ->() {
+        let was_open = self.expanded(id)
+        let mut sections = Vec[str]::new()
+        for section in self.sections {
+            if section != id {
+                sections.push(section)
+            }
+        }
+        if !was_open {
+            sections.push(id)
+        }
+        self.sections = sections self.focused = id self.popup = ""
+    }
+    pub fn popup(self: Self) -> str {
+        ret self.popup
+    }
+    /// Nested menu entries disappear when their popup replaces the parent.
+    /// Anchor lifetime and restored focus follow the persistent toolbar item.
+    pub fn popup_anchor(self: Self) -> str {
+        ret if self.popup == "ui-project-settings" || self.popup == "ui-lod-groups" {
+            "menu-edit"
+        } elif self.popup == "ui-anti-aliasing" {
+            "ui-viewport-settings"
+        } else {
+            self.popup
+        }
+    }
+    pub fn open(self: mut Self, owner: str) ->() {
+        self.popup = if self.popup == owner {
+            ""
+        } else {
+            owner
+        }
+        self.focused = owner
+    }
+    pub fn close(self: mut Self) ->() {
+        self.focused = self.popup_anchor()
+        self.popup = ""
+    }
+    pub fn focused(self: Self) -> str {
+        ret self.focused
+    }
+    /// Scene commands follow actor selection in either the viewport or Outliner.
+    pub fn scene_keyboard_focus(self: Self, viewport_focused: bool) -> bool {
+        ret viewport_focused ||(self.focused.contains("entity-cube-") && !self.focused.contains("toggle-visible-"))
+    }
+    pub fn focus(self: mut Self, id: str) ->() {
+        self.focused = id
+    }
+    pub fn pressed(self: Self) -> str {
+        ret self.pressed
+    }
+    pub fn press(self: mut Self, id: str) ->() {
+        self.pressed = id
+    }
+}

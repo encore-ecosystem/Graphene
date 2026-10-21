@@ -1,0 +1,43 @@
+//! Camera chrome is painted above external viewport images, like gizmo guides.
+import luma::{DisplayList, Rect, Style, StyleSheet, Widget, WidgetLayout}
+pub struct CameraOverlayStyle {
+    frame: Style
+    title: Style
+    pilot: Style
+}
+
+impl for CameraOverlayStyle {
+    pub fn from_sheet(sheet: StyleSheet) -> Self {
+        ret Self {
+            sheet.apply(Widget::panel("").with_classes("g-camera-preview"), "", "", "").style(), sheet.apply(Widget::label("").with_classes("g-camera-preview-title"), "", "", "").style(), sheet.apply(Widget::label("").with_classes("g-camera-pilot-banner"), "", "", "").style()
+        }
+    }
+    pub fn display(self: Self, layout: WidgetLayout, name: str) -> DisplayList {
+        let mut list = DisplayList::new()
+        match layout.find_bounds("camera-preview") {
+            Some(bounds) => {
+                match layout.find_bounds("camera-preview-surface") {
+                    Some(image) => {
+                        let header = Rect::new(bounds.x(), bounds.y(), bounds.width(), image.y() - bounds.y())
+                        list.fill_rect(header, self.frame.background())
+                        list.stroke_rect(bounds, self.frame.border_color())
+                        list.styled_text(header.x() + 7.0_f32, header.y() + 5.0_f32, name, self.title)
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match layout.find_bounds("camera-pilot-banner") {
+            Some(bounds) => {
+                list.fill_rect(bounds, self.pilot.background()) list.stroke_rect(bounds, self.pilot.border_color())
+                list.styled_text(bounds.x() + 9.0_f32, bounds.y() + 5.0_f32, "PILOT CAMERA · Esc to exit", self.pilot)
+            }
+            None => {
+            }
+        }
+        ret list
+    }
+}

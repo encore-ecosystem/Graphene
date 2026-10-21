@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -6,9 +7,16 @@ layout(set = 0, binding = 0, std430) buffer SceneStream {
     uint values[];
 } scene;
 
+// Previous and current visible cuts are per instance. Any LOD/residency
+// change conservatively rejects temporal history for the affected instance.
+layout(set=0,binding=10,std430) buffer LodHistory { uvec4 values[]; } lod_history;
+uint cutHash(uint cluster) {uint x=cluster+1u;x^=x>>16;x*=0x7feb352du;x^=x>>15;return x;}
 float valuef(uint index) {
     return uintBitsToFloat(scene.values[index]);
 }
+
+#include "animation/vg.glsl"
+#include "autolod_policy.glsl"
 
 mat4 instanceModel(uint base) {
     return mat4(
@@ -39,7 +47,7 @@ uint hizStorageBase(uint clusterCount, uint maximumInstances) {
     uint maximumCandidates = clusterCount * maximumInstances;
     uint feedbackBase = 64u + clusterCount * 16u +
         hierarchyCount * 12u +
-        maximumInstances * 24u + maximumCandidates * 4u;
+        maximumInstances * 28u + maximumCandidates * 4u;
     return feedbackBase + clusterCount;
 }
 
@@ -74,30 +82,33 @@ bool hiddenByPreviousHiz(uint pyramidBase, vec2 screen,
     return covered;
 }
 
-void writeCurrentHiz(uint pyramidBase, vec2 screen,
-    float projectedRadius, float farthestDepth) {
-    uint encoded = floatBitsToUint(clamp(farthestDepth, 0.0, 1.0));
-    for (uint level = 0u; level <= 6u; ++level) {
-        uint width = hizWidth(level);
-        uint height = hizHeight(level);
-        vec2 tileScale = vec2(width, height);
-        ivec2 center = ivec2(clamp(screen, vec2(0.0), vec2(0.99999)) * tileScale);
-        for (int oy = -1; oy <= 1; ++oy) {
-            for (int ox = -1; ox <= 1; ++ox) {
-                ivec2 tile = center + ivec2(ox, oy);
-                if (tile.x < 0 || tile.y < 0 ||
-                    tile.x >= int(width) || tile.y >= int(height)) continue;
-                vec2 tileMinimum = vec2(tile) / tileScale;
-                vec2 tileMaximum = vec2(tile + ivec2(1)) / tileScale;
-                vec2 farCorner = max(abs(tileMinimum - screen),
-                    abs(tileMaximum - screen));
-                if (length(farCorner) <= projectedRadius) {
-                    atomicMin(scene.values[pyramidBase + hizLevelOffset(level) +
-                        uint(tile.y) * width + uint(tile.x)], encoded);
-                }
-            }
-        }
-    }
+// A cluster's bounding sphere describes possible coverage, not solid coverage.
+// Do not insert it as an occluder: empty areas between its triangles would hide
+// visible geometry. Leave HZB cells unknown until actual rasterized depth is
+// available. Unknown cells conservatively retain the candidate.
+
+bool coneVisible(uint metadata, vec3 localCamera) {
+#ifdef GRAPHENE_SKINNED
+    return true;
+#else
+    vec3 axis = vec3(valuef(metadata + 4u), valuef(metadata + 5u),
+        valuef(metadata + 6u));
+    // Stored cutoff is cos(normal-cone half-angle), NOT a view-dot threshold.
+    // A cone spanning a hemisphere cannot prove that all triangles face away.
+    float cosine = valuef(metadata + 7u);
+    if (cosine <= 0.0 || dot(axis, axis) < 0.5) return true;
+    vec3 center = vec3(valuef(metadata), valuef(metadata + 1u),
+        valuef(metadata + 2u));
+    float radius = valuef(metadata + 3u);
+    vec3 toCamera = localCamera - center;
+    float distanceToCamera = length(toCamera);
+    if (distanceToCamera <= radius) return true;
+    float sine = sqrt(max(0.0, 1.0 - min(cosine * cosine, 1.0)));
+    // Perspective directions vary across the cluster. The radius term makes
+    // rejection conservative even close to the silhouette. Testing in object
+    // space also preserves the cone under nonuniform instance scaling.
+    return dot(axis, toCamera) >= -sine * distanceToCamera - radius;
+#endif
 }
 
 void main() {
@@ -106,11 +117,16 @@ void main() {
     uint hierarchyCount = scene.values[2];
     uint instanceIndex = gl_GlobalInvocationID.x;
     if (instanceIndex >= instanceCount) return;
+#ifdef GRAPHENE_SKINNED
+    animation_instance=instanceIndex;
+#endif
+    lod_history.values[instanceIndex].x=lod_history.values[instanceIndex].y;
+    lod_history.values[instanceIndex].y=0u;
 
     uint clusterStorageBase = 64u;
     uint hierarchyBase = clusterStorageBase + clusterCount * 16u;
     uint instanceStorageBase = hierarchyBase + hierarchyCount * 12u;
-    uint instanceBase = instanceStorageBase + instanceIndex * 24u;
+    uint instanceBase = instanceStorageBase + instanceIndex * 28u;
     mat4 model = instanceModel(instanceBase);
     float scale = max(length(model[0].xyz),
         max(length(model[1].xyz), length(model[2].xyz)));
@@ -121,18 +137,23 @@ void main() {
         vec4(valuef(12), valuef(13), valuef(14), valuef(15)),
         vec4(valuef(16), valuef(17), valuef(18), valuef(19)));
     vec3 camera = vec3(valuef(20), valuef(21), valuef(22));
+    bool validConeTransform = determinant(mat3(model)) > 0.00000001;
+    vec3 localCamera = validConeTransform ?
+        (inverse(model) * vec4(camera, 1.0)).xyz : vec3(0.0);
     float maximumDistance = valuef(23);
     float viewportHeight = valuef(36);
     uint maximumLod = uint(valuef(37));
     uint rootNode = uint(valuef(40));
-    float targetPixelError = max(valuef(41), 0.125);
+    bool forceFullDetail = valuef(41) < 0.0;
+    float targetRatio = lodTargetRatio(model, viewProjection, camera, scale);
+    lod_history.values[instanceIndex].z = floatBitsToUint(forceFullDetail ? 1.0 : targetRatio);
     bool diagnosticMode = scene.values[3] > 1u && scene.values[3] != 11u;
     uint maximumInstances = uint(valuef(39));
     uint maximumCandidates = clusterCount * maximumInstances;
-    uint visibleBase = instanceStorageBase + maximumInstances * 24u;
+    uint visibleBase = instanceStorageBase + maximumInstances * 28u;
     uint postCandidateBase = visibleBase + maximumCandidates * 2u;
     uint feedbackBase = instanceStorageBase +
-        maximumInstances * 24u + maximumCandidates * 4u;
+        maximumInstances * 28u + maximumCandidates * 4u;
     uint hizBase = hizStorageBase(clusterCount, maximumInstances);
     uint indirectBase = hizBase + 3067u * 2u;
     uint currentPyramid = uint(valuef(35));
@@ -140,8 +161,8 @@ void main() {
     uint previousHiz = hizBase + (1u - currentPyramid) * 3067u;
 
     // Traverse a continuous cut of the cluster DAG. Each node owns renderable
-    // parent clusters. We descend only when its screen-space error exceeds the
-    // target and every direct child page is resident; otherwise the parent is
+    // parent clusters. We descend when its mesh-specific budget threshold is met
+    // and every direct child page is resident; otherwise the parent is
     // a crack-free fallback while child pages are requested.
     uint stack[64];
     uint stackSize = 0u;
@@ -152,6 +173,10 @@ void main() {
         vec3 localCenter = vec3(valuef(nodeBase), valuef(nodeBase + 1u),
             valuef(nodeBase + 2u));
         float worldRadius = valuef(nodeBase + 3u) * scale;
+#ifdef GRAPHENE_SKINNED
+        vec4 animatedSphere=skinNodeSphere(instanceIndex,nodeIndex);
+        localCenter=animatedSphere.xyz;worldRadius=animatedSphere.w*scale;
+#endif
         vec3 worldCenter = (model * vec4(localCenter, 1.0)).xyz;
         vec4 clip = viewProjection * vec4(worldCenter, 1.0);
         float clipRadius = max(worldRadius * abs(viewProjection[1][1]), 0.001);
@@ -159,10 +184,7 @@ void main() {
             viewProjection[0][2], viewProjection[1][2], viewProjection[2][2]));
         float wRadius = worldRadius * length(vec3(
             viewProjection[0][3], viewProjection[1][3], viewProjection[2][3]));
-        bool inFrustum = diagnosticMode || (clip.w > 0.0 &&
-            clip.x >= -clip.w - clipRadius && clip.x <= clip.w + clipRadius &&
-            clip.y >= -clip.w - clipRadius && clip.y <= clip.w + clipRadius &&
-            clip.z >= -clipRadius && clip.z <= clip.w + clipRadius);
+        bool inFrustum = diagnosticMode || lodSphereInFrustum(viewProjection,clip,worldRadius);
         bool inRange = diagnosticMode || maximumDistance <= 0.0 ||
             distance(camera, worldCenter) <= maximumDistance + worldRadius;
         if (!inFrustum || !inRange) continue;
@@ -185,9 +207,9 @@ void main() {
         float leftValue = valuef(nodeBase + 6u);
         float rightValue = valuef(nodeBase + 7u);
         bool hasChildren = leftValue >= 0.0;
-        float projectedError = valuef(nodeBase + 9u) * scale * viewportHeight /
-            max(distance(camera, worldCenter), 0.001);
-        bool wantsRefinement = hasChildren && projectedError > targetPixelError;
+        float projectedError = lodProjectedError(viewProjection,clip,worldRadius,
+            valuef(nodeBase+9u),scale,viewportHeight);
+        bool wantsRefinement = hasChildren && lodRefine(nodeBase, forceFullDetail, targetRatio, projectedError);
         bool childrenResident = wantsRefinement;
         if (wantsRefinement) {
             uint childCount = rightValue >= 0.0 ? 2u : 1u;
@@ -230,7 +252,6 @@ void main() {
         atomicMax(scene.values[indirectBase + 6u], selectedLevel);
         uint firstCluster = uint(valuef(nodeBase + 4u));
         uint nodeClusterCount = uint(valuef(nodeBase + 5u));
-        bool wroteDepth = false;
         for (uint clusterOffset = 0u; clusterOffset < nodeClusterCount; ++clusterOffset) {
             uint clusterIndex = firstCluster + clusterOffset;
             if (clusterIndex >= clusterCount) continue;
@@ -240,24 +261,14 @@ void main() {
                 atomicMax(scene.values[feedbackBase + clusterIndex], 1u);
                 continue;
             }
-            vec3 localCone = vec3(valuef(clusterBase + 4u),
-                valuef(clusterBase + 5u), valuef(clusterBase + 6u));
-            float coneCutoff = valuef(clusterBase + 7u);
-            vec3 worldCone = normalize(mat3(model) * localCone);
-            bool coneVisible = coneCutoff < -1.0 ||
-                dot(worldCone, normalize(camera - worldCenter)) >= coneCutoff;
-            if (!coneVisible) continue;
-            if (!wroteDepth) {
-                float farthestDepth = (clip.z + depthRadius) /
-                    max(clip.w + wRadius, 0.0001);
-                writeCurrentHiz(currentHiz, screen, screenRadius, farthestDepth);
-                wroteDepth = true;
-            }
+            bool facingCamera = !validConeTransform || coneVisible(clusterBase, localCamera);
+            if (!resident || !facingCamera) continue;
             uint outputIndex = atomicAdd(scene.values[indirectBase], 1u);
             atomicAdd(scene.values[indirectBase + 4u], 1u);
             uint maximumVisible = clusterCount * instanceCount;
             if (outputIndex < maximumVisible) {
                 uint outputBase = visibleBase + outputIndex * 2u;
+                atomicXor(lod_history.values[instanceIndex].y,cutHash(clusterIndex));
                 scene.values[outputBase] = clusterIndex;
                 scene.values[outputBase + 1u] =
                     (instanceIndex & 0x0007ffffu) |

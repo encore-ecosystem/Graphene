@@ -1,0 +1,801 @@
+//! Draft-based project LOD group editor. Apply publishes one validated catalog.
+import core::option::Option
+import core::vec::Vec
+import luma::{Widget, TextEditor, Event, CurveEditor, CurveAxes, Point, Rect, WidgetLayout, PreparedFrame, StyleSheet, horizontal, vertical, event_pointer_down, event_pointer_up, event_focus_lost, event_key_down, event_text_input, key_enter, key_escape, key_tab, key_backspace, key_delete, key_left, key_right, key_home, key_end}
+import mod::autolod_settings::AutoLodSettings
+import mod::automation_transport::automation_capability_token
+import mod::lod_groups::{LodGroups, LodGroup, LodCurvePoint, LodInterpolation, trim_name}
+import mod::project_assets::ImportedMeshAsset
+import mod::scene::json_value::parse_number
+
+struct LodDraftSnapshot {
+    catalog: LodGroups
+    selected: str
+}
+pub struct LodGroupEditor {
+    project: str
+    catalog: LodGroups
+    draft: LodGroups
+    selected: str
+    field: str
+    editor: TextEditor
+    message: str
+    changed: bool
+    applied: bool
+    asset_paths: Vec[str]
+    usage: Vec[str]
+    graph: CurveEditor
+    bounds: Rect
+    history: Vec[LodDraftSnapshot]
+    future: Vec[LodDraftSnapshot]
+    gesture: Option[LodDraftSnapshot]
+}
+fn button(id: str, text: str, disabled: bool) -> Widget {
+    ret Widget::button(id, text).with_classes("g-lod-button").with_disabled(disabled)
+}
+
+// Compact display only. Focused editing keeps the original numeric text, so
+// merely focusing/committing a field does not quantize the stored curve.
+fn compact_number(value: str) -> str {
+    let number = parse_number(value).unwrap_or( - 1.0_f32)
+    if !(number >= 0 && number <= 1000000) {
+        ret value
+    }
+    let scaled =(number * 1000.0_f32 + 0.5_f32) as usize
+    if scaled == 0 && number > 0 {
+        ret value
+    }
+    let whole =(scaled / 1000_usize).fmt()
+    let remainder = scaled % 1000_usize
+    if remainder == 0 {
+        ret whole
+    }
+    let mut fraction =(if remainder < 10 {
+            "00"
+        } elif remainder < 100 {
+            "0"
+        } else {
+            ""
+        }
+    ) + remainder.fmt()
+    while fraction.byte_at(fraction.byte_len() - 1_usize) == 48 {
+        fraction = fraction.slice_bytes(0, fraction.byte_len() - 1_usize)
+    }
+    ret whole + "." + fraction
+}
+
+impl for LodGroupEditor {
+    pub fn new() -> Self {
+        ret Self {
+            "", LodGroups::defaults(), LodGroups::defaults(), "default", "", TextEditor::new(""), "", false, false, Vec[str]::new(), Vec[str]::new(), CurveEditor::new(), Rect::new(0, 0, 0, 0), Vec[LodDraftSnapshot]::new(), Vec[LodDraftSnapshot]::new(), Option[LodDraftSnapshot]::None
+        }
+    }
+    fn snapshot(self: Self) -> LodDraftSnapshot {
+        ret LodDraftSnapshot {
+            self.draft.independent(), self.selected
+        }
+    }
+    fn reset_history(self: mut Self) ->() {
+        self.history = Vec[LodDraftSnapshot]::new() self.future = Vec[LodDraftSnapshot]::new() self.gesture = Option[LodDraftSnapshot]::None
+    }
+    fn remember(self: mut Self) ->() {
+        if self.gesture.is_none() {
+            self.history.push(self.snapshot()) self.future = Vec[LodDraftSnapshot]::new()
+        }
+    }
+    fn restore(self: mut Self, saved: LodDraftSnapshot) ->() {
+        self.draft = saved.catalog.independent() self.selected = saved.selected self.changed = true self.field = "" self.message = "" self.graph.reset_gesture()
+        let n = self.group().curve.len() if self.graph.selected() >= n {
+            self.graph.select(n - 1)
+        }
+    }
+    fn undo(self: mut Self, redo: bool) ->() {
+        if self.gesture.is_some() {
+            self.finish_gesture(true)
+        }
+        if redo {
+            match self.future.pop() {
+                Some(saved) => {
+                    self.history.push(self.snapshot()) self.restore(saved)
+                }
+                None => {
+                }
+            }
+        } else {
+            match self.history.pop() {
+                Some(saved) => {
+                    self.future.push(self.snapshot()) self.restore(saved)
+                }
+                None => {
+                }
+            }
+        }
+    }
+    fn finish_gesture(self: mut Self, cancel: bool) ->() {
+        match self.gesture {
+            Some(saved) => {
+                self.gesture = Option[LodDraftSnapshot]::None
+                if cancel {
+                    self.restore(saved)
+                } elif saved.catalog.encode() != self.draft.encode() {
+                    self.history.push(saved) self.future = Vec[LodDraftSnapshot]::new()
+                }
+            }
+            None => {
+            }
+        }
+    }
+    pub fn dragging(self: Self) -> bool {
+        ret self.graph.active()
+    }
+    pub fn set_layout(self: mut Self, layout: WidgetLayout) ->() {
+        self.bounds = layout.find_bounds("lod-curve").unwrap_or(Rect::new(0, 0, 0, 0))
+    }
+    fn graph_points(self: Self) -> Vec[Point] {
+        let mut points = Vec[Point]::new() for p in self.group().curve {
+            points.push(Point::new(p.distance, p.triangle_ratio))
+        }
+        ret points
+    }
+    fn frame_curve(self: mut Self) ->() {
+        let group = self.group() self.graph.fit(group.curve.get_unchecked_borrowed(group.curve.len() - 1).distance)
+    }
+    fn move_point(self: mut Self, index: usize, at: Point) ->() {
+        let mut group = self.group() if index >= group.curve.len() {
+            ret()
+        }
+        let old = group.curve.get_unchecked_borrowed(index)
+        let mut distance = if at.x() < 0 {
+            0.0_f32
+        } else {
+            at.x()
+        }
+        let low = if index + 1 < group.curve.len() {
+            group.curve.get_unchecked_borrowed(index + 1).triangle_ratio
+        } else {
+            0.0001_f32
+        }
+        let high = if index > 0 {
+            group.curve.get_unchecked_borrowed(index - 1).triangle_ratio
+        } else {
+            1.0_f32
+        }
+        let ratio = if at.y() < low {
+            low
+        } elif at.y() > high {
+            high
+        } else {
+            at.y()
+        }
+        if index > 0 && distance <= group.curve.get_unchecked_borrowed(index - 1).distance {
+            distance = old.distance
+        }
+        if index + 1 < group.curve.len() && distance >= group.curve.get_unchecked_borrowed(index + 1).distance {
+            distance = old.distance
+        }
+        if distance == old.distance && ratio == old.triangle_ratio {
+            ret()
+        }
+        group.curve.set(index, LodCurvePoint { distance, ratio })
+        if group.valid() {
+            self.replace(group) self.message = ""
+        }
+    }
+    fn insert_point(self: mut Self, at: Point) ->() {
+        let mut group = self.group()
+        if group.curve.len() >= 8 {
+            self.message = "Maximum 8 points" ret()
+        }
+        let distance = if at.x() < 0 {
+            0.0_f32
+        } else {
+            at.x()
+        }
+        let mut index = 0_usize
+        while index < group.curve.len() && group.curve.get_unchecked_borrowed(index).distance < distance {
+            index += 1
+        }
+        if index < group.curve.len() && group.curve.get_unchecked_borrowed(index).distance == distance {
+            self.graph.select(index) ret()
+        }
+        let low = if index < group.curve.len() {
+            group.curve.get_unchecked_borrowed(index).triangle_ratio
+        } else {
+            0.0001_f32
+        }
+        let high = if index > 0 {
+            group.curve.get_unchecked_borrowed(index - 1).triangle_ratio
+        } else {
+            1.0_f32
+        }
+        let ratio = if at.y() < low {
+            low
+        } elif at.y() > high {
+            high
+        } else {
+            at.y()
+        }
+        let mut points = Vec[LodCurvePoint]::new()
+        for offset in 0_usize..group.curve.len() + 1 {
+            points.push(if offset == index {
+                    LodCurvePoint { distance, ratio }
+                } else {
+                    group.curve.get_unchecked_borrowed(if offset < index {
+                            offset
+                        } else {
+                            offset - 1
+                        }
+                    )
+                }
+                ,
+            )
+        }
+        group.curve = points
+        if group.valid() {
+            self.replace(group) self.graph.select(index) self.message = ""
+        }
+    }
+    pub fn compose(self: Self, frame: PreparedFrame, sheet: StyleSheet) -> PreparedFrame {
+        if self.bounds.width() <= 66 || self.bounds.height() <= 62 {
+            ret frame
+        }
+        let group = self.group() let mut samples = Vec[Point]::new()
+        let mut start = self.graph.left()
+        for index in 0_usize..group.curve.len() + 1 {
+            let end = if index < group.curve.len() {
+                group.curve.get_unchecked_borrowed(index).distance
+            } else {
+                self.graph.right()
+            }
+            if end > start && end >= self.graph.left() {
+                let right = if end > self.graph.right() {
+                    self.graph.right()
+                } else {
+                    end
+                }
+                if right > start {
+                    for step in 0_usize..33_usize {
+                        let x = start +(right - start) *((step as f32) / 32) samples.push(Point::new(x, group.evaluate(x)))
+                    }
+                }
+                start = right
+            }
+        }
+        let surface = sheet.style(Widget::panel("").with_classes("g-lod-curve"), false, false, false)
+        let accent = sheet.style(Widget::panel("").with_classes("g-lod-curve-accent"), false, false, false)
+        let text = sheet.style(Widget::label("").with_classes("g-lod-curve-text"), false, false, false)
+        ret frame.with_foreground_overlay(self.graph.display(self.graph_points(), samples, self.bounds, surface, accent, text, CurveAxes {
+                    "Camera distance (u)", "Triangles kept", " u", "%", 100.0_f32
+                }
+                ,
+            ), self.bounds)
+    }
+    pub fn sync(self: mut Self, project: str, assets: Vec[ImportedMeshAsset]) ->() {
+        if project != self.project {
+            self.project = project self.catalog = LodGroups::load(project)
+            self.message = if self.catalog.error != "" {
+                self.catalog.error
+            } elif LodGroups::needs_migration(project) {
+                "Legacy profiles converted to distances; Apply backs up the original"
+            } else {
+                self.catalog.error
+            }
+            self.changed = false self.selected = "default" self.field = ""
+            for asset in assets {
+                let id = AutoLodSettings::load(asset.project_path()).group_id
+                if self.catalog.find(id).is_none() && id.byte_len() > 7 && id.slice_bytes(0, 7) == "legacy-" {
+                    self.catalog.migrate_legacy(id)
+                }
+            }
+            self.draft = self.catalog.independent()
+        }
+        let mut changed = self.asset_paths.len() != assets.len()
+        for index in 0_usize..assets.len() {
+            if self.asset_paths.get(index).unwrap_or("") != assets.get_unchecked_borrowed(index).project_path() {
+                changed = true
+            }
+        }
+        if changed {
+            self.asset_paths = Vec[str]::new()
+            for asset in assets {
+                self.asset_paths.push(asset.project_path())
+            }
+            self.refresh_usage()
+            for id in self.usage {
+                if self.catalog.find(id).is_none() && id.byte_len() > 7 && id.slice_bytes(0, 7) == "legacy-" {
+                    self.catalog.migrate_legacy(id)
+                }
+            }
+        }
+    }
+    pub fn refresh_usage(self: mut Self) ->() {
+        self.usage = Vec[str]::new()
+        for path in self.asset_paths {
+            self.usage.push(AutoLodSettings::load(path).group_id)
+        }
+    }
+    pub fn begin(self: mut Self, selected: str) ->() {
+        self.refresh_usage()
+        self.draft = self.catalog.independent() self.selected = if self.catalog.find(selected).is_some() {
+            selected
+        } else {
+            "default"
+        }
+        self.reset_history() self.graph = CurveEditor::new() self.frame_curve()
+        self.field = "" self.changed = self.catalog.error == "" && LodGroups::needs_migration(self.project) self.message = if self.catalog.error != "" {
+            self.catalog.error
+        } elif self.changed {
+            "Converted to distance approximately · original backed up on Apply"
+        } else {
+            self.catalog.error
+        }
+    }
+    pub fn cancel(self: mut Self) ->() {
+        self.reset_history() self.graph.reset_gesture() self.graph.focus(false)
+        self.draft = self.catalog.independent() self.field = "" self.changed = false self.message = self.catalog.error
+    }
+    pub fn take_applied(self: mut Self) -> bool {
+        let value = self.applied self.applied = false ret value
+    }
+    pub fn group(self: Self) -> LodGroup {
+        ret self.draft.resolve(self.selected).independent()
+    }
+    pub fn uses(self: Self, id: str) -> usize {
+        let mut count = 0_usize
+        for used in self.usage {
+            if used == id {
+                count += 1
+            }
+        }
+        ret count
+    }
+    fn replace(self: mut Self, group: LodGroup) ->() {
+        self.remember()
+        let mut groups = Vec[LodGroup]::new()
+        for previous in self.draft.groups {
+            groups.push(if previous.id == group.id {
+                    group
+                } else {
+                    previous
+                }
+            )
+        }
+        self.draft.groups = groups self.changed = true
+    }
+    fn fields(self: Self) -> Vec[str] {
+        let mut fields = Vec[str]::new()
+        if self.selected != "default" {
+            fields.push("lod-name")
+        }
+        for index in 0_usize..self.group().curve.len() {
+            fields.push("lod-distance-" + index.fmt()) fields.push("lod-triangles-" + index.fmt())
+        }
+        ret fields
+    }
+    fn text(self: Self, field: str) -> str {
+        let group = self.group()
+        if field == "lod-name" {
+            ret group.name
+        }
+        for index in 0_usize..group.curve.len() {
+            let point = group.curve.get_unchecked_borrowed(index)
+            if field == "lod-distance-" + index.fmt() {
+                ret point.distance.fmt()
+            }
+            if field == "lod-triangles-" + index.fmt() {
+                ret(point.triangle_ratio * 100.0_f32).fmt()
+            }
+        }
+        ret ""
+    }
+    fn commit_field(self: mut Self) -> bool {
+        if self.field == "" {
+            ret true
+        }
+        let mut group = self.group()
+        if self.field == "lod-name" {
+            group.name = trim_name(self.editor.value())
+            if group.name == "" || group.name.byte_len() > 64 {
+                self.message = "Name must contain 1–64 bytes" ret false
+            }
+        } else {
+            let value = match parse_number(self.editor.value()) {
+                Some(value) => value None => {
+                    self.message = "Enter a finite number" ret false
+                }
+            }
+            for index in 0_usize..group.curve.len() {
+                let point = group.curve.get_unchecked_borrowed(index)
+                group.curve.set(index, LodCurvePoint {
+                        if self.field == "lod-distance-" + index.fmt() {
+                            value
+                        } else {
+                            point.distance
+                        }
+                        ,
+                        if self.field == "lod-triangles-" + index.fmt() {
+                            value / 100.0_f32
+                        } else {
+                            point.triangle_ratio
+                        }
+                    }
+                    ,)
+            }
+        }
+        if !group.valid() {
+            self.message = "Distances must increase; keep 0 < triangles <= 100%, decreasing with distance" ret false
+        }
+        self.replace(group) self.field = "" self.message = "" ret true
+    }
+    pub fn action(self: mut Self, target: str) -> bool {
+        if !self.commit_field() {
+            ret true
+        }
+        for group in self.draft.groups {
+            if target == "lod-select-" + group.id {
+                self.selected = group.id self.graph.select(0) self.frame_curve() self.message = "" ret true
+            }
+        }
+        let mut group = self.group()
+        if target == "lod-new" || target == "lod-duplicate" {
+            let mut base = if target == "lod-new" {
+                self.draft.resolve("default")
+            } else {
+                group
+            }
+            let stem = if target == "lod-new" {
+                "New group"
+            } else {
+                if base.name.byte_len() > 48 {
+                    "Group copy"
+                } else {
+                    base.name + " copy"
+                }
+            }
+            let mut name = stem let mut suffix = 2_usize let mut found = true
+            while found {
+                found = false
+                for other in self.draft.groups {
+                    if other.name == name {
+                        found = true
+                    }
+                }
+                if found {
+                    name = stem + " " + suffix.fmt() suffix += 1
+                }
+            }
+            self.remember()
+            if target == "lod-new" {
+                base.interpolation = LodInterpolation::Smooth
+            }
+            base.id = automation_capability_token() base.name = name self.selected = base.id
+            self.draft.groups.push(base) self.changed = true self.graph.select(0) self.frame_curve()
+        } elif target == "lod-delete" && group.id != "default" {
+            self.refresh_usage()
+            let references = self.uses(group.id)
+            if references > 0 {
+                self.message = "Used by " + references.fmt() + " mesh assets; reassign them first" ret true
+            }
+            self.remember()
+            let mut remaining = Vec[LodGroup]::new()
+            for other in self.draft.groups {
+                if other.id != group.id {
+                    remaining.push(other)
+                }
+            }
+            self.draft.groups = remaining self.selected = "default" self.changed = true self.graph.select(0) self.frame_curve()
+        } elif target == "lod-reset" {
+            let defaults = LodGroup::defaults() group.curve = defaults.curve self.replace(group) self.graph.select(0) self.frame_curve()
+        } elif target == "lod-frame" {
+            self.frame_curve()
+        } elif target == "lod-linear" || target == "lod-smooth" {
+            group.interpolation = if target == "lod-smooth" {
+                LodInterpolation::Smooth
+            } else {
+                LodInterpolation::Linear
+            }
+            self.replace(group)
+        } elif target == "lod-undo" {
+            self.undo(false)
+        } elif target == "lod-redo" {
+            self.undo(true)
+        } elif target == "lod-add-point" && group.curve.len() < 8 {
+            // Insert at the largest distance gap, preserving monotonic quality.
+            let mut best = 0_usize let mut gap = - 1.0_f32
+            for index in 0_usize..group.curve.len() - 1 {
+                let a = group.curve.get_unchecked_borrowed(index) let b = group.curve.get_unchecked_borrowed(index + 1)
+                if b.distance - a.distance > gap {
+                    gap = b.distance - a.distance best = index
+                }
+            }
+            let mut points = Vec[LodCurvePoint]::new()
+            for index in 0_usize..group.curve.len() {
+                let point = group.curve.get_unchecked_borrowed(index) points.push(point)
+                if index == best {
+                    let next = group.curve.get_unchecked_borrowed(index + 1) points.push(LodCurvePoint {
+                            point.distance +(next.distance - point.distance) * 0.5_f32, point.triangle_ratio +(next.triangle_ratio - point.triangle_ratio) * 0.5_f32
+                        }
+                        ,
+                    )
+                }
+            }
+            group.curve = points self.replace(group) self.graph.select(best + 1)
+        } elif target == "lod-apply" {
+            if !self.draft.valid() {
+                self.message = "Use unique names; 2–8 increasing distances (at least 0) and non-increasing triangle percentages (greater than 0, at most 100)" ret true
+            }
+            if self.draft.save(self.project) {
+                self.catalog = self.draft.independent() self.changed = false self.applied = true self.reset_history() self.message = "Saved · applied to all assigned meshes"
+            } else {
+                self.message = "Unable to save Config/LODGroups.json; active settings preserved"
+            }
+        } else {
+            for index in 0_usize..group.curve.len() {
+                if target == "lod-remove-" + index.fmt() && group.curve.len() > 2 {
+                    let mut points = Vec[LodCurvePoint]::new()
+                    for offset in 0_usize..group.curve.len() {
+                        if offset != index {
+                            points.push(group.curve.get_unchecked_borrowed(offset))
+                        }
+                    }
+                    group.curve = points self.replace(group) self.graph.select(if index < points.len() {
+                            index
+                        } else {
+                            points.len() - 1
+                        }
+                    ) ret true
+                }
+            }
+            ret false
+        }
+        ret true
+    }
+    pub fn focus_field(self: mut Self, id: str) -> bool {
+        if id == "lod-curve" {
+            self.field = "" self.graph.focus(true) ret true
+        }
+        self.graph.focus(false)
+        for field in self.fields() {
+            if field == id {
+                self.graph.focus(false) self.field = id self.editor = TextEditor::new(self.text(id)).select_all()
+                for index in 0_usize..self.group().curve.len() {
+                    if id == "lod-distance-" + index.fmt() || id == "lod-triangles-" + index.fmt() {
+                        self.graph.select(index)
+                    }
+                }
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn input(self: mut Self, event: Event, target: str) -> bool {
+        if event.kind() == event_key_down() && event.control() && self.field == "" &&(event.key() == 122 || event.key() == 121) {
+            self.undo(event.key() == 121 || event.shift()) ret true
+        }
+        if event.kind() == event_pointer_down() && target == "lod-curve" && !self.commit_field() {
+            ret true
+        }
+        if self.field == "" || event.kind() == event_pointer_down() || event.kind() == event_focus_lost() {
+            let edit = self.graph.input(event, self.graph_points(), self.bounds)
+            match edit {
+                Ignored => {
+                }
+                View => {
+                    ret true
+                }
+                Begin(index) => {
+                    self.gesture = Option[LodDraftSnapshot]::Some(self.snapshot()) self.graph.select(index) ret true
+                }
+                Move(change) => {
+                    self.move_point(change.index, change.point) ret true
+                }
+                Insert(point) => {
+                    self.insert_point(point) ret true
+                }
+                Remove(index) => {
+                    self.action("lod-remove-" + index.fmt()) ret true
+                }
+                Commit => {
+                    self.finish_gesture(false) ret true
+                }
+                Cancel => {
+                    self.finish_gesture(true) ret true
+                }
+            }
+        }
+        if event.kind() == event_pointer_down() {
+            for field in self.fields() {
+                if field == target {
+                    if !self.commit_field() {
+                        ret true
+                    }
+                    self.focus_field(field) ret true
+                }
+            }
+            if self.field != "" && !self.commit_field() {
+                ret true
+            }
+        }
+        if self.field == "" {
+            ret false
+        }
+        if event.kind() == event_text_input() {
+            self.editor = self.editor.insert(event.text()) ret true
+        }
+        if event.kind() == event_key_down() {
+            if event.key() == key_escape() {
+                self.field = "" self.message = "" ret true
+            }
+            if event.key() == key_enter() {
+                self.commit_field() ret true
+            }
+            if event.key() == key_tab() {
+                ret !self.commit_field()
+            }
+            self.editor = if event.control() && event.key() == 97 {
+                self.editor.select_all()
+            } elif event.key() == key_backspace() {
+                self.editor.backspace()
+            } elif event.key() == key_delete() {
+                self.editor.delete()
+            } elif event.key() == key_left() {
+                self.editor.move_left(event.shift())
+            } elif event.key() == key_right() {
+                self.editor.move_right(event.shift())
+            } elif event.key() == key_home() {
+                self.editor.move_home(event.shift())
+            } elif event.key() == key_end() {
+                self.editor.move_end(event.shift())
+            } else {
+                self.editor
+            }
+            ret true
+        }
+        ret false
+    }
+    fn pending_valid(self: Self) -> bool {
+        if !self.draft.valid() {
+            ret false
+        }
+        if self.field == "" {
+            ret true
+        }
+        if self.field == "lod-name" {
+            ret trim_name(self.editor.value()) != "" && self.editor.value().byte_len() <= 64
+        }
+        let value = match parse_number(self.editor.value()) {
+            Some(number) => number None => {
+                ret false
+            }
+        }
+        let group = self.group()
+        for index in 0_usize..group.curve.len() {
+            if self.field == "lod-distance-" + index.fmt() {
+                ret value >= 0 && value <= 340282346638528859811704183484516925440.0_f32 &&(index == 0 || value > group.curve.get_unchecked_borrowed(index - 1).distance) &&(index + 1 == group.curve.len() || value < group.curve.get_unchecked_borrowed(index + 1).distance)
+            }
+            if self.field == "lod-triangles-" + index.fmt() {
+                ret value > 0 && value <= 100 &&(index == 0 || value / 100 <= group.curve.get_unchecked_borrowed(index - 1).triangle_ratio) &&(index + 1 == group.curve.len() || value / 100 >= group.curve.get_unchecked_borrowed(index + 1).triangle_ratio)
+            }
+        }
+        ret true
+    }
+    fn input_widget(self: Self, id: str, disabled: bool) -> Widget {
+        ret Widget::input(id, if self.field == id {
+                self.editor.value()
+            } else {
+                if id == "lod-name" {
+                    self.text(id)
+                } else {
+                    compact_number(self.text(id))
+                }
+            }
+            ,
+        ).with_classes("g-lod-input").with_focus(self.field == id).with_selection(self.editor.selection_start(), self.editor.selection_end()).with_disabled(disabled)
+    }
+    pub fn widget(self: Self) -> Widget {
+        ret self.widget_width(940)
+    }
+    pub fn widget_width(self: Self, width: f32) -> Widget {
+        let narrow = width - 200 < 640
+        let mut root = Widget::panel("ui-local-popup").with_classes("g-local-popup g-lod-editor").with_direction(vertical()).with_attribute("role", "dialog").with_attribute("aria-label", "Project Settings · Rendering · AutoLOD")
+        root.push(Widget::label("Project Settings / Rendering / AutoLOD").with_classes("g-popup-caption"))
+        let mut body = Widget::panel("lod-editor-body").with_classes("g-lod-body").with_direction(horizontal())
+        let mut list = Widget::panel("lod-group-list").with_classes("g-lod-list").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        for group in self.draft.groups {
+            list.push(button("lod-select-" + group.id, group.name, false).with_added_classes(if group.id == self.selected {
+                        "state-active"
+                    } else {
+                        ""
+                    }
+                ).with_attribute("aria-pressed", if group.id == self.selected {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                    ,
+                ))
+        }
+        body.push(list)
+        let mut details = Widget::panel("lod-editor-fields").with_classes("g-lod-fields").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        let group = self.group()
+        details.push(self.input_widget("lod-name", group.id == "default").with_attribute("aria-label", "Group name"))
+        let mut modes = Widget::panel("lod-curve-tools").with_classes("g-lod-tools").with_direction(horizontal())
+        modes.push(button("lod-linear", "Linear", false).with_added_classes(if !group.interpolation.smooth() {
+                    "state-active"
+                } else {
+                    ""
+                }
+            ).with_attribute("aria-pressed", if !group.interpolation.smooth() {
+                    "true"
+                } else {
+                    "false"
+                }
+                ,
+            ))
+        modes.push(button("lod-smooth", "Smooth", false).with_added_classes(if group.interpolation.smooth() {
+                    "state-active"
+                } else {
+                    ""
+                }
+            ).with_attribute("aria-pressed", if group.interpolation.smooth() {
+                    "true"
+                } else {
+                    "false"
+                }
+                ,
+            ))
+        modes.push(button("lod-frame", "Frame all", false))
+        modes.push(button("lod-undo", "Undo", self.history.len() == 0)) modes.push(button("lod-redo", "Redo", self.future.len() == 0))
+        details.push(modes)
+        let mut workspace = Widget::panel("lod-curve-workspace").with_classes(if narrow {
+                "g-lod-workspace g-lod-stacked"
+            } else {
+                "g-lod-workspace"
+            }
+        ).with_direction(if narrow {
+                vertical()
+            } else {
+                horizontal()
+            }
+        )
+        let mut plot = Widget::panel("lod-plot-panel").with_classes("g-lod-plot-panel").with_direction(vertical())
+        plot.push(Widget::canvas("lod-curve").with_classes("g-lod-curve").with_focus(self.graph.focused()).with_attribute("tabindex", "0").with_attribute("role", "group").with_attribute("aria-label", "AutoLOD curve: camera distance and triangles kept. Double click to add; drag to move; Delete to remove").with_attribute("data-luma-focusable", "true"))
+        plot.push(Widget::label("Double-click: add · Drag: move · Wheel: zoom · MMB: pan").with_classes("g-autolod-help").with_text_wrap(true))
+        workspace.push(plot)
+        let mut table = Widget::panel("lod-point-table").with_classes("g-lod-table").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        table.push(Widget::label("Distance (u)      Triangles (%)").with_classes("g-autolod-help"))
+        for index in 0_usize..group.curve.len() {
+            let mut row = Widget::panel("lod-point-" + index.fmt()).with_classes(if self.graph.selected() == index {
+                    "g-lod-point state-selected"
+                } else {
+                    "g-lod-point"
+                }
+            ).with_direction(horizontal())
+            row.push(self.input_widget("lod-distance-" + index.fmt(), false).with_attribute("aria-label", "Camera distance in world units"))
+            row.push(self.input_widget("lod-triangles-" + index.fmt(), false).with_attribute("aria-label", "Original triangles to keep, percent"))
+            row.push(button("lod-remove-" + index.fmt(), "−", group.curve.len() <= 2).with_added_classes("g-lod-remove").with_attribute("aria-label", "Remove curve point"))
+            table.push(row)
+        }
+        table.push(button("lod-add-point", "+ Add point", group.curve.len() >= 8).with_attribute("title", if group.curve.len() >= 8 {
+                    "Maximum 8 points"
+                } else {
+                    "Insert into largest distance interval"
+                }
+                ,
+            ))
+        table.push(Widget::label(group.curve.len().fmt() + " / 8 points").with_classes("g-autolod-help"))
+        workspace.push(table) details.push(workspace)
+        details.push(Widget::label("Camera -> mesh center · world units").with_classes("g-autolod-help"))
+        details.push(Widget::label("Target budget · limited by available simplification").with_classes("g-autolod-help"))
+        details.push(Widget::label("Used by " + self.uses(group.id).fmt() + " mesh assets").with_classes("g-autolod-help"))
+        body.push(details) root.push(body)
+        let mut tools = Widget::panel("lod-editor-tools").with_direction(horizontal()).with_classes("g-lod-tools")
+        tools.push(button("lod-new", "New", false)) tools.push(button("lod-duplicate", "Duplicate", false))
+        tools.push(button("lod-delete", "Delete", group.id == "default" || self.uses(group.id) > 0)) tools.push(button("lod-reset", "Reset curve", false))
+        root.push(tools)
+        root.push(Widget::label(self.message).with_id("lod-editor-message").with_classes("g-lod-message"))
+        let mut footer = Widget::panel("lod-editor-footer").with_direction(horizontal()).with_classes("g-lod-tools")
+        footer.push(button("lod-apply", "Apply", !self.pending_valid() ||(!self.changed && self.field == ""))) footer.push(button("lod-cancel", "Cancel", false))
+        root.push(footer) ret root
+    }
+}

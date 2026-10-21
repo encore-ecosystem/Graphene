@@ -1,9 +1,7 @@
 //! Regression coverage for Graphene's new Luma stylesheet state model.
 
-import luma:: {
-    Body, Button, Html, Nav, StyleSheet
-}
 import core::result::Result
+import luma::{Body, Button, Html, Nav, StyleSheet}
 
 fn main() -> u32 {
     let sheet = StyleSheet::parse(
@@ -31,11 +29,14 @@ fn main() -> u32 {
     }
     let application = match StyleSheet::from_file("graphene.css") {
         Result::Ok(value) => value
-        Result::Err(_) => { ret 4_u32 }
+        Result::Err(_) => {
+            ret 4_u32
+        }
     }
     let file_hovered = application.style(selected, true, false, false)
-    if application.len() < 20_usize || file_hovered.background().red() != 20_u8 ||
-    file_hovered.background().green() != 139_u8 || file_hovered.background().blue() != 214_u8 {
+    if application.len() < 20_usize || file_hovered.background().red() != 40_u8 ||
+    file_hovered.background().green() != 85_u8 || file_hovered.background().blue() != 111_u8 ||
+    file_hovered.background().packed() != application.style(selected, false, false, false).background().packed() {
         ret 5_u32
     }
     let viewport_bar = Nav::new("viewport-bar").with_classes("viewport-bar")
@@ -44,6 +45,19 @@ fn main() -> u32 {
     viewport_bar_style.background().green() != 20_u8 ||
     viewport_bar_style.background().blue() != 23_u8 {
         ret 6_u32
+    }
+    let lod = Button::new("lod-select-default", "Default").with_classes("g-lod-button state-active")
+    let lod_normal = application.style(lod, false, false, false)
+    if application.style(lod, true, false, false).background().packed() != lod_normal.background().packed() || application.style(lod, false, false, true).outline().width() != 1.0_f32 {
+        ret 7_u32
+    }
+    let disabled = Button::new("lod-delete", "Delete").with_classes("g-lod-button").with_disabled(true)
+    if application.style(disabled, false, false, false).opacity() < 0.44_f32 || application.style(disabled, false, false, false).opacity() > 0.46_f32 {
+        ret 8_u32
+    }
+    let plain = Button::new("lod-new", "New").with_classes("g-lod-button")
+    if application.style(plain, true, false, false).background().packed() == application.style(plain, false, false, false).background().packed() || application.style(plain, false, true, false).background().packed() == application.style(plain, false, false, false).background().packed() {
+        ret 9_u32
     }
     ret 0_u32
 }

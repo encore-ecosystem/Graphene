@@ -1,0 +1,29 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+layout(local_size_x=128) in;
+void main(){uint id=gl_GlobalInvocationID.x,mode=uint(f.step.z),n=cellCount(),kind=uint(f.settings.w),capacity=uint(f.liquidConfig.x);float dt=safeDelta(),h=f.grid.w;
+ if(mode==0){if(id<n){cells[id*2]=vec4(0,0,0,kind==2?f.liquidConfig.w:0);cells[id*2+1]=vec4(0);temporary[id*2]=vec4(0);temporary[id*2+1]=vec4(0);pressure[id*2]=0;pressure[id*2+1]=0;divergence[id]=0;bins[id]=0xffffffffu;}if(id==0){liquidCount=kind==1?capacity:0;maxSpeedBits=floatBitsToUint(1);fluidDropped=0;previousMaxSpeedBits=floatBitsToUint(1);}return;}
+ if(mode==13){if(id==0)maxSpeedBits=0;return;}
+ if(mode==14){if(id==0){previousMaxSpeedBits=maxSpeedBits;if(dt+1e-8<f.step.x)atomicAdd(fluidDropped,1);}return;}
+ if(mode==11){if(id>=capacity)return;uint seed=id^uint(f.liquidConfig.y);float z=fluidRandom(seed)*2-1,angle=fluidRandom(seed+1)*6.28318530718,r=pow(fluidRandom(seed+2),1.0/3.0)*f.source.w;vec3 p=f.source.xyz+vec3(sqrt(max(0,1-z*z))*cos(angle),z,sqrt(max(0,1-z*z))*sin(angle))*r;p=clamp(p,vec3(h*.1),f.extent.xyz-vec3(h*.1));particles[id*2]=vec4(p,1);particles[id*2+1]=vec4(f.sourceVelocity.xyz,0);return;}
+ if(mode==7){if(id<n)bins[id]=0xffffffffu;return;}
+ if(mode==8){if(id>=liquidCount)return;ivec3 p=ivec3(particles[id*2].xyz/h);uint cell=cellIndex(p);bins[n+id]=atomicExchange(bins[cell],id);return;}
+ if(mode==10){if(id>=liquidCount)return;vec3 p=particles[id*2].xyz,q=p/h-.5,pic=sampleState(q,0).xyz,old=sampleOld(q),v=mix(pic,particles[id*2+1].xyz+pic-old,f.liquidConfig.z);p+=v*dt;
+  for(int a=0;a<3;a++){if(p[a]<h*.1){p[a]=h*.1;v[a]=abs(v[a])*.1;}if(p[a]>f.extent[a]-h*.1){p[a]=f.extent[a]-h*.1;v[a]=-abs(v[a])*.1;}}
+  if(f.obstacle.w>0&&distance(p,f.obstacle.xyz)<f.obstacle.w){vec3 normal=normalize(p-f.obstacle.xyz+vec3(.00001));p=f.obstacle.xyz+normal*(f.obstacle.w+h*.1);vec3 relative=v-f.obstacleVelocity.xyz;v-=normal*min(0,dot(relative,normal));}
+  particles[id*2]=vec4(p,1);particles[id*2+1]=vec4(v,0);atomicMax(maxSpeedBits,floatBitsToUint(length(v)));return;}
+ if(id>=n)return;ivec3 p=cellPosition(id);bool solid=solidCell(p);int axes=dimensions().z==1?2:3;
+ if(mode==9){vec3 sum=vec3(0);float weight=0;for(int z=-1;z<=1;z++)for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++){ivec3 neighbour=p+ivec3(x,y,z);if(!insideCell(neighbour))continue;uint j=bins[cellIndex(neighbour)],traversed=0;while(j!=0xffffffffu&&traversed<4096u){vec3 d=abs((particles[j*2].xyz/h-.5)-vec3(p)),w=max(vec3(0),1-d);float q=w.x*w.y*w.z;sum+=particles[j*2+1].xyz*q;weight+=q;j=bins[n+j];traversed++;}if(j!=0xffffffffu)atomicAdd(fluidDropped,1);}
+  vec3 v=weight>1e-6?sum/weight:vec3(0);cells[id*2]=vec4(solid?f.obstacleVelocity.xyz:v,min(1,weight));cells[id*2+1]=vec4(0);temporary[id*2]=vec4(v,0);return;}
+ if(mode==1){vec3 q=vec3(p)-cells[id*2].xyz*dt/h;temporary[id*2]=solid?vec4(f.obstacleVelocity.xyz,0):sampleState(q,0);temporary[id*2+1]=solid?vec4(0):sampleState(q,1);return;}
+ if(mode==2){vec4 v=kind==1?cells[id*2]:temporary[id*2],thermal=kind==1?cells[id*2+1]:temporary[id*2+1];vec3 world=(vec3(p)+.5)*h;float d=dimensions().z==1?distance(world.xy,f.source.xy):distance(world,f.source.xyz);float source=max(0,1-d/max(.00001,f.source.w))*dt;
+  if(!solid){if(kind==1)v.y+=f.settings.x*dt;else{v.w+=source*f.sourceValues.x;thermal.x+=source*f.sourceValues.y;thermal.y+=source*f.sourceValues.z;v.xyz+=f.sourceVelocity.xyz*source;float burned=thermal.x>.1?thermal.y*(1-exp(-f.settings.y*dt)):0;thermal.y-=burned;thermal.x=(thermal.x+burned*4)*exp(-.25*dt);v.w=(v.w+burned*.3)*exp(-f.sourceValues.w*dt);v.y+=f.sourceVelocity.w*thermal.x*dt;}}
+  cells[id*2]=solid?vec4(f.obstacleVelocity.xyz,0):v;cells[id*2+1]=thermal;return;}
+ if(mode==3){float div=0;for(int a=0;a<axes;a++){ivec3 axis=ivec3(0);axis[a]=1;vec3 l=solidCell(p-axis)?f.obstacleVelocity.xyz:cells[cellIndex(p-axis)*2].xyz,r=solidCell(p+axis)?f.obstacleVelocity.xyz:cells[cellIndex(p+axis)*2].xyz;div+=(r[a]-l[a])/(2*h);}divergence[id]=solid?0:div;pressure[id*2]=0;pressure[id*2+1]=0;return;}
+ if(mode==4){uint parity=uint(f.step.w);if(solid||(kind==1&&cells[id*2].w<.001)){pressure[id*2+1-parity]=0;return;}float sum=0,count=0;for(int a=0;a<axes;a++)for(int sign=-1;sign<=1;sign+=2){ivec3 axis=ivec3(0);axis[a]=sign;ivec3 q=p+axis;if(!solidCell(q)){sum+=pressure[cellIndex(q)*2+parity];count++;}}pressure[id*2+1-parity]=count>0?(sum-divergence[id]*h*h/max(.000001,dt))/count:0;return;}
+ if(mode==5){vec4 v=cells[id*2];for(int a=0;a<axes;a++){ivec3 axis=ivec3(0);axis[a]=1;uint parity=uint(f.step.w);float center=pressure[id*2+parity],l=solidCell(p-axis)?center:pressure[cellIndex(p-axis)*2+parity],r=solidCell(p+axis)?center:pressure[cellIndex(p+axis)*2+parity];v[a]-=dt*(r-l)/(2*h);if(solidCell(p-axis)||solidCell(p+axis))v[a]=f.obstacleVelocity[a];}cells[id*2]=solid?vec4(f.obstacleVelocity.xyz,0):v;atomicMax(maxSpeedBits,floatBitsToUint(length(v.xyz)));return;}
+ if(mode==6){cells[id*2]=temporary[id*2];cells[id*2+1]=temporary[id*2+1];return;}
+ if(mode==12){vec4 v=cells[id*2];float div=0;for(int a=0;a<2;a++)for(int sign=-1;sign<=1;sign+=2){ivec3 axis=ivec3(0);axis[a]=sign;ivec3 q=p+axis;if(solidCell(q)||solid)continue;vec4 other=cells[cellIndex(q)*2];float face=(v[a]+other[a])*.5;div+=sign*face*(sign*face>0?v.w:other.w)/h;}
+  vec4 next=v;next.w=max(0,v.w-dt*div);for(int a=0;a<2;a++){ivec3 axis=ivec3(0);axis[a]=1;next[a]=solid||solidCell(p-axis)||solidCell(p+axis)?0:v[a]-abs(f.settings.x)*dt*(cells[cellIndex(p+axis)*2].w-cells[cellIndex(p-axis)*2].w)/(2*h);}temporary[id*2]=next;temporary[id*2+1]=cells[id*2+1];atomicMax(maxSpeedBits,floatBitsToUint(length(next.xy)+sqrt(abs(f.settings.x)*next.w)));return;}
+}

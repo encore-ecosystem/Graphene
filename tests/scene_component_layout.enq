@@ -1,0 +1,49 @@
+//! Component fields must remain visible inside narrow Details docks.
+import core::vec::Vec
+import graphene::editor_actor_details::ActorDetails
+import graphene::scene::camera::camera_frame_extent
+import graphene::{Scene, Transform, SceneComponent}
+import luma::{Widget, Rect, StyleSheet, layout_widget, property_section, vertical}
+import std::os::read_file
+
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    for kind in vec!["camera", "directional-light", "point-light", "spot-light"] {
+        let mut scene = Scene::new()
+        let id = scene.create_entity("Actor", Transform::identity())
+        scene.set_component(id, SceneComponent::for_kind(kind))
+        let mut details = ActorDetails::new() details.sync(scene, id, false)
+        for width in vec![240.0_f32, 280.0_f32, 320.0_f32] {
+            let widget = Widget::panel("details-panel").with_classes("g-inspector").with_direction(vertical()).with_child(property_section("component", "Component", true, details.widget()))
+            let layout = layout_widget(sheet.apply(widget, "", "", ""), Rect::new(0, 0, width, 500))
+            let fields = if kind == "camera" {
+                vec!["actor-fov", "actor-aspect", "actor-near", "actor-far", "actor-preview", "actor-pilot"]
+            } elif kind == "directional-light" {
+                vec!["actor-intensity", "actor-sun-angle", "actor-color"]
+            } elif kind == "point-light" {
+                vec!["actor-intensity", "actor-range", "actor-color"]
+            } else {
+                vec!["actor-intensity", "actor-range", "actor-inner", "actor-outer", "actor-color"]
+            }
+            for field in fields {
+                let bounds = layout.find_bounds(field).unwrap_or(Rect::new(0, 0, 0, 0))
+                if bounds.width() < 72 || bounds.height() < 20 || bounds.right() > width || bounds.y() < 20 {
+                    ret 1_u32
+                }
+            }
+        }
+    }
+    if camera_frame_extent(1280, 720, 1.7777778_f32) !=(1280_u32, 720_u32) {
+        ret 2_u32
+    }
+    if camera_frame_extent(1280, 720, 2.0_f32) !=(1280_u32, 640_u32) {
+        ret 3_u32
+    }
+    if camera_frame_extent(1280, 720, 1.0_f32) !=(720_u32, 720_u32) {
+        ret 4_u32
+    }
+    if camera_frame_extent(1280, 720, 0.0_f32) !=(1280_u32, 720_u32) {
+        ret 5_u32
+    }
+    ret 0_u32
+}

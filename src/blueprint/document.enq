@@ -1,0 +1,397 @@
+//! Blueprint mutation boundary shared by interactive and automation frontends.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::codec::{blueprint_stringify, blueprint_semantic_source}
+import mod::model::*
+import mod::validate::blueprint_connection_error
+
+pub struct BlueprintMove {
+    node: u64
+    x: f32
+    y: f32
+}
+pub struct BlueprintClipboard {
+    nodes: Vec[BlueprintNode]
+    links: Vec[BlueprintLink]
+}
+pub enum BlueprintCommand {
+    AddNode(BlueprintNode)
+    SetNode(BlueprintNode)
+    DeleteNodes(Vec[u64])
+    MoveNode(BlueprintMove)
+    MoveNodes(Vec[BlueprintMove])
+    Connect(BlueprintLink)
+    Disconnect(BlueprintEndpoint)
+    SetProperty(BlueprintProperty)
+    RemoveProperty(u64)
+    SetComponent(BlueprintComponent)
+    RemoveComponent(u64)
+    Paste(BlueprintClipboard)
+    BeginGesture
+    CommitGesture
+    CancelGesture
+    Undo
+    Redo
+}
+pub struct BlueprintDocument {
+    asset: BlueprintAsset
+    undo: Vec[BlueprintAsset]
+    redo: Vec[BlueprintAsset]
+    gesture: Option[BlueprintAsset]
+    saved: str
+    semantic: str
+    compiled: str
+    revision: u64
+    locked: bool
+    changed: bool
+    gesture_changed: bool
+}
+pub fn snapshot_blueprint(asset: BlueprintAsset) -> BlueprintAsset {
+    let mut components = Vec[BlueprintComponent]::new() let mut properties = Vec[BlueprintProperty]::new()
+    let mut nodes = Vec[BlueprintNode]::new() let mut links = Vec[BlueprintLink]::new()
+    for component in asset.components {
+        components.push(component)
+    }
+    for property in asset.properties {
+        properties.push(property)
+    }
+    for node in asset.nodes {
+        nodes.push(node)
+    }
+    for link in asset.links {
+        links.push(link)
+    }
+    ret BlueprintAsset { asset.id, asset.name, components, properties, nodes, links }
+}
+fn selected(ids: Vec[u64], id: u64) -> bool {
+    for value in ids {
+        if value == id {
+            ret true
+        }
+    }
+    ret false
+}
+
+impl for BlueprintDocument {
+    pub fn new(asset: BlueprintAsset) -> BlueprintDocument {
+        ret BlueprintDocument {
+            snapshot_blueprint(asset), Vec[BlueprintAsset]::new(), Vec[BlueprintAsset]::new(),
+            Option[BlueprintAsset]::None, blueprint_stringify(asset), blueprint_semantic_source(asset), "", 0, false, false, false
+        }
+    }
+    pub fn asset(self: Self) -> BlueprintAsset {
+        ret snapshot_blueprint(self.asset)
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn semantic(self: Self) -> str {
+        ret self.semantic
+    }
+    pub fn needs_compile(self: Self) -> bool {
+        ret self.semantic != self.compiled
+    }
+    pub fn dirty(self: Self) -> bool {
+        ret self.changed
+    }
+    pub fn can_undo(self: Self) -> bool {
+        ret !self.locked && self.undo.len() > 0 && self.gesture.is_none()
+    }
+    pub fn can_redo(self: Self) -> bool {
+        ret !self.locked && self.redo.len() > 0 && self.gesture.is_none()
+    }
+    pub fn mark_saved(self: mut Self) ->() {
+        self.saved = blueprint_stringify(self.asset)
+        self.changed = false
+    }
+    /// Completion for an old immutable snapshot is not completion for a new edit.
+    pub fn mark_compiled(self: mut Self, semantic: str) -> bool {
+        if self.semantic != semantic {
+            ret false
+        }
+        self.compiled = semantic
+        ret true
+    }
+    pub fn set_playing(self: mut Self, playing: bool) ->() {
+        if playing {
+            self.cancel_gesture()
+        }
+        self.locked = playing
+    }
+    pub fn in_gesture(self: Self) -> bool {
+        ret self.gesture.is_some()
+    }
+    pub fn copy_nodes(self: Self, ids: Vec[u64]) -> BlueprintClipboard {
+        let mut nodes = Vec[BlueprintNode]::new() let mut links = Vec[BlueprintLink]::new()
+        for node in self.asset.nodes {
+            if selected(ids, node.id) {
+                nodes.push(node)
+            }
+        }
+        for link in self.asset.links {
+            if selected(ids, link.source.node) && selected(ids, link.target.node) {
+                links.push(link)
+            }
+        }
+        ret BlueprintClipboard { nodes, links }
+    }
+    fn cancel_gesture(self: mut Self) ->() {
+        match self.gesture {
+            Some(before) => {
+                self.asset = snapshot_blueprint(before)
+                self.changed = self.gesture_changed
+            }
+            None => {
+            }
+        }
+        self.gesture = Option[BlueprintAsset]::None
+    }
+    fn commit(self: mut Self, before: BlueprintAsset) ->() {
+        let encoded = blueprint_stringify(self.asset)
+        self.changed = encoded != self.saved
+        if blueprint_stringify(before) == encoded {
+            ret()
+        }
+        if self.undo.len() >= 128 {
+            let mut retained = Vec[BlueprintAsset]::new() let mut index = 0_usize
+            for item in self.undo {
+                if index > 0 {
+                    retained.push(item)
+                }
+                index += 1
+            }
+            self.undo = retained
+        }
+        self.undo.push(snapshot_blueprint(before))
+        self.redo.clear()
+        self.semantic = blueprint_semantic_source(self.asset)
+        self.revision += 1
+    }
+    pub fn execute(self: mut Self, command: BlueprintCommand) -> Result[(), str] {
+        if self.locked {
+            ret Result[(), str]::Err("Stop Play before editing a Blueprint")
+        }
+        let before = if self.gesture.is_some() {
+            BlueprintAsset::new("gesture", "gesture")
+        } else {
+            snapshot_blueprint(self.asset)
+        }
+        match command {
+            BeginGesture => {
+                if self.gesture.is_some() {
+                    ret Result[(), str]::Err("a Blueprint gesture is already active")
+                }
+                self.gesture = Option[BlueprintAsset]::Some(before)
+                self.gesture_changed = self.changed
+                ret Result[(), str]::Ok(())
+            }
+            CommitGesture => {
+                match self.gesture {
+                    Some(start) => {
+                        self.commit(start)
+                    }
+                    None => {
+                    }
+                }
+                self.gesture = Option[BlueprintAsset]::None
+                ret Result[(), str]::Ok(())
+            }
+            CancelGesture => {
+                self.cancel_gesture() ret Result[(), str]::Ok(())
+            }
+            Undo => {
+                self.cancel_gesture()
+                match self.undo.pop() {
+                    Some(previous) => {
+                        self.redo.push(snapshot_blueprint(self.asset)) self.asset = snapshot_blueprint(previous) self.semantic = blueprint_semantic_source(self.asset) self.revision += 1
+                        self.changed = blueprint_stringify(self.asset) != self.saved
+                    }
+                    None => {
+                    }
+                }
+                ret Result[(), str]::Ok(())
+            }
+            Redo => {
+                self.cancel_gesture()
+                match self.redo.pop() {
+                    Some(next) => {
+                        self.undo.push(snapshot_blueprint(self.asset)) self.asset = snapshot_blueprint(next) self.semantic = blueprint_semantic_source(self.asset) self.revision += 1
+                        self.changed = blueprint_stringify(self.asset) != self.saved
+                    }
+                    None => {
+                    }
+                }
+                ret Result[(), str]::Ok(())
+            }
+            AddNode(node) => {
+                if node.id == 0 || self.asset.node(node.id).is_some() {
+                    ret Result[(), str]::Err("node ID is already in use or zero")
+                }
+                self.asset.nodes.push(node)
+            }
+            SetNode(node) => {
+                let mut found = false let mut position = 0_usize
+                for existing in self.asset.nodes {
+                    if existing.id == node.id {
+                        self.asset.nodes.set(position, node) found = true
+                    }
+                    position += 1
+                }
+                if !found {
+                    ret Result[(), str]::Err("node no longer exists")
+                }
+            }
+            MoveNode(move_value) => {
+                let mut found = false let mut position = 0_usize
+                for node in self.asset.nodes {
+                    if node.id == move_value.node {
+                        self.asset.nodes.set(position, node.at(move_value.x, move_value.y)) found = true
+                    }
+                    position += 1
+                }
+                if !found {
+                    ret Result[(), str]::Err("node no longer exists")
+                }
+            }
+            MoveNodes(moves) => {
+                for movement in moves {
+                    if self.asset.node(movement.node).is_none() {
+                        ret Result[(), str]::Err("node no longer exists")
+                    }
+                }
+                let mut index = 0_usize
+                for node in self.asset.nodes {
+                    for movement in moves {
+                        if movement.node == node.id {
+                            self.asset.nodes.set(index, node.at(movement.x, movement.y))
+                        }
+                    }
+                    index += 1
+                }
+            }
+            DeleteNodes(ids) => {
+                let mut nodes = Vec[BlueprintNode]::new() let mut links = Vec[BlueprintLink]::new()
+                for node in self.asset.nodes {
+                    if !selected(ids, node.id) {
+                        nodes.push(node)
+                    }
+                }
+                for link in self.asset.links {
+                    if !selected(ids, link.source.node) && !selected(ids, link.target.node) {
+                        links.push(link)
+                    }
+                }
+                self.asset.nodes = nodes self.asset.links = links
+            }
+            Connect(link) => {
+                let error = blueprint_connection_error(self.asset, link)
+                if error != "" {
+                    ret Result[(), str]::Err(error)
+                }
+                let mut links = Vec[BlueprintLink]::new()
+                let owner = self.asset.node(link.target.node).unwrap_or(BlueprintNode::new(0, "", BlueprintType::Exec))
+                let input = blueprint_pin(owner, link.target.pin, false)
+                let data = match input {
+                    Some(pin) => pin.value_type.name() != "exec" None => false
+                }
+                for edge in self.asset.links {
+                    if !(data && edge.target.node == link.target.node && edge.target.pin == link.target.pin) &&
+                    !(edge.source.node == link.source.node && edge.source.pin == link.source.pin && edge.target.node == link.target.node && edge.target.pin == link.target.pin) {
+                        links.push(edge)
+                    }
+                }
+                links.push(link)
+                self.asset.links = links
+            }
+            Disconnect(endpoint) => {
+                let mut links = Vec[BlueprintLink]::new()
+                for link in self.asset.links {
+                    if !(link.target.node == endpoint.node && link.target.pin == endpoint.pin) {
+                        links.push(link)
+                    }
+                }
+                self.asset.links = links
+            }
+            SetProperty(property) => {
+                let mut properties = Vec[BlueprintProperty]::new() let mut found = false
+                for existing in self.asset.properties {
+                    if existing.id == property.id {
+                        properties.push(property) found = true
+                    } else {
+                        properties.push(existing)
+                    }
+                }
+                if !found {
+                    properties.push(property)
+                }
+                self.asset.properties = properties
+            }
+            RemoveProperty(id) => {
+                let mut properties = Vec[BlueprintProperty]::new()
+                for property in self.asset.properties {
+                    if property.id != id {
+                        properties.push(property)
+                    }
+                }
+                self.asset.properties = properties
+                // References are deliberately retained and become diagnostics.
+            }
+            SetComponent(component) => {
+                let mut components = Vec[BlueprintComponent]::new() let mut found = false
+                for existing in self.asset.components {
+                    if existing.id == component.id {
+                        components.push(component) found = true
+                    } else {
+                        components.push(existing)
+                    }
+                }
+                if !found {
+                    components.push(component)
+                }
+                self.asset.components = components
+            }
+            RemoveComponent(id) => {
+                let mut components = Vec[BlueprintComponent]::new()
+                for component in self.asset.components {
+                    if component.id != id {
+                        components.push(component)
+                    }
+                }
+                self.asset.components = components
+            }
+            Paste(clipboard) => {
+                let mut from = Vec[u64]::new() let mut to = Vec[u64]::new()
+                for node in clipboard.nodes {
+                    let fresh_id = self.asset.next_node_id()
+                    from.push(node.id) to.push(fresh_id)
+                    self.asset.nodes.push(BlueprintNode {
+                            fresh_id, node.operation, node.value_type, node.reference, node.text, node.value, node.x + 32, node.y + 32
+                        }
+                        ,
+                    )
+                }
+                for link in clipboard.links {
+                    let mut source = 0_u64 let mut target = 0_u64 let mut position = 0_usize
+                    for original in from {
+                        if original == link.source.node {
+                            source = to.get(position).unwrap_or(0)
+                        }
+                        if original == link.target.node {
+                            target = to.get(position).unwrap_or(0)
+                        }
+                        position += 1
+                    }
+                    if source != 0 && target != 0 {
+                        self.asset.connect(source, link.source.pin, target, link.target.pin)
+                    }
+                }
+            }
+        }
+        self.changed = true
+        if self.gesture.is_none() {
+            self.commit(before)
+        }
+        ret Result[(), str]::Ok(())
+    }
+}

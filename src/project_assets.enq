@@ -1,16 +1,46 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+import mod::autolod_settings::AutoLodSettings
+import mod::content_browser::path::{ends, lower, content_name_valid}
+import mod::mesh_prepare::prepare_mesh_geometry
+import mod::native_asset::{asset_source_stamp, load_native_mesh, save_native_mesh, load_native_texture, save_native_texture, native_mesh_valid, native_asset_source}
+import mod::project_files::project_file_info
 import mod::scene::obj::parse_obj
 import mod::scene::primitive::MeshData
+import mod::source_model::decode_source_model
+import mod::texture_asset::TextureImage
+import mod::virtual_geometry::VirtualGeometry
+import std::io::println
 import std::os::{file_exists, mkdir_all, read_dir, read_file, write_file}
+import std::path::Path
 
 pub struct ImportedMeshAsset {
-    name: str source_path: str project_path: str mesh: MeshData
-    texture_pixels: Vec[u32] texture_width: u32 texture_height: u32
+    name: str
+    source_path: str
+    project_path: str
+    mesh: MeshData
+    texture_pixels: Vec[u32]
+    texture_width: u32
+    texture_height: u32
+    revision: str
+    geometry: VirtualGeometry
 }
 
 impl for ImportedMeshAsset {
+    pub fn geometry(self: Self) -> VirtualGeometry {
+        ret self.geometry
+    }
+    pub fn native_path(self: Self) -> str {
+        ret if ends(self.project_path, ".gmesh") {
+            self.project_path
+        } else {
+            self.project_path + ".gmesh"
+        }
+    }
+    pub fn revision(self: Self) -> str {
+        ret self.revision
+    }
     pub fn name(self: Self) -> str {
         ret self.name
     }
@@ -47,24 +77,14 @@ pub fn project_mesh_autolod_path(mesh_path: str) -> str {
 /// Reads the per-asset AutoLOD switch. Imported meshes opt in by default, so
 /// existing projects immediately benefit without a migration step.
 pub fn project_mesh_autolod_enabled(mesh_path: str) -> bool {
-    let path = project_mesh_autolod_path(mesh_path)
-    if !file_exists(path) {
-        ret true
-    }
-    let setting = read_file(path)
-    ret setting != "enabled=false\n" && setting != "enabled=false"
+    ret AutoLodSettings::load(mesh_path).enabled
 }
 
-/// Persists only editor policy. Derived cluster data remains disposable and
-/// can be rebuilt from the source mesh whenever its cache version changes.
+/// Changes the switch without resetting the asset's quality preference.
 pub fn set_project_mesh_autolod(mesh_path: str, enabled: bool) -> bool {
-    ret write_file(project_mesh_autolod_path(mesh_path),
-        if enabled {
-            "enabled=true\n"
-        } else {
-            "enabled=false\n"
-        }
-        ,) == 0_i32
+    let mut settings = AutoLodSettings::load(mesh_path)
+    settings.enabled = enabled
+    ret settings.save(mesh_path)
 }
 
 fn asset_u32(source: str, start: usize) ->(u32, usize) {
@@ -85,6 +105,23 @@ fn asset_texture(path: str) ->(Vec[u32], u32, u32) {
     let base = path.slice(0_usize, path.byte_len() - 4_usize)
     let metadata = base + ".texture"
     let rgba = base + ".rgba"
+    let native = base + ".gtexture"
+    let revision = asset_source_stamp(metadata) + ":" + asset_source_stamp(rgba)
+    if file_exists(native) {
+        match load_native_texture(native, if !file_exists(metadata) && !file_exists(rgba) {
+                ""
+            } else {
+                revision
+            }
+            ,
+        ) {
+            Result::Ok(image) => {
+                ret(image.pixels, image.width, image.height)
+            }
+            Result::Err(_) => {
+            }
+        }
+    }
     if !file_exists(metadata) || !file_exists(rgba) {
         ret(white, 1_u32, 1_u32)
     }
@@ -97,14 +134,14 @@ fn asset_texture(path: str) ->(Vec[u32], u32, u32) {
     let height_part = asset_u32(dimensions, split)
     let width = width_part.0
     let height = height_part.0
-    if width == 0_u32 || height == 0_u32 {
+    if width == 0_u32 || height == 0_u32 || width > 8192 || height > 8192 {
         ret(white, 1_u32, 1_u32)
     }
     let bytes = read_file(rgba)
     if bytes.byte_len() !=(width as usize) *(height as usize) * 4_usize {
         ret(white, 1_u32, 1_u32)
     }
-    let mut pixels = Vec[u32]::new()
+    let mut pixels = Vec[u32]::with_capacity((width as usize) *(height as usize))
     let mut index = 0_usize
     while index < bytes.byte_len() {
         pixels.push((bytes.byte_at(index) as u32) |
@@ -113,6 +150,11 @@ fn asset_texture(path: str) ->(Vec[u32], u32, u32) {
             ((bytes.byte_at(index + 3_usize) as u32) << 24_u32))
         index += 4_usize
     }
+    let _saved = save_native_texture(native, metadata, revision, TextureImage {
+            width, height, pixels
+        }
+        ,
+    )
     ret(pixels, width, height)
 }
 
@@ -140,68 +182,201 @@ pub fn project_mesh_directory(project_root: str) -> str {
     ret project_root + "/Content/Meshes"
 }
 
+/// Loads a native mesh directly, or imports legacy OBJ into a versioned asset.
 pub fn load_obj_asset(path: str) -> Result[ImportedMeshAsset, str] {
-    if !file_exists(path) {
-        ret Result[ImportedMeshAsset, str]::Err("Mesh file does not exist: " + path)
+    let source = if ends(path, ".gmesh") {
+        path.slice_bytes(0, path.byte_len() - 6)
+    } else {
+        path
     }
-    if !asset_is_obj(path) {
-        ret Result[ImportedMeshAsset, str]::Err("Only .obj mesh files are supported")
+    let native = source + ".gmesh"
+    if !asset_is_obj(source) && !ends(path, ".gmesh") {
+        ret Result::Err("Expected an OBJ source or .gmesh asset")
     }
-    match parse_obj(read_file(path)) {
-        Result::Ok(mesh) => {
-            let texture = asset_texture(path)
-            ret Result[ImportedMeshAsset, str]::Ok(ImportedMeshAsset {
-                    asset_file_name(path), path, path, mesh, texture.0, texture.1, texture.2
-                }
-                ,
-            )
+    let revision = if asset_is_obj(source) {
+        asset_source_stamp(source)
+    } else {
+        ""
+    }
+    match load_native_mesh(native, revision) {
+        Result::Ok(asset) => {
+            ret Result::Ok(imported_mesh(source, asset.mesh(), asset.geometry()))
         }
+        Result::Err(_) => {
+        }
+    }
+    if !asset_is_obj(source) || !file_exists(source) {
+        ret Result::Err("No valid native mesh or source: " + source)
+    }
+    let mesh = match parse_obj(read_file(source)) {
+        Result::Ok(value) => value.with_uvs()
         Result::Err(message) => {
-            ret Result[ImportedMeshAsset, str]::Err("Unable to import " + path + ": " + message)
+            ret Result::Err("Unable to import " + source + ": " + message)
         }
+    }
+    println("Graphene: importing mesh and AutoLOD: " + source)
+    let geometry = prepare_mesh_geometry(mesh)
+    if !geometry.valid() {
+        ret Result::Err("Unable to build AutoLOD: " + geometry.error())
+    }
+    if !native_mesh_valid(mesh, geometry) {
+        ret Result::Err("Invalid imported mesh geometry: " + source)
+    }
+    // Read-only source directories remain usable without persisting the import.
+    let _saved = save_native_mesh(native, source, revision, mesh, geometry)
+    ret Result::Ok(imported_mesh(source, mesh, geometry))
+}
+fn imported_mesh(source: str, mesh: MeshData, geometry: VirtualGeometry) -> ImportedMeshAsset {
+    let texture = asset_texture(if asset_is_obj(source) {
+            source
+        } else {
+            source + ".obj"
+        }
+    )
+    let base = if asset_is_obj(source) {
+        source.slice_bytes(0, source.byte_len() - 4)
+    } else {
+        source
+    }
+    let project_path = if asset_is_obj(source) {
+        source
+    } else {
+        source + ".gmesh"
+    }
+    ret ImportedMeshAsset {
+        asset_file_name(project_path), source, project_path, mesh,
+        texture.0, texture.1, texture.2,
+        asset_source_stamp(source + ".gmesh") + read_file(project_path + ".autolod") +
+        asset_source_stamp(base + ".gtexture"), geometry
     }
 }
 
 pub fn import_obj_asset(project_root: str, source_path: str) -> Result[ImportedMeshAsset, str] {
-    match load_obj_asset(source_path) {
-        Result::Ok(asset) => {
-            let directory = project_mesh_directory(project_root)
-            if mkdir_all(directory) != 0_i32 {
-                ret Result[ImportedMeshAsset, str]::Err("Unable to create " + directory)
-            }
-            let destination = directory + "/" + asset.name()
-            if write_file(destination, read_file(source_path)) != 0_i32 {
-                ret Result[ImportedMeshAsset, str]::Err("Unable to write imported mesh: " + destination)
-            }
-            ret Result[ImportedMeshAsset, str]::Ok(ImportedMeshAsset {
-                    asset.name(), source_path, destination, asset.mesh(),
-                    asset.texture_pixels(), asset.texture_width(), asset.texture_height()
-                }
-                ,
-            )
+    if !file_exists(source_path) || !asset_is_obj(source_path) {
+        ret Result::Err("Expected an existing .obj source")
+    }
+    // Parse before copying so invalid imports do not leave a broken project asset.
+    match parse_obj(read_file(source_path)) {
+        Result::Ok(_) => {
         }
         Result::Err(message) => {
-            ret Result[ImportedMeshAsset, str]::Err(message)
+            ret Result::Err("Unable to import " + source_path + ": " + message)
+        }
+    }
+    let directory = project_mesh_directory(project_root)
+    if mkdir_all(directory) != 0 {
+        ret Result::Err("Unable to create " + directory)
+    }
+    let destination = directory + "/" + asset_file_name(source_path)
+    if source_path != destination && write_file(destination, read_file(source_path)) != 0 {
+        ret Result::Err("Unable to write imported mesh: " + destination)
+    }
+    // Legacy per-mesh textures travel with their mesh; material references are separate assets.
+    let source_base = source_path.slice_bytes(0, source_path.byte_len() - 4)
+    let destination_base = destination.slice_bytes(0, destination.byte_len() - 4)
+    if source_path != destination {
+        for suffix in vec![".texture", ".rgba", ".gtexture"] {
+            if file_exists(source_base + suffix) && write_file(destination_base + suffix, read_file(source_base + suffix)) != 0 {
+                ret Result::Err("Unable to copy mesh texture: " + suffix)
+            }
+        }
+    }
+    let asset = load_obj_asset(destination)?
+    ret Result::Ok(ImportedMeshAsset {
+            asset.name(), source_path, destination, asset.mesh(),
+            asset.texture_pixels(), asset.texture_width(), asset.texture_height(), asset.revision(), asset.geometry()
+        }
+        ,)
+}
+
+pub fn model_source_supported(path: str) -> bool {
+    let name = lower(path)
+    ret ends(name, ".obj") || ends(name, ".fbx") || ends(name, ".glb") || ends(name, ".gltf")
+}
+/// Source formats are decoded in memory and written directly as native assets.
+pub fn import_mesh_asset(project_root: str, source_path: str) -> Result[ImportedMeshAsset, str] {
+    let name = Path::new(source_path).stem().unwrap_or("")
+    ret import_mesh_asset_as(project_root, source_path, name)
+}
+pub fn import_mesh_asset_as(project_root: str, source_path: str, name: str) -> Result[ImportedMeshAsset, str] {
+    let source = Path::new(source_path).resolve().as_str()
+    if !model_source_supported(source) || !file_exists(source) {
+        ret Result::Err("Select an existing FBX, OBJ, GLB or glTF model")
+    }
+    if !content_name_valid(name) || ends(lower(name), ".gmesh") {
+        ret Result::Err("Invalid mesh asset name")
+    }
+    let directory = project_mesh_directory(project_root)
+    let destination = directory + "/" + name + ".gmesh"
+    if file_exists(destination) {
+        match native_asset_source(destination, "mesh") {
+            Result::Ok(previous) => {
+                if previous != source {
+                    ret Result::Err("A different mesh already uses the name " + name)
+                }
+            }
+            Result::Err(error) => {
+                ret Result::Err(error)
+            }
+        }
+    }
+    let decoded = decode_source_model(source)?
+    let mesh = decoded.mesh()
+    let geometry = prepare_mesh_geometry(mesh)
+    if !native_mesh_valid(mesh, geometry) {
+        ret Result::Err("Unable to prepare native mesh: " + geometry.error())
+    }
+    if mkdir_all(directory) != 0 {
+        ret Result::Err("Unable to create mesh directory")
+    }
+    // Decode and prepare everything before publishing either native file. A
+    // reimport keeps the existing native identities and the scene reference.
+    if !save_native_texture(directory + "/" + name + ".gtexture", source, "", decoded.texture()) {
+        ret Result::Err("Unable to write native mesh texture")
+    }
+    if !save_native_mesh(destination, source, asset_source_stamp(source), mesh, geometry) {
+        ret Result::Err("Unable to write native mesh")
+    }
+    ret load_obj_asset(destination)
+}
+
+fn discover_obj_directory(project: str, directory: str, depth: u32, assets: mut Vec[ImportedMeshAsset]) ->() {
+    if depth > 16 || assets.len() >= 16384 {
+        ret()
+    }
+    for name in read_dir(project + "/" + directory) {
+        let relative = directory + "/" + name
+        let info = project_file_info(project, relative)
+        if info == 2 {
+            discover_obj_directory(project, relative, depth + 1, assets)
+        } elif info != 0 &&(asset_is_obj(name) ||
+            (ends(name, ".gmesh") && !file_exists(project + "/" + relative.slice_bytes(0, relative.byte_len() - 6)))) {
+            match load_obj_asset(project + "/" + relative) {
+                Result::Ok(asset) => {
+                    // Flat legacy names remain readable. Nested folders use a full
+                    // project-relative identity, so equal filenames never collide.
+                    let identity = if directory == "Content/Meshes" {
+                        asset.name()
+                    } else {
+                        relative
+                    }
+                    assets.push(ImportedMeshAsset {
+                            identity, asset.source_path(), asset.project_path(), asset.mesh(),
+                            asset.texture_pixels(), asset.texture_width(), asset.texture_height(), asset.revision(), asset.geometry()
+                        }
+                        ,)
+                }
+                Result::Err(error) => {
+                    println("Graphene asset: " + error)
+                }
+            }
         }
     }
 }
-
-pub fn discover_obj_assets(project_root: str) -> Vec[ImportedMeshAsset] {
-    let mut out = Vec[ImportedMeshAsset]::new()
-    let directory = project_mesh_directory(project_root)
-    for name in read_dir(directory) {
-        let path = directory + "/" + name
-        if asset_is_obj(path) {
-            match load_obj_asset(path) {
-                Result::Ok(asset) => {
-                    out.push(asset)
-                }
-                Result::Err(_) => {
-                }
-            }
-        }
-    }
-    ret out
+pub fn discover_obj_assets(project_root: str) -> sending Vec[ImportedMeshAsset] {
+    let mut assets = Vec[ImportedMeshAsset]::new()
+    discover_obj_directory(project_root, "Content", 0, assets)
+    ret assets
 }
 
 pub fn add_actor_mesh_name(target: str, assets: Vec[ImportedMeshAsset]) -> Option[str] {

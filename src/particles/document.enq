@@ -1,0 +1,97 @@
+//! History stores value snapshots, never shared Vec graph handles or native resources.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::codec::{particle_system_parse, particle_system_stringify}
+import mod::model::*
+pub struct ParticleDocument {
+    asset: ParticleSystem
+    undo: Vec[str]
+    redo: Vec[str]
+    gesture: Option[str]
+    saved: str
+    revision: u64
+    changed: bool
+}
+
+impl for ParticleDocument {
+    pub fn new(asset: ParticleSystem) -> Self {
+        let text = particle_system_stringify(asset) ret Self {
+            particle_system_parse(text).unwrap_or(ParticleSystem::new("")), Vec[str]::new(), Vec[str]::new(), Option[str]::None, text, 0_u64, false
+        }
+    }
+    pub fn asset(self: Self) -> ParticleSystem {
+        ret particle_system_parse(particle_system_stringify(self.asset)).unwrap_or(ParticleSystem::new(""))
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn dirty(self: Self) -> bool {
+        ret self.changed
+    }
+    pub fn mark_saved(self: mut Self) ->() {
+        self.saved = particle_system_stringify(self.asset) self.changed = false
+    }
+    pub fn replace(self: mut Self, asset: ParticleSystem) -> bool {
+        let previous = particle_system_stringify(self.asset) let next = particle_system_stringify(asset) if previous == next {
+            ret false
+        }
+        if self.gesture.is_none() {
+            self.undo.push(previous)
+        }
+        if self.undo.len() > 128_usize {
+            let mut retained = Vec[str]::new() for i in 1_usize..self.undo.len() {
+                retained.push(self.undo.get(i).unwrap_or(""))
+            }
+            self.undo = retained
+        }
+        self.redo.clear() self.asset = particle_system_parse(next).unwrap_or(self.asset) self.changed = next != self.saved self.revision += 1_u64 ret true
+    }
+    pub fn begin_gesture(self: mut Self) ->() {
+        if self.gesture.is_none() {
+            self.gesture = Option[str]::Some(particle_system_stringify(self.asset))
+        }
+    }
+    pub fn end_gesture(self: mut Self) ->() {
+        match self.gesture {
+            Some(before) => {
+                if before != particle_system_stringify(self.asset) {
+                    self.undo.push(before) self.redo.clear()
+                }
+            }
+            None => {
+            }
+        }
+        self.gesture = Option[str]::None
+    }
+    pub fn cancel_gesture(self: mut Self) ->() {
+        match self.gesture {
+            Some(before) => {
+                self.asset = particle_system_parse(before).unwrap_or(self.asset) self.changed = before != self.saved self.revision += 1_u64
+            }
+            None => {
+            }
+        }
+        self.gesture = Option[str]::None
+    }
+    pub fn undo(self: mut Self) -> bool {
+        match self.undo.pop() {
+            Some(text) => {
+                self.redo.push(particle_system_stringify(self.asset)) self.asset = particle_system_parse(text).unwrap_or(self.asset) self.changed = text != self.saved self.revision += 1_u64 ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+    pub fn redo(self: mut Self) -> bool {
+        match self.redo.pop() {
+            Some(text) => {
+                self.undo.push(particle_system_stringify(self.asset)) self.asset = particle_system_parse(text).unwrap_or(self.asset) self.changed = text != self.saved self.revision += 1_u64 ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+}

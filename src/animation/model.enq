@@ -1,0 +1,291 @@
+//! Serializable animation records. Runtime resources never enter asset data.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{LocalTransform, PoseMatrix, PoseRotation, PoseVector, animation_finite, animation_abs}
+
+pub struct SkeletonBone {
+    name: str
+    parent: i32
+    rest: LocalTransform
+}
+pub struct SkeletonSocket {
+    name: str
+    bone: u32
+    offset: LocalTransform
+}
+pub struct Skeleton {
+    version: u32
+    identity: str
+    name: str
+    bones: Vec[SkeletonBone]
+    sockets: Vec[SkeletonSocket]
+}
+
+impl for Skeleton {
+    pub fn validate(self: Self) -> Result[bool, str] {
+        if self.version != 1_u32 || self.identity == "" || self.bones.len() == 0_usize || self.bones.len() > 4096_usize {
+            ret Result::Err("Invalid skeleton header or bone count")
+        }
+        for i in 0_usize..self.bones.len() {
+            let b = self.bones.get_unchecked_borrowed(i)
+            if b.name == "" || b.parent < - 1_i32 || b.parent >= i as i32 || !b.rest.valid() {
+                ret Result::Err("Bones must have unique names, valid TRS and parents before children")
+            }
+            for j in 0_usize..i {
+                if self.bones.get_unchecked_borrowed(j).name == b.name {
+                    ret Result::Err("Duplicate bone name: " + b.name)
+                }
+            }
+        }
+        for i in 0_usize..self.sockets.len() {
+            let socket = self.sockets.get_unchecked_borrowed(i)
+            if socket.name == "" || socket.bone as usize >= self.bones.len() || !socket.offset.valid() {
+                ret Result::Err("Invalid socket")
+            }
+            for j in 0_usize..i {
+                if self.sockets.get_unchecked_borrowed(j).name == socket.name {
+                    ret Result::Err("Duplicate socket name")
+                }
+            }
+        }
+        ret Result::Ok(true)
+    }
+}
+pub enum TrackPath {
+    Translation
+    Rotation
+    Scale
+    Morph
+}
+pub enum KeyInterpolation {
+    Step
+    Linear
+    CubicSpline
+}
+/// Quaternion and morph tracks use xyzw; vector tracks use xyz. Cubic tangents
+/// are derivatives per second and are NOT normalized quaternions.
+pub struct AnimationValue {
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+}
+
+impl for AnimationValue {
+    pub fn zero() -> Self {
+        ret Self { 0_f32, 0_f32, 0_f32, 0_f32 }
+    }
+    pub fn finite(self: Self) -> bool {
+        ret animation_finite(self.x) && animation_finite(self.y) && animation_finite(self.z) && animation_finite(self.w)
+    }
+    pub fn rotation(self: Self) -> PoseRotation {
+        ret PoseRotation { self.x, self.y, self.z, self.w }
+    }
+    pub fn vector(self: Self) -> PoseVector {
+        ret PoseVector { self.x, self.y, self.z }
+    }
+    pub fn scaled(self: Self, n: f32) -> Self {
+        ret Self { self.x * n, self.y * n, self.z * n, self.w * n }
+    }
+    pub fn add(self: Self, b: Self) -> Self {
+        ret Self { self.x + b.x, self.y + b.y, self.z + b.z, self.w + b.w }
+    }
+}
+pub struct AnimationKey {
+    time: f32
+    value: AnimationValue
+    incoming: AnimationValue
+    outgoing: AnimationValue
+}
+pub struct AnimationTrack {
+    target: u32
+    path: TrackPath
+    interpolation: KeyInterpolation
+    keys: Vec[AnimationKey]
+}
+pub struct AnimationNotify {
+    time: f32
+    name: str
+    payload: str
+}
+pub struct AnimationClip {
+    version: u32
+    identity: str
+    skeleton: str
+    name: str
+    duration: f32
+    tracks: Vec[AnimationTrack]
+    notifies: Vec[AnimationNotify]
+}
+
+impl for AnimationClip {
+    pub fn validate(self: Self, skeleton: Skeleton, morph_count: usize) -> Result[bool, str] {
+        if self.version != 1_u32 || self.identity == "" || self.skeleton != skeleton.identity || !animation_finite(self.duration) || self.duration < 0_f32 || self.duration > 86400_f32 || self.tracks.len() > 65536_usize {
+            ret Result::Err("Invalid clip header or skeleton mismatch")
+        }
+        for index in 0_usize..self.tracks.len() {
+            let track = self.tracks.get_unchecked_borrowed(index)
+            let morph = match track.path {
+                TrackPath::Morph => true _ => false
+            }
+            let limit = if morph {
+                morph_count
+            } else {
+                skeleton.bones.len()
+            }
+            if track.target as usize >= limit || track.keys.len() == 0_usize || track.keys.len() > 1000000_usize {
+                ret Result::Err("Invalid animation track target or key count")
+            }
+            for other in 0_usize..index {
+                let previous = self.tracks.get_unchecked_borrowed(other)
+                if previous.target == track.target && track_path_id(previous.path) == track_path_id(track.path) {
+                    ret Result::Err("Duplicate animation channel")
+                }
+            }
+            let mut last = - 1_f32
+            for key in track.keys {
+                if !animation_finite(key.time) || key.time < 0_f32 || key.time > self.duration || key.time <= last || !key.value.finite() || !key.incoming.finite() || !key.outgoing.finite() {
+                    ret Result::Err("Animation keys must be finite and strictly increasing")
+                }
+                match track.path {
+                    TrackPath::Rotation => {
+                        if !key.value.rotation().valid() {
+                            ret Result::Err("Animation rotation must be normalized")
+                        }
+                    }
+                    TrackPath::Scale => {
+                        if animation_abs(key.value.x) < 0.000001_f32 || animation_abs(key.value.y) < 0.000001_f32 || animation_abs(key.value.z) < 0.000001_f32 {
+                            ret Result::Err("Singular scale key")
+                        }
+                    }
+                    _ => {
+                    }
+                }
+                last = key.time
+            }
+        }
+        let mut last = - 1_f32
+        for notify in self.notifies {
+            if !animation_finite(notify.time) || notify.time < 0_f32 || notify.time > self.duration || notify.time < last || notify.name == "" {
+                ret Result::Err("Invalid notify or notify order")
+            }
+            last = notify.time
+        }
+        ret Result::Ok(true)
+    }
+}
+pub fn track_path_id(path: TrackPath) -> u32 {
+    ret match path {
+        TrackPath::Translation => 0_u32 TrackPath::Rotation => 1_u32 TrackPath::Scale => 2_u32 TrackPath::Morph => 3_u32
+    }
+}
+/// Eight maximum influences. Zero-weight slots are still initialized safely.
+pub struct SkinInfluence {
+    bone: u32
+    weight: f32
+}
+pub struct SkinVertex {
+    position: PoseVector
+    normal: PoseVector
+    tangent: AnimationValue
+    uv: AnimationValue
+    influences: Vec[SkinInfluence]
+}
+pub struct SkinSection {
+    name: str
+    first_index: u32
+    index_count: u32
+    material: str
+}
+pub struct MorphDelta {
+    vertex: u32
+    position: PoseVector
+    normal: PoseVector
+    tangent: PoseVector
+}
+pub struct MorphTarget {
+    name: str
+    minimum: f32
+    maximum: f32
+    default_weight: f32
+    deltas: Vec[MorphDelta]
+}
+pub struct SkeletalMesh {
+    version: u32
+    identity: str
+    skeleton: str
+    name: str
+    vertices: Vec[SkinVertex]
+    indices: Vec[u32]
+    inverse_bind: Vec[PoseMatrix]
+    sections: Vec[SkinSection]
+    morphs: Vec[MorphTarget]
+}
+
+impl for SkeletalMesh {
+    pub fn validate(self: Self, skeleton: Skeleton) -> Result[bool, str] {
+        if self.version != 1_u32 || self.identity == "" || self.skeleton != skeleton.identity || self.inverse_bind.len() != skeleton.bones.len() || self.vertices.len() == 0_usize || self.vertices.len() > 1000000_usize || self.indices.len() == 0_usize || self.indices.len() % 3_usize != 0_usize || self.morphs.len() > 256_usize {
+            ret Result::Err("Invalid skeletal mesh header or counts")
+        }
+        for matrix in self.inverse_bind {
+            if !matrix.finite() || matrix.inverse().is_none() {
+                ret Result::Err("Invalid inverse bind matrix")
+            }
+        }
+        for vertex in self.vertices {
+            if !vertex.position.finite() || !vertex.normal.finite() || !vertex.tangent.finite() || !vertex.uv.finite() || vertex.influences.len() == 0_usize || vertex.influences.len() > 8_usize {
+                ret Result::Err("Invalid skin vertex")
+            }
+            let mut total = 0_f32
+            for i in 0_usize..vertex.influences.len() {
+                let influence = vertex.influences.get_unchecked_borrowed(i)
+                if influence.bone as usize >= skeleton.bones.len() || !animation_finite(influence.weight) || influence.weight <= 0_f32 || influence.weight > 1_f32 {
+                    ret Result::Err("Invalid skin influence")
+                }
+                for j in 0_usize..i {
+                    if vertex.influences.get_unchecked_borrowed(j).bone == influence.bone {
+                        ret Result::Err("Duplicate skin influence")
+                    }
+                }
+                total += influence.weight
+            }
+            if animation_abs(total - 1_f32) > 0.001_f32 {
+                ret Result::Err("Skin weights must sum to one")
+            }
+        }
+        for index in self.indices {
+            if index as usize >= self.vertices.len() {
+                ret Result::Err("Skin index out of range")
+            }
+        }
+        let mut first = 0_usize
+        for section in self.sections {
+            if section.first_index as usize != first || section.index_count == 0_u32 || section.index_count % 3_u32 != 0_u32 || section.index_count as usize > self.indices.len() - first {
+                ret Result::Err("Material sections must partition the index buffer")
+            }
+            first += section.index_count as usize
+        }
+        if first != self.indices.len() {
+            ret Result::Err("Missing material section")
+        }
+        for i in 0_usize..self.morphs.len() {
+            let morph = self.morphs.get_unchecked_borrowed(i)
+            if morph.name == "" || !animation_finite(morph.minimum) || !animation_finite(morph.maximum) || !animation_finite(morph.default_weight) || morph.minimum > morph.maximum || morph.default_weight < morph.minimum || morph.default_weight > morph.maximum {
+                ret Result::Err("Invalid morph range")
+            }
+            for j in 0_usize..i {
+                if self.morphs.get_unchecked_borrowed(j).name == morph.name {
+                    ret Result::Err("Duplicate morph name")
+                }
+            }
+            let mut previous = - 1_i64
+            for delta in morph.deltas {
+                if delta.vertex as usize >= self.vertices.len() || delta.vertex as i64 <= previous || !delta.position.finite() || !delta.normal.finite() || !delta.tangent.finite() {
+                    ret Result::Err("Morph deltas must be finite and sorted by vertex")
+                }
+                previous = delta.vertex as i64
+            }
+        }
+        ret Result::Ok(true)
+    }
+}

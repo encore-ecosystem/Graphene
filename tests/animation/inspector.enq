@@ -1,0 +1,106 @@
+import std::os::read_file
+//! Routing regressions use the actual inspector and scene command history.
+import core::vec::Vec
+import graphene::animation::component::{SkeletalMeshComponent, CharacterMorphChoice, CharacterMorphControl}
+import graphene::command_bus::{EditorState, GrapheneCommand}
+import graphene::editor_actor_details::ActorDetails
+import graphene::scene::component::SceneComponent
+import graphene::scene::transform::Transform
+import graphene::scene::world::Scene
+import luma::{Event, Widget, Rect, StyleSheet, layout_widget, event_pointer_down, event_scroll, key_down, key_enter, key_escape, key_end, key_home}
+fn down() -> Event {
+    ret Event {
+        event_pointer_down(), 0_f32, 0_f32, 0_f32, 0_f32, 1_u32, 0_u32, 0_u32, 0_f32, 0_f32, "", 0_u64
+    }
+}
+fn component(state: EditorState, id: u64) -> SkeletalMeshComponent {
+    ret match state.scene().get(id) {
+        Some(entity) => match entity.component() {
+            SkeletalMesh(c) => c _ => SkeletalMeshComponent::defaults()
+        }
+        None => SkeletalMeshComponent::defaults()
+    }
+}
+fn main() -> u32 {
+    let mut scene = Scene::new() let id = scene.create_entity("Character", Transform::identity())
+    let mut c = SkeletalMeshComponent::defaults() c.clip = "idle"
+    scene.set_component(id, SceneComponent::SkeletalMesh(c))
+    let mut state = EditorState::new(scene) let mut details = ActorDetails::new()
+    details.sync(scene, id, false)
+    details.set_clip_choices(vec![("idle", "Idle"),("walk", "Walk"),("run", "Run")])
+    details.set_animation_info(vec![CharacterMorphChoice { "Blink", 0_f32, 1_f32, 0_f32 }], "")
+    let layout = layout_widget(Widget::panel("test").with_child(details.widget()), Rect::new(0_f32, 0_f32, 320_f32, 600_f32))
+    if !details.input(down(), "actor-anim-clip", layout, state) || !details.popup_open() {
+        ret 1_u32
+    }
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let overlay = Widget::panel("overlay").with_child(details.popup(1600_f32, 1000_f32, layout))
+    let popup_layout = layout_widget(sheet.apply(overlay, "", "", ""), Rect::new(0_f32, 0_f32, 1600_f32, 1000_f32))
+    let menu = popup_layout.find_bounds("actor-anim-clip-menu").unwrap_or(Rect::new(0_f32, 0_f32, 0_f32, 0_f32))
+    if menu.height() < 88_f32 || menu.width() < 240_f32 || menu.right() > 1592_f32 {
+        ret 10_u32
+    }
+    for i in 0_usize..3_usize {
+        let row = popup_layout.find_bounds("actor-anim-choice-" + i.fmt()).unwrap_or(Rect::new(0_f32, 0_f32, 0_f32, 0_f32)) if row.height() < 24_f32 || row.bottom() > menu.bottom() {
+            ret 11_u32
+        }
+    }
+    details.input(Event::key_down(key_down(), 0_u32), "actor-anim-clip", layout, state)
+    details.input(Event::key_down(key_enter(), 0_u32), "actor-anim-clip", layout, state)
+    if component(state, id).clip != "walk" || details.popup_open() || details.editing() {
+        ret 2_u32
+    }
+    if details.input(Event::key_down(122_u32, 192_u32), "actor-anim-clip", layout, state) {
+        ret 3_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() || component(state, id).clip != "idle" {
+        ret 4_u32
+    }
+    if !state.execute(GrapheneCommand::Redo).success() || component(state, id).clip != "walk" {
+        ret 5_u32
+    }
+    details.sync(state.scene(), id, false)
+    details.input(down(), "actor-anim-morph-0", layout, state)
+    details.input(Event::text_input("0.8"), "actor-anim-morph-0", layout, state)
+    details.input(Event::key_down(key_enter(), 0_u32), "actor-anim-morph-0", layout, state)
+    let edited = component(state, id)
+    if edited.morphs.len() != 1_usize || edited.morphs.get_unchecked_borrowed(0_usize).weight != 0.8_f32 {
+        ret 6_u32
+    }
+    details.input(down(), "actor-anim-morph-reset", layout, state)
+    if details.focused_id() != "actor-anim-clip" {
+        ret 14_u32
+    }
+    if component(state, id).morphs.len() != 0_usize || details.editing() {
+        ret 7_u32
+    }
+    details.input(down(), "actor-anim-clip", layout, state)
+    details.input(Event::key_down(key_escape(), 0_u32), "actor-anim-clip", layout, state)
+    if details.popup_open() {
+        ret 8_u32
+    }
+    details.sync(state.scene(), id, true)
+    if details.input(down(), "actor-anim-loop", layout, state) || !component(state, id).looping {
+        ret 9_u32
+    }
+    details.sync(state.scene(), id, false)
+    let mut choices = Vec[(str, str)]::new() for i in 0_usize..50_usize {
+        choices.push(("clip-" + i.fmt(), "Clip " + i.fmt()))
+    }
+    details.set_clip_choices(choices) details.input(down(), "actor-anim-clip", layout, state)
+    details.input(Event::key_down(key_end(), 0_u32), "actor-anim-clip", layout, state)
+    let last_page = layout_widget(sheet.apply(Widget::panel("overlay").with_child(details.popup(1600_f32, 1000_f32, layout)), "", "", ""), Rect::new(0_f32, 0_f32, 1600_f32, 1000_f32))
+    if last_page.find_bounds("actor-anim-choice-49").is_none() || last_page.find_bounds("actor-anim-choice-0").is_some() {
+        ret 12_u32
+    }
+    details.input(Event {
+            event_scroll(), 0_f32, 0_f32, 0_f32, 0_f32, 0_u32, 0_u32, 0_u32, 0_f32, 1_f32, "", 0_u64
+        }
+        , "actor-anim-clip-menu", layout, state,)
+    details.input(Event::key_down(key_home(), 0_u32), "actor-anim-clip", layout, state)
+    let first_page = layout_widget(sheet.apply(Widget::panel("overlay").with_child(details.popup(1600_f32, 1000_f32, layout)), "", "", ""), Rect::new(0_f32, 0_f32, 1600_f32, 1000_f32))
+    if first_page.find_bounds("actor-anim-choice-0").is_none() || first_page.find_bounds("actor-anim-choice-49").is_some() {
+        ret 13_u32
+    }
+    ret 0_u32
+}

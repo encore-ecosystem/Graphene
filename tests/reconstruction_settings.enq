@@ -1,0 +1,33 @@
+//! Saved preferences remain distinct from device/session-dependent fallbacks.
+import core::option::Option
+import graphene::{AntiAliasingMethod, RenderSettings, UpscalingQuality, FrameGenerationMethod, anti_aliasing_methods, upscaling_qualities, effective_reconstruction, effective_frame_generation}
+import std::os::{read_file, write_file, mkdir_all}
+fn main()->u32 {
+    let defaults=RenderSettings::defaults()
+    if defaults.anti_aliasing().key()!="smaa" || defaults.frame_generation().key()!="off" {ret 1}
+    for method in anti_aliasing_methods() {
+        let parsed=RenderSettings::parse("{\"anti_aliasing\":\""+method.key()+"\"}")
+        if parsed.unwrap_or(defaults).anti_aliasing().key()!=method.key(){ret 2}
+    }
+    for quality in upscaling_qualities(){
+        let parsed=RenderSettings::parse("{\"anti_aliasing\":\"fsr\",\"upscaling_quality\":\""+quality.key()+"\"}")
+        if parsed.unwrap_or(defaults).quality().key()!=quality.key(){ret 3}
+    }
+    for source in vec!["[]","{\"anti_aliasing\":\"unknown\"}","{\"frame_generation\":\"bogus\"}","{\"upscaling_quality\":false}","{\"frame_generation_multiplier\":1}","{\"frame_generation_multiplier\":5}","{\"frame_generation_multiplier\":2.5}","{\"upscaling_sharpness\":-1}","{\"upscaling_sharpness\":2}"] {
+        if RenderSettings::parse(source).is_some(){ret 4}
+    }
+    if effective_reconstruction(AntiAliasingMethod::Dlss,1,1).key()!="fsr" || effective_reconstruction(AntiAliasingMethod::Dlss,1,0).key()!="taa" || effective_reconstruction(AntiAliasingMethod::Dlaa,1,1).key()!="taa" || effective_reconstruction(AntiAliasingMethod::Fsr,1,0).key()!="taa" {ret 5}
+    let fg=defaults.with_anti_aliasing(AntiAliasingMethod::Taa).with_frame_generation(FrameGenerationMethod::Dlss).with_multiplier(4)
+    if effective_frame_generation(fg,127,false).key()!="off" || effective_frame_generation(fg,16,true).key()!="off" || effective_frame_generation(fg,127,true).key()!="dlss" || effective_frame_generation(fg.with_anti_aliasing(AntiAliasingMethod::Smaa),127,true).key()!="off" {ret 6}
+    if effective_frame_generation(fg.with_frame_generation(FrameGenerationMethod::Fsr),127,true).key()!="off" || effective_frame_generation(fg.with_frame_generation(FrameGenerationMethod::Fsr).with_multiplier(2),8,true).key()!="fsr" {ret 7}
+    let project="target/reconstruction-settings-test"
+    mkdir_all(project+"/Config")
+    write_file(project+"/Config/Rendering.json","{\"future\":{\"preserved\":true}}")
+    let saved=fg.with_anti_aliasing(AntiAliasingMethod::Dlss).with_quality(UpscalingQuality::Performance).with_sharpness(0.75_f32)
+    if !saved.save(project){ret 8}
+    let loaded=RenderSettings::load(project)
+    if loaded.anti_aliasing().key()!="dlss" || loaded.quality().key()!="performance" || loaded.frame_generation().key()!="dlss" || loaded.multiplier()!=4 || loaded.sharpness()!=0.75_f32 || !read_file(project+"/Config/Rendering.json").contains("preserved"){ret 9}
+    write_file(project+"/Config/Rendering.json","broken")
+    if saved.save(project) || read_file(project+"/Config/Rendering.json")!="broken" {ret 10}
+    ret 0
+}

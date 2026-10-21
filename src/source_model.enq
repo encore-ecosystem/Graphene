@@ -1,0 +1,65 @@
+//! Source decoders own temporary native memory; only engine records escape.
+import core::result::Result
+import core::vec::Vec
+import mod::scene::primitive::MeshData
+import mod::texture_image::TextureImage
+
+extern fn graphene_model_open(path: str) -> usize
+extern fn graphene_model_error(handle: usize) -> str
+extern fn graphene_model_count(handle: usize) -> usize
+extern fn graphene_model_vertex(handle: usize, index: usize) -> f32
+extern fn graphene_model_width(handle: usize) -> u32
+extern fn graphene_model_height(handle: usize) -> u32
+extern fn graphene_model_pixel(handle: usize, index: usize) -> u32
+extern fn graphene_model_close(handle: usize) ->()
+
+pub struct SourceModel {
+    mesh: MeshData
+    texture: TextureImage
+}
+
+impl for SourceModel {
+    pub fn mesh(self: Self) -> MeshData {
+        ret self.mesh
+    }
+    pub fn texture(self: Self) -> TextureImage {
+        ret self.texture
+    }
+}
+
+/// Static FBX/OBJ/glTF/GLB geometry, with world transforms baked in metres,
+/// normalized normals, vertex colors and the primary base-color image.
+#attr(safe)
+pub fn decode_source_model(path: str) -> Result[SourceModel, str] {
+    unsafe {
+        let handle = graphene_model_open(path)
+        let error = graphene_model_error(handle)
+        if error != "" {
+            graphene_model_close(handle)
+            ret Result::Err(error)
+        }
+        let count = graphene_model_count(handle)
+        let mut vertices = Vec[f32]::with_capacity(count * 11)
+        let mut indices = Vec[u32]::with_capacity(count)
+        for index in 0_usize..count * 11 {
+            vertices.push(graphene_model_vertex(handle, index))
+        }
+        for index in 0_usize..count {
+            indices.push(index as u32)
+        }
+        let width = graphene_model_width(handle)
+        let height = graphene_model_height(handle)
+        let mut pixels = Vec[u32]::with_capacity((width as usize) *(height as usize))
+        for index in 0_usize..(width as usize) *(height as usize) {
+            pixels.push(graphene_model_pixel(handle, index))
+        }
+        graphene_model_close(handle)
+        ret Result::Ok(SourceModel {
+                MeshData::new(vertices, indices, 44), TextureImage {
+                    width, height, pixels
+                }
+            }
+            ,
+        )
+    }
+}

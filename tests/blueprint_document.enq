@@ -1,0 +1,72 @@
+import core::vec::Vec
+import graphene::blueprint::*
+
+fn main() -> u32 {
+    let mut document = BlueprintDocument::new(rotator_blueprint())
+    if document.can_undo() || document.can_redo() { ret 19 }
+    let semantic = document.semantic()
+    if !document.mark_compiled(semantic) || document.needs_compile() {
+        ret 1
+    }
+    if document.execute(BlueprintCommand::BeginGesture).is_err() {
+        ret 2
+    }
+    if document.execute(BlueprintCommand::MoveNode(BlueprintMove { 1, 50, 70 })).is_err() {
+        ret 3
+    }
+    if document.execute(BlueprintCommand::MoveNode(BlueprintMove { 1, 100, 200 })).is_err() {
+        ret 4
+    }
+    if document.execute(BlueprintCommand::CommitGesture).is_err() || document.revision() != 1 || document.needs_compile() {
+        ret 5
+    }
+    let _undo = document.execute(BlueprintCommand::Undo)
+    if !document.can_redo() || document.can_undo() { ret 20 }
+    if document.asset().node(1).unwrap_or(BlueprintNode::new(0, "", BlueprintType::Exec)).x != 40 {
+        ret 6
+    }
+    let _redo = document.execute(BlueprintCommand::Redo)
+    if document.asset().node(1).unwrap_or(BlueprintNode::new(0, "", BlueprintType::Exec)).x != 100 {
+        ret 7
+    }
+    let _change = document.execute(BlueprintCommand::SetProperty(BlueprintProperty {
+                1, "Speed", BlueprintValue::F32(3)
+            }
+            ,
+        ))
+    if !document.needs_compile() || document.mark_compiled(semantic) {
+        ret 8
+    }
+    let clipboard = document.copy_nodes(vec![1_u64, 2_u64, 3_u64])
+    let initial_count = document.asset().nodes.len()
+    let _paste = document.execute(BlueprintCommand::Paste(clipboard))
+    if document.asset().nodes.len() != initial_count + 3 {
+        ret 9
+    }
+    document.set_playing(true)
+    if document.execute(BlueprintCommand::RemoveProperty(1)).is_ok() {
+        ret 10
+    }
+    document.set_playing(false)
+    let _remove = document.execute(BlueprintCommand::RemoveProperty(1))
+    if validate_blueprint(document.asset()).len() == 0 {
+        ret 11
+    }
+    let mut edges = BlueprintDocument::new(rotator_blueprint())
+    let original = blueprint_stringify(edges.asset())
+    let bad = BlueprintLink { BlueprintEndpoint { 2, "value" }, BlueprintEndpoint { 9, "condition" } }
+    if edges.execute(BlueprintCommand::Connect(bad)).is_ok() || blueprint_stringify(edges.asset()) != original { ret 12 }
+    let cycle = BlueprintLink { BlueprintEndpoint { 3, "value" }, BlueprintEndpoint { 3, "a" } }
+    if edges.execute(BlueprintCommand::Connect(cycle)).is_ok() || edges.dirty() { ret 13 }
+    let replacement = BlueprintLink { BlueprintEndpoint { 4, "value" }, BlueprintEndpoint { 3, "a" } }
+    if edges.execute(BlueprintCommand::Connect(replacement)).is_err() || edges.asset().links.len() != rotator_blueprint().links.len() { ret 14 }
+    let _undo_edge = edges.execute(BlueprintCommand::Undo)
+    if blueprint_stringify(edges.asset()) != original || edges.dirty() { ret 15 }
+    let _gesture = edges.execute(BlueprintCommand::BeginGesture)
+    if edges.execute(BlueprintCommand::MoveNodes(vec![BlueprintMove { 1, 90, 90 }, BlueprintMove { 2, 150, 150 }])).is_err() || !edges.dirty() { ret 16 }
+    let _cancel = edges.execute(BlueprintCommand::CancelGesture)
+    if blueprint_stringify(edges.asset()) != original || edges.dirty() { ret 17 }
+    let invalid_moves = vec![BlueprintMove { 1, 70, 80 }, BlueprintMove { 9999, 0, 0 }]
+    if edges.execute(BlueprintCommand::MoveNodes(invalid_moves)).is_ok() || blueprint_stringify(edges.asset()) != original { ret 18 }
+    ret 0
+}

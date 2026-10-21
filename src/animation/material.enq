@@ -1,0 +1,53 @@
+//! Serializable material samples shared by offline import and cooked characters.
+import core::result::Result
+import core::vec::Vec
+import mod::math::animation_finite
+import mod::model::AnimationValue
+/// Base-color pixels retain sRGB encoding; normals retain raw data samples.
+/// Upload color with sRGB format and normals with linear UNORM.
+pub struct AnimationSourceImage {
+    width: u32
+    height: u32
+    pixels: Vec[u32]
+    has_texture: bool
+}
+pub struct AnimationSourceMaterial {
+    name: str
+    base_color: AnimationValue
+    metallic: f32
+    roughness: f32
+    normal_scale: f32
+    unlit: bool
+    double_sided: bool
+    alpha_mode: u32
+    alpha_cutoff: f32
+    base_image: AnimationSourceImage
+    normal_image: AnimationSourceImage
+}
+
+impl for AnimationSourceImage {
+    pub fn validate(self: Self) -> Result[bool, str] {
+        if self.width == 0_u32 || self.height == 0_u32 || self.width > 16384_u32 || self.height > 16384_u32 || self.pixels.len() > 16777216_usize || self.pixels.len() !=(self.width as usize) *(self.height as usize) {
+            ret Result::Err("Invalid animation texture dimensions")
+        }
+        if !self.has_texture &&(self.width != 1_u32 || self.height != 1_u32) {
+            ret Result::Err("Missing animation texture must use a single fallback sample")
+        }
+        ret Result::Ok(true)
+    }
+}
+
+impl for AnimationSourceMaterial {
+    pub fn validate(self: Self) -> Result[bool, str] {
+        if self.name == "" || !self.base_color.finite() || !animation_finite(self.normal_scale) || !animation_finite(self.alpha_cutoff) || self.alpha_cutoff < 0_f32 || self.alpha_mode > 2_u32 {
+            ret Result::Err("Invalid animation material")
+        }
+        for value in vec![self.base_color.x, self.base_color.y, self.base_color.z, self.base_color.w, self.metallic, self.roughness] {
+            if !(value >= 0_f32 && value <= 1_f32) {
+                ret Result::Err("Animation material factor outside [0,1]")
+            }
+        }
+        self.base_image.validate()? self.normal_image.validate()?
+        ret Result::Ok(true)
+    }
+}

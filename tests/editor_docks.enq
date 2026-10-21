@@ -1,0 +1,183 @@
+//! Invisible dock hit targets keep their geometry through hover/focus and resize.
+import core::vec::Vec
+import luma::{ReactiveUi, Rect, StyleSheet, Widget, layout_widget}
+import std::os::read_file
+
+fn splitter(id: str, row: bool) -> Widget {
+    ret Widget::button(id, "").with_classes(if row {
+            "dock-splitter dock-splitter-row"
+        } else {
+            "dock-splitter dock-splitter-column"
+        }
+    )
+}
+
+fn axes() -> Vec[str] {
+    let mut values = Vec[str]::new()
+    values.push("x") values.push("y") values.push("z")
+    ret values
+}
+
+fn transform_controls() -> Widget {
+    let mut panel = Widget::panel("details-panel").with_classes("editor-panel g-inspector")
+    let mut values = Widget::panel("transform-location").with_classes("g-transform-property")
+    values.push(Widget::label("Location").with_classes("g-transform-property-label"))
+    for axis in axes() {
+        values.push(Widget::panel(axis + "-field").with_classes("g-property-value")
+            .with_child(Widget::label(axis).with_classes("g-transform-axis-badge"))
+            .with_child(Widget::input(axis + "-input", "0.000").with_classes("g-transform-value-input")))
+
+    }
+    values.push(Widget::button("ui-transform-location", "...").with_classes("g-property-menu"))
+    panel.push(values)
+    ret panel
+}
+
+fn editor(details_width: f32) -> Widget {
+    let mut upper = Widget::panel("upper").with_classes("upper-workspace")
+    upper.push(Widget::panel("outliner-dock").with_classes("outliner-dock")
+        .with_child(Widget::panel("hierarchy").with_classes("g-hierarchy")))
+    upper.push(splitter("dock-splitter-outliner", false))
+    upper.push(Widget::panel("viewport").with_classes("viewport")
+        .with_child(Widget::render_surface("viewport-surface").with_classes("viewport-surface g-viewport-3")))
+    upper.push(splitter("dock-splitter-details", false))
+    upper.push(Widget::panel("details-dock").with_classes("details-dock")
+        .with_geometry_basis(details_width).with_child(transform_controls()))
+    ret Widget::panel("root").with_classes("graphene-editor").with_child(upper)
+    .with_child(splitter("dock-splitter-bottom", true))
+    .with_child(Widget::panel("lower").with_classes("lower-workspace"))
+}
+
+fn invisible_hit(ui: mut ReactiveUi, id: str, row: bool) -> bool {
+    let layout = ui.find_layout(id).unwrap_or(ui.layout())
+    let bounds = layout.bounds()
+    let style = layout.widget().style()
+    if style.background().alpha() != 0 || style.border_width() != 0 || style.outline().width() != 0 {
+        ret false
+    }
+    if row {
+        ret bounds.height() == 8 &&
+        ui.hit(bounds.x() + bounds.width() / 2, bounds.y() + 0.25) == id &&
+        ui.hit(bounds.x() + bounds.width() / 2, bounds.bottom() - 0.25) == id
+    }
+    ret bounds.width() == 8 &&
+    ui.hit(bounds.x() + 0.25, bounds.y() + bounds.height() / 2) == id &&
+    ui.hit(bounds.right() - 0.25, bounds.y() + bounds.height() / 2) == id
+}
+
+fn resize_lower(ui: mut ReactiveUi, height: f32) -> bool {
+    let mut path = Vec[usize]::new()
+    path.push(2)
+    let mut dirty = Vec[Vec[usize]]::new()
+    dirty.push(path)
+    ret ui.patch_bound_geometry(path, Widget::panel("lower").with_classes("lower-workspace")
+        .with_geometry_basis(height),) && ui.reflow_bound_geometry(dirty)
+}
+
+fn main() -> u32 {
+    let sheet = StyleSheet::parse(read_file("graphene.css"))
+    let root = editor(292)
+    let mut ids = Vec[str]::new()
+    ids.push("dock-splitter-outliner")
+    ids.push("dock-splitter-details")
+    ids.push("dock-splitter-bottom")
+    for id in ids {
+        for state in 0..4 {
+            let mut ui = ReactiveUi::new(layout_widget(sheet.apply(root,
+                        if state == 1 {
+                            id
+                        } else {
+                            ""
+                        }
+                        ,
+                        if state == 2 {
+                            id
+                        } else {
+                            ""
+                        }
+                        ,
+                        if state == 3 {
+                            id
+                        } else {
+                            ""
+                        }
+                        ,), Rect::new(0, 0, 1440, 900)))
+            if !invisible_hit(ui, id, id == "dock-splitter-bottom") {
+                ret 1
+            }
+            let outliner = ui.find_layout("outliner-dock").unwrap_or(ui.layout()).bounds()
+            let viewport = ui.find_layout("viewport").unwrap_or(ui.layout()).bounds()
+            let details = ui.find_layout("details-dock").unwrap_or(ui.layout()).bounds()
+            if outliner.width() != 242 || details.width() != 292 ||
+            viewport.x() - outliner.right() > 2 || details.x() - viewport.right() > 2 {
+                ret 2
+            }
+            let mut path = Vec[usize]::new()
+            path.push(0) path.push(0)
+            let local = Widget::panel("outliner-dock").with_classes("outliner-dock")
+            .with_geometry_basis(340)
+            let mut dirty = Vec[Vec[usize]]::new()
+            dirty.push(path)
+            if !ui.patch_bound_geometry(path, local) || !ui.reflow_bound_geometry(dirty) {
+                ret 3
+            }
+            if ui.find_layout("outliner-dock").unwrap_or(ui.layout()).bounds().width() != 340 ||
+            ui.find_layout("hierarchy").unwrap_or(ui.layout()).bounds().width() != 340 ||
+            ui.find_layout("details-dock").unwrap_or(ui.layout()).bounds().width() != 292 ||
+            !invisible_hit(ui, "dock-splitter-outliner", false) ||
+            !invisible_hit(ui, "dock-splitter-details", false) {
+                ret 4
+            }
+            let lower = ui.find_layout("lower").unwrap_or(ui.layout()).bounds()
+            // Capturing the current pixel height must not add a flex-grow share.
+            if !resize_lower(ui, lower.height()) {
+                ret 5
+            }
+            let captured = ui.find_layout("lower").unwrap_or(ui.layout()).bounds()
+            if captured.y() != lower.y() || captured.height() != lower.height() {
+                ret 6
+            }
+            if !resize_lower(ui, lower.height() + 60) ||
+            ui.find_layout("lower").unwrap_or(ui.layout()).bounds().height() != lower.height() + 60 ||
+            !invisible_hit(ui, "dock-splitter-bottom", true) {
+                ret 7
+            }
+            if !resize_lower(ui, lower.height()) ||
+            ui.find_layout("lower").unwrap_or(ui.layout()).bounds().y() != lower.y() {
+                ret 8
+            }
+        }
+    }
+    let mut widths = Vec[f32]::new()
+    widths.push(1320) widths.push(1440) widths.push(2560)
+    let mut detail_widths = Vec[f32]::new()
+    detail_widths.push(280) detail_widths.push(292) detail_widths.push(720)
+    for width in widths {
+        for details_width in detail_widths {
+            if width < 2000 && details_width > 300 {
+                continue
+            }
+            let mut ui = ReactiveUi::new(layout_widget(sheet.apply(editor(details_width), "", "", ""),
+                    Rect::new(0, 0, width, 900),))
+            let viewport = ui.find_layout("viewport").unwrap_or(ui.layout())
+            if viewport.bounds().width() < viewport.widget().style().layout().min_width() ||
+            ui.find_layout("details-dock").unwrap_or(ui.layout()).bounds().right() > width {
+                ret 9
+            }
+            for axis in axes() {
+                let field = ui.find_layout(axis + "-field").unwrap_or(ui.layout()).bounds()
+                let details = ui.find_layout("details-panel").unwrap_or(ui.layout()).bounds()
+                let menu = ui.find_layout("ui-transform-location").unwrap_or(ui.layout()).bounds()
+                if field.width() < 55 || field.height() != 24 ||
+                field.right() > details.right() || menu.right() > details.right() ||
+                ui.find_layout(axis + "-stepper").is_some() ||
+                ui.find_layout(axis + "-minus").is_some() ||
+                ui.find_layout(axis + "-plus").is_some() {
+                    ret 10
+                }
+
+            }
+        }
+    }
+    ret 0
+}

@@ -1,0 +1,138 @@
+//! Original templates are ordinary editable graphs, not special backend branches.
+import core::vec::Vec
+import linalg::Vec3
+import mod::model::*
+fn vfx_template_node(id: u64, op: str, value: ParticleValue, x: f32, y: f32) -> ParticleNode {
+    let mut n = ParticleNode::new(id, op, x, y) n.value = value ret n
+}
+pub fn particle_template(name: str) -> ParticleSystem {
+    let mut system = ParticleSystem::new(name) system.identity = "graphene.template." + name
+    let mut emitter = ParticleEmitter::new(name) emitter.identity = "primary"
+    if name == "Gas 2D" || name == "Smoke 3D" || name == "Fire 3D" || name == "Liquid" || name == "Shallow Water" {
+        emitter.renderer = if name == "Gas 2D" {
+            "gas-2d"
+        } elif name == "Liquid" {
+            "liquid"
+        } elif name == "Shallow Water" {
+            "shallow-water"
+        } else {
+            "gas-3d"
+        }
+        emitter.color = if name == "Fire 3D" {
+            ParticleValue::vector(0.2_f32, 0.22_f32, 0.25_f32, 1)
+        } else {
+            ParticleValue::vector(0.45_f32, 0.5_f32, 0.6_f32, 1)
+        }
+        emitter.rate = 0 emitter.position = Vec3::new( - 1.6_f32, 0, - 1.6_f32)
+        system.parameters = vec![ParticleParameter {
+                "Fluid.Grid", "vec4", ParticleValue::vector(32, 48, if name == "Gas 2D" || name == "Shallow Water" {
+                        1_f32
+                    } else {
+                        32_f32
+                    }
+                    , 0.1_f32,)
+            }
+            , ParticleParameter {
+                "Fluid.Source", "vec4", ParticleValue::vector(1.6_f32, 1, if name == "Gas 2D" {
+                        0.05_f32
+                    } else {
+                        1.6_f32
+                    }
+                    , 0.5_f32,)
+            }
+            , ParticleParameter {
+                "Fluid.Injection", "vec4", ParticleValue::vector(4, if name == "Fire 3D" {
+                        4_f32
+                    } else {
+                        1_f32
+                    }
+                    , if name == "Fire 3D" {
+                        2_f32
+                    } else {
+                        0_f32
+                    }
+                    , 0.15_f32,)
+            }
+            , ParticleParameter {
+                "Fluid.Forces", "vec4", ParticleValue::vector( - 9.81_f32, 2, 32, 1)
+            }
+            , ParticleParameter {
+                "Fluid.Velocity", "vec4", ParticleValue::vector(0, 1, 0, 1)
+            }
+            , ParticleParameter {
+                "Fluid.Obstacle", "vec4", ParticleValue::vector(1.6_f32, 2, 1.6_f32, 0)
+            }
+            , ParticleParameter {
+                "Fluid.Liquid", "vec4", ParticleValue::vector(8192, 7, 0.95_f32, 0.5_f32)
+            }
+        ]
+        system.emitters.push(emitter) ret system
+    }
+    if name == "Smoke" {
+        emitter.rate = 80 emitter.lifetime = 6 emitter.speed = 0.6_f32 emitter.size = 0.3_f32 emitter.gravity = 0.3_f32 emitter.drag = 0.4_f32 emitter.color = ParticleValue::vector(0.25_f32, 0.3_f32, 0.36_f32, 0.3_f32)
+    } elif name == "Fire" {
+        emitter.rate = 300 emitter.lifetime = 1.5_f32 emitter.speed = 1 emitter.size = 0.2_f32 emitter.gravity = 1 emitter.drag = 0.8_f32
+    } elif name == "Fountain" {
+        emitter.rate = 600 emitter.lifetime = 4 emitter.speed = 5 emitter.size = 0.045_f32 emitter.gravity = - 3 emitter.color = ParticleValue::vector(0.15_f32, 0.55_f32, 1, 0.8_f32)
+    } elif name == "Explosion" {
+        emitter.rate = 0 emitter.burst = 1500_u32 emitter.duration = 0.1_f32 emitter.looping = false emitter.lifetime = 2 emitter.speed = 6 emitter.gravity = - 1 emitter.drag = 1
+    } elif name == "Snow" {
+        emitter.rate = 500 emitter.lifetime = 8 emitter.speed = - 0.5_f32 emitter.gravity = - 0.2_f32 emitter.size = 0.035_f32 emitter.color = ParticleValue::vector(1, 1, 1, 0.8_f32)
+    }
+    let mut shape = ParticleModule::new("Spawn shape", 0_u32) shape.identity = "spawn-shape"
+    shape.nodes.push(vfx_template_node(1_u64, "sphere", ParticleValue::scalar(if name == "Explosion" {
+                    0.1_f32
+                } else {
+                    0.4_f32
+                }
+            ), 0, 0))
+    let mut position = vfx_template_node(2_u64, "load", ParticleValue::scalar(0), 0, 140) position.attribute = 0_u32 shape.nodes.push(position)
+    shape.nodes.push(vfx_template_node(3_u64, "add", ParticleValue::scalar(0), 260, 40))
+    let mut store = vfx_template_node(4_u64, "store", ParticleValue::scalar(0), 520, 40) store.attribute = 0_u32 shape.nodes.push(store)
+    shape.links = vec![ParticleLink { 1_u64, 3_u64, 0_u32 }, ParticleLink { 2_u64, 3_u64, 1_u32 }, ParticleLink {
+            3_u64, 4_u64, 0_u32
+        }
+    ] emitter.modules.push(shape)
+    let mut motion = ParticleModule::new("Cone velocity", 0_u32) motion.identity = "spawn-velocity"
+    motion.nodes.push(vfx_template_node(1_u64, "cone", ParticleValue::vector(if name == "Explosion" {
+                    3.1415927_f32
+                } else {
+                    0.3_f32
+                }
+                , emitter.speed, 0, 0,), 0, 0))
+    let mut velocity = vfx_template_node(2_u64, "load", ParticleValue::scalar(0), 0, 140) velocity.attribute = 1_u32 motion.nodes.push(velocity)
+    // Remove the default velocity without changing lifetime in W.
+    motion.nodes.push(vfx_template_node(3_u64, "constant", ParticleValue::vector(0, 0, 0, 1), 260, 180))
+    motion.nodes.push(vfx_template_node(4_u64, "multiply", ParticleValue::scalar(0), 520, 150))
+    motion.nodes.push(vfx_template_node(5_u64, "add", ParticleValue::scalar(0), 780, 40))
+    let mut velocity_store = vfx_template_node(6_u64, "store", ParticleValue::scalar(0), 1040, 40) velocity_store.attribute = 1_u32 motion.nodes.push(velocity_store)
+    motion.links = vec![ParticleLink { 2_u64, 4_u64, 0_u32 }, ParticleLink { 3_u64, 4_u64, 1_u32 }, ParticleLink {
+            1_u64, 5_u64, 0_u32
+        }
+        , ParticleLink {
+            4_u64, 5_u64, 1_u32
+        }
+        , ParticleLink {
+            5_u64, 6_u64, 0_u32
+        }
+    ] emitter.modules.push(motion)
+    let mut color = ParticleModule::new("Color over life", 1_u32) color.identity = "color-life"
+    color.nodes.push(vfx_template_node(1_u64, "context", ParticleValue::scalar(2), 0, 0))
+    let mut gradient = vfx_template_node(2_u64, "curve", ParticleValue::scalar(0), 260, 0)
+    let mut end = emitter.color end.w = 0
+    gradient.points = vec![ParticleCurvePoint { 0, emitter.color }, ParticleCurvePoint {
+            0.7_f32, emitter.color
+        }
+        , ParticleCurvePoint {
+            1, end
+        }
+    ]
+    color.nodes.push(gradient) let mut color_store = vfx_template_node(3_u64, "store", ParticleValue::scalar(0), 520, 0) color_store.attribute = 2_u32 color.nodes.push(color_store)
+    color.links = vec![ParticleLink { 1_u64, 2_u64, 0_u32 }, ParticleLink { 2_u64, 3_u64, 0_u32 }] emitter.modules.push(color)
+    let mut collision = ParticleModule::new("Ground collision", 7_u32) collision.identity = "ground"
+    collision.nodes.push(vfx_template_node(1_u64, "plane-collision", ParticleValue::vector(0, 0.4_f32, 0, 0), 0, 0)) emitter.modules.push(collision)
+    system.emitters.push(emitter) ret system
+}
+pub fn particle_templates() -> Vec[str] {
+    ret vec!["Sparks", "Smoke", "Fire", "Fountain", "Explosion", "Snow", "Gas 2D", "Smoke 3D", "Fire 3D", "Liquid", "Shallow Water"]
+}

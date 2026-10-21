@@ -1,0 +1,179 @@
+//! Shared geometry for paint, pin picking and frame selection.
+import core::vec::Vec
+import luma::{CanvasView, DisplayList, DisplayPoint, Rect, Point, Style, StyleSheet, Widget, SvgDocument, IconManager, canvas_cubic, canvas_grid}
+import mod::catalog::operation_info
+import mod::model::*
+
+pub struct BlueprintIcons {
+    names: Vec[str]
+    documents: Vec[SvgDocument]
+}
+
+impl for BlueprintIcons {
+    pub fn load(manager: IconManager) -> BlueprintIcons {
+        let names = vec!["hammer", "play", "timer", "keyboard", "hash", "variable", "plus", "minus", "x", "divide", "equal", "chevron-left", "chevron-right", "git-merge", "git-branch", "circle-slash", "move-3d", "split", "list-ordered", "rotate-3d", "scale-3d", "eye", "terminal", "circle-help", "save", "undo", "redo", "scan", "search", "box", "folder", "chevron-down", "circle-alert", "check", "sliders-horizontal", "panel-left", "panel-right", "circle-dot", "copy", "trash-2"]
+        let mut documents = Vec[SvgDocument]::new()
+        for name in names {
+            documents.push(manager.document(name))
+        }
+        ret BlueprintIcons { names, documents }
+    }
+    pub fn get(self: Self, name: str) -> SvgDocument {
+        let mut index = 0_usize
+        for key in self.names {
+            if key == name {
+                ret self.documents.get(index).unwrap_or(SvgDocument::empty())
+            }
+            index += 1
+        }
+        ret SvgDocument::empty()
+    }
+}
+pub fn bp_style(sheet: StyleSheet, classes: str) -> Style {
+    ret sheet.style(Widget::panel("").with_classes(classes), false, false, false)
+}
+/// World-aligned grid, bounded by the visible area rather than graph size.
+pub fn grid_paint(view: CanvasView, viewport: Rect, style: Style) -> DisplayList {
+    ret canvas_grid(view, viewport, style.foreground(), style.background())
+}
+
+pub fn node_bounds(node: BlueprintNode) -> Rect {
+    let mut inputs = 0_u32 let mut outputs = 0_u32
+    for pin in blueprint_pins(node) {
+        if pin.output {
+            outputs += 1
+        } else {
+            inputs += 1
+        }
+    }
+    let count = if inputs > outputs {
+        inputs
+    } else {
+        outputs
+    }
+    ret Rect::new(node.x, node.y, 248, 62 +(count as f32) * 28)
+}
+pub fn pin_point(node: BlueprintNode, key: str, output: bool) -> Point {
+    let mut row = 0_u32
+    for pin in blueprint_pins(node) {
+        if pin.output == output {
+            if pin.key == key {
+                ret Point::new(node.x +(if output {
+                            248_f32
+                        } else {
+                            0_f32
+                        }
+                    ), node.y + 57 +(row as f32) * 28)
+            }
+            row += 1
+        }
+    }
+    ret Point::new(node.x, node.y)
+}
+fn pin_label(key: str) -> str {
+    ret match key {
+        "in" => "In" "then" => "Then" "value" => "Value" "delta" => "Delta seconds"
+        "condition" => "Condition" "true" => "True" "false" => "False" "first" => "First" "second" => "Second"
+        "result" => "Result" "x" => "X" "y" => "Y" "z" => "Z" "a" => "A" "b" => "B" _ => key
+    }
+}
+pub fn node_paint(node: BlueprintNode, asset: BlueprintAsset, selected: bool, error: bool, icons: BlueprintIcons, sheet: StyleSheet) -> DisplayList {
+    let bounds = node_bounds(node)
+    let info = operation_info(node.operation)
+    let base = bp_style(sheet, "bp-node" +(if selected {
+                " selected"
+            } else {
+                ""
+            }
+        ) +(if error {
+                " invalid"
+            } else {
+                ""
+            }
+        ))
+    let title = bp_style(sheet, "bp-node-title") let label = bp_style(sheet, "bp-node-label")
+    let header = bp_style(sheet, "bp-category-" + info.category)
+    let mut paint = DisplayList::new()
+    paint.round_rect(bounds, base.radius(), base.background(), true)
+    paint.round_rect(bounds, base.radius(), base.border_color(), false)
+    paint.clip(Rect::new(node.x + 1, node.y + 1, bounds.width() - 2, bounds.height() - 2))
+    paint.round_rect(Rect::new(node.x + 1, node.y + 1, bounds.width() - 2, 36), base.radius(), header.background(), true)
+    paint.svg(Rect::new(node.x + 12, node.y + 10, 16, 16), icons.get(info.icon), title.foreground(), 1.8)
+    paint.styled_text(node.x + 36, node.y + 10, info.title, title)
+    let detail = if node.operation == "get-variable" || node.operation == "set-variable" {
+        match asset.property(node.reference) {
+            Some(value) => value.name None => "Choose a variable"
+        }
+    } elif node.operation == "input-pressed" || node.operation == "input-released" {
+        node.text
+    } else {
+        ""
+    }
+    if detail != "" {
+        paint.styled_text(node.x + 12, bounds.bottom() - 19, detail, bp_style(sheet, "bp-node-detail"))
+    }
+    paint.clear_clip()
+    for pin in blueprint_pins(node) {
+        let point = pin_point(node, pin.key, pin.output)
+        let style = bp_style(sheet, "bp-pin-" + pin.value_type.name())
+        if pin.value_type.name() == "exec" {
+            paint.path(vec![DisplayPoint::new(point.x() - 4, point.y() - 5), DisplayPoint::new(point.x() + 4, point.y()), DisplayPoint::new(point.x() - 4, point.y() + 5)], 1.7, style.foreground(), true)
+        } else {
+            paint.round_rect(Rect::new(point.x() - 4, point.y() - 4, 8, 8), 4, style.foreground(), true)
+        }
+        let text = pin_label(pin.key)
+        paint.styled_text(if pin.output {
+                node.x + 232 -(text.char_len() as f32) * 6.5
+            } else {
+                node.x + 14
+            }
+            , point.y() - 7, text, label,)
+    }
+    ret paint
+}
+pub fn wire_bounds(source: BlueprintNode, target: BlueprintNode, link: BlueprintLink) -> Rect {
+    let a = pin_point(source, link.source.pin, true) let b = pin_point(target, link.target.pin, false)
+    let left = if a.x() < b.x() {
+        a.x()
+    } else {
+        b.x()
+    }
+    let top = if a.y() < b.y() {
+        a.y()
+    } else {
+        b.y()
+    }
+    let width = if a.x() > b.x() {
+        a.x() - b.x()
+    } else {
+        b.x() - a.x()
+    }
+    let height = if a.y() > b.y() {
+        a.y() - b.y()
+    } else {
+        b.y() - a.y()
+    }
+    ret Rect::new(left - 130, top - 5, width + 260, height + 10)
+}
+pub fn wire_paint(source: BlueprintNode, target: BlueprintNode, link: BlueprintLink, sheet: StyleSheet) -> DisplayList {
+    let a = pin_point(source, link.source.pin, true) let b = pin_point(target, link.target.pin, false)
+    let kind = match blueprint_pin(source, link.source.pin, true) {
+        Some(pin) => pin.value_type.name() None => "exec"
+    }
+    let style = bp_style(sheet, "bp-pin-" + kind)
+    let distance = if a.x() > b.x() {
+        a.x() - b.x()
+    } else {
+        b.x() - a.x()
+    }
+    let handle = if distance * 0.45 > 120 {
+        120_f32
+    } elif distance * 0.45 < 50 {
+        50_f32
+    } else {
+        distance * 0.45
+    }
+    let mut paint = DisplayList::new()
+    paint.path(canvas_cubic(DisplayPoint::new(a.x(), a.y()), DisplayPoint::new(a.x() + handle, a.y()), DisplayPoint::new(b.x() - handle, b.y()), DisplayPoint::new(b.x(), b.y()), 24), 1.7, style.foreground(), false)
+    ret paint
+}

@@ -1,0 +1,251 @@
+import binary::{encode, decode}
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import graphene::content_browser::files::{content_move, scan_content}
+import graphene::content_browser::model::ContentAsset
+import graphene::content_browser::operations::content_suffix
+import graphene::prepare_mesh_geometry
+import graphene::{NativeMesh, StandardMaterial, TextureImage, asset_source_stamp, load_obj_asset, load_native_mesh, save_native_mesh, load_native_texture, save_native_texture, load_native_material, save_native_material, cube_mesh, native_mesh_valid, MeshData}
+import graphene::{load_material_asset_file, save_material_asset_file}
+import linalg::Vec3
+import std::os::{mkdir_all, read_file, write_file, copy_file, file_exists}
+import std::time::perf_counter_ns
+
+extern fn encore_str_from_buffer(bytes: u8*, length: usize) -> str
+#attr(safe)
+fn text(bytes: Vec[u8]) -> str {
+    unsafe {
+        ret encore_str_from_buffer(bytes.as_ptr(), bytes.len())
+    }
+}
+struct Header {
+    version: u32
+    kind: str
+    identity: str
+    source: str
+    revision: str
+    payload_sha256: str
+}
+fn main() -> u32 {
+    let root = "/tmp/graphene-native-assets-" + perf_counter_ns().fmt()
+    if mkdir_all(root) != 0 {
+        ret 1
+    }
+    let source = root + "/Triangle.obj"
+    if write_file(source, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n") != 0 {
+        ret 2
+    }
+    let first = match load_obj_asset(source) {
+        Ok(asset) => asset Err(_) => {
+            ret 3
+        }
+    }
+    if !file_exists(source + ".gmesh") {
+        ret 4
+    }
+    let stamp = asset_source_stamp(source + ".gmesh")
+    let warm = match load_obj_asset(source) {
+        Ok(asset) => asset Err(_) => {
+            ret 5
+        }
+    }
+    if stamp != asset_source_stamp(source + ".gmesh") || warm.mesh().indices().len() != 3 {
+        ret 6
+    }
+    if load_native_mesh(source + ".gmesh", "different revision").is_ok() {
+        ret 7
+    }
+    // Native data is sufficient even when no importer source is distributed.
+    let standalone = root + "/Standalone.obj.gmesh"
+    if copy_file(source + ".gmesh", standalone) != 0 {
+        ret 8
+    }
+    if load_obj_asset(standalone).is_err() {
+        ret 9
+    }
+    if write_file(source, "v 0 0 0\nv 1 0 0\nv 0 2 0\nf 1 2 3\n") != 0 {
+        ret 10
+    }
+    let changed = match load_obj_asset(source) {
+        Ok(asset) => asset Err(_) => {
+            ret 11
+        }
+    }
+    if stamp == asset_source_stamp(source + ".gmesh") || changed.mesh().vertices().get(23).unwrap_or(0) != 2 {
+        ret 12
+    }
+    let cube = cube_mesh(2).with_uvs()
+    let geometry = prepare_mesh_geometry(cube)
+    if !native_mesh_valid(cube, geometry) || !save_native_mesh(root + "/Cube.gmesh", "Cube", "revision", cube, geometry) {
+        ret 13
+    }
+    let loaded = match load_native_mesh(root + "/Cube.gmesh", "revision") {
+        Ok(value) => value Err(_) => {
+            ret 14
+        }
+    }
+    if loaded.geometry().clusters().len() != geometry.clusters().len() ||
+    loaded.geometry().hierarchy().len() != geometry.hierarchy().len() || loaded.mesh().indices().len() != cube.indices().len() {
+        ret 15
+    }
+    let bad = MeshData::new(cube.vertices(), vec![4294967295_u32, 0, 1], 44)
+    if save_native_mesh(root + "/Invalid.gmesh", "bad", "", bad, geometry) {
+        ret 16
+    }
+    let pixels = vec![0_u32, 4294967295_u32, 4278190335_u32, 305419896_u32]
+    let image = TextureImage { 2, 2, pixels }
+    if !save_native_texture(root + "/Texture.gtexture", "texture", "tex-revision", image) {
+        ret 17
+    }
+    let texture = match load_native_texture(root + "/Texture.gtexture", "tex-revision") {
+        Ok(value) => value Err(_) => {
+            ret 18
+        }
+    }
+    if texture.width != 2 || texture.height != 2 {
+        ret 19
+    }
+    for index in 0..4 {
+        if texture.pixels.get(index).unwrap_or(0) != pixels.get(index).unwrap_or(0) {
+            ret 20
+        }
+    }
+    if load_native_texture(root + "/Texture.gtexture", "stale").is_ok() {
+        ret 21
+    }
+    let material = StandardMaterial::editor_default().with_roughness(0.25).with_metallic(0.7)
+    .with_base_color(Vec3::new(0.1, 0.2, 0.3)).with_unlit().with_double_sided()
+    .with_base_color_texture("Content/Textures/color.png").with_normal_texture("Content/Textures/normal.png")
+    .with_normal_scale(2.5).with_normal_flip_y(true)
+    if !save_native_material(root + "/Material.gmaterial", "material", "mat-revision", material) {
+        ret 22
+    }
+    let restored = match load_native_material(root + "/Material.gmaterial", "mat-revision") {
+        Ok(value) => value Err(_) => {
+            ret 23
+        }
+    }
+    if restored.roughness() != 0.25_f32 || restored.base_color_texture() != "Content/Textures/color.png" {
+        ret 24
+    }
+    if !restored.unlit() || !restored.double_sided() || !restored.normal_flip_y() || restored.normal_scale() != 2.5_f32 ||
+    restored.normal_texture() != "Content/Textures/normal.png" || restored.metallic() != 0.7_f32 || restored.base_color().z() != 0.3_f32 {
+        ret 42
+    }
+    if save_native_material(root + "/Invalid.gmaterial", "", "", material.with_base_color_texture("../outside.png")) {
+        ret 43
+    }
+    if load_native_mesh(root + "/Material.gmaterial", "").is_ok() {
+        ret 25
+    }
+    let original = read_file(root + "/Cube.gmesh")
+    if write_file(root + "/Corrupt.gmesh", original.slice_bytes(0, original.byte_len() - 1) + "x") != 0 {
+        ret 26
+    }
+    if load_native_mesh(root + "/Corrupt.gmesh", "").is_ok() {
+        ret 27
+    }
+    if write_file(root + "/Truncated.gmesh", "GAS1") != 0 {
+        ret 28
+    }
+    if load_native_mesh(root + "/Truncated.gmesh", "").is_ok() {
+        ret 29
+    }
+    // Decode and rewrite just the independently encoded schema header.
+    let length =(original.byte_at(4) as usize) |((original.byte_at(5) as usize) << 8) |
+    ((original.byte_at(6) as usize) << 16) |((original.byte_at(7) as usize) << 24)
+    let mut encoded = Vec[u8]::new()
+    for index in 8..8 + length {
+        encoded.push(original.byte_at(index))
+    }
+    let header = match decode[Header](encoded) {
+        Ok(value) => value Err(_) => {
+            ret 30
+        }
+    }
+    let future = Header {
+        2, header.kind, header.identity, header.source, header.revision, header.payload_sha256
+    }
+    let replacement = match encode(future) {
+        Ok(value) => value Err(_) => {
+            ret 31
+        }
+    }
+    let mut prefix = vec![71_u8, 65, 83, 49]
+    for shift in 0_usize..4_usize {
+        prefix.push(((replacement.len() as u32) >>((shift as u32) * 8)) as u8)
+    }
+    if write_file(root + "/Future.gmesh", text(prefix) + text(replacement) + original.slice_bytes(8 + length, original.byte_len() - 8 - length)) != 0 {
+        ret 32
+    }
+    if load_native_mesh(root + "/Future.gmesh", "").is_ok() {
+        ret 33
+    }
+    if mkdir_all(root + "/Content/Meshes") != 0 {
+        ret 34
+    }
+    let before = "Content/Meshes/Move.obj"
+    let after = "Content/Meshes/Moved.obj"
+    if copy_file(source, root + "/" + before) != 0 || copy_file(source + ".gmesh", root + "/" + before + ".gmesh") != 0 {
+        ret 35
+    }
+    if !content_move(root, before, after) || file_exists(root + "/" + before + ".gmesh") || !file_exists(root + "/" + after + ".gmesh") {
+        ret 36
+    }
+    if write_file(root + "/Content/Meshes/Blocked.obj.gmesh", "existing") != 0 {
+        ret 37
+    }
+    if content_move(root, after, "Content/Meshes/Blocked.obj") || !file_exists(root + "/" + after) || !file_exists(root + "/" + after + ".gmesh") {
+        ret 38
+    }
+    let scan = scan_content(root)
+    let mut companions = 0_u32
+    for entry in scan.entries {
+        if entry.path == after + ".gmesh" {
+            companions += 1
+        }
+    }
+    if companions != 0 {
+        ret 39
+    }
+    if content_suffix(ContentAsset::new("Content/Cube.gmesh", "Cube", "mesh", 1)) != ".gmesh" {
+        ret 40
+    }
+    if save_native_texture(root + "/InvalidTexture.gtexture", "bad", "", TextureImage {
+            0, 0, Vec[u32]::new()
+        }
+        ,
+    ) {
+        ret 41
+    }
+    if copy_file(root + "/Cube.gmesh", root + "/Content/Meshes/Standalone.gmesh") != 0 ||
+    write_file(root + "/Content/Meshes/Standalone.gmesh.autolod", "enabled=false\n") != 0 {
+        ret 44
+    }
+    if !content_move(root, "Content/Meshes/Standalone.gmesh", "Content/Meshes/Shifted.gmesh") {
+        ret 45
+    }
+    let shifted = match load_obj_asset(root + "/Content/Meshes/Shifted.gmesh") {
+        Ok(value) => value Err(_) => {
+            ret 46
+        }
+    }
+    if shifted.autolod_enabled() {
+        ret 47
+    }
+    if !save_material_asset_file(root + "/Direct.gmaterial", material) {
+        ret 48
+    }
+    match load_material_asset_file(root + "/Direct.gmaterial") {
+        Some(value) => {
+            if value.roughness() != 0.25_f32 || !value.normal_flip_y() {
+                ret 49
+            }
+        }
+        None => {
+            ret 50
+        }
+    }
+    ret 0
+}

@@ -1,0 +1,50 @@
+//! Neighboring sections must have real flex extents in the application theme.
+import luma::{Rect, StyleSheet, Widget, layout_widget, property_row, property_section, horizontal, vertical}
+import std::io::println
+import std::os::read_file
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    for width in vec![280_f32, 320_f32] {
+        let mut content = Widget::panel("transform-content").with_classes("g-property-content").with_direction(vertical())
+        for name in vec!["location", "rotation", "scale"] {
+            let mut row = Widget::panel(name).with_classes("g-transform-property").with_direction(horizontal())
+            row.push(Widget::label(name).with_classes("g-transform-property-label"))
+            for axis in vec!["x", "y", "z"] {
+                let mut field = Widget::panel("").with_classes("g-property-value").with_direction(horizontal())
+                field.push(Widget::label(axis).with_classes("g-transform-axis-badge"))
+                field.push(Widget::input(name + "-" + axis, "1.000").with_classes("g-transform-value-input"))
+                row.push(field)
+            }
+            row.push(Widget::button("ui-" + name, "...").with_classes("g-property-menu"))
+            content.push(row)
+        }
+        let panel = Widget::panel("details-panel").with_classes("g-inspector").with_direction(vertical())
+        .with_child(property_section("hierarchy", "Hierarchy", false, Widget::panel("")))
+        .with_child(property_section("transform", "Transform", true, content))
+        .with_child(property_section("mesh", "Static Mesh", false, Widget::panel("")))
+        .with_child(property_row("color-row", "Color", Widget::input("color", "#FFFFFF")))
+        let layout = layout_widget(sheet.apply(panel, "", "", ""), Rect::new(0, 0, width, 500))
+        let transform = layout.find_bounds("transform-section").unwrap_or(Rect::new(0, 0, 0, 0))
+        let mesh = layout.find_bounds("mesh-section").unwrap_or(Rect::new(0, 0, 0, 0))
+        if transform.height() != 106 || mesh.y() < transform.bottom() {
+            ret 1
+        }
+        for name in vec!["location", "rotation", "scale"] {
+            let row = layout.find_bounds(name).unwrap_or(Rect::new(0, 0, 0, 0))
+            if row.height() != 26 || row.width() < width - 20 {
+                ret 2
+            }
+            for axis in vec!["x", "y", "z"] {
+                let field = layout.find_bounds(name + "-" + axis).unwrap_or(Rect::new(0, 0, 0, 0))
+                if field.width() < 30 || field.right() > width {
+                    println(f "{width} {name}-{axis}: {field.x()} {field.width()} row {row.x()} {row.width()}")
+                    ret 3
+                }
+            }
+        }
+        if layout.find_bounds("color-row").unwrap_or(Rect::new(0, 0, 0, 0)).height() != 26 {
+            ret 4
+        }
+    }
+    ret 0
+}

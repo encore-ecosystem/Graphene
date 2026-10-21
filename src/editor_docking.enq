@@ -1,0 +1,102 @@
+//! Editor panel registration and the default docking layout. Panel contents
+//! remain owned by the shared retained tree when their tab group changes.
+import core::option::Option
+import core::panic::panic
+import core::vec::Vec
+import luma::{DockHost, DockNodeId, DockPanel, DockPlacement, DockWorkspace, PanelId, Rect, Size, UiBindings, Widget, WindowId, vertical}
+
+pub fn editor_dock_shell(view: Widget) -> Widget {
+    let body = required(view, "root")
+    let mut children = Vec[Widget]::new()
+    for child in body.children() {
+        if child.id() == "upper" {
+            children.push(Widget::panel("editor-dock-workspace").with_classes("luma-dock-root editor-dock-workspace")
+                .with_direction(vertical()).with_flex(0, 1))
+        } elif child.id() != "lower" && child.id() != "dock-splitter-bottom" {
+            children.push(child)
+        }
+    }
+    ret view.with_children(vec![body.with_children(children)])
+}
+
+pub fn create_editor_docks(bindings: UiBindings<H>, view: Widget, main: WindowId,
+    bounds: Rect,) -> DockHost<H> {
+    let mut workspace = DockWorkspace::new(main)
+    let mut host = DockHost::new(workspace, bindings)
+    let registered = host.register(DockPanel::new("viewport", "Viewport", Size::new(480, 200)), required(view, "viewport")) &&
+    host.register(DockPanel::new("outliner", "World Outliner", Size::new(200, 160)), required(view, "hierarchy")) &&
+    host.register(DockPanel::new("details", "Details", Size::new(280, 180)), required(view, "details-panel")) &&
+    host.register(DockPanel::new("content", "Content Browser", Size::new(280, 140)), required(view, "content-browser")) &&
+    host.register(DockPanel::new("blueprint", "Blueprint", Size::new(620, 280)), Widget::panel("blueprint-editor").with_classes("blueprint-editor")) &&
+    host.register(DockPanel::new("particles", "VFX", Size::new(840,360)),Widget::panel("particle-editor").with_classes("blueprint-editor vfx-editor")) &&
+    host.register(DockPanel::new("audio", "Audio", Size::new(660, 330)), Widget::panel("audio-panel").with_classes("g-perf-panel")) &&
+    host.register(DockPanel::new("environment", "Environment", Size::new(540, 220)), Widget::panel("environment-panel").with_classes("g-perf-panel")) &&
+    host.register(DockPanel::new("performance", "Performance", Size::new(600, 260)), Widget::panel("performance-panel").with_classes("g-perf-panel")) &&
+    host.register(DockPanel::new("material", "Material", Size::new(620, 280)), Widget::panel("material-editor").with_classes("material-editor"))
+    if !registered {
+        panic("unable to register editor panels")
+    }
+    let viewport = PanelId::new("viewport") let details = PanelId::new("details")
+    let outliner = PanelId::new("outliner") let content = PanelId::new("content")
+    let _view = workspace.show(viewport, main)
+    let _details = workspace.show(details, main)
+    let _outliner = workspace.show(outliner, main)
+    let _content = workspace.show(content, main)
+    let group = workspace.location(viewport).unwrap_or(DockNodeId::empty())
+    let _right = workspace.dock(details, group, DockPlacement::Right, 0)
+    let root = match workspace.window(main) {
+        Some(window) => window.root() None => DockNodeId::empty()
+    }
+    let _left = workspace.dock(outliner, root, DockPlacement::Left, 0)
+    let upper = match workspace.window(main) {
+        Some(window) => window.root() None => DockNodeId::empty()
+    }
+    let _bottom = workspace.dock(content, upper, DockPlacement::Bottom, 0)
+    let root = match workspace.window(main) {
+        Some(window) => window.root() None => DockNodeId::empty()
+    }
+    let right = match workspace.node(upper) {
+        Some(node) => node.second() None => DockNodeId::empty()
+    }
+    let width = bounds.width() let height = bounds.height()
+    if width > 244 {
+        let _sized = workspace.resize(upper, 220 /(width - 2))
+        if width > 538 {
+            let _details_sized = workspace.resize(right, 1 - 320 /(width - 224))
+        }
+    }
+    if height > 282 {
+        let _sized = workspace.resize(root, 1 - 180 /(height - 2))
+    }
+    ret host
+}
+
+pub fn stage_editor_dock_contents(host: mut DockHost&, upper: Widget, lower: Widget) -> bool {
+    ret stage_optional(host, "outliner", upper, "hierarchy") &&
+    stage_optional(host, "viewport", upper, "viewport") &&
+    stage_optional(host, "details", upper, "details-panel") &&
+    stage_optional(host, "content", lower, "content-browser")
+}
+
+fn stage_optional(host: mut DockHost&, panel: str, view: Widget, id: str) -> bool {
+    match view.find(id) {
+        Some(widget) => {
+            ret host.stage_panel(PanelId::new(panel), widget)
+        }
+        None => {
+            ret true
+        }
+    }
+}
+
+fn required(view: Widget, id: str) -> Widget {
+    match view.find(id) {
+        Some(widget) => {
+            ret widget
+        }
+        None => {
+            panic("missing editor panel: " + id)
+        }
+    }
+    ret Widget::panel(id)
+}

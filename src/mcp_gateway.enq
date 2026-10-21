@@ -30,10 +30,9 @@ impl for GrapheneMcpGateway {
     fn call_api(self: mut Self, request: str) -> str {
         match self.api {
             Option::Some(api) => {
-                let mut active = api
-                let response = active.handle(request)
-                self.api = Option[AutomationServer]::Some(active)
-                ret response
+                let updated = api.updated(request)
+                self.api = Option[AutomationServer]::Some(updated.0)
+                ret updated.1
             }
             Option::None => {
                 ret automation_request(self.endpoint, request)

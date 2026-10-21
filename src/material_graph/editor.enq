@@ -1,0 +1,1292 @@
+//! Material-specific interaction on Luma's retained canvas and docking system.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import luma::{CanvasScene, CanvasView, DisplayList, DisplayPoint, Event, Point, Rect, StyleSheet, TextEditor, Widget, Window, PreparedFrame, canvas_cubic, horizontal, vertical, event_pointer_down, event_pointer_up, event_pointer_move, event_scroll, event_key_down, event_text_input, event_focus_lost, key_enter, key_escape, key_delete, key_backspace, key_left, key_right, key_home, key_end, key_tab}
+import luma::{canvas_grid, Style, ColorPicker, PickerColor, WidgetLayout, anchored_popup_bounds, property_row}
+import mod::codec::{material_graph_parse, material_graph_stringify}
+import mod::compiler::*
+import mod::cooked::{CookedMaterialGraph, cook_material_graph, save_cooked_material_graph}
+import mod::document::*
+import mod::model::*
+import mod::preview::MaterialPreview
+import refrain::content_search::search_matches
+import refrain::scene::json_value::parse_number
+import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
+fn bp_style(sheet: StyleSheet, classes: str) -> Style {
+    ret sheet.style(Widget::panel("").with_classes(classes), false, false, false)
+}
+fn grid_paint(view: CanvasView, viewport: Rect, style: Style) -> DisplayList {
+    ret canvas_grid(view, viewport, style.foreground(), style.background())
+}
+
+pub struct MaterialEditor {
+    document: MaterialDocument
+    view: CanvasView
+    scene: CanvasScene
+    bounds: Rect
+    selection: Vec[u64]
+    focused: bool
+    field: str
+    fields: Vec[TextEditor]
+    search: TextEditor
+    dragging: bool
+    panning: bool
+    orbiting: bool
+    boxing: bool
+    pointer: Point
+    anchor: Point
+    starts: Vec[MaterialNode]
+    connection: Option[MaterialEndpoint]
+    message: str
+    status: str
+    hovered: u64
+    opened: bool
+    saved_file: bool
+    project: str
+    path: str
+    last_edit: u64
+    attempted: str
+    compiled: str
+    force_compile: bool
+    worker: Option[JoinHandle[i32]]
+    job: Option[MaterialBuild]
+    preview: Option[MaterialPreview]
+    yaw: f32
+    pitch: f32
+    distance: f32
+    controls_dirty: bool
+    picker: ColorPicker
+    picker_open: bool
+    picker_node: u64
+    picker_dirty: bool
+    picker_hover: str
+    published: Option[CookedMaterialGraph]
+    runtime: Option[CookedMaterialGraph]
+    applied: bool
+}
+fn has(ids: Vec[u64], id: u64) -> bool {
+    for value in ids {
+        if value == id {
+            ret true
+        }
+    }
+    ret false
+}
+fn abs(value: f32) -> f32 {
+    ret if value < 0 {
+        - value
+    } else {
+        value
+    }
+}
+/// Compact labels do not change the document's stored floating point values.
+pub fn material_display_number(value: f32) -> str {
+    if value > 1000000 || value < - 1000000 {
+        ret Debug::fmt(value)
+    }
+    let scaled =(abs(value) * 1000 + 0.5) as u64
+    let sign = if value < 0 {
+        "-"
+    } else {
+        ""
+    }
+    let whole = Debug::fmt(scaled / 1000)
+    let fraction = scaled % 1000
+    if fraction == 0 {
+        ret sign + whole
+    }
+    let padded = Debug::fmt(fraction + 1000)
+    let mut decimal = padded.slice_bytes(1, 3)
+    while decimal.byte_len() > 1 && decimal.slice_bytes(decimal.byte_len() - 1, 1) == "0" {
+        decimal = decimal.slice_bytes(0, decimal.byte_len() - 1)
+    }
+    ret sign + whole + "." + decimal
+}
+
+pub fn material_node_bounds(node: MaterialNode) -> Rect {
+    ret Rect::new(node.x, node.y, 220, if material_pins(node).len() > 3 {
+            172_f32
+        } elif material_is_output(node) {
+            152_f32
+        } elif material_polymorphic(node) {
+            128_f32
+        } else {
+            106_f32
+        }
+        ,
+    )
+}
+pub fn material_pin_point(node: MaterialNode, pin: MaterialPin) -> Point {
+    let mut row = 0_usize
+    for candidate in material_pins(node) {
+        if candidate.output == pin.output {
+            if candidate.key == pin.key {
+                break
+            }
+            row += 1
+        }
+    }
+    ret Point::new(node.x + if pin.output {
+            220_f32
+        } else {
+            0_f32
+        }
+        , node.y + 58 +(row as f32) * 28,)
+}
+fn pin_hit(graph: MaterialGraph, at: Point, output: bool, radius: f32) -> Option[MaterialEndpoint] {
+    for node in graph.nodes {
+        for pin in material_pins(node) {
+            if pin.output == output {
+                let point = material_pin_point(node, pin)
+                if abs(point.x() - at.x()) <= radius && abs(point.y() - at.y()) <= radius {
+                    ret Option::Some(MaterialEndpoint {
+                            node.id, pin.key
+                        }
+                        ,
+                    )
+                }
+            }
+        }
+    }
+    ret Option::None
+}
+fn wire(graph: MaterialGraph, link: MaterialLink, sheet: StyleSheet) ->(Rect, DisplayList) {
+    let mut paint = DisplayList::new()
+    let source = graph.node(link.source.node).unwrap_or(MaterialNode::new(0, "", 0, 0))
+    let target = graph.node(link.target.node).unwrap_or(source)
+    let a = material_pin_point(source, material_pin(source, link.source.pin, true).unwrap_or(MaterialPin {
+                "", "scalar", true
+            }
+            ,
+        ))
+    let b = material_pin_point(target, material_pin(target, link.target.pin, false).unwrap_or(MaterialPin {
+                "", "scalar", false
+            }
+            ,
+        ))
+    paint.path(canvas_cubic(DisplayPoint::new(a.x(), a.y()), DisplayPoint::new(a.x() + 90, a.y()), DisplayPoint::new(b.x() - 90, b.y()), DisplayPoint::new(b.x(), b.y()), 24), 1.7,
+        bp_style(sheet, if source.kind == "scalar" {
+                "bp-pin-f32"
+            } else {
+                "bp-pin-vec3"
+            }
+            ,
+        ).foreground(), false,)
+    ret(Rect::new(if a.x() < b.x() {
+                a.x() - 95
+            } else {
+                b.x() - 95
+            }
+            , if a.y() < b.y() {
+                a.y() - 5
+            } else {
+                b.y() - 5
+            }
+            , abs(a.x() - b.x()) + 190, abs(a.y() - b.y()) + 10,), paint)
+}
+
+impl for MaterialEditor {
+    pub fn new() -> Self {
+        ret MaterialEditor {
+            MaterialDocument::new(MaterialGraph::default()), CanvasView::new(), CanvasScene::new(), Rect::new(0, 0, 0, 0), Vec[u64]::new(),
+            false, "", Vec[TextEditor]::new(), TextEditor::new(""), false, false, false, false, Point::new(0, 0), Point::new(0, 0), Vec[MaterialNode]::new(), Option::None, "", "Ready", 0,
+            false, false, "", "", 0, "", "", false, Option::None, Option::None, Option::None, 0.5, 0.25, 3.2, true, ColorPicker::new("mg-picker", PickerColor::linear(0, 0, 0)), false, 0, false, "", Option::None, Option::None, false
+        }
+    }
+    pub fn open(self: mut Self, project: str, sheet: StyleSheet) ->() {
+        self.open_path(project, project + "/Content/Materials/M_Graph.graphene-material-graph.json", sheet)
+    }
+    pub fn open_path(self: mut Self, project: str, path: str, sheet: StyleSheet) ->() {
+        if !self.opened || self.project != project || self.path != path {
+            if self.dirty() {
+                self.message = "Save the open material before opening another asset" ret()
+            }
+            let saved_file = file_exists(path)
+            let graph = if saved_file {
+                match material_graph_parse(read_file(path)) {
+                    Some(graph) => graph
+                    None => {
+                        self.message = "Material graph is invalid; the file has been preserved" self.controls_dirty = true ret()
+                    }
+                }
+            } else {
+                MaterialGraph::default()
+            }
+            self.project = project self.path = path self.saved_file = saved_file
+            self.document = MaterialDocument::new(graph)
+            self.opened = true self.attempted = "" self.force_compile = true self.last_edit = 0 self.selection.clear()
+        }
+        self.focused = true self.refresh(sheet) self.controls_dirty = true
+    }
+    pub fn asset_path(self: Self) -> str {
+        ret if self.opened {
+            self.path
+        } else {
+            ""
+        }
+    }
+    pub fn dirty(self: Self) -> bool {
+        ret self.opened &&(!self.saved_file || self.document.dirty())
+    }
+    pub fn save(self: mut Self, sheet: StyleSheet) -> bool {
+        if self.picker_open {
+            self.message = "Finish color selection before saving" self.controls_dirty = true ret false
+        }
+        if !self.commit_field(sheet) {
+            ret false
+        }
+        if !self.opened ||(self.saved_file && !self.document.dirty()) {
+            ret true
+        }
+        if mkdir_all(std::path::Path::new(self.path).parent().unwrap_or(std::path::Path::new(self.project + "/Content/Materials")).as_str()) != 0 || write_file_atomic(self.path, material_graph_stringify(self.document.graph(), false) + "\n") != 0 {
+            self.message = "Unable to save material graph" self.controls_dirty = true ret false
+        }
+        match self.published {
+            Some(asset) => {
+                if asset.semantic == self.document.semantic() {
+                    match save_cooked_material_graph(asset, self.path) {
+                        Ok(_) => {
+                        }
+                        Err(error) => {
+                            self.message = error self.controls_dirty = true ret false
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        self.document.mark_saved() self.saved_file = true self.message = "" self.controls_dirty = true ret true
+    }
+    pub fn discard(self: mut Self) ->() {
+        self.picker_open = false self.picker_dirty = true
+        self.document = MaterialDocument::new(MaterialGraph::default()) self.opened = false
+        self.selection.clear() self.field = "" self.focused = false self.controls_dirty = true
+        self.force_compile = false self.attempted = "" self.status = "Ready"
+    }
+    pub fn popup_open(self: Self) -> bool {
+        ret self.picker_open
+    }
+    pub fn take_popup_dirty(self: mut Self) -> bool {
+        let dirty = self.picker_dirty self.picker_dirty = false ret dirty
+    }
+    pub fn popup(self: Self, width: f32, height: f32, layout: WidgetLayout) -> Widget {
+        let owner = layout.find_bounds("mg-color-open").unwrap_or(self.bounds)
+        let bounds = anchored_popup_bounds(owner, self.picker.preferred_size(), Rect::new(8, 8, width - 16, height - 16))
+        ret self.picker.widget(width, height).with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_max_height(bounds.height()))
+    }
+    pub fn cancel_color(self: mut Self, sheet: StyleSheet) ->() {
+        if !self.picker_open {
+            ret()
+        }
+        let _cancelled = self.edit(MaterialCommand::CancelGesture, sheet)
+        self.picker_open = false self.picker_dirty = true self.select(sheet) self.field = "mg-color-open"
+    }
+    pub fn color_input(self: mut Self, event: Event, target: str, layout: WidgetLayout, sheet: StyleSheet) -> bool {
+        if !self.picker_open || event.kind() == 0 {
+            ret false
+        }
+        // Resize must still reach the main layout and surface negotiation.
+        if event.kind() != event_pointer_down() && event.kind() != event_pointer_up() && event.kind() != event_pointer_move() && event.kind() != event_key_down() && event.kind() != event_text_input() && event.kind() != event_focus_lost() && event.kind() != event_scroll() {
+            ret false
+        }
+        if layout.find_bounds("mg-color-open").is_none() ||(event.kind() == event_pointer_down() && !layout.find_bounds("mg-picker").unwrap_or(Rect::new(0, 0, 0, 0)).contains(Point::new(event.x(), event.y()))) {
+            self.cancel_color(sheet) ret true
+        }
+        let dragging = self.picker.dragging()
+        let outcome = self.picker.input(event, target, layout)
+        self.picker_dirty = self.picker_dirty || dragging || event.kind() != event_pointer_move() || self.picker_hover != target
+        self.picker_hover = target
+        if outcome == 3 {
+            self.cancel_color(sheet) ret true
+        }
+        if outcome == 1 || outcome == 2 {
+            let color = self.picker.color()
+            match self.document.graph().node(self.picker_node) {
+                Some(node) => {
+                    let _changed = self.edit(MaterialCommand::Set(node.with_value(Vec3::new(color.red(), color.green(), color.blue()))), sheet)
+                }
+                None => {
+                }
+            }
+            self.refresh(sheet)
+        }
+        if outcome == 2 {
+            let _committed = self.edit(MaterialCommand::CommitGesture, sheet)
+            self.picker_open = false self.picker_dirty = true self.select(sheet) self.field = "mg-color-open"
+        }
+        ret true
+    }
+    pub fn take_runtime(self: mut Self) -> Option[CookedMaterialGraph] {
+        let asset = self.runtime self.runtime = Option[CookedMaterialGraph]::None ret asset
+    }
+    pub fn graph(self: Self) -> MaterialGraph {
+        ret self.document.graph()
+    }
+    pub fn status(self: Self) -> str {
+        ret self.status
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.worker.is_some() || self.job.is_some() ||(self.opened &&(self.force_compile || self.document.semantic() != self.attempted))
+    }
+    pub fn take_controls_dirty(self: mut Self) -> bool {
+        let dirty = self.controls_dirty self.controls_dirty = false ret dirty
+    }
+    pub fn view(self: Self) -> CanvasView {
+        ret self.view
+    }
+    pub fn set_bounds(self: mut Self, bounds: Rect) ->() {
+        self.bounds = bounds
+    }
+    pub fn canvas(self: Self, sheet: StyleSheet) -> CanvasScene {
+        let start = self.view.world(0, 0) let end = self.view.world(self.bounds.width(), self.bounds.height())
+        let mut scene = self.scene.with_background(Rect::new(start.x(), start.y(), end.x() - start.x(), end.y() - start.y()), grid_paint(self.view, self.bounds, bp_style(sheet, "bp-grid")))
+        let mut paint = DisplayList::new()
+        let pointer = self.view.world(self.pointer.x(), self.pointer.y())
+        if self.boxing {
+            let rect = Rect::new(if pointer.x() < self.anchor.x() {
+                    pointer.x()
+                } else {
+                    self.anchor.x()
+                }
+                , if pointer.y() < self.anchor.y() {
+                    pointer.y()
+                } else {
+                    self.anchor.y()
+                }
+                , abs(pointer.x() - self.anchor.x()), abs(pointer.y() - self.anchor.y()),)
+            let style = bp_style(sheet, "bp-gesture") paint.fill_rect(rect, style.background()) paint.stroke_rect(rect, style.foreground())
+            scene = scene.with_overlay(rect, paint)
+        } elif self.connection.is_some() {
+            paint.path(canvas_cubic(DisplayPoint::new(self.anchor.x(), self.anchor.y()), DisplayPoint::new(self.anchor.x() + 90, self.anchor.y()), DisplayPoint::new(pointer.x() - 90, pointer.y()), DisplayPoint::new(pointer.x(), pointer.y()), 24), 2, bp_style(sheet, "bp-gesture").foreground(), false)
+            scene = scene.with_overlay(Rect::new(start.x(), start.y(), end.x() - start.x(), end.y() - start.y()), paint)
+        }
+        ret scene
+    }
+    fn node_paint(self: Self, node: MaterialNode, sheet: StyleSheet) -> DisplayList {
+        let bounds = material_node_bounds(node)
+        let style = bp_style(sheet, "bp-node" + if has(self.selection, node.id) {
+                " selected"
+            } elif self.hovered == node.id {
+                " hovered"
+            } else {
+                ""
+            }
+            ,
+        )
+        let title = bp_style(sheet, "bp-node-title") let label = bp_style(sheet, "bp-node-label")
+        let mut paint = DisplayList::new()
+        paint.round_rect(bounds, style.radius(), style.background(), true) paint.round_rect(bounds, style.radius(), style.border_color(), false)
+        paint.round_rect(Rect::new(node.x + 1, node.y + 1, 218, 34), style.radius(), bp_style(sheet, if material_is_output(node) {
+                    "bp-category-Appearance"
+                } elif material_polymorphic(node) {
+                    "bp-category-Math"
+                } else {
+                    "bp-category-Values"
+                }
+                ,
+            ).background(), true)
+        paint.styled_text(node.x + 12, node.y + 10, material_node_title(node.operation), title)
+        for pin in material_pins(node) {
+            let p = material_pin_point(node, pin)
+            paint.round_rect(Rect::new(p.x() - 4, p.y() - 4, 8, 8), 4, bp_style(sheet, if pin.kind == "scalar" {
+                        "bp-pin-f32"
+                    } else {
+                        "bp-pin-vec3"
+                    }
+                    ,
+                ).foreground(), true)
+            let caption = match pin.key {
+                "base_color" => "Base Color" "metallic" => "Metallic" "roughness" => "Roughness" "value" => if pin.kind == "scalar" {
+                    "Scalar"
+                } else {
+                    "Color"
+                }
+                "a" => "A" _ => "B"
+            }
+            paint.styled_text(if pin.output {
+                    node.x + 160
+                } else {
+                    node.x + 14
+                }
+                , p.y() - 7, caption, label,)
+        }
+        if node.operation == "scalar" || node.operation == "color" {
+            let detail = if node.operation == "scalar" {
+                material_display_number(node.value.x())
+            } else {
+                material_display_number(node.value.x()) + ", " + material_display_number(node.value.y()) + ", " + material_display_number(node.value.z())
+            }
+            paint.clip(Rect::new(node.x + 10, bounds.bottom() - 25, bounds.width() - 20, 20))
+            paint.styled_text(node.x + 12, bounds.bottom() - 24, detail, bp_style(sheet, "bp-node-detail"))
+            paint.clear_clip()
+        }
+        ret paint
+    }
+    pub fn refresh(self: mut Self, sheet: StyleSheet) ->() {
+        let graph = self.document.graph() self.scene = CanvasScene::new()
+        for link in graph.links {
+            let drawing = wire(graph, link, sheet) self.scene.add(0, drawing.0, drawing.1, false)
+        }
+        for node in graph.nodes {
+            self.scene.add(node.id, material_node_bounds(node), self.node_paint(node, sheet), true)
+        }
+    }
+    fn update_movement(self: mut Self, sheet: StyleSheet) ->() {
+        let graph = self.document.graph() let mut index = 0_usize
+        for link in graph.links {
+            if has(self.selection, link.source.node) || has(self.selection, link.target.node) {
+                let drawing = wire(graph, link, sheet) let _updated = self.scene.update_item(index, drawing.0, drawing.1)
+            }
+            index += 1
+        }
+        for node in graph.nodes {
+            if has(self.selection, node.id) {
+                let _updated = self.scene.update_item(index, material_node_bounds(node), self.node_paint(node, sheet))
+            }
+            index += 1
+        }
+    }
+    fn edit(self: mut Self, command: MaterialCommand, sheet: StyleSheet) -> bool {
+        let previous = self.document.semantic()
+        let was_dirty = self.document.dirty()
+        match self.document.execute(command) {
+            Ok(changed) => {
+                if previous != self.document.semantic() {
+                    self.last_edit = perf_counter_ms() self.status = "Needs compile"
+                    self.controls_dirty = true
+                }
+                if changed {
+                    self.message = ""
+                    self.controls_dirty = self.controls_dirty || was_dirty != self.document.dirty()
+                }
+                ret changed
+            }
+            Err(error) => {
+                self.message = error self.controls_dirty = true ret false
+            }
+        }
+    }
+    fn select(self: mut Self, sheet: StyleSheet) ->() {
+        self.fields.clear()
+        if self.selection.len() == 1 {
+            match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    self.fields.push(TextEditor::new(material_display_number(node.value.x()))) self.fields.push(TextEditor::new(material_display_number(node.value.y()))) self.fields.push(TextEditor::new(material_display_number(node.value.z())))
+                }
+                None => {
+                }
+            }
+        }
+        self.field = "" self.controls_dirty = true self.refresh(sheet)
+    }
+    fn commit_field(self: mut Self, sheet: StyleSheet) -> bool {
+        if !self.field.contains("mg-value-") {
+            ret true
+        }
+        if self.selection.len() != 1 {
+            ret true
+        }
+        let mut index = 0_usize
+        for candidate in 0..3 {
+            if self.field == f "mg-value-{candidate}" {
+                index = candidate
+            }
+        }
+        let value = match parse_number(self.fields.get(index).unwrap_or(TextEditor::new("")).value()) {
+            Some(value) => value
+            None => {
+                self.message = "Enter a finite number" self.controls_dirty = true ret false
+            }
+        }
+        match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
+            Some(node) => {
+                let old = node.value
+                let next = Vec3::new(if index == 0 {
+                        value
+                    } else {
+                        old.x()
+                    }
+                    , if index == 1 {
+                        value
+                    } else {
+                        old.y()
+                    }
+                    , if index == 2 {
+                        value
+                    } else {
+                        old.z()
+                    }
+                    ,
+                )
+                let _edited = self.edit(MaterialCommand::Set(node.with_value(next)), sheet)
+            }
+            None => {
+            }
+        }
+        self.field = "" self.refresh(sheet) self.controls_dirty = true ret true
+    }
+    fn focus_order(self: Self) -> Vec[str] {
+        let mut order = Vec[str]::new()
+        if self.dirty() {
+            order.push("mg-save")
+        }
+        if self.opened && !self.busy() {
+            order.push("mg-compile")
+        }
+        if self.document.can_undo() {
+            order.push("mg-undo")
+        }
+        if self.document.can_redo() {
+            order.push("mg-redo")
+        }
+        order.push("mg-frame")
+        if self.published.is_some() && !self.busy() {
+            order.push("mg-apply")
+        }
+        if self.opened {
+            for domain in vec!["surface", "sky", "volume", "particle"] {
+                order.push("mg-domain-" + domain)
+            }
+        }
+        if self.selection.len() == 1 {
+            match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    if material_polymorphic(node) {
+                        order.push("mg-type-scalar") order.push("mg-type-vec3")
+                    }
+                    if !material_is_output(node) {
+                        if node.kind == "vec3" && material_has_value(node) {
+                            order.push("mg-color-open")
+                        }
+                        for index in 0..if node.kind == "vec3" || !material_has_value(node) {
+                            0_usize
+                        } else {
+                            1_usize
+                        }
+                        {
+                            order.push(f "mg-value-{index}")
+                        }
+                        order.push("mg-delete")
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        order.push("mg-search")
+        for operation in material_operations() {
+            if search_matches(self.search.value(), material_node_title(operation)) {
+                order.push("mg-add-" + operation)
+            }
+        }
+        ret order
+    }
+    fn button(self: Self, id: str, title: str, disabled: bool) -> Widget {
+        ret Widget::button(id, title).with_classes("bp-button mg-button").with_disabled(disabled).with_focus(self.field == id)
+    }
+    pub fn widget(self: Self) -> Widget {
+        let mut root = Widget::panel("material-editor").with_classes("blueprint-editor material-editor").with_direction(vertical())
+        let mut toolbar = Widget::panel("mg-toolbar").with_classes("bp-toolbar").with_direction(horizontal())
+        toolbar.push(Widget::label(self.document.graph().name + if self.dirty() {
+                    " *"
+                } else {
+                    ""
+                }
+            ).with_classes("bp-document-name"))
+        toolbar.push(self.button("mg-save", "Save", !self.opened || !self.dirty()))
+        toolbar.push(self.button("mg-compile", "Compile", !self.opened || self.busy()))
+        toolbar.push(self.button("mg-apply", "Apply to scene", self.published.is_none() || self.busy()))
+        toolbar.push(self.button("mg-undo", "Undo", !self.document.can_undo()))
+        toolbar.push(self.button("mg-redo", "Redo", !self.document.can_redo()))
+        toolbar.push(self.button("mg-frame", "Frame", false))
+        for domain in vec!["surface", "sky", "volume", "particle"] {
+            toolbar.push(self.button("mg-domain-" + domain, domain, !self.opened).with_added_classes(if self.document.graph().domain.key() == domain {
+                        " bp-selected"
+                    } else {
+                        ""
+                    }
+                ))
+        }
+        toolbar.push(Widget::spacer(1)) toolbar.push(Widget::label(self.status).with_classes("bp-status")) root.push(toolbar)
+        let mut workspace = Widget::panel("mg-workspace").with_classes("bp-workspace").with_direction(horizontal())
+        workspace.push(Widget::canvas("material-canvas").with_classes("blueprint-canvas"))
+        let mut sidebar = Widget::panel("mg-sidebar").with_classes("bp-sidebar mg-sidebar").with_direction(vertical())
+        sidebar.push(Widget::label("MATERIAL PREVIEW").with_classes("bp-section-label"))
+        // An external surface requires an image on the very first frame.
+        // Restored tabs must remain presentable while compilation is pending.
+        sidebar.push((if self.preview.is_some() {
+                    Widget::render_surface("material-preview-surface")
+                } else {
+                    Widget::panel("material-preview-surface")
+                }
+            ).with_classes("mg-preview"))
+        sidebar.push(Widget::label("Drag to orbit · Wheel to zoom").with_classes("bp-muted"))
+        let mut properties = Widget::panel("mg-properties").with_attribute("data-luma-scrollable", "true").with_classes("mg-properties").with_direction(vertical())
+        if self.selection.len() == 1 {
+            match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    properties.push(Widget::label("DETAILS · " + material_node_title(node.operation)).with_classes("bp-section-label"))
+                    if material_polymorphic(node) {
+                        properties.push(self.button("mg-type-scalar", "Scalar inputs", false).with_added_classes(if node.kind == "scalar" {
+                                    "bp-selected"
+                                } else {
+                                    ""
+                                }
+                            ))
+                        properties.push(self.button("mg-type-vec3", "Color inputs", false).with_added_classes(if node.kind == "vec3" {
+                                    "bp-selected"
+                                } else {
+                                    ""
+                                }
+                            ))
+                    }
+                    if !material_is_output(node) {
+                        if !material_has_value(node) {
+                            properties.push(Widget::label("Live scene input").with_classes("bp-section-label"))
+                        }
+                        if node.kind == "vec3" && material_has_value(node) {
+                            let color = PickerColor::linear(node.value.x(), node.value.y(), node.value.z())
+                            properties.push(property_row("mg-color-row", "Color", Widget::color_picker("mg-color-open", color.hex(), color.display()).with_classes("bp-button mg-color-button").with_focus(self.field == "mg-color-open")))
+                        }
+                        for index in 0..if node.kind == "vec3" || !material_has_value(node) {
+                            0_usize
+                        } else {
+                            1_usize
+                        }
+                        {
+                            let id = f "mg-value-{index}"
+                            properties.push(property_row("mg-scalar-row", "Value", Widget::input(id, self.fields.get(index).unwrap_or(TextEditor::new("0")).value()).with_classes("bp-input").with_focus(self.field == id)))
+                        }
+                        properties.push(self.button("mg-delete", "Delete expression", false))
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        properties.push(Widget::label("EXPRESSIONS").with_classes("bp-section-label"))
+        properties.push(Widget::input("mg-search", self.search.value()).with_classes("bp-input").with_focus(self.field == "mg-search"))
+        for operation in material_operations() {
+            if self.search.value() == "" || search_matches(self.search.value(), material_node_title(operation)) {
+                properties.push(self.button("mg-add-" + operation, material_node_title(operation), !self.opened))
+            }
+        }
+        sidebar.push(properties)
+        workspace.push(sidebar) root.push(workspace)
+        root.push(Widget::label(if self.message != "" {
+                    self.message
+                } else {
+                    "Connect output pins to inputs · Alt-click input to disconnect · F frame · Ctrl+S save · Ctrl+Z undo"
+                }
+            ).with_classes(if self.message == "" {
+                    "bp-footer"
+                } else {
+                    "bp-error-text mg-error"
+                }
+            ))
+        ret root
+    }
+    fn action(self: mut Self, target: str, sheet: StyleSheet) ->() {
+        if !self.commit_field(sheet) {
+            ret()
+        }
+        if target == "mg-color-open" {
+            if self.selection.len() == 1 {
+                match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
+                    Some(node) => {
+                        if node.kind == "vec3" && material_has_value(node) {
+                            let _gesture = self.edit(MaterialCommand::BeginGesture, sheet)
+                            self.picker = ColorPicker::new("mg-picker", PickerColor::linear(node.value.x(), node.value.y(), node.value.z())).with_compact()
+                            self.picker_node = node.id self.picker_open = true self.picker_dirty = true
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+        } elif target == "mg-save" {
+            let _saved = self.save(sheet)
+        } elif target == "mg-compile" {
+            self.force_compile = true self.attempted = ""
+        } elif target == "mg-undo" {
+            let _edited = self.edit(MaterialCommand::Undo, sheet) self.select(sheet)
+        } elif target == "mg-redo" {
+            let _edited = self.edit(MaterialCommand::Redo, sheet) self.select(sheet)
+        } elif target == "mg-delete" {
+            let _edited = self.edit(MaterialCommand::Delete(self.selection), sheet) self.selection.clear() self.select(sheet)
+        } elif target == "mg-frame" {
+            let mut bounds = Rect::new(0, 0, 1, 1) let mut first = true
+            for node in self.document.graph().nodes {
+                if self.selection.len() == 0 || has(self.selection, node.id) {
+                    let b = material_node_bounds(node)
+                    if first {
+                        bounds = b first = false
+                    } else {
+                        let x = if b.x() < bounds.x() {
+                            b.x()
+                        } else {
+                            bounds.x()
+                        }
+                        let y = if b.y() < bounds.y() {
+                            b.y()
+                        } else {
+                            bounds.y()
+                        }
+                        let right = if b.right() > bounds.right() {
+                            b.right()
+                        } else {
+                            bounds.right()
+                        }
+                        let bottom = if b.bottom() > bounds.bottom() {
+                            b.bottom()
+                        } else {
+                            bounds.bottom()
+                        }
+                        bounds = Rect::new(x, y, right - x, bottom - y)
+                    }
+                }
+            }
+            self.view = self.view.fit(bounds, self.bounds, 35)
+        } elif target == "mg-type-scalar" || target == "mg-type-vec3" {
+            match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    let graph = self.document.graph() let mut connected = false
+                    for link in graph.links {
+                        if link.source.node == node.id || link.target.node == node.id {
+                            connected = true
+                        }
+                    }
+                    if connected {
+                        self.message = "Disconnect this expression before changing its type"
+                    } else {
+                        let _edited = self.edit(MaterialCommand::Set(node.with_kind(if target == "mg-type-scalar" {
+                                        "scalar"
+                                    } else {
+                                        "vec3"
+                                    }
+                                )), sheet) self.select(sheet)
+                    }
+                }
+                None => {
+                }
+            }
+        } elif target == "mg-apply" {
+            if self.save(sheet) {
+                match self.published {
+                    Some(asset) => {
+                        match save_cooked_material_graph(asset, self.path) {
+                            Ok(_) => {
+                                self.applied = true self.runtime = self.published
+                            }
+                            Err(error) => {
+                                self.message = error
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+        } else {
+            for domain in vec!["surface", "sky", "volume", "particle"] {
+                if target == "mg-domain-" + domain {
+                    let _edited = self.edit(MaterialCommand::Domain(MaterialDomain::parse(domain).unwrap_or(MaterialDomain::Surface)), sheet)
+                }
+            }
+            for operation in material_operations() {
+                if target == "mg-add-" + operation {
+                    let graph = self.document.graph() let at = self.view.world(self.bounds.width() * 0.3, self.bounds.height() * 0.4)
+                    let id = graph.next_id()
+                    let _edited = self.edit(MaterialCommand::Add(MaterialNode::new(id, operation, at.x(), at.y())), sheet)
+                    self.selection = vec![id] self.select(sheet)
+                }
+            }
+        }
+        self.controls_dirty = true self.refresh(sheet)
+    }
+    pub fn input(self: mut Self, event: Event, target: str, canvas: Rect, preview: Rect, sheet: StyleSheet) -> bool {
+        self.bounds = canvas
+        let local = Point::new(event.x() - canvas.x(), event.y() - canvas.y())
+        let world = self.view.world(local.x(), local.y())
+        let inside = canvas.width() > 0 && canvas.height() > 0 && canvas.contains(Point::new(event.x(), event.y()))
+        let on_preview = preview.width() > 0 && preview.contains(Point::new(event.x(), event.y()))
+        if event.kind() == event_focus_lost() ||(event.kind() == event_key_down() && event.key() == key_escape() && self.focused) {
+            let consumed = self.dragging || self.panning || self.boxing || self.orbiting || self.connection.is_some() || self.field != ""
+            if self.dragging {
+                let _edited = self.edit(MaterialCommand::CancelGesture, sheet)
+            }
+            self.dragging = false self.panning = false self.orbiting = false self.boxing = false self.connection = Option[MaterialEndpoint]::None self.field = "" self.focused = event.kind() != event_focus_lost() self.select(sheet)
+            ret consumed
+        }
+        if event.kind() == event_pointer_down() && target.contains("mg-") {
+            self.focused = true
+            if target == "mg-search" || target.contains("mg-value-") {
+                if self.field != target && !self.commit_field(sheet) {
+                    ret true
+                }
+                self.field = target self.controls_dirty = true ret true
+            }
+            if event.primary_down() {
+                self.action(target, sheet) self.field = target self.controls_dirty = true ret true
+            }
+        }
+        if self.focused && event.kind() == event_key_down() &&((event.control() && event.key() == 115) || event.key() == 1073741888) {
+            self.action(if event.key() == 115 {
+                    "mg-save"
+                } else {
+                    "mg-compile"
+                }
+                , sheet,) ret true
+        }
+        if self.focused && event.kind() == event_key_down() && event.key() == key_tab() {
+            let order = self.focus_order()
+            let mut index = if event.shift() {
+                0_usize
+            } else {
+                order.len() - 1
+            }
+            for candidate in 0..order.len() {
+                if order.get(candidate).unwrap_or("") == self.field {
+                    index = candidate
+                }
+            }
+            if !self.commit_field(sheet) {
+                ret true
+            }
+            index = if event.shift() {
+                (index + order.len() - 1) % order.len()
+            } else {
+                (index + 1) % order.len()
+            }
+            self.field = order.get(index).unwrap_or("mg-search") self.controls_dirty = true ret true
+        }
+        if self.focused && self.field != "" && self.field != "mg-search" && !self.field.contains("mg-value-") && event.kind() == event_key_down() &&(event.key() == key_enter() || event.key() == 32) {
+            let action = self.field self.action(action, sheet) ret true
+        }
+        if self.focused &&(self.field == "mg-search" || self.field.contains("mg-value-")) &&(event.kind() == event_text_input() || event.kind() == event_key_down()) {
+            if event.kind() == event_key_down() && event.key() == key_enter() {
+                if self.field == "mg-search" {
+                    for operation in material_operations() {
+                        if search_matches(self.search.value(), material_node_title(operation)) {
+                            self.action("mg-add-" + operation, sheet) break
+                        }
+                    }
+                } else {
+                    let _committed = self.commit_field(sheet)
+                }
+            } elif event.kind() == event_key_down() && event.key() == key_tab() {
+                let _committed = self.commit_field(sheet)
+            } else {
+                if self.field == "mg-search" {
+                    // SDL delivers text input after the Space shortcut that
+                    // opened search. Do not insert that opening keystroke.
+                    if !(event.kind() == event_text_input() && event.text() == " " && self.search.value() == "") {
+                        self.search = edit_text(self.search, event)
+                    }
+                } else {
+                    for index in 0..self.fields.len() {
+                        if self.field == f "mg-value-{index}" {
+                            self.fields.set(index, edit_text(self.fields.get(index).unwrap_or(TextEditor::new("")), event))
+                        }
+                    }
+                }
+            }
+            self.controls_dirty = true ret true
+        }
+        if event.kind() == event_scroll() &&(inside || on_preview) {
+            if on_preview {
+                self.distance = self.distance * if event.wheel_y() > 0 {
+                    0.9_f32
+                } else {
+                    1.1_f32
+                }
+                if self.distance < 2 {
+                    self.distance = 2
+                }
+                if self.distance > 8 {
+                    self.distance = 8
+                }
+                match self.preview {
+                    Some(preview) => {
+                        self.preview = Option[MaterialPreview]::Some(preview.invalidate())
+                    }
+                    None => {
+                    }
+                }
+            } else {
+                self.view = self.view.zoom_at(if event.wheel_y() > 0 {
+                        1.1_f32
+                    } else {
+                        0.9090909_f32
+                    }
+                    , local.x(), local.y(),)
+            }
+            ret true
+        }
+        if event.kind() == event_pointer_down() &&(inside || on_preview) {
+            if !self.commit_field(sheet) {
+                ret true
+            }
+            self.focused = true self.pointer = local self.anchor = world
+            if on_preview {
+                self.orbiting = true ret true
+            }
+            if (event.buttons() & 6) != 0 {
+                self.panning = true ret true
+            }
+            if !event.primary_down() {
+                ret false
+            }
+            let graph = self.document.graph()
+            match pin_hit(graph, world, true, 10 / self.view.scale()) {
+                Some(endpoint) => {
+                    self.connection = Option[MaterialEndpoint]::Some(endpoint) let node = graph.node(endpoint.node).unwrap_or(MaterialNode::new(0, "", 0, 0)) self.anchor = material_pin_point(node, material_pin(node, endpoint.pin, true).unwrap_or(MaterialPin {
+                                "", "scalar", true
+                            }
+                            ,
+                        )) ret true
+                }
+                None => {
+                }
+            }
+            match pin_hit(graph, world, false, 10 / self.view.scale()) {
+                Some(endpoint) => {
+                    if (event.modifiers() & 768) != 0 {
+                        let _edited = self.edit(MaterialCommand::Disconnect(endpoint), sheet) self.refresh(sheet) ret true
+                    }
+                }
+                None => {
+                }
+            }
+            match self.scene.hit(self.view, local.x(), local.y()) {
+                Some(id) => {
+                    if !has(self.selection, id) {
+                        if !event.control() {
+                            self.selection.clear()
+                        }
+                        self.selection.push(id)
+                    }
+                    self.starts.clear() for node in graph.nodes {
+                        if has(self.selection, node.id) {
+                            self.starts.push(node)
+                        }
+                    }
+                    let _started = self.edit(MaterialCommand::BeginGesture, sheet) self.dragging = true
+                }
+                None => {
+                    if !event.control() {
+                        self.selection.clear()
+                    }
+                    self.boxing = true
+                }
+            }
+            self.select(sheet) ret true
+        }
+        if event.kind() == event_pointer_move() {
+            if self.orbiting {
+                self.yaw +=(local.x() - self.pointer.x()) * 0.01 self.pitch +=(local.y() - self.pointer.y()) * 0.01
+                if self.pitch < - 1.45 {
+                    self.pitch = - 1.45
+                }
+                if self.pitch > 1.45 {
+                    self.pitch = 1.45
+                }
+                self.pointer = local match self.preview {
+                    Some(preview) => {
+                        self.preview = Option[MaterialPreview]::Some(preview.invalidate())
+                    }
+                    None => {
+                    }
+                }
+                ret true
+            }
+            if self.panning {
+                self.view = self.view.pan(local.x() - self.pointer.x(), local.y() - self.pointer.y()) self.pointer = local ret true
+            }
+            if self.dragging {
+                for node in self.starts {
+                    let _edited = self.edit(MaterialCommand::Set(node.at(node.x + world.x() - self.anchor.x(), node.y + world.y() - self.anchor.y())), sheet)
+                }
+                self.update_movement(sheet) ret true
+            }
+            if self.boxing || self.connection.is_some() {
+                self.pointer = local ret true
+            }
+            let hovered = if inside {
+                self.scene.hit(self.view, local.x(), local.y()).unwrap_or(0)
+            } else {
+                0
+            }
+            if hovered != self.hovered {
+                self.hovered = hovered self.refresh(sheet) ret true
+            }
+        }
+        if event.kind() == event_pointer_up() {
+            if self.orbiting || self.panning {
+                self.orbiting = false self.panning = false ret true
+            }
+            if self.dragging {
+                let _edited = self.edit(MaterialCommand::CommitGesture, sheet) self.dragging = false self.controls_dirty = true ret true
+            }
+            if self.boxing {
+                let rect = Rect::new(if world.x() < self.anchor.x() {
+                        world.x()
+                    } else {
+                        self.anchor.x()
+                    }
+                    , if world.y() < self.anchor.y() {
+                        world.y()
+                    } else {
+                        self.anchor.y()
+                    }
+                    , abs(world.x() - self.anchor.x()), abs(world.y() - self.anchor.y()),)
+                for id in self.scene.intersecting(rect) {
+                    if !has(self.selection, id) {
+                        self.selection.push(id)
+                    }
+                }
+                self.boxing = false self.select(sheet) ret true
+            }
+            match self.connection {
+                Some(source) => {
+                    match pin_hit(self.document.graph(), world, false, 12 / self.view.scale()) {
+                        Some(destination) => {
+                            let _edited = self.edit(MaterialCommand::Connect(MaterialLink {
+                                        source, destination
+                                    }
+                                    ,
+                                ), sheet)
+                        }
+                        None => {
+                        }
+                    }
+                    self.connection = Option[MaterialEndpoint]::None self.refresh(sheet) ret true
+                }
+                None => {
+                }
+            }
+        }
+        if event.kind() == event_key_down() && self.focused {
+            if event.control() && event.key() == 115 {
+                self.action("mg-save", sheet) ret true
+            }
+            if event.control() && event.key() == 122 {
+                self.action(if event.shift() {
+                        "mg-redo"
+                    } else {
+                        "mg-undo"
+                    }
+                    , sheet,) ret true
+            }
+            if event.key() == key_delete() {
+                self.action("mg-delete", sheet) ret true
+            }
+            if event.key() == 102 || event.key() == key_home() {
+                self.action("mg-frame", sheet) ret true
+            }
+            if event.key() == 32 {
+                self.field = "mg-search" self.search = TextEditor::new("") self.controls_dirty = true ret true
+            }
+            if event.key() == 1073741888 {
+                self.action("mg-compile", sheet) ret true
+            }
+        }
+        if self.focused && event.kind() == event_key_down() {
+            ret true
+        }
+        if event.kind() == event_pointer_down() {
+            self.focused = false self.field = ""
+        }
+        ret false
+    }
+    pub fn tick(self: mut Self, window: Window, sheet: StyleSheet) -> bool {
+        let mut changed = false
+        let finished = match self.worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if finished {
+            let code = match self.worker {
+                Some(worker) => worker.join() None => 1_i32
+            }
+            self.worker = Option[JoinHandle[i32]]::None
+            if code != 0 {
+                match self.job {
+                    Some(job) => {
+                        self.message = "Shader compilation failed; last valid preview retained.\n" + read_file(job.directory + "/compile-vert.log") + read_file(job.directory + "/compile-frag.log") + read_file(job.directory + "/validate-vert.log") + read_file(job.directory + "/validate-frag.log")
+                    }
+                    None => {
+                    }
+                }
+                self.status = "Compile error" self.job = Option[MaterialBuild]::None
+            }
+            changed = true
+        }
+        if self.worker.is_none() {
+            match self.job {
+                Some(job) => {
+                    if !self.opened || job.project != self.project || job.semantic != self.document.semantic() {
+                        self.job = Option[MaterialBuild]::None self.status = "Needs compile" changed = true
+                    } else {
+                        let vertex = material_spirv(read_file(job.directory + "/preview.vert.spv"))
+                        let fragment = material_spirv(read_file(job.directory + "/preview.frag.spv"))
+                        match vertex {
+                            Ok(vertex) => {
+                                match fragment {
+                                    Ok(fragment) => {
+                                        let result = match self.preview {
+                                            Some(preview) => preview.replace(vertex, fragment)
+                                            None => {
+                                                match MaterialPreview::create(window, vertex, fragment) {
+                                                    Ok(preview) => {
+                                                        Result[Option[MaterialPreview], str]::Ok(Option[MaterialPreview]::Some(preview))
+                                                    }
+                                                    Err(error) => Result[Option[MaterialPreview], str]::Err(error)
+                                                }
+                                            }
+                                        }
+                                        match result {
+                                            Ok(applied) => {
+                                                match applied {
+                                                    Some(preview) => {
+                                                        self.preview = Option[MaterialPreview]::Some(preview)
+                                                        match cook_material_graph(job, self.path) {
+                                                            Ok(asset) => {
+                                                                if self.saved_file && !self.document.dirty() {
+                                                                    let _cooked = save_cooked_material_graph(asset, self.path)
+                                                                }
+                                                                self.published = Option[CookedMaterialGraph]::Some(asset) if self.applied {
+                                                                    self.runtime = self.published
+                                                                }
+                                                            }
+                                                            Err(error) => {
+                                                                self.message = error
+                                                            }
+                                                        }
+                                                        self.compiled = job.semantic
+                                                        self.status = if job.cached {
+                                                            "Compiled · cached"
+                                                        } else {
+                                                            "Compiled"
+                                                        }
+                                                        self.message = "" self.job = Option[MaterialBuild]::None changed = true
+                                                    }
+                                                    None => {
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                self.message = error self.status = "Preview error" self.job = Option[MaterialBuild]::None changed = true
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        self.message = error self.status = "Compile error" self.job = Option[MaterialBuild]::None changed = true
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                self.message = error self.status = "Compile error" self.job = Option[MaterialBuild]::None changed = true
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        let semantic = self.document.semantic()
+        if self.opened && self.job.is_none() && self.worker.is_none() &&(self.force_compile || self.attempted != semantic) &&(self.force_compile || perf_counter_ms() >= self.last_edit + 250) {
+            self.force_compile = false self.attempted = semantic
+            let generated = generate_material(self.document.graph())
+            if generated.diagnostics.len() > 0 {
+                self.message = "" for diagnostic in generated.diagnostics {
+                    self.message += f "Node {diagnostic.node} {diagnostic.pin}: {diagnostic.message}\n"
+                }
+                self.status = "Graph error"
+            } else {
+                match prepare_material_build(self.project, semantic, generated.source) {
+                    Ok(job) => {
+                        if !job.cached {
+                            self.worker = Option[JoinHandle[i32]]::Some(spawn run_material_build(job.directory, job.compiler, job.validator, job.cache))
+                        }
+                        self.job = Option[MaterialBuild]::Some(job) self.status = "Compiling…"
+                    }
+                    Err(error) => {
+                        self.message = error self.status = "Compile error"
+                    }
+                }
+            }
+            changed = true
+        }
+        if changed {
+            self.controls_dirty = true self.refresh(sheet)
+        }
+        ret changed
+    }
+    pub fn compose(self: mut Self, frame: mut PreparedFrame, environment: Vec[f32], animated: bool) -> bool {
+        match self.preview {
+            Some(preview) => {
+                let result = preview.compose(frame, self.yaw, self.pitch, self.distance, self.document.graph().domain.key(), environment, animated)
+                self.preview = Option[MaterialPreview]::Some(result.0) ret result.1
+            }
+            None => {
+                ret true
+            }
+        }
+    }
+    pub fn destroy(self: mut Self) ->() {
+        match self.worker {
+            Some(worker) => {
+                let _code = worker.join()
+            }
+            None => {
+            }
+        }
+        self.worker = Option[JoinHandle[i32]]::None
+        match self.preview {
+            Some(preview) => {
+                preview.destroy()
+            }
+            None => {
+            }
+        }
+        self.preview = Option[MaterialPreview]::None
+    }
+}
+fn edit_text(editor: TextEditor, event: Event) -> TextEditor {
+    if event.kind() == event_text_input() {
+        ret editor.insert(event.text())
+    }
+    if event.control() && event.key() == 97 {
+        ret editor.select_all()
+    }
+    if event.key() == key_backspace() {
+        ret editor.backspace()
+    }
+    if event.key() == key_delete() {
+        ret editor.delete()
+    }
+    if event.key() == key_left() {
+        ret editor.move_left(event.shift())
+    }
+    if event.key() == key_right() {
+        ret editor.move_right(event.shift())
+    }
+    if event.key() == key_home() {
+        ret editor.move_home(event.shift())
+    }
+    if event.key() == key_end() {
+        ret editor.move_end(event.shift())
+    }
+    ret editor
+}

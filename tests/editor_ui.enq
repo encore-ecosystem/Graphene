@@ -1,0 +1,54 @@
+import graphene::EditorUiState
+fn main() -> u32 {
+    let mut ui = EditorUiState::new()
+    if !ui.expanded("ui-section-transform") || ui.expanded("ui-section-advanced") {
+        ret 1
+    }
+    ui.open("ui-build") ui.open("ui-play")
+    if ui.popup() != "ui-play" {
+        ret 2
+    }
+    ui.close()
+    if ui.popup() != "" || ui.focused() != "ui-play" {
+        ret 3
+    }
+    ui.toggle_section("ui-section-advanced")
+    if !ui.expanded("ui-section-advanced") {
+        ret 4
+    }
+    ui.toggle_section("ui-section-advanced")
+    if ui.expanded("ui-section-advanced") {
+        ret 5
+    }
+    ui.focus("entity-cube-2")
+    if !ui.scene_keyboard_focus(false) {
+        ret 6
+    }
+    ui.focus("toggle-visible-entity-cube-2")
+    if ui.scene_keyboard_focus(false) {
+        ret 7
+    }
+    for focus in vec!["cb-item-Content/Meshes/Chair.obj", "cb-query", "scene-search", "entity-name", "transform-x", ""] {
+        ui.focus(focus)
+        if ui.scene_keyboard_focus(false) || !ui.scene_keyboard_focus(true) {
+            ret 8
+        }
+    }
+    ui.open("ui-project-settings")
+    if ui.popup_anchor() != "menu-edit" {
+        ret 11
+    }
+    ui.close()
+    if ui.focused() != "menu-edit" {
+        ret 9
+    }
+    ui.open("ui-anti-aliasing")
+    if ui.popup_anchor() != "ui-viewport-settings" {
+        ret 12
+    }
+    ui.close()
+    if ui.focused() != "ui-viewport-settings" {
+        ret 10
+    }
+    ret 0
+}

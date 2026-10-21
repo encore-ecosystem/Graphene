@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/ufbx/ufbx",
+  "commit": "5955c5c0b042ac2dc6f32955ab206aaec0620cfc",
+  "local_patches": [
+    "Documentation-only quoted self-include examples use angle brackets to avoid Encore issue https://github.com/encore-ecosystem/encore/issues/120; executable code is unchanged."
+  ]
+}

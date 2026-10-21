@@ -1,0 +1,127 @@
+//! Actual native -> Encore -> sampling -> deformation integration.
+import core::vec::Vec
+import graphene::animation::deform::DeformedVertex
+import graphene::animation::deform::{deform_vertex, prepare_deformable_cluster, deformable_cluster_bounds}
+import graphene::animation::math::{PoseMatrix, animation_abs}
+import graphene::animation::model::{Skeleton, SkeletalMesh, AnimationClip}
+import graphene::animation::pose::{AnimationPose, model_pose, skin_palette}
+import graphene::animation::sample::sample_clip
+import graphene::animation::source::{AnimationSource, AnimationSourceMaterial, AnimationSourceImage, decode_animation_source}
+fn main() -> u32 {
+    let source = match decode_animation_source("FIXTURE_ROOT/fixtures/rig.glb", "original-rig") {
+        Ok(s) => s Err(_) => {
+            ret 1_u32
+        }
+    }
+    if source.skeleton.bones.len() != 3_usize || source.mesh.vertices.len() != 3_usize || source.mesh.morphs.len() != 1_usize || source.clips.len() != 1_usize {
+        ret 2_u32
+    }
+    let mut pose = AnimationPose::rest(source.skeleton, 1_usize)
+    pose.reset(source.skeleton, source.mesh)
+    let clip = source.clips.get_unchecked_borrowed(0_usize)
+    pose = match sample_clip(clip, 1_f32, pose) {
+        Ok(p) => p Err(_) => {
+            ret 3_u32
+        }
+    }
+    let mut model = Vec[PoseMatrix]::new()
+    model = match model_pose(source.skeleton, pose, model) {
+        Ok(m) => m Err(_) => {
+            ret 4_u32
+        }
+    }
+    let mut palette = Vec[PoseMatrix]::new()
+    palette = match skin_palette(model, source.mesh, palette) {
+        Ok(m) => m Err(_) => {
+            ret 5_u32
+        }
+    }
+    let vertex = match deform_vertex(source.mesh, 0_usize, palette, vec![0_f32]) {
+        Ok(v) => v Err(_) => {
+            ret 6_u32
+        }
+    }
+    if animation_abs(vertex.position.x - 2.5_f32) > 0.0001_f32 || animation_abs(vertex.position.y - 0.5_f32) > 0.0001_f32 {
+        ret 7_u32
+    }
+    let fox = match decode_animation_source("FIXTURE_ROOT/Fox.glb", "fox") {
+        Ok(s) => s Err(_) => {
+            ret 8_u32
+        }
+    }
+    if fox.skeleton.bones.len() != 26_usize || fox.mesh.vertices.len() != 1728_usize || fox.clips.len() != 3_usize {
+        ret 9_u32
+    }
+    if fox.materials.len() != 1_usize {
+        ret 16_u32
+    }
+    let material = fox.materials.get_unchecked_borrowed(0_usize)
+    if !material.base_image.has_texture || material.base_image.width <= 1_u32 || material.base_image.pixels.len() !=(material.base_image.width as usize) *(material.base_image.height as usize) || material.normal_image.has_texture {
+        ret 17_u32
+    }
+    for clip in fox.clips {
+        for frame in 0_usize..10_usize {
+            let mut pose = AnimationPose::rest(fox.skeleton, 0_usize)
+            pose = match sample_clip(clip,(frame as f32) * clip.duration / 10_f32, pose) {
+                Ok(p) => p Err(_) => {
+                    ret 10_u32
+                }
+            }
+            let mut model = Vec[PoseMatrix]::new()
+            model = match model_pose(fox.skeleton, pose, model) {
+                Ok(m) => m Err(_) => {
+                    ret 11_u32
+                }
+            }
+            let mut palette = Vec[PoseMatrix]::new()
+            palette = match skin_palette(model, fox.mesh, palette) {
+                Ok(m) => m Err(_) => {
+                    ret 12_u32
+                }
+            }
+            for index in 0_usize..fox.mesh.vertices.len() {
+                let vertex = match deform_vertex(fox.mesh, index, palette, Vec[f32]::new()) {
+                    Ok(v) => v Err(_) => {
+                        ret 13_u32
+                    }
+                }
+                if !vertex.position.finite() || !vertex.normal.finite() {
+                    ret 14_u32
+                }
+            }
+        }
+    }
+    if decode_animation_source("FIXTURE_ROOT/fixtures/bad-sparse.glb", "bad").is_ok() {
+        ret 15_u32
+    }
+    let duplicate = match decode_animation_source("FIXTURE_ROOT/fixtures/duplicate-clips.glb", "duplicates") {
+        Ok(s) => s Err(_) => {
+            ret 18_u32
+        }
+    }
+    if duplicate.clips.len() != 2_usize || duplicate.clips.get_unchecked_borrowed(0_usize).identity == duplicate.clips.get_unchecked_borrowed(1_usize).identity {
+        ret 19_u32
+    }
+    if decode_animation_source("FIXTURE_ROOT/fixtures/bad-material.glb", "bad-material").is_ok() {
+        ret 20_u32
+    }
+    let wide = match decode_animation_source("FIXTURE_ROOT/fixtures/wide-morph.glb", "wide") {
+        Ok(s) => s Err(_) => {
+            ret 21_u32
+        }
+    }
+    let range = wide.mesh.morphs.get_unchecked_borrowed(0_usize)
+    if range.minimum > - 0.5_f32 || range.maximum < 3_f32 {
+        ret 22_u32
+    }
+    let mut pose = AnimationPose::rest(wide.skeleton, 1_usize)
+    pose = match sample_clip(wide.clips.get_unchecked_borrowed(0_usize), 1_f32, pose) {
+        Ok(p) => p Err(_) => {
+            ret 23_u32
+        }
+    }
+    if animation_abs(pose.morphs.get_unchecked_borrowed(0_usize) - 3_f32) > 0.0001_f32 {
+        ret 24_u32
+    }
+    ret 0_u32
+}

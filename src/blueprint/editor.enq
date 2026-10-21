@@ -1,0 +1,1982 @@
+//! Dockable graph controls. Drawing is Luma Canvas; mutations use Command Bus.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import linalg::Vec3
+import luma::{CanvasScene, CanvasView, Color, DisplayList, DisplayPoint, Event, Point, Rect, Style, StyleSheet, TextEditor, Widget, canvas_cubic, vertical, horizontal, event_pointer_down, event_pointer_move, event_pointer_up, event_key_down, event_text_input, event_scroll, event_focus_lost, key_delete, key_backspace, key_enter, key_left, key_right, key_home, key_end, key_escape}
+import luma::{IconManager, key_down, key_up, Size, WidgetLayout, anchored_popup_bounds, property_row}
+import mod::catalog::{blueprint_operations, operation_info, operation_types, operation_node, blueprint_default}
+import mod::codec::{blueprint_value_json, blueprint_value_parse}
+import mod::document::{BlueprintCommand, BlueprintMove, BlueprintClipboard}
+import mod::files::BlueprintFile
+import mod::model::*
+import mod::validate::{validate_blueprint, blueprint_connection_error}
+import mod::visual::{BlueprintIcons, bp_style, grid_paint, node_bounds, node_paint, pin_point, wire_bounds, wire_paint}
+import refrain::command_bus::{EditorState, GrapheneCommand}
+import refrain::content_search::search_matches
+import refrain::editor_values::parse_editor_scalar
+import refrain::scene::transform::Transform
+
+pub struct BlueprintEditor {
+    view: CanvasView
+    scene: CanvasScene
+    selection: Vec[u64]
+    clipboard: BlueprintClipboard
+    dragging: bool
+    panning: bool
+    boxing: bool
+    anchor: Point
+    pointer: Point
+    starts: Vec[BlueprintNode]
+    connection: Option[BlueprintEndpoint]
+    focused: bool
+    field: str
+    query: TextEditor
+    value: TextEditor
+    property: u64
+    message: str
+    property_name: TextEditor
+    component: u64
+    component_name: TextEditor
+    component_mesh: TextEditor
+    component_material: TextEditor
+    component_axes: Vec[TextEditor]
+    gesture_style: Style
+    icons: BlueprintIcons
+    cached: BlueprintAsset
+    node_slots: Vec[usize]
+    link_slots: Vec[usize]
+    diagnostics: Vec[BlueprintDiagnostic]
+    node_rebuilds: u64
+    wire_rebuilds: u64
+    menu: bool
+    menu_at: Point
+    menu_index: usize
+    right_pending: bool
+    viewport: Rect
+    left_open: bool
+    right_open: bool
+    components_open: bool
+    properties_open: bool
+    property_menu: bool
+    actions: Vec[str]
+    value_axes: Vec[TextEditor]
+    active_type: str
+    field_dirty: bool
+    request: str
+    asset_name: TextEditor
+    asset_query: TextEditor
+    resizing: str
+    resize_x: f32
+    resize_width: f32
+    left_width: f32
+    right_width: f32
+    resize_limit: f32
+    initial_frame: bool
+    hint: str
+    hint_style: Style
+    build_log: str
+    show_log: bool
+    grid_style: Style
+    reference_menu: bool
+    reference_search: TextEditor
+    reference_index: usize
+}
+fn has(ids: Vec[u64], id: u64) -> bool {
+    for value in ids {
+        if value == id {
+            ret true
+        }
+    }
+    ret false
+}
+fn absolute(value: f32) -> f32 {
+    ret if value < 0 {
+        - value
+    } else {
+        value
+    }
+}
+fn ascii_lower(value: str) -> str {
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    let lower = "abcdefghijklmnopqrstuvwxyz"
+    let mut text = ""
+    let mut index = 0_usize
+    while index < value.byte_len() {
+        let mut ch = value.slice(index, 1)
+        let mut letter = 0_usize
+        while letter < 26 {
+            if ch == alphabet.slice(letter, 1) {
+                ch = lower.slice(letter, 1) break
+            }
+            letter += 1
+        }
+        text += ch index += 1
+    }
+    ret text
+}
+fn pin_hit(asset: BlueprintAsset, world: Point, output: bool, radius: f32) -> Option[BlueprintEndpoint] {
+    for node in asset.nodes {
+        for pin in blueprint_pins(node) {
+            if pin.output == output {
+                let p = pin_point(node, pin.key, output)
+                let dx = world.x() - p.x() let dy = world.y() - p.y()
+                if dx * dx + dy * dy <= radius * radius {
+                    ret Option[BlueprintEndpoint]::Some(BlueprintEndpoint {
+                            node.id, pin.key
+                        }
+                        ,
+                    )
+                }
+            }
+        }
+    }
+    ret Option[BlueprintEndpoint]::None
+}
+fn themed(sheet: StyleSheet, class: str) -> Style {
+    ret sheet.style(Widget::panel("").with_classes(class), false, false, false)
+}
+fn edit(state: mut EditorState, command: BlueprintCommand) -> bool {
+    ret state.execute(GrapheneCommand::EditBlueprint(command)).success()
+}
+fn palette() -> Vec[str] {
+    ret blueprint_operations()
+}
+fn default_value(kind: str) -> BlueprintValue {
+    ret match kind {
+        "bool" => BlueprintValue::Bool(false) "i32" => BlueprintValue::I32(0)
+        "str" => BlueprintValue::String("") "vec3" => BlueprintValue::Vector(Vec3::zero())
+        "actor" => BlueprintValue::Actor(0) "component" => BlueprintValue::Component(0)
+        _ => BlueprintValue::F32(0)
+    }
+}
+fn vector_editors(value: Vec3, editors: mut Vec[TextEditor]) ->() {
+    editors.push(TextEditor::new(Debug::fmt(value.x()))) editors.push(TextEditor::new(Debug::fmt(value.y()))) editors.push(TextEditor::new(Debug::fmt(value.z())))
+}
+
+impl for BlueprintEditor {
+    pub fn new() -> BlueprintEditor {
+        ret BlueprintEditor {
+            CanvasView::new(), CanvasScene::new(), Vec[u64]::new(), BlueprintClipboard {
+                Vec[BlueprintNode]::new(), Vec[BlueprintLink]::new()
+            }
+            ,
+            false, false, false, Point::new(0, 0), Point::new(0, 0), Vec[BlueprintNode]::new(), Option[BlueprintEndpoint]::None, false, "", TextEditor::new(""), TextEditor::new(""), 0, "",
+            TextEditor::new(""), 0, TextEditor::new(""), TextEditor::new(""), TextEditor::new(""), Vec[TextEditor]::new(),
+            themed(StyleSheet::default(), "bp-gesture"),
+            BlueprintIcons::load(IconManager::with_bundled("../Luma/assets/icons")),
+            BlueprintAsset::new("unopened", "Blueprint"), Vec[usize]::new(), Vec[usize]::new(), Vec[BlueprintDiagnostic]::new(),
+            0, 0, false, Point::new(0, 0), 0, false, Rect::new(0, 0, 0, 0), true, true, true, true, false,
+            Vec[str]::new(), Vec[TextEditor]::new(), "f32", false, "", TextEditor::new("BP_New"), TextEditor::new(""),
+            "", 0, 0, 0, 0, 0, true, "", themed(StyleSheet::default(), "bp-tooltip"), "", false,
+            themed(StyleSheet::default(), "bp-grid"), false, TextEditor::new(""), 0
+        }
+    }
+    pub fn canvas(self: Self) -> CanvasScene {
+        let start = self.view.world(0, 0)
+        let finish = self.view.world(self.viewport.width(), self.viewport.height())
+        let scene = self.scene.with_background(Rect::new(start.x(), start.y(), finish.x() - start.x(), finish.y() - start.y()),
+            grid_paint(self.view, self.viewport, self.grid_style),)
+        let pointer = self.view.world(self.pointer.x(), self.pointer.y())
+        let mut list = DisplayList::new()
+        if self.boxing {
+            let x = if pointer.x() < self.anchor.x() {
+                pointer.x()
+            } else {
+                self.anchor.x()
+            }
+            let y = if pointer.y() < self.anchor.y() {
+                pointer.y()
+            } else {
+                self.anchor.y()
+            }
+            let bounds = Rect::new(x, y, absolute(pointer.x() - self.anchor.x()), absolute(pointer.y() - self.anchor.y()))
+            list.fill_rect(bounds, self.gesture_style.background())
+            list.stroke_rect(bounds, self.gesture_style.foreground())
+            ret scene.with_overlay(bounds, list)
+        }
+        match self.connection {
+            Some(_) => {
+                let a = self.anchor let d = pointer
+                list.path(canvas_cubic(DisplayPoint::new(a.x(), a.y()), DisplayPoint::new(a.x() + 90, a.y()),
+                        DisplayPoint::new(d.x() - 90, d.y()), DisplayPoint::new(d.x(), d.y()), 24,), 2, self.gesture_style.foreground(), false)
+                let x = if a.x() < d.x() {
+                    a.x() - 90
+                } else {
+                    d.x() - 90
+                }
+                let y = if a.y() < d.y() {
+                    a.y()
+                } else {
+                    d.y()
+                }
+                ret scene.with_overlay(Rect::new(x, y - 4, absolute(d.x() - a.x()) + 180, absolute(d.y() - a.y()) + 8), list)
+            }
+            None => {
+            }
+        }
+        if self.hint != "" && !self.dragging && !self.panning && !self.menu {
+            let scale = self.view.scale()
+            let desired =(self.hint.char_len() as f32) * 6.5 + 20
+            let width = if desired > 380 {
+                380_f32
+            } else {
+                desired
+            }
+            let x = if self.pointer.x() + width + 15 > self.viewport.width() {
+                self.viewport.width() - width - 5
+            } else {
+                self.pointer.x() + 12
+            }
+            let y = if self.pointer.y() + 40 > self.viewport.height() {
+                self.pointer.y() - 32
+            } else {
+                self.pointer.y() + 16
+            }
+            let position = self.view.world(x, y)
+            let bounds = Rect::new(position.x(), position.y(), width / scale, 26 / scale)
+            list.round_rect(bounds, 4 / scale, self.hint_style.background(), true)
+            list.clip(bounds)
+            list.styled_text(position.x() + 8 / scale, position.y() + 7 / scale, self.hint, self.hint_style.with_font_size(11 / scale))
+            list.clear_clip()
+            ret scene.with_overlay(bounds, list)
+        }
+        ret scene
+    }
+    pub fn view(self: Self) -> CanvasView {
+        ret self.view
+    }
+    pub fn message(self: Self) -> str {
+        ret self.message
+    }
+    pub fn refresh(self: mut Self, asset: BlueprintAsset, sheet: StyleSheet) ->() {
+        let mut selected = Vec[u64]::new()
+        for id in self.selection {
+            if asset.node(id).is_some() {
+                selected.push(id)
+            }
+        }
+        self.selection = selected
+        if self.property != 0 && asset.property(self.property).is_none() {
+            self.property = 0
+        }
+        if self.component != 0 && asset.component(self.component).is_none() {
+            self.component = 0
+        }
+        self.cached = asset
+        if self.field == "" && !self.field_dirty {
+            self.reload_fields()
+        }
+        self.gesture_style = themed(sheet, "bp-gesture")
+        self.hint_style = themed(sheet, "bp-tooltip")
+        self.grid_style = themed(sheet, "bp-grid")
+        self.diagnostics = validate_blueprint(asset)
+        self.scene = CanvasScene::new()
+        self.node_slots = Vec[usize]::new()
+        self.link_slots = Vec[usize]::new()
+        for link in asset.links {
+            self.link_slots.push(self.scene.len())
+            match asset.node(link.source.node) {
+                Some(source) => {
+                    match asset.node(link.target.node) {
+                        Some(target) => {
+                            self.scene.add(0, wire_bounds(source, target, link), wire_paint(source, target, link, sheet), false)
+                            self.wire_rebuilds += 1
+                        }
+                        None => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        for node in asset.nodes {
+            self.node_slots.push(self.scene.len())
+            let mut error = false
+            for diagnostic in self.diagnostics {
+                if diagnostic.node == node.id {
+                    error = true
+                }
+            }
+            self.scene.add(node.id, node_bounds(node), node_paint(node, asset, has(self.selection, node.id), error, self.icons, sheet), true)
+            self.node_rebuilds += 1
+        }
+    }
+    fn move_visuals(self: mut Self, moves: Vec[BlueprintMove], sheet: StyleSheet) ->() {
+        let mut index = 0_usize
+        for node in self.cached.nodes {
+            for movement in moves {
+                if movement.node == node.id {
+                    self.cached.nodes.set(index, node.at(movement.x, movement.y))
+                }
+            }
+            index += 1
+        }
+        index = 0
+        for node in self.cached.nodes {
+            if has(self.selection, node.id) {
+                let mut error = false
+                for diagnostic in self.diagnostics {
+                    if diagnostic.node == node.id {
+                        error = true
+                    }
+                }
+                let _updated = self.scene.update_item(self.node_slots.get(index).unwrap_or(self.scene.len()),
+                    node_bounds(node), node_paint(node, self.cached, true, error, self.icons, sheet),)
+                self.node_rebuilds += 1
+            }
+            index += 1
+        }
+        index = 0
+        for link in self.cached.links {
+            if has(self.selection, link.source.node) || has(self.selection, link.target.node) {
+                match self.cached.node(link.source.node) {
+                    Some(source) => {
+                        match self.cached.node(link.target.node) {
+                            Some(target) => {
+                                let _updated = self.scene.update_item(self.link_slots.get(index).unwrap_or(self.scene.len()),
+                                    wire_bounds(source, target, link), wire_paint(source, target, link, sheet),)
+                                self.wire_rebuilds += 1
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            index += 1
+        }
+    }
+    pub fn geometry_rebuilds(self: Self) ->(u64, u64) {
+        ret(self.node_rebuilds, self.wire_rebuilds)
+    }
+    pub fn popup_open(self: Self) -> bool {
+        ret self.menu || self.reference_menu
+    }
+    pub fn set_bounds(self: mut Self, bounds: Rect) ->() {
+        self.viewport = bounds
+        if self.initial_frame && bounds.width() > 0 && bounds.height() > 0 {
+            self.frame(false) self.initial_frame = false
+        }
+    }
+    pub fn build_result(self: mut Self, log: str, failed: bool) ->() {
+        self.build_log = log self.show_log = failed
+    }
+    pub fn resizing(self: Self) -> bool {
+        ret self.resizing != ""
+    }
+    pub fn set_actions(self: mut Self, actions: Vec[str]) ->() {
+        self.actions = actions
+    }
+    pub fn take_request(self: mut Self) -> str {
+        let request = self.request self.request = "" ret request
+    }
+    pub fn new_asset_name(self: Self) -> str {
+        ret self.asset_name.value()
+    }
+    pub fn browser(self: Self, files: Vec[BlueprintFile]) -> Widget {
+        let mut browser = Widget::panel("blueprint-editor").with_classes("blueprint-editor bp-browser").with_direction(vertical())
+        let mut toolbar = Widget::panel("").with_classes("bp-toolbar").with_direction(horizontal())
+        toolbar.push(Widget::icon("", self.icons.get("git-branch")).with_classes("bp-brand"))
+        toolbar.push(Widget::label("Blueprints").with_classes("bp-document-name"))
+        toolbar.push(self.entry("bp-browser-search", self.asset_query.value()))
+        toolbar.push(self.entry("bp-asset-name", self.asset_name.value()))
+        toolbar.push(self.button("bp-new", "Create Blueprint", "plus"))
+        browser.push(toolbar)
+        let mut list = Widget::panel("").with_classes("bp-browser-results").with_direction(vertical())
+        let mut index = 0_usize
+        for file in files {
+            if self.asset_query.value() == "" || file.name.contains(self.asset_query.value()) {
+                list.push(self.button(f "bp-open-{index}", file.name, if file.error == "" {
+                            "git-branch"
+                        } else {
+                            "circle-alert"
+                        }
+                        ,
+                    ).with_added_classes("bp-asset-row"))
+                if file.error != "" {
+                    list.push(Widget::label(file.error).with_classes("bp-error-text"))
+                }
+            }
+            index += 1
+        }
+        if files.len() == 0 {
+            list.push(Widget::label("Create a Blueprint to start building actor logic.").with_classes("bp-description"))
+        }
+        browser.push(list)
+        ret browser
+    }
+    fn frame(self: mut Self, selected: bool) ->() {
+        let mut found = false let mut bounds = Rect::new(0, 0, 248, 100)
+        for node in self.cached.nodes {
+            if !selected || has(self.selection, node.id) {
+                let item = node_bounds(node)
+                if !found {
+                    bounds = item found = true
+                } else {
+                    let x = if item.x() < bounds.x() {
+                        item.x()
+                    } else {
+                        bounds.x()
+                    }
+                    let y = if item.y() < bounds.y() {
+                        item.y()
+                    } else {
+                        bounds.y()
+                    }
+                    let right = if item.right() > bounds.right() {
+                        item.right()
+                    } else {
+                        bounds.right()
+                    }
+                    let bottom = if item.bottom() > bounds.bottom() {
+                        item.bottom()
+                    } else {
+                        bounds.bottom()
+                    }
+                    bounds = Rect::new(x, y, right - x, bottom - y)
+                }
+            }
+        }
+        self.view = self.view.fit(bounds, self.viewport, 40)
+    }
+    fn button(self: Self, id: str, title: str, icon: str) -> Widget {
+        ret Widget::icon_button(id, title, self.icons.get(icon)).with_classes("bp-button").with_tag("button")
+    }
+    fn entry(self: Self, id: str, value: str) -> Widget {
+        let editor = Widget::input(id, value).with_focus(self.field == id)
+        ret editor.with_classes("bp-input" +(if self.field == id && self.message != "" {
+                    " invalid"
+                } else {
+                    ""
+                }
+            ))
+    }
+    fn value_controls(self: Self, state: EditorState) -> Widget {
+        let mut controls = Widget::panel("").with_classes("bp-fields").with_direction(vertical())
+        if self.active_type == "bool" {
+            controls.push(self.button("bp-toggle-value", if self.value.value() == "true" {
+                        "True"
+                    } else {
+                        "False"
+                    }
+                    , if self.value.value() == "true" {
+                        "check"
+                    } else {
+                        "circle-dot"
+                    }
+                    ,
+                ))
+        } elif self.active_type == "vec3" {
+            let mut axes = Widget::panel("").with_classes("bp-transform-row").with_direction(horizontal())
+            let mut index = 0_usize
+            for axis in vec!["X", "Y", "Z"] {
+                let mut column = Widget::panel("").with_classes("bp-axis").with_direction(vertical())
+                column.push(Widget::label(axis).with_classes("bp-muted"))
+                column.push(self.entry(f "bp-value-axis-{index}", self.value_axes.get(index).unwrap_or(TextEditor::new("0")).value()))
+                axes.push(column) index += 1
+            }
+            controls.push(axes)
+        } elif self.active_type == "actor" || self.active_type == "component" {
+            let mut name = "None"
+            if self.active_type == "actor" {
+                for actor in state.scene().entities() {
+                    if self.value.value() == Debug::fmt(actor.id()) {
+                        name = actor.name()
+                    }
+                }
+            } else {
+                for component in self.cached.components {
+                    if self.value.value() == Debug::fmt(component.id) {
+                        name = component.name
+                    }
+                }
+            }
+            controls.push(self.button("bp-value-reference-open", name, "box").with_attribute("aria-label", "Choose " + self.active_type).with_focus(self.reference_menu ||(self.focused && self.field == "")))
+        } else {
+            controls.push(self.entry("bp-value", self.value.value()))
+        }
+        ret property_row("bp-value-row", if self.active_type == "actor" {
+                "Actor"
+            } elif self.active_type == "component" {
+                "Component"
+            } else {
+                "Value"
+            }
+            , controls,)
+    }
+    pub fn widget(self: Self, state: EditorState, compiling: bool) -> Widget {
+        let asset = self.cached
+        let locked = state.simulation_mode() != ""
+        let mut root = Widget::panel("blueprint-editor").with_classes("blueprint-editor").with_direction(vertical())
+        let mut toolbar = Widget::panel("bp-toolbar").with_classes("bp-toolbar").with_direction(horizontal())
+        toolbar.push(Widget::icon("", self.icons.get("git-branch")).with_classes("bp-brand"))
+        toolbar.push(Widget::label(asset.name +(if state.blueprint_dirty() {
+                        " *"
+                    } else {
+                        ""
+                    }
+                )).with_classes("bp-document-name"))
+        toolbar.push(self.button("bp-save", "Save", "save").with_disabled(!state.blueprint_dirty() || locked))
+        toolbar.push(self.button("bp-compile", if compiling {
+                    "Compiling…"
+                } else {
+                    "Compile"
+                }
+                , "hammer",).with_disabled(compiling || locked))
+        toolbar.push(self.button("bp-place", "Place Instance", "box").with_disabled(locked))
+        toolbar.push(self.button("bp-undo", "", "undo").with_disabled(!state.blueprint_can_undo()))
+        toolbar.push(self.button("bp-redo", "", "redo").with_disabled(!state.blueprint_can_redo()))
+        toolbar.push(Widget::spacer(1))
+        toolbar.push(Widget::label(if locked {
+                    "READ ONLY · PLAY"
+                } elif compiling {
+                    "COMPILING"
+                } elif self.diagnostics.len() > 0 {
+                    f "{self.diagnostics.len()} issues"
+                } elif state.blueprint_needs_compile() {
+                    "NEEDS COMPILE"
+                } else {
+                    "COMPILED"
+                }
+            ).with_classes("bp-status"))
+        toolbar.push(self.button("bp-frame", "", "scan"))
+        toolbar.push(self.button("bp-toggle-left", "", "panel-left"))
+        toolbar.push(self.button("bp-toggle-right", "", "panel-right"))
+        toolbar.push(self.button("bp-browser", "", "folder").with_disabled(locked))
+        root.push(toolbar)
+        let mut workspace = Widget::panel("bp-workspace").with_classes("bp-workspace").with_direction(horizontal())
+        if self.left_open {
+            let mut structure = Widget::panel("bp-structure").with_attribute("data-luma-scrollable", "true").with_classes("bp-sidebar bp-left").with_direction(vertical())
+            structure.push(self.button("bp-components-toggle", "Components", if self.components_open {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    }
+                    ,
+                ).with_added_classes("bp-section"))
+            if self.components_open {
+                for component in asset.components {
+                    structure.push(self.button(f "bp-component-{component.id}", component.name, if component.kind == "static-mesh" {
+                                "box"
+                            } else {
+                                "circle-dot"
+                            }
+                            ,
+                        ).with_added_classes(if self.component == component.id {
+                                "bp-selected"
+                            } else {
+                                ""
+                            }
+                        ))
+                }
+                structure.push(self.button("bp-new-scene", "Scene Component", "plus").with_disabled(locked))
+                structure.push(self.button("bp-new-mesh", "Static Mesh", "plus").with_disabled(locked))
+            }
+            let mut variables = Widget::panel("").with_classes("bp-section-row").with_direction(horizontal())
+            variables.push(self.button("bp-properties-toggle", "Variables", if self.properties_open {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    }
+                    ,
+                ).with_added_classes("bp-section"))
+            variables.push(self.button("bp-property-menu", "", "plus").with_disabled(locked))
+            structure.push(variables)
+            if self.property_menu {
+                for kind in vec!["bool", "i32", "f32", "str", "vec3", "actor", "component"] {
+                    structure.push(self.button("bp-new-property-" + kind, kind, "plus"))
+                }
+            }
+            if self.properties_open {
+                for property in asset.properties {
+                    structure.push(self.button(f "bp-property-{property.id}", property.name, "variable").with_added_classes(if self.property == property.id {
+                                "bp-selected"
+                            } else {
+                                ""
+                            }
+                        ))
+                    structure.push(Widget::label(property.default_value.value_type().name()).with_classes("bp-type-caption"))
+                }
+                if asset.properties.len() == 0 {
+                    structure.push(Widget::label("No variables yet").with_classes("bp-muted"))
+                }
+            }
+            structure.push(Widget::spacer(1))
+            structure.push(self.button("bp-add-menu", "Add Node", "plus").with_disabled(locked))
+            if self.left_width > 0 {
+                structure = structure.with_computed_style(Style::default().with_flex_basis(self.left_width))
+            }
+            workspace.push(structure)
+            workspace.push(Widget::button("bp-resize-left", "").with_classes("bp-resizer"))
+        }
+        workspace.push(Widget::canvas("blueprint-canvas").with_classes("blueprint-canvas"))
+        if self.right_open {
+            workspace.push(Widget::button("bp-resize-right", "").with_classes("bp-resizer"))
+            let mut inspector = Widget::panel("bp-inspector").with_attribute("data-luma-scrollable", "true").with_classes("bp-sidebar bp-right").with_direction(vertical())
+            inspector.push(Widget::label("DETAILS").with_classes("bp-section-label"))
+            if self.component != 0 {
+                match asset.component(self.component) {
+                    Some(component) => {
+                        inspector.push(Widget::label(component.kind).with_classes("bp-muted"))
+                        inspector.push(property_row("bp-component-name-row", "Name", self.entry("bp-component-name", self.component_name.value())))
+                        if component.kind == "static-mesh" {
+                            inspector.push(property_row("bp-component-mesh-row", "Mesh", self.entry("bp-component-mesh", self.component_mesh.value())))
+                            inspector.push(property_row("bp-component-material-row", "Material", self.entry("bp-component-material", self.component_material.value())))
+                        }
+                        let mut group = 0_usize
+                        for title in vec!["Position", "Rotation · radians", "Scale"] {
+                            let mut axes = Widget::panel("").with_classes("bp-transform-row").with_direction(horizontal())
+                            let mut axis = 0_usize
+                            for label in vec!["X", "Y", "Z"] {
+                                let index = group * 3 + axis
+                                let mut column = Widget::panel("").with_classes("bp-axis").with_direction(vertical())
+                                column.push(Widget::label(label).with_classes("bp-muted"))
+                                column.push(self.entry(f "bp-axis-{index}", self.component_axes.get(index).unwrap_or(TextEditor::new("0")).value()))
+                                axes.push(column) axis += 1
+                            }
+                            inspector.push(property_row(f "bp-transform-row-{group}", if group == 0 {
+                                        "Position"
+                                    } elif group == 1 {
+                                        "Rotation"
+                                    } else {
+                                        "Scale"
+                                    }
+                                    , axes,)) group += 1
+                        }
+                        if component.parent != 0 {
+                            inspector.push(self.button("bp-remove-component", "Remove Component", "trash-2").with_disabled(locked))
+                        }
+                    }
+                    None => {
+                    }
+                }
+            } elif self.property != 0 {
+                inspector.push(Widget::label("VARIABLE").with_classes("bp-muted"))
+                inspector.push(property_row("bp-property-name-row", "Name", self.entry("bp-property-name", self.property_name.value())))
+                inspector.push(Widget::label(self.active_type).with_classes("bp-field-label"))
+                inspector.push(self.value_controls(state))
+                inspector.push(self.button("bp-remove-property", "Remove Variable", "trash-2").with_disabled(locked))
+            } elif self.selection.len() == 1 {
+                match asset.node(self.selection.get(0).unwrap_or(0)) {
+                    Some(node) => {
+                        let info = operation_info(node.operation)
+                        inspector.push(self.button("bp-frame-selected", info.title, info.icon))
+                        inspector.push(Widget::label(info.description).with_classes("bp-description"))
+                        for kind in operation_types(node.operation) {
+                            inspector.push(self.button("bp-type-" + kind, kind, "hash").with_added_classes(if kind == node.value_type.name() {
+                                        "bp-selected"
+                                    } else {
+                                        ""
+                                    }
+                                ).with_disabled(locked))
+                        }
+                        if node.operation == "constant" {
+                            inspector.push(self.value_controls(state))
+                        }
+                        if node.operation == "get-variable" || node.operation == "set-variable" {
+                            inspector.push(Widget::label("Variable").with_classes("bp-field-label"))
+                            for property in asset.properties {
+                                inspector.push(self.button(f "bp-reference-{property.id}", property.name, "variable").with_added_classes(if node.reference == property.id {
+                                            "bp-selected"
+                                        } else {
+                                            ""
+                                        }
+                                    ).with_disabled(locked))
+                            }
+                        }
+                        if node.operation == "input-pressed" || node.operation == "input-released" {
+                            inspector.push(property_row("bp-action-name-row", "Action", self.entry("bp-action-name", self.value.value())))
+                            for action in self.actions {
+                                inspector.push(self.button("bp-action-" + action, action, "keyboard").with_disabled(locked))
+                            }
+                            if self.actions.len() == 0 {
+                                inspector.push(Widget::label("Define actions in project input settings.").with_classes("bp-description"))
+                            }
+                        }
+                        if info.category == "Transform" || info.category == "Appearance" {
+                            inspector.push(Widget::label("Target").with_classes("bp-field-label"))
+                            inspector.push(self.button("bp-target-self", "Self", "circle-dot").with_disabled(locked))
+                            for component in asset.components {
+                                inspector.push(self.button(f "bp-target-{component.id}", component.name, "box").with_disabled(locked))
+                            }
+                        }
+                        inspector.push(self.button("bp-disconnect", "Disconnect Inputs", "split").with_disabled(locked))
+                        inspector.push(self.button("bp-duplicate", "Duplicate", "copy").with_disabled(locked))
+                        inspector.push(self.button("bp-delete", "Delete Node", "trash-2").with_disabled(locked))
+                    }
+                    None => {
+                    }
+                }
+            } else {
+                inspector.push(Widget::label(if self.selection.len() > 1 {
+                            f "{self.selection.len()} nodes selected"
+                        } else {
+                            "Select a node, component or variable."
+                        }
+                    ).with_classes("bp-description"))
+            }
+            if self.message != "" {
+                inspector.push(Widget::label(self.message).with_classes("bp-error-text"))
+            }
+            if self.right_width > 0 {
+                inspector = inspector.with_computed_style(Style::default().with_flex_basis(self.right_width))
+            }
+            workspace.push(inspector)
+        }
+        root.push(workspace)
+        if self.diagnostics.len() > 0 {
+            let mut diagnostics = Widget::panel("bp-diagnostics").with_classes("bp-diagnostics").with_direction(vertical())
+            let mut index = 0_usize
+            for diagnostic in self.diagnostics {
+                diagnostics.push(self.button(f "bp-diagnostic-{index}", diagnostic.message +(if diagnostic.pin != "" {
+                                " · " + diagnostic.pin
+                            } else {
+                                ""
+                            }
+                        ), "circle-alert").with_disabled(diagnostic.node == 0))
+                index += 1
+            }
+            root.push(diagnostics)
+        }
+        if self.show_log {
+            let mut log = Widget::panel("bp-build-log").with_classes("bp-build-log").with_direction(vertical())
+            log.push(Widget::label(self.build_log).with_classes("bp-build-output")) root.push(log)
+        }
+        let mut footer = Widget::panel("").with_classes("bp-footer").with_direction(horizontal())
+        footer.push(Widget::label(f "{asset.nodes.len()} nodes · {asset.links.len()} connections"))
+        footer.push(Widget::spacer(1))
+        if self.build_log != "" {
+            footer.push(self.button("bp-toggle-log", "Build Log", "terminal"))
+        }
+        footer.push(Widget::label("Space · Add node     F · Frame selection     MMB · Pan"))
+        root.push(footer)
+        ret root
+    }
+    fn candidates(self: Self) -> Vec[str] {
+        let mut result = Vec[str]::new()
+        for key in palette() {
+            let info = operation_info(key)
+            let query = ascii_lower(self.query.value())
+            let matches = query == "" || ascii_lower(info.title).contains(query) || key.contains(query) || ascii_lower(info.category).contains(query)
+            let mut compatible = self.connection.is_none()
+            match self.connection {
+                Some(source) => {
+                    match self.cached.node(source.node) {
+                        Some(owner) => {
+                            match blueprint_pin(owner, source.pin, true) {
+                                Some(output) => {
+                                    let mut node = operation_node(self.cached.next_node_id(), key)
+                                    for kind in operation_types(key) {
+                                        if kind == output.value_type.name() {
+                                            node.value_type = output.value_type
+                                        }
+                                    }
+                                    for input in blueprint_pins(node) {
+                                        if !input.output && input.value_type.name() == output.value_type.name() {
+                                            compatible = true
+                                        }
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            if matches && compatible {
+                result.push(key)
+            }
+        }
+        ret result
+    }
+    fn reference_choices(self: Self, state: EditorState) -> Vec[u64] {
+        let mut ids = Vec[u64]::new()
+        let query = self.reference_search.value()
+        if search_matches(query, "None") {
+            ids.push(0)
+        }
+        if self.active_type == "actor" {
+            for actor in state.scene().entities() {
+                if search_matches(query, actor.name()) {
+                    ids.push(actor.id())
+                }
+            }
+        } else {
+            for component in self.cached.components {
+                if search_matches(query, component.name) {
+                    ids.push(component.id)
+                }
+            }
+        }
+        ret ids
+    }
+    pub fn popup(self: Self, width: f32, height: f32, state: EditorState, layout: WidgetLayout) -> Widget {
+        if self.reference_menu {
+            let bounds = anchored_popup_bounds(layout.find_bounds("bp-value-reference-open").unwrap_or(self.viewport), Size::new(280, 296), Rect::new(8, 8, width - 16, height - 16))
+            let mut popup = Widget::panel("bp-reference-popup").with_classes("g-local-popup").with_direction(vertical()).with_attribute("role", "dialog").with_attribute("aria-label", "Choose reference")
+            .with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_height(bounds.height()))
+            popup.push(Widget::input("bp-reference-search", self.reference_search.value()).with_classes("bp-input").with_focus(true).with_cursor(self.reference_search.cursor()).with_attribute("aria-label", "Search references"))
+            let mut results = Widget::panel("").with_classes("bp-node-results").with_direction(vertical())
+            let ids = self.reference_choices(state)
+            for index in 0..ids.len() {
+                let id = ids.get(index).unwrap_or(0)
+                let mut name = "None"
+                if self.active_type == "actor" {
+                    for actor in state.scene().entities() {
+                        if actor.id() == id {
+                            name = actor.name()
+                        }
+                    }
+                } else {
+                    for component in self.cached.components {
+                        if component.id == id {
+                            name = component.name
+                        }
+                    }
+                }
+                results.push(self.button(f "bp-value-reference-{id}", name, "box").with_added_classes(if index == self.reference_index {
+                            "bp-selected"
+                        } else {
+                            ""
+                        }
+                    ))
+            }
+            if ids.len() == 0 {
+                results.push(Widget::label("No matching references").with_classes("bp-muted"))
+            }
+            popup.push(results) ret popup
+        }
+        let mut popup = Widget::panel("bp-node-menu").with_classes("bp-node-menu").with_direction(vertical())
+        let x = if self.menu_at.x() + 340 > width {
+            width - 344
+        } else {
+            self.menu_at.x()
+        }
+        let y = if self.menu_at.y() + 450 > height {
+            height - 454
+        } else {
+            self.menu_at.y()
+        }
+        popup = popup.with_computed_style(Style::default().with_left(if x < 4 {
+                    4_f32
+                } else {
+                    x
+                }
+            ).with_top(if y < 4 {
+                    4_f32
+                } else {
+                    y
+                }
+            ))
+        popup.push(Widget::label("ADD NODE").with_classes("bp-section-label"))
+        popup.push(self.entry("bp-search", self.query.value()))
+        let mut list = Widget::panel("").with_classes("bp-node-results").with_direction(vertical())
+        let mut index = 0_usize
+        for key in self.candidates() {
+            let info = operation_info(key)
+            list.push(self.button("bp-add-" + key, info.title + " · " + info.category, info.icon).with_added_classes(if index == self.menu_index {
+                        "bp-selected"
+                    } else {
+                        ""
+                    }
+                ))
+            index += 1
+        }
+        if index == 0 {
+            list.push(Widget::label("No compatible nodes found").with_classes("bp-description"))
+        }
+        popup.push(list)
+        ret popup
+    }
+    fn load_value(self: mut Self, value: BlueprintValue) ->() {
+        self.active_type = value.value_type().name()
+        let payload = blueprint_value_json(value).get("value").unwrap_or(Json::Null)
+        self.value = TextEditor::new(payload.as_str().unwrap_or(stringify(payload)))
+        self.value_axes = Vec[TextEditor]::new()
+        match value {
+            Vector(vector) => {
+                vector_editors(vector, self.value_axes)
+            }
+            _ => {
+            }
+        }
+        self.field_dirty = false
+    }
+    fn load_node(self: mut Self, node: BlueprintNode) ->() {
+        self.property = 0 self.component = 0 self.load_value(node.value)
+        if node.operation == "input-pressed" || node.operation == "input-released" {
+            self.value = TextEditor::new(node.text) self.active_type = "action"
+        }
+    }
+    fn reload_fields(self: mut Self) ->() {
+        self.message = ""
+        if self.component != 0 {
+            match self.cached.component(self.component) {
+                Some(component) => {
+                    self.component_name = TextEditor::new(component.name)
+                    self.component_mesh = TextEditor::new(component.mesh)
+                    self.component_material = TextEditor::new(component.material)
+                    self.component_axes = Vec[TextEditor]::new()
+                    vector_editors(component.transform.position(), self.component_axes)
+                    vector_editors(component.transform.rotation(), self.component_axes)
+                    vector_editors(component.transform.scale(), self.component_axes)
+                }
+                None => {
+                }
+            }
+        } elif self.property != 0 {
+            match self.cached.property(self.property) {
+                Some(property) => {
+                    self.property_name = TextEditor::new(property.name)
+                    self.load_value(property.default_value)
+                }
+                None => {
+                }
+            }
+        } else {
+            match self.cached.node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    self.load_node(node)
+                }
+                None => {
+                }
+            }
+        }
+        self.field_dirty = false
+    }
+    fn open_menu(self: mut Self, position: Point) ->() {
+        self.menu = true self.menu_at = position self.menu_index = 0
+        self.query = TextEditor::new("") self.field = "bp-search" self.focused = true
+    }
+    fn commit_field(self: mut Self, state: mut EditorState, sheet: StyleSheet) -> bool {
+        if !self.field_dirty || self.field == "bp-search" {
+            ret true
+        }
+        self.message = ""
+        if self.field.contains("bp-component-") || self.field.contains("bp-axis-") {
+            self.action(state, "bp-apply-component")
+        } elif self.field == "bp-action-name" {
+            match state.blueprint_asset().node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    let _changed = edit(state, BlueprintCommand::SetNode(node.with_text(self.value.value())))
+                }
+                None => {
+                }
+            }
+        } else {
+            self.action(state, "bp-apply-value")
+        }
+        if self.message != "" {
+            ret false
+        }
+        self.field_dirty = false
+        self.refresh(state.blueprint_asset(), sheet)
+        ret true
+    }
+    fn field_editor(self: Self) -> TextEditor {
+        ret match self.field {
+            "bp-asset-name" => self.asset_name "bp-browser-search" => self.asset_query
+            "bp-search" => self.query "bp-property-name" => self.property_name
+            "bp-component-name" => self.component_name "bp-component-mesh" => self.component_mesh
+            "bp-component-material" => self.component_material
+            _ => {
+                let mut index = 0_usize
+                for value in self.component_axes {
+                    if self.field == f "bp-axis-{index}" {
+                        ret value
+                    }
+                    index += 1
+                }
+                index = 0
+                for value in self.value_axes {
+                    if self.field == f "bp-value-axis-{index}" {
+                        ret value
+                    }
+                    index += 1
+                }
+                self.value
+            }
+        }
+    }
+    fn update_field(self: mut Self, editor: TextEditor) ->() {
+        match self.field {
+            "bp-asset-name" => {
+                self.asset_name = editor
+            }
+            "bp-browser-search" => {
+                self.asset_query = editor
+            }
+            "bp-search" => {
+                self.query = editor self.menu_index = 0
+            }
+            "bp-property-name" => {
+                self.property_name = editor
+            }
+            "bp-component-name" => {
+                self.component_name = editor
+            }
+            "bp-component-mesh" => {
+                self.component_mesh = editor
+            }
+            "bp-component-material" => {
+                self.component_material = editor
+            }
+            _ => {
+                let mut found = false let mut index = 0_usize
+                for value in self.component_axes {
+                    if self.field == f "bp-axis-{index}" {
+                        self.component_axes.set(index, editor) found = true
+                    }
+                    index += 1
+                }
+                index = 0
+                for value in self.value_axes {
+                    if self.field == f "bp-value-axis-{index}" {
+                        self.value_axes.set(index, editor) found = true
+                    }
+                    index += 1
+                }
+                if !found {
+                    self.value = editor
+                }
+            }
+        }
+        self.field_dirty = self.field != "bp-search" && self.field != "bp-asset-name" && self.field != "bp-browser-search"
+    }
+    /// Consumed events never reach viewport navigation or editor-global shortcuts.
+    pub fn input(self: mut Self, state: mut EditorState, event: Event, target: str, bounds: Rect, sheet: StyleSheet) -> bool {
+        self.viewport = bounds
+        if self.reference_menu &&(bounds.width() <= 0 || bounds.height() <= 0) {
+            self.reference_menu = false self.field = "" ret true
+        }
+        if self.reference_menu {
+            if event.kind() == event_focus_lost() ||(event.kind() == event_key_down() && event.key() == key_escape()) {
+                if event.kind() == event_focus_lost() {
+                    self.focused = false
+                }
+                self.reference_menu = false self.field = "" ret true
+            }
+            if event.kind() == event_pointer_down() {
+                if target.contains("bp-value-reference-") && target != "bp-value-reference-open" {
+                    self.action(state, target) self.reference_menu = false self.field = "" self.refresh(state.blueprint_asset(), sheet)
+                } elif target != "bp-reference-search" && target != "bp-reference-popup" {
+                    self.reference_menu = false self.field = ""
+                }
+                ret true
+            }
+            if event.kind() == event_text_input() {
+                self.reference_search = text_input(self.reference_search, event) self.reference_index = 0 ret true
+            }
+            if event.kind() == event_key_down() {
+                let choices = self.reference_choices(state)
+                if event.key() == key_enter() {
+                    match choices.get(self.reference_index) {
+                        Some(id) => {
+                            self.action(state, f "bp-value-reference-{id}") self.reference_menu = false self.field = "" self.refresh(state.blueprint_asset(), sheet)
+                        }
+                        None => {
+                        }
+                    }
+                } elif event.key() == key_down() ||(event.key() == 9 && !event.shift()) {
+                    if self.reference_index + 1 < choices.len() {
+                        self.reference_index += 1
+                    }
+                } elif event.key() == key_up() ||(event.key() == 9 && event.shift()) {
+                    if self.reference_index > 0 {
+                        self.reference_index -= 1
+                    }
+                } else {
+                    self.reference_search = text_input(self.reference_search, event) self.reference_index = 0
+                }
+                ret true
+            }
+            if event.kind() == event_scroll() {
+                ret true
+            }
+        }
+        let local = Point::new(event.x() - bounds.x(), event.y() - bounds.y())
+        let world = self.view.world(local.x(), local.y())
+        let inside = bounds.width() > 0 && bounds.height() > 0 && bounds.contains(Point::new(event.x(), event.y()))
+        if event.kind() == event_focus_lost() ||(event.kind() == event_key_down() && event.key() == key_escape()) {
+            let had_gesture = self.dragging || self.connection.is_some() || self.boxing || self.panning || self.right_pending || self.menu || self.field != ""
+            let keep_draft = event.kind() == event_focus_lost() && !self.commit_field(state, sheet)
+            if self.dragging {
+                let _cancelled = edit(state, BlueprintCommand::CancelGesture)
+            }
+            self.dragging = false self.panning = false self.boxing = false self.right_pending = false
+            self.connection = Option[BlueprintEndpoint]::None self.menu = false self.resizing = ""
+            if !keep_draft {
+                self.field = "" self.field_dirty = false
+            }
+            if event.kind() == event_focus_lost() {
+                self.focused = false
+            }
+            if had_gesture {
+                self.refresh(state.blueprint_asset(), sheet)
+            }
+            ret had_gesture
+        }
+        if state.simulation_mode() != "" {
+            self.menu = false ret false
+        }
+        if event.kind() == event_key_down() && self.focused &&((event.control() && event.key() == 115) || event.key() == 1073741888) {
+            if self.commit_field(state, sheet) {
+                self.request = if event.key() == 115 {
+                    "bp-save"
+                } else {
+                    "bp-compile"
+                }
+            }
+            ret true
+        }
+        if self.menu && event.kind() == event_key_down() {
+            let choices = self.candidates()
+            if event.key() == key_down() {
+                if self.menu_index + 1 < choices.len() {
+                    self.menu_index += 1
+                }
+                ret true
+            }
+            if event.key() == key_up() {
+                if self.menu_index > 0 {
+                    self.menu_index -= 1
+                }
+                ret true
+            }
+            if event.key() == key_enter() {
+                match choices.get(self.menu_index) {
+                    Some(key) => {
+                        self.action(state, "bp-add-" + key) self.refresh(state.blueprint_asset(), sheet)
+                    }
+                    None => {
+                    }
+                }
+                ret true
+            }
+        }
+        if self.field != "" &&(event.kind() == event_text_input() || event.kind() == event_key_down()) {
+            if event.kind() == event_key_down() && event.key() == key_enter() {
+                if self.commit_field(state, sheet) {
+                    self.field = "" self.refresh(state.blueprint_asset(), sheet)
+                }
+            } else {
+                self.update_field(text_input(self.field_editor(), event))
+            }
+            ret true
+        }
+        if event.kind() == event_pointer_down() {
+            if target != self.field && !self.commit_field(state, sheet) {
+                ret true
+            }
+            if target == "bp-resize-left" || target == "bp-resize-right" {
+                self.resizing = target self.resize_x = event.x()
+                self.resize_width = if target == "bp-resize-left" {
+                    if self.left_width > 0 {
+                        self.left_width
+                    } else {
+                        themed(sheet, "bp-left").layout().flex().basis()
+                    }
+                } else {
+                    if self.right_width > 0 {
+                        self.right_width
+                    } else {
+                        themed(sheet, "bp-right").layout().flex().basis()
+                    }
+                }
+                self.resize_limit = self.resize_width + bounds.width() - 260
+                ret true
+            }
+            if self.menu && target != "bp-search" && !target.contains("bp-add-") {
+                self.menu = false self.field = "" self.connection = Option[BlueprintEndpoint]::None ret true
+            }
+            if target == "bp-search" || target == "bp-asset-name" || target == "bp-browser-search" || target == "bp-value" || target == "bp-property-name" || target == "bp-action-name" ||
+            target == "bp-component-name" || target == "bp-component-mesh" || target == "bp-component-material" ||
+            target.contains("bp-axis-") || target.contains("bp-value-axis-") {
+                self.field = target self.focused = true ret true
+            }
+            if target.contains("bp-") {
+                if target == "bp-new" || target.contains("bp-open-") {
+                    ret false
+                }
+                self.field = ""
+                let revision = state.revision()
+                self.action(state, target)
+                if revision != state.revision() || target.contains("bp-property-") || target.contains("bp-component-") || target.contains("bp-diagnostic-") {
+                    self.refresh(state.blueprint_asset(), sheet)
+                }
+                ret target != "bp-compile" && target != "bp-save" && target != "bp-place" && target != "bp-browser"
+            }
+        }
+        if event.kind() == event_scroll() && inside {
+            self.view = self.view.zoom_at(if event.wheel_y() > 0 {
+                    1.1_f32
+                } else {
+                    0.9090909_f32
+                }
+                , local.x(), local.y(),)
+            ret true
+        }
+        if event.kind() == event_pointer_down() && inside {
+            self.focused = true self.field = "" self.anchor = world self.pointer = local
+            if (event.buttons() & 2) != 0 {
+                self.panning = true ret true
+            }
+            if (event.buttons() & 4) != 0 {
+                self.right_pending = true ret true
+            }
+            if !event.primary_down() {
+                ret false
+            }
+            match pin_hit(self.cached, world, true, 10 / self.view.scale()) {
+                Some(pin) => {
+                    self.connection = Option[BlueprintEndpoint]::Some(pin)
+                    match self.cached.node(pin.node) {
+                        Some(node) => {
+                            self.anchor = pin_point(node, pin.pin, true)
+                        }
+                        None => {
+                        }
+                    }
+                    ret true
+                }
+                None => {
+                }
+            }
+            match pin_hit(self.cached, world, false, 10 / self.view.scale()) {
+                Some(pin) => {
+                    if (event.modifiers() & 768) != 0 {
+                        let _removed = edit(state, BlueprintCommand::Disconnect(pin)) self.refresh(state.blueprint_asset(), sheet) ret true
+                    }
+                    for edge in self.cached.links {
+                        if edge.target.node == pin.node && edge.target.pin == pin.pin {
+                            self.connection = Option[BlueprintEndpoint]::Some(edge.source)
+                            match self.cached.node(edge.source.node) {
+                                Some(node) => {
+                                    self.anchor = pin_point(node, edge.source.pin, true)
+                                }
+                                None => {
+                                }
+                            }
+                            ret true
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            match self.scene.hit(self.view, local.x(), local.y()) {
+                Some(id) => {
+                    if !has(self.selection, id) {
+                        if !event.control() {
+                            self.selection.clear()
+                        }
+                        self.selection.push(id)
+                    }
+                    self.property = 0 self.component = 0
+                    match self.cached.node(id) {
+                        Some(node) => {
+                            self.load_node(node)
+                        }
+                        None => {
+                        }
+                    }
+                    self.starts = Vec[BlueprintNode]::new()
+                    for node in self.cached.nodes {
+                        if has(self.selection, node.id) {
+                            self.starts.push(node)
+                        }
+                    }
+                    self.dragging = edit(state, BlueprintCommand::BeginGesture)
+                }
+                None => {
+                    if !event.control() {
+                        self.selection.clear()
+                    }
+                    self.boxing = true
+                }
+            }
+            self.refresh(state.blueprint_asset(), sheet) ret true
+        }
+        if event.kind() == event_pointer_move() {
+            if self.resizing != "" {
+                let value = self.resize_width +(event.x() - self.resize_x) *(if self.resizing == "bp-resize-left" {
+                        1_f32
+                    } else {
+                        - 1_f32
+                    }
+                )
+                let max = self.resize_limit
+                let width = if value < 160 {
+                    160_f32
+                } elif value > max {
+                    max
+                } else {
+                    value
+                }
+                if self.resizing == "bp-resize-left" {
+                    self.left_width = width
+                } else {
+                    self.right_width = width
+                }
+                ret true
+            }
+            if self.right_pending &&(absolute(local.x() - self.pointer.x()) > 3 || absolute(local.y() - self.pointer.y()) > 3) {
+                self.right_pending = false self.panning = true
+            }
+            if self.panning {
+                self.view = self.view.pan(local.x() - self.pointer.x(), local.y() - self.pointer.y()) self.pointer = local ret true
+            }
+            if self.dragging {
+                let mut moves = Vec[BlueprintMove]::new()
+                for node in self.starts {
+                    moves.push(BlueprintMove {
+                            node.id, node.x + world.x() - self.anchor.x(), node.y + world.y() - self.anchor.y()
+                        }
+                        ,
+                    )
+                }
+                if edit(state, BlueprintCommand::MoveNodes(moves)) {
+                    self.move_visuals(moves, sheet)
+                }
+                ret true
+            }
+            if self.boxing || self.connection.is_some() {
+                self.pointer = local ret true
+            }
+            if inside {
+                self.pointer = local
+                let mut hint = ""
+                let pin = match pin_hit(self.cached, world, true, 10 / self.view.scale()) {
+                    Some(value) => Option[BlueprintEndpoint]::Some(value) None => pin_hit(self.cached, world, false, 10 / self.view.scale())
+                }
+                match pin {
+                    Some(endpoint) => {
+                        match self.cached.node(endpoint.node) {
+                            Some(node) => {
+                                let found = match blueprint_pin(node, endpoint.pin, true) {
+                                    Some(value) => Option[BlueprintPin]::Some(value) None => blueprint_pin(node, endpoint.pin, false)
+                                }
+                                match found {
+                                    Some(value) => {
+                                        hint = endpoint.pin + " : " + value.value_type.name()
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    None => {
+                        match self.scene.hit(self.view, local.x(), local.y()) {
+                            Some(id) => {
+                                match self.cached.node(id) {
+                                    Some(node) => {
+                                        let info = operation_info(node.operation) hint = info.title + " · " + info.category
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+                let changed = hint != self.hint self.hint = hint
+                if changed || hint != "" {
+                    ret true
+                }
+            } elif self.hint != "" {
+                self.hint = "" ret true
+            }
+        }
+        if event.kind() == event_pointer_up() {
+            if self.resizing != "" {
+                self.resizing = "" ret true
+            }
+            if self.right_pending {
+                self.right_pending = false self.open_menu(Point::new(event.x(), event.y())) ret true
+            }
+            if self.dragging {
+                let _committed = edit(state, BlueprintCommand::CommitGesture) self.dragging = false ret true
+            }
+            if self.panning {
+                self.panning = false ret true
+            }
+            if self.boxing {
+                let x = if world.x() < self.anchor.x() {
+                    world.x()
+                } else {
+                    self.anchor.x()
+                }
+                let y = if world.y() < self.anchor.y() {
+                    world.y()
+                } else {
+                    self.anchor.y()
+                }
+                let hits = self.scene.intersecting(Rect::new(x, y, absolute(world.x() - self.anchor.x()), absolute(world.y() - self.anchor.y())))
+                for id in hits {
+                    if !has(self.selection, id) {
+                        self.selection.push(id)
+                    }
+                }
+                self.boxing = false self.refresh(state.blueprint_asset(), sheet) ret true
+            }
+            match self.connection {
+                Some(source) => {
+                    match pin_hit(self.cached, world, false, 10 / self.view.scale()) {
+                        Some(pin) => {
+                            let link = BlueprintLink { source, pin }
+                            self.message = blueprint_connection_error(self.cached, link)
+                            if self.message == "" {
+                                let _connected = edit(state, BlueprintCommand::Connect(link))
+                            }
+                            self.connection = Option[BlueprintEndpoint]::None self.refresh(state.blueprint_asset(), sheet)
+                        }
+                        None => {
+                            if inside {
+                                self.open_menu(Point::new(event.x(), event.y()))
+                            } else {
+                                self.connection = Option[BlueprintEndpoint]::None
+                            }
+                        }
+                    }
+                    ret true
+                }
+                None => {
+                }
+            }
+        }
+        if event.kind() == event_key_down() && self.focused {
+            if event.key() == 32 {
+                self.open_menu(Point::new(bounds.x() + self.pointer.x(), bounds.y() + self.pointer.y()))
+            } elif event.key() == 102 {
+                self.frame(true)
+            } elif event.key() == key_home() {
+                self.frame(false)
+            } elif event.key() == 1073741888 {
+                self.request = "bp-compile"
+            } elif event.key() == key_delete() {
+                self.action(state, "bp-delete")
+            } elif event.control() && event.key() == 99 {
+                self.clipboard = copy_selection(self.cached, self.selection)
+            } elif event.control() && event.key() == 118 {
+                self.action(state, "bp-paste")
+            } elif event.control() && event.key() == 100 {
+                self.action(state, "bp-duplicate")
+            } elif event.control() && event.key() == 122 {
+                self.action(state, if event.shift() {
+                        "bp-redo"
+                    } else {
+                        "bp-undo"
+                    }
+                    ,
+                )
+            } else {
+                ret false
+            }
+            if event.key() != 32 && event.key() != 102 && event.key() != key_home() && event.key() != 1073741888 {
+                self.refresh(state.blueprint_asset(), sheet)
+            }
+            ret true
+        }
+        if event.kind() == event_pointer_down() {
+            self.focused = false self.field = ""
+        }
+        ret false
+    }
+    fn action(self: mut Self, state: mut EditorState, target: str) ->() {
+        let asset = state.blueprint_asset()
+        if target == "bp-toggle-log" {
+            self.show_log = !self.show_log ret()
+        }
+        if target == "bp-toggle-left" {
+            self.left_open = !self.left_open ret()
+        }
+        if target == "bp-toggle-right" {
+            self.right_open = !self.right_open ret()
+        }
+        if target == "bp-components-toggle" {
+            self.components_open = !self.components_open ret()
+        }
+        if target == "bp-properties-toggle" {
+            self.properties_open = !self.properties_open ret()
+        }
+        if target == "bp-property-menu" {
+            self.property_menu = !self.property_menu ret()
+        }
+        if target == "bp-frame" {
+            self.frame(false) ret()
+        }
+        if target == "bp-frame-selected" {
+            self.frame(true) ret()
+        }
+        if target == "bp-add-menu" {
+            self.open_menu(Point::new(self.viewport.x() + self.viewport.width() / 2, self.viewport.y() + 50)) ret()
+        }
+        if target == "bp-undo" || target == "bp-redo" {
+            let _history = edit(state, if target == "bp-undo" {
+                    BlueprintCommand::Undo
+                } else {
+                    BlueprintCommand::Redo
+                }
+                ,
+            )
+            ret()
+        }
+        if target == "bp-delete" {
+            let _deleted = edit(state, BlueprintCommand::DeleteNodes(self.selection)) self.selection.clear() ret()
+        }
+        if target == "bp-duplicate" || target == "bp-paste" {
+            let source = if target == "bp-duplicate" {
+                copy_selection(asset, self.selection)
+            } else {
+                self.clipboard
+            }
+            let mut nodes = Vec[BlueprintNode]::new()
+            let anchor = source.nodes.get(0).unwrap_or(BlueprintNode::new(0, "", BlueprintType::Exec))
+            let cursor = self.view.world(self.pointer.x(), self.pointer.y())
+            let dx = if target == "bp-duplicate" {
+                0_f32
+            } else {
+                cursor.x() - anchor.x - 32
+            }
+            let dy = if target == "bp-duplicate" {
+                0_f32
+            } else {
+                cursor.y() - anchor.y - 32
+            }
+            let mut ids = Vec[u64]::new() let mut id = asset.next_node_id()
+            for node in source.nodes {
+                nodes.push(node.at(node.x + dx, node.y + dy)) ids.push(id) id += 1
+            }
+            if edit(state, BlueprintCommand::Paste(BlueprintClipboard { nodes, source.links })) {
+                self.selection = ids
+            }
+            ret()
+        }
+        if target == "bp-toggle-value" {
+            self.value = TextEditor::new(if self.value.value() == "true" {
+                    "false"
+                } else {
+                    "true"
+                }
+            )
+            self.action(state, "bp-apply-value") ret()
+        }
+        if target == "bp-value-reference-open" {
+            self.reference_menu = true self.focused = true self.menu = false self.reference_search = TextEditor::new("") self.reference_index = 0 self.field = "" ret()
+        }
+        if target.contains("bp-value-reference-") {
+            if target == "bp-value-reference-0" {
+                self.value = TextEditor::new("0")
+            }
+            if self.active_type == "actor" {
+                for actor in state.scene().entities() {
+                    if target == f "bp-value-reference-{actor.id()}" {
+                        self.value = TextEditor::new(f "{actor.id()}")
+                    }
+                }
+            } else {
+                for component in asset.components {
+                    if target == f "bp-value-reference-{component.id}" {
+                        self.value = TextEditor::new(f "{component.id}")
+                    }
+                }
+            }
+            self.action(state, "bp-apply-value") ret()
+        }
+        let mut diagnostic_index = 0_usize
+        for diagnostic in self.diagnostics {
+            if target == f "bp-diagnostic-{diagnostic_index}" && diagnostic.node != 0 {
+                self.selection = vec![diagnostic.node] self.frame(true) self.right_open = true
+                match asset.node(diagnostic.node) {
+                    Some(node) => {
+                        self.load_node(node)
+                    }
+                    None => {
+                    }
+                }
+            }
+            diagnostic_index += 1
+        }
+        match asset.node(self.selection.get(0).unwrap_or(0)) {
+            Some(node) => {
+                if target == "bp-target-self" {
+                    let _set = edit(state, BlueprintCommand::SetNode(node.with_reference(0))) ret()
+                }
+                for component in asset.components {
+                    if target == f "bp-target-{component.id}" {
+                        let _set = edit(state, BlueprintCommand::SetNode(node.with_reference(component.id))) ret()
+                    }
+                }
+                for property in asset.properties {
+                    if target == f "bp-reference-{property.id}" {
+                        let _set = edit(state, BlueprintCommand::SetNode(node.with_value(property.default_value).with_reference(property.id))) ret()
+                    }
+                }
+                for action in self.actions {
+                    if target == "bp-action-" + action {
+                        self.value = TextEditor::new(action) let _set = edit(state, BlueprintCommand::SetNode(node.with_text(action))) ret()
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        for kind in vec!["bool", "i32", "f32", "str", "vec3", "actor", "component"] {
+            if target == "bp-new-property-" + kind {
+                let mut id = 1_u64
+                for property in asset.properties {
+                    if property.id >= id {
+                        id = property.id + 1
+                    }
+                }
+                let value = default_value(kind)
+                let name = "Property" + Debug::fmt(id)
+                let _created = edit(state, BlueprintCommand::SetProperty(BlueprintProperty {
+                            id, name, value
+                        }
+                        ,
+                    ))
+                self.property = id self.component = 0 self.property_menu = false self.properties_open = true self.right_open = true
+                self.selection.clear() self.property_name = TextEditor::new(name)
+                self.load_value(value)
+            }
+            if target == "bp-type-" + kind {
+                match asset.node(self.selection.get(0).unwrap_or(0)) {
+                    Some(node) => {
+                        let _changed = edit(state, BlueprintCommand::SetNode(node.with_value(default_value(kind))))
+                        self.load_value(default_value(kind))
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+        if target == "bp-new-scene" || target == "bp-new-mesh" {
+            let mut id = 1_u64
+            for component in asset.components {
+                if component.id >= id {
+                    id = component.id + 1
+                }
+            }
+            let parent = if self.component != 0 {
+                self.component
+            } else {
+                match asset.components.get(0) {
+                    Some(component) => component.id None => 1_u64
+                }
+            }
+            let _created = edit(state, BlueprintCommand::SetComponent(BlueprintComponent {
+                        id, parent, "Component" + Debug::fmt(id), if target == "bp-new-mesh" {
+                            "static-mesh"
+                        } else {
+                            "scene"
+                        }
+                        , Transform::identity(), if target == "bp-new-mesh" {
+                            "cube"
+                        } else {
+                            ""
+                        }
+                        , "default", true
+                    }
+                    ,
+                ))
+        }
+        for component in asset.components {
+            if target == "bp-component-" + Debug::fmt(component.id) {
+                self.property = 0 self.selection.clear() self.right_open = true
+                self.component = component.id self.component_name = TextEditor::new(component.name)
+                self.component_mesh = TextEditor::new(component.mesh) self.component_material = TextEditor::new(component.material)
+                self.component_axes = Vec[TextEditor]::new()
+                vector_editors(component.transform.position(), self.component_axes) vector_editors(component.transform.rotation(), self.component_axes) vector_editors(component.transform.scale(), self.component_axes)
+            }
+        }
+        if target == "bp-apply-component" {
+            if self.component_name.value() == "" {
+                self.message = "Component name is required" ret()
+            }
+            match asset.component(self.component) {
+                Some(component) => {
+                    let mut axes = Vec[f32]::new()
+                    for editor in self.component_axes {
+                        match parse_editor_scalar(editor.value()) {
+                            Some(value) => {
+                                axes.push(value)
+                            }
+                            None => {
+                                self.message = "Invalid component transform" ret()
+                            }
+                        }
+                    }
+                    if axes.len() == 9 {
+                        let position = Vec3::new(axes.get(0).unwrap_or(0), axes.get(1).unwrap_or(0), axes.get(2).unwrap_or(0))
+                        let rotation = Vec3::new(axes.get(3).unwrap_or(0), axes.get(4).unwrap_or(0), axes.get(5).unwrap_or(0))
+                        let scale = Vec3::new(axes.get(6).unwrap_or(1), axes.get(7).unwrap_or(1), axes.get(8).unwrap_or(1))
+                        let _changed = edit(state, BlueprintCommand::SetComponent(BlueprintComponent {
+                                    component.id, component.parent, self.component_name.value(), component.kind, Transform::new(position, rotation, scale), self.component_mesh.value(), self.component_material.value(), component.visible
+                                }
+                                ,
+                            ))
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        if target == "bp-remove-component" {
+            let _removed = edit(state, BlueprintCommand::RemoveComponent(self.component)) self.component = 0
+        }
+        if target == "bp-remove-property" {
+            let _removed = edit(state, BlueprintCommand::RemoveProperty(self.property)) self.property = 0
+        }
+        if target == "bp-use-property" {
+            match asset.node(self.selection.get(0).unwrap_or(0)) {
+                Some(node) => {
+                    match asset.property(self.property) {
+                        Some(property) => {
+                            let _changed = edit(state, BlueprintCommand::SetNode(node.with_value(property.default_value).with_reference(property.id)))
+                        }
+                        None => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        if target == "bp-disconnect" {
+            let _begin = edit(state, BlueprintCommand::BeginGesture)
+            for node in asset.nodes {
+                if has(self.selection, node.id) {
+                    for pin in blueprint_pins(node) {
+                        if !pin.output {
+                            let _disconnected = edit(state, BlueprintCommand::Disconnect(BlueprintEndpoint {
+                                        node.id, pin.key
+                                    }
+                                    ,
+                                ))
+                        }
+                    }
+                }
+            }
+            let _commit = edit(state, BlueprintCommand::CommitGesture)
+        }
+        for operation in palette() {
+            if target == "bp-add-" + operation {
+                let position = self.view.world(self.menu_at.x() - self.viewport.x(), self.menu_at.y() - self.viewport.y())
+                let mut node = operation_node(asset.next_node_id(), operation).at(position.x(), position.y())
+                if operation == "constant" {
+                    node = node.with_value(blueprint_default("f32"))
+                }
+                if operation == "get-variable" || operation == "set-variable" {
+                    match asset.property(self.property) {
+                        Some(property) => {
+                            node = node.with_value(property.default_value).with_reference(property.id)
+                        }
+                        None => {
+                            match asset.properties.get(0) {
+                                Some(property) => {
+                                    node = node.with_value(property.default_value).with_reference(property.id)
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                }
+                if operation == "input-pressed" || operation == "input-released" {
+                    node = node.with_text(self.actions.get(0).unwrap_or(""))
+                }
+                let mut connection = Option[BlueprintLink]::None
+                match self.connection {
+                    Some(source) => {
+                        match asset.node(source.node) {
+                            Some(owner) => {
+                                match blueprint_pin(owner, source.pin, true) {
+                                    Some(output) => {
+                                        for kind in operation_types(operation) {
+                                            if kind == output.value_type.name() {
+                                                node = node.with_value(blueprint_default(kind))
+                                            }
+                                        }
+                                        for pin in blueprint_pins(node) {
+                                            if !pin.output && pin.value_type.name() == output.value_type.name() && connection.is_none() {
+                                                connection = Option[BlueprintLink]::Some(BlueprintLink {
+                                                        source, BlueprintEndpoint {
+                                                            node.id, pin.key
+                                                        }
+                                                    }
+                                                    ,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+                let _began = edit(state, BlueprintCommand::BeginGesture)
+                let mut success = edit(state, BlueprintCommand::AddNode(node))
+                match connection {
+                    Some(link) => {
+                        success = success && edit(state, BlueprintCommand::Connect(link))
+                    }
+                    None => {
+                    }
+                }
+                let _finished = edit(state, if success {
+                        BlueprintCommand::CommitGesture
+                    } else {
+                        BlueprintCommand::CancelGesture
+                    }
+                    ,
+                )
+                if !success {
+                    self.message = "Unable to add this connection" ret()
+                }
+                self.selection = vec![node.id] self.load_node(node)
+                self.menu = false self.field = "" self.connection = Option[BlueprintEndpoint]::None
+            }
+        }
+        for property in asset.properties {
+            if target == "bp-property-" + Debug::fmt(property.id) {
+                self.component = 0 self.selection.clear() self.right_open = true
+                self.property = property.id self.property_name = TextEditor::new(property.name) self.load_value(property.default_value)
+            }
+        }
+        if target == "bp-apply-value" {
+            if self.property != 0 {
+                if self.property_name.value() == "" {
+                    self.message = "Variable name is required" ret()
+                }
+                for property in asset.properties {
+                    if property.id != self.property && property.name == self.property_name.value() {
+                        self.message = "Variable names must be unique" ret()
+                    }
+                }
+            }
+            let text = if self.active_type == "str" {
+                stringify(Json::String(self.value.value()))
+            } elif self.active_type == "vec3" {
+                "[" + self.value_axes.get(0).unwrap_or(TextEditor::new("0")).value() + "," + self.value_axes.get(1).unwrap_or(TextEditor::new("0")).value() + "," + self.value_axes.get(2).unwrap_or(TextEditor::new("0")).value() + "]"
+            } else {
+                self.value.value()
+            }
+            let payload = match parse(text) {
+                Ok(value) => value Err(error) => {
+                    self.message = error.message() ret()
+                }
+            }
+            let mut value_type = BlueprintType::F32
+            if self.property != 0 {
+                match asset.property(self.property) {
+                    Some(property) => {
+                        value_type = property.default_value.value_type()
+                    }
+                    None => {
+                    }
+                }
+            } else {
+                match asset.node(self.selection.get(0).unwrap_or(0)) {
+                    Some(node) => {
+                        value_type = node.value_type
+                    }
+                    None => {
+                    }
+                }
+            }
+            match blueprint_value_parse(Json::Object(vec![field("type", Json::String(value_type.name())), field("value", payload)])) {
+                Ok(value) => {
+                    if self.property != 0 {
+                        match asset.property(self.property) {
+                            Some(property) => {
+                                let _changed = edit(state, BlueprintCommand::SetProperty(BlueprintProperty {
+                                            property.id, self.property_name.value(), value
+                                        }
+                                        ,
+                                    ))
+                            }
+                            None => {
+                            }
+                        }
+                    } else {
+                        match asset.node(self.selection.get(0).unwrap_or(0)) {
+                            Some(node) => {
+                                let _changed = edit(state, BlueprintCommand::SetNode(node.with_value(value)))
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    self.message = ""
+                }
+                Err(error) => {
+                    self.message = error
+                }
+            }
+        }
+    }
+}
+fn copy_selection(asset: BlueprintAsset, selection: Vec[u64]) -> BlueprintClipboard {
+    let mut nodes = Vec[BlueprintNode]::new() let mut links = Vec[BlueprintLink]::new()
+    for node in asset.nodes {
+        if has(selection, node.id) {
+            nodes.push(node)
+        }
+    }
+    for link in asset.links {
+        if has(selection, link.source.node) && has(selection, link.target.node) {
+            links.push(link)
+        }
+    }
+    ret BlueprintClipboard { nodes, links }
+}
+fn text_input(editor: TextEditor, event: Event) -> TextEditor {
+    if event.kind() == event_text_input() {
+        ret editor.insert(event.text())
+    }
+    if event.control() && event.key() == 97 {
+        ret editor.select_all()
+    }
+    if event.key() == key_backspace() {
+        ret editor.backspace()
+    }
+    if event.key() == key_delete() {
+        ret editor.delete()
+    }
+    if event.key() == key_left() {
+        ret editor.move_left(event.shift())
+    }
+    if event.key() == key_right() {
+        ret editor.move_right(event.shift())
+    }
+    if event.key() == key_home() {
+        ret editor.move_home(event.shift())
+    }
+    if event.key() == key_end() {
+        ret editor.move_end(event.shift())
+    }
+    ret editor
+}

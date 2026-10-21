@@ -1,0 +1,63 @@
+//! Asynchronous, fence-owned uploads. No device-wide idle on material changes.
+
+import core::option::Option
+import mod::rhi::*
+import mod::texture_image::TextureImage
+
+pub struct TextureUpload {
+    texture: GpuTexture
+    staging: GpuBuffer
+    encoder: CommandEncoder
+    submission: GpuSubmission
+}
+
+impl for TextureUpload {
+    pub fn begin(device: GraphicsDevice, image: TextureImage) -> Option[TextureUpload] {
+        ret Self::begin_with_format(device, image, format_rgba8_srgb())
+    }
+
+    /// Data maps (normal, roughness, etc.) must bypass sRGB decoding.
+    pub fn begin_linear(device: GraphicsDevice, image: TextureImage) -> Option[TextureUpload] {
+        ret Self::begin_with_format(device, image, format_rgba8_unorm())
+    }
+
+    fn begin_with_format(device: GraphicsDevice, image: TextureImage, format: u32) -> Option[TextureUpload] {
+        if image.width == 0 || image.height == 0 || image.pixels.len() !=(image.width as usize) *(image.height as usize) {
+            ret Option::None
+        }
+        let texture = device.create_texture_2d(image.width, image.height, 1,
+            format, texture_sampled() | texture_transfer_destination(),)
+        let staging = device.create_buffer((image.pixels.len() as u64) * 4, buffer_transfer_source(), true)
+        let encoder = device.create_encoder()
+        if !texture.available() || !staging.available() || !encoder.available() ||
+        !staging.write_u32s(0, image.pixels) ||
+        !encoder.transition_texture(texture, texture_layout_transfer_destination()) ||
+        !encoder.copy_buffer_to_texture(staging, texture, image.width, image.height, 0) ||
+        !encoder.transition_texture(texture, texture_layout_shader_read()) {
+            encoder.destroy() staging.destroy() texture.destroy()
+            ret Option::None
+        }
+        let submission = encoder.submit()
+        if !submission.available() {
+            submission.destroy() encoder.destroy() staging.destroy() texture.destroy()
+            ret Option::None
+        }
+        ret Option::Some(TextureUpload { texture, staging, encoder, submission })
+    }
+
+    pub fn complete(self: Self) -> bool {
+        ret self.submission.complete()
+    }
+    /// Startup-only white image; waits for this submission, not device idle.
+    pub fn wait(self: Self) -> bool {
+        ret self.submission.wait(18446744073709551615_u64)
+    }
+
+    /// Caller must observe completion before publishing or abandoning the image.
+    pub fn finish(self: Self) -> GpuTexture {
+        self.submission.destroy()
+        self.encoder.destroy()
+        self.staging.destroy()
+        ret self.texture
+    }
+}

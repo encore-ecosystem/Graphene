@@ -1,0 +1,167 @@
+//! Project-owned cooked characters. A single atomic publication keeps skeleton,
+//! geometry, clips and texture generations consistent, including failed reimports.
+//! Runtime loading never opens the recorded source path or invokes an importer.
+import binary::{encode, decode}
+import core::result::Result
+import core::vec::Vec
+import mod::cook::{CookedSkeletalMesh, prepare_skeletal_geometry}
+import mod::material::{AnimationSourceMaterial, AnimationSourceImage}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip}
+import mod::source::{AnimationSource, decode_animation_source}
+import refrain::content_browser::path::{content_name_valid, ends, lower}
+import refrain::native_asset::{save_animation_payload, load_animation_payload, asset_source_stamp, native_asset_source}
+import std::os::{file_exists, mkdir_all}
+import std::path::Path
+import std::time::perf_counter_ns
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+extern fn encore_text_sha256(contents: str) -> str
+#attr(safe)
+fn byte_string(data: Vec[u8]) -> str {
+    ret graphene_asset_bytes(data.as_ptr(), data.len())
+}
+#attr(safe)
+fn identity(source: str) -> str {
+    ret encore_text_sha256(source + ":" + perf_counter_ns().fmt())
+}
+fn bytes(data: str) -> Vec[u8] {
+    let mut out = Vec[u8]::with_capacity(data.byte_len()) for i in 0_usize..data.byte_len() {
+        out.push(data.byte_at(i))
+    }
+    ret out
+}
+
+pub struct CharacterAsset {
+    version: u32
+    identity: str
+    name: str
+    skeleton: Skeleton
+    geometry: CookedSkeletalMesh
+    clips: Vec[AnimationClip]
+    materials: Vec[AnimationSourceMaterial]
+    default_clip: str
+    warnings: Vec[str]
+}
+
+impl for CharacterAsset {
+    pub fn validate(self: Self) -> Result[bool, str] {
+        if self.version != 1_u32 || self.identity == "" || self.name == "" || self.skeleton.identity != self.identity || self.clips.len() > 4096_usize || self.materials.len() == 0_usize || self.materials.len() > 4096_usize {
+            ret Result::Err("Invalid character header")
+        }
+        self.geometry.validate(self.skeleton)?
+        let mut found = self.default_clip == "" && self.clips.len() == 0_usize
+        for i in 0_usize..self.clips.len() {
+            let clip = self.clips.get_unchecked_borrowed(i)
+            clip.validate(self.skeleton, self.geometry.mesh.morphs.len())?
+            if clip.identity == self.default_clip {
+                found = true
+            }
+            for j in 0_usize..i {
+                if self.clips.get_unchecked_borrowed(j).identity == clip.identity {
+                    ret Result::Err("Duplicate character clip identity")
+                }
+            }
+        }
+        if !found {
+            ret Result::Err("Character default clip is missing")
+        }
+        for i in 0_usize..self.materials.len() {
+            let material = self.materials.get_unchecked_borrowed(i) material.validate()?
+            for j in 0_usize..i {
+                if self.materials.get_unchecked_borrowed(j).name == material.name {
+                    ret Result::Err("Duplicate character material binding")
+                }
+            }
+        }
+        for section in self.geometry.mesh.sections {
+            let mut bound = false
+            for material in self.materials {
+                if section.material == material.name {
+                    bound = true
+                }
+            }
+            if !bound {
+                ret Result::Err("Character section has no material binding")
+            }
+        }
+        ret Result::Ok(true)
+    }
+    pub fn clip_index(self: Self, identity: str) -> Result[u32, str] {
+        let selected = if identity == "" {
+            self.default_clip
+        } else {
+            identity
+        }
+        for i in 0_usize..self.clips.len() {
+            if self.clips.get_unchecked_borrowed(i).identity == selected {
+                ret Result::Ok(i as u32)
+            }
+        }
+        if selected == "" && self.clips.len() == 0_usize {
+            ret Result::Ok(0_u32)
+        }
+        ret Result::Err("Character clip is missing: " + selected)
+    }
+}
+pub fn load_character(path: str, revision: str) -> Result[CharacterAsset, str] {
+    let payload = load_animation_payload(path, "character", revision)?
+    let asset = match decode[CharacterAsset](bytes(payload)) {
+        Ok(a) => a Err(e) => {
+            ret Result::Err(e.message())
+        }
+    }
+    asset.validate()? ret Result::Ok(asset)
+}
+pub fn save_character(path: str, source: str, revision: str, asset: CharacterAsset) -> Result[bool, str] {
+    asset.validate()?
+    let payload = match encode(asset) {
+        Ok(p) => p Err(e) => {
+            ret Result::Err(e.message())
+        }
+    }
+    if !save_animation_payload(path, "character", source, revision, byte_string(payload)) {
+        ret Result::Err("Unable to publish character asset")
+    }
+    ret Result::Ok(true)
+}
+/// Import is explicit and offline. Reimport preserves logical identities and
+/// only publishes after every dependent record and cooked section validates.
+pub fn import_character(project: str, source_path: str, name: str) -> Result[CharacterAsset, str] {
+    if !content_name_valid(name) || ends(lower(name), ".gcharacter") {
+        ret Result::Err("Invalid character asset name")
+    }
+    let source = Path::new(source_path).resolve().as_str()
+    if !file_exists(source) {
+        ret Result::Err("Animation source does not exist")
+    }
+    let directory = project + "/Content/Characters"
+    let destination = directory + "/" + name + ".gcharacter"
+    let mut stable = identity(source)
+    if file_exists(destination) {
+        if native_asset_source(destination, "character")? != source {
+            ret Result::Err("A different source already uses this character name")
+        }
+        let previous = load_character(destination, "")? stable = previous.identity
+    }
+    let revision = asset_source_stamp(source)
+    if revision == "" {
+        ret Result::Err("Unable to fingerprint animation source")
+    }
+    let decoded = decode_animation_source(source, stable)?
+    let cooked = prepare_skeletal_geometry(decoded.mesh, decoded.skeleton, decoded.clips)?
+    let mut default_clip = ""
+    if decoded.clips.len() > 0_usize {
+        default_clip = decoded.clips.get_unchecked_borrowed(0_usize).identity
+    }
+    let asset = CharacterAsset {
+        1_u32, stable, name, decoded.skeleton, cooked, decoded.clips, decoded.materials, default_clip, decoded.warnings
+    }
+    asset.validate()?
+    if asset_source_stamp(source) != revision {
+        ret Result::Err("Animation source changed during import; retry")
+    }
+    if mkdir_all(directory) != 0_i32 {
+        ret Result::Err("Unable to create character directory")
+    }
+    save_character(destination, source, revision, asset)?
+    ret Result::Ok(asset)
+}

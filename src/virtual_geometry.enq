@@ -607,9 +607,16 @@ fn representative_root(representatives: Vec[u32], value: u32) -> u32 {
 // Symmetric 4x4 plane quadric. Only the upper triangle is stored, keeping the
 // builder allocation-free per candidate while retaining the full QEM metric.
 struct GeometryQuadric {
-    xx: f32 xy: f32 xz: f32 xw: f32
-    yy: f32 yz: f32 yw: f32
-    zz: f32 zw: f32 ww: f32
+    xx: f32
+    xy: f32
+    xz: f32
+    xw: f32
+    yy: f32
+    yz: f32
+    yw: f32
+    zz: f32
+    zw: f32
+    ww: f32
     planes: f32
 }
 
@@ -860,8 +867,19 @@ fn approximate_square_root(value: f32) -> f32 {
     ret estimate
 }
 
+fn geometry_attributes_match(attributes: Vec[f32], stride: usize, a: u32, b: u32) -> bool {
+    for component in 3_usize..stride {
+        let difference = attributes.get((a as usize) * stride + component).unwrap_or(0.0_f32) -
+        attributes.get((b as usize) * stride + component).unwrap_or(0.0_f32)
+        if difference < - 0.000001_f32 || difference > 0.000001_f32 {
+            ret false
+        }
+    }
+    ret true
+}
+
 fn canonical_geometry_representatives(values: Vec[Vec3],
-    indices: Vec[u32],) -> Vec[u32] {
+    indices: Vec[u32], attributes: Vec[f32], attribute_stride: usize,) -> Vec[u32] {
     let mut representatives = Vec[u32]::new()
     let mut vertex = 0_usize
     while vertex < values.len() {
@@ -881,7 +899,8 @@ fn canonical_geometry_representatives(values: Vec[Vec3],
             let candidate_index = triangle_index(indices, probe)
             let candidate = position(values, candidate_index)
             let delta = point.sub(candidate)
-            if delta.dot(delta) <= 0.000000000001_f32 {
+            if delta.dot(delta) <= 0.000000000001_f32 &&
+            geometry_attributes_match(attributes, attribute_stride, current, candidate_index) {
                 canonical = match representatives.get(candidate_index as usize) {
                     Option::Some(value) => value
                     Option::None => candidate_index
@@ -907,18 +926,30 @@ fn canonical_geometry_indices(indices: Vec[u32],
     ret canonical
 }
 
+// Optional deformation-displacement samples are in mesh units, xyz triples.
+// Static meshes pass zero and retain their existing cost and welding policy.
+fn deformation_edge_error(attributes: Vec[f32],stride: usize,start: usize,a: u32,b: u32) -> f32 {
+    if start==0_usize {ret 0_f32}
+    let mut error=0_f32 let mut at=start
+    while at+2_usize<stride {
+        let x=attributes.get_unchecked_borrowed((a as usize)*stride+at)-attributes.get_unchecked_borrowed((b as usize)*stride+at)
+        let y=attributes.get_unchecked_borrowed((a as usize)*stride+at+1_usize)-attributes.get_unchecked_borrowed((b as usize)*stride+at+1_usize)
+        let z=attributes.get_unchecked_borrowed((a as usize)*stride+at+2_usize)-attributes.get_unchecked_borrowed((b as usize)*stride+at+2_usize)
+        let value=x*x+y*y+z*z if value>error{error=value} at+=3_usize
+    }
+    ret error
+}
 fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
-    target_triangles: usize,) -> SimplifiedGeometryIndices {
+    target_triangles: usize, attributes: Vec[f32], attribute_stride: usize,deformation_start: usize,) -> SimplifiedGeometryIndices {
     if values.len() == 0_usize || indices.len() < 3_usize {
         ret SimplifiedGeometryIndices {
             Vec[u32]::new(), 0.0_f32
         }
     }
-    // Rendering keeps the original split vertices (hard normals, UV seams and
-    // colors), while the topology graph welds position-equivalent vertices.
-    // OBJ and glTF importers are therefore free to use per-corner attributes
-    // without turning every triangle into an un-simplifiable boundary island.
-    let mut representatives = canonical_geometry_representatives(values, indices)
+    // Weld identical render vertices, preserving UV charts, hard normals and
+    // color discontinuities. Position-only welding corrupts even parent nodes
+    // that do not collapse an edge: their indices select the wrong UV chart.
+    let mut representatives = canonical_geometry_representatives(values, indices, attributes, attribute_stride)
     let working_indices = canonical_geometry_indices(indices, representatives)
     let locked = locked_geometry_vertices(working_indices, values.len())
     let mut active_triangles = working_indices.len() / 3_usize
@@ -929,8 +960,9 @@ fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
     }
     let mut maximum_error = 0.0_f32
     let mut guard = 0_usize
+    // Retain the original surface planes throughout the collapse sequence.
+    let mut quadrics = build_geometry_quadrics(values, working_indices, representatives)
     while active_triangles > safe_target && guard < values.len() * 2_usize {
-        let quadrics = build_geometry_quadrics(values, working_indices, representatives)
         let mut best_removed = 4294967295_u32
         let mut best_retained = 4294967295_u32
         let mut best_cost = 340282346638528859811704183484516925440.0_f32
@@ -961,14 +993,15 @@ fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
                         geometry_quadric_at(quadrics, second),)
                     let first_locked = geometry_bool_at(locked, first)
                     let second_locked = geometry_bool_at(locked, second)
-                    let first_cost = combined.evaluate(position(values, second))
+                    let deformation_cost=deformation_edge_error(attributes,attribute_stride,deformation_start,first,second)*combined.plane_count()
+                    let first_cost = combined.evaluate(position(values, second))+deformation_cost
                     if !first_locked && first_cost < best_cost &&
                     collapse_preserves_orientation(values, working_indices,
                         representatives, first, second,) {
                         best_removed = first best_retained = second best_cost = first_cost
                         best_plane_count = combined.plane_count()
                     }
-                    let second_cost = combined.evaluate(position(values, first))
+                    let second_cost = combined.evaluate(position(values, first))+deformation_cost
                     if !second_locked && second_cost < best_cost &&
                     collapse_preserves_orientation(values, working_indices,
                         representatives, second, first,) {
@@ -984,6 +1017,8 @@ fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
             break
         }
         representatives.set(best_removed as usize, best_retained)
+        quadrics.set(best_retained as usize, geometry_quadric_at(quadrics, best_retained).add(geometry_quadric_at(quadrics, best_removed)))
+        quadrics.set(best_removed as usize, GeometryQuadric::zero())
         let normalized_cost = best_cost /
         if best_plane_count > 1.0_f32 {
             best_plane_count
@@ -1005,6 +1040,25 @@ fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
             triangle += 3_usize
         }
         guard += 1_usize
+    }
+    // Endpoint displacement bounds every source vertex through the whole
+    // collapse chain. A low average plane cost alone can hide a flattened pole
+    // or a cone, causing the GPU to select that LOD at close viewing distances.
+    for original in indices {
+        let retained = representative_root(representatives, original)
+        let delta = position(values, original).sub(position(values, retained))
+        if delta.dot(delta) > maximum_error {
+            maximum_error = delta.dot(delta)
+        }
+        if deformation_start!=0_usize {
+            let mut at=deformation_start
+            while at+2_usize<attribute_stride {
+                let a=(original as usize)*attribute_stride+at let b=(retained as usize)*attribute_stride+at
+                let sampled=delta.add(Vec3::new(attributes.get_unchecked_borrowed(a)-attributes.get_unchecked_borrowed(b),attributes.get_unchecked_borrowed(a+1_usize)-attributes.get_unchecked_borrowed(b+1_usize),attributes.get_unchecked_borrowed(a+2_usize)-attributes.get_unchecked_borrowed(b+2_usize)))
+                if sampled.dot(sampled)>maximum_error {maximum_error=sampled.dot(sampled)}
+                at+=3_usize
+            }
+        }
     }
     let mut simplified = Vec[u32]::new()
     let mut triangle = 0_usize
@@ -1030,7 +1084,7 @@ pub fn simplify_virtual_geometry_indices(values: Vec[Vec3], indices: Vec[u32],
     let triangle_count = indices.len() / 3_usize
     let target_triangles =
     triangle_count * resolution as usize /(resolution as usize + 16_usize)
-    let result = simplify_geometry_qem(values, indices, target_triangles)
+    let result = simplify_geometry_qem(values, indices, target_triangles, Vec[f32]::new(), 0_usize,0_usize)
     ret result.parts().0
 }
 
@@ -1110,6 +1164,25 @@ fn append_virtual_partition(clusters: mut Vec[GeometryCluster],
 /// root page range contiguous and lets the runtime pin the coarsest cut.
 pub fn build_virtual_geometry_lods(values: Vec[Vec3], indices: Vec[u32],
     max_vertices: usize, max_triangles: usize,) -> VirtualGeometry {
+    ret build_virtual_geometry_lods_with_attributes(values, indices, Vec[f32]::new(), 0_usize, max_vertices, max_triangles)
+}
+
+/// Interleaved render attributes participate in welding, keeping seams intact.
+pub fn build_virtual_geometry_lods_with_attributes(values: Vec[Vec3], indices: Vec[u32],
+    attributes: Vec[f32], attribute_stride: usize,
+    max_vertices: usize, max_triangles: usize,) -> VirtualGeometry {
+    ret build_virtual_geometry_lods_with_deformation(values,indices,attributes,attribute_stride,0_usize,max_vertices,max_triangles)
+}
+/// Skin-aware QEM: retain source endpoints/influences while penalizing differences
+/// in sampled animation and morph displacement. Material sections cook separately.
+pub fn build_virtual_geometry_lods_with_deformation(values: Vec[Vec3], indices: Vec[u32],
+    attributes: Vec[f32], attribute_stride: usize,deformation_start: usize,
+    max_vertices: usize,max_triangles: usize) -> VirtualGeometry {
+    if deformation_start!=0_usize && (deformation_start<3_usize || deformation_start>attribute_stride || (attribute_stride-deformation_start)%3_usize!=0_usize){ret invalid_geometry("Invalid deformation attribute layout")}
+
+    if attribute_stride != 0_usize &&(attribute_stride < 3_usize || attributes.len() / attribute_stride != values.len() || attributes.len() % attribute_stride != 0_usize) {
+        ret invalid_geometry("Invalid AutoLOD vertex attributes")
+    }
     let base = build_virtual_geometry(values, indices, max_vertices, max_triangles)
     if !base.valid() {
         ret base
@@ -1152,6 +1225,12 @@ pub fn build_virtual_geometry_lods(values: Vec[Vec3], indices: Vec[u32],
 
     let mut level = 1_u32
     let mut accumulated_error = 0.0_f32
+    // Reuse a source-to-group map. QEM's quadrics and boundary arrays must
+    // scale with the current cluster group, not with the complete source mesh.
+    let mut group_remap = Vec[u32]::with_capacity(values.len())
+    for _ in 0..values.len() {
+        group_remap.push(4294967295_u32)
+    }
     while level_nodes.len() > 1_usize && level < 24_u32 {
         let level_first_cluster = clusters.len()
         let mut next_nodes = Vec[u32]::new()
@@ -1197,10 +1276,33 @@ pub fn build_virtual_geometry_lods(values: Vec[Vec3], indices: Vec[u32],
                     1_usize
                 }
             }
+            let mut group_values = Vec[Vec3]::new()
+            let mut group_attributes = Vec[f32]::new()
+            let mut group_sources = Vec[u32]::new()
+            let mut group_indices = Vec[u32]::with_capacity(source_indices.len())
+            for source_index in source_indices {
+                let mut local = group_remap.get(source_index as usize).unwrap_or(4294967295_u32)
+                if local == 4294967295_u32 {
+                    local = group_values.len() as u32
+                    group_values.push(position(values, source_index))
+                    for component in 0_usize..attribute_stride {
+                        group_attributes.push(attributes.get((source_index as usize) * attribute_stride + component).unwrap_or(0.0_f32))
+                    }
+                    group_sources.push(source_index)
+                    group_remap.set(source_index as usize, local)
+                }
+                group_indices.push(local)
+            }
             let simplified = simplify_geometry_qem(
-                values, source_indices, target_triangle_count,)
+                group_values, group_indices, target_triangle_count, group_attributes, attribute_stride,deformation_start,)
             let simplified_parts = simplified.parts()
-            let simplified_indices = simplified_parts.0
+            let mut simplified_indices = Vec[u32]::with_capacity(simplified_parts.0.len())
+            for local in simplified_parts.0 {
+                simplified_indices.push(group_sources.get(local as usize).unwrap_or(0_u32))
+            }
+            for source_index in group_sources {
+                group_remap.set(source_index as usize, 4294967295_u32)
+            }
             let collapse_error = simplified_parts.1
             let partition = build_virtual_geometry(
                 values, simplified_indices, max_vertices, max_triangles,)

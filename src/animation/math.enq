@@ -1,0 +1,332 @@
+//! Animation math is independent of scene Euler transforms and GPU ownership.
+//! Affine matrices retain shear produced by non-uniformly scaled hierarchies.
+import core::option::Option
+
+pub fn animation_finite(x: f32) -> bool {
+    ret x >= - 340282346638528859811704183484516925440_f32 && x <= 340282346638528859811704183484516925440_f32
+}
+pub fn animation_abs(x: f32) -> f32 {
+    ret if x < 0_f32 {
+        - x
+    } else {
+        x
+    }
+}
+pub fn animation_clamp(x: f32, low: f32, high: f32) -> f32 {
+    ret if x < low {
+        low
+    } elif x > high {
+        high
+    } else {
+        x
+    }
+}
+/// Scaled Newton iteration avoids overflow and works on subnormal floats.
+pub fn animation_sqrt(x: f32) -> f32 {
+    if x <= 0_f32 {
+        ret 0_f32
+    }
+    if !animation_finite(x) {
+        ret x
+    }
+    let mut value = x let mut scale = 1_f32
+    while value > 4_f32 {
+        value *= 0.25_f32 scale *= 2_f32
+    }
+    while value < 1_f32 {
+        value *= 4_f32 scale *= 0.5_f32
+    }
+    let mut result = 1.5_f32
+    for _i in 0_usize..6_usize {
+        result =(result + value / result) * 0.5_f32
+    }
+    ret result * scale
+}
+fn animation_atan_positive(x: f32) -> f32 {
+    if x > 1_f32 {
+        ret 1.570796326795_f32 - animation_atan_positive(1_f32 / x)
+    }
+    if x > 0.414213562373_f32 {
+        ret 0.785398163397_f32 + animation_atan_series((x - 1_f32) /(x + 1_f32))
+    }
+    ret animation_atan_series(x)
+}
+fn animation_atan_series(x: f32) -> f32 {
+    let mut term = x let mut total = x let square = x * x
+    for i in 1_usize..12_usize {
+        term *= - square total += term /((i * 2_usize + 1_usize) as f32)
+    }
+    ret total
+}
+fn animation_sin(x: f32) -> f32 {
+    // Slerp calls this only in [0, pi/2].
+    let square = x * x let mut term = x let mut total = x
+    for i in 1_usize..7_usize {
+        term *= - square /((i * 2_usize *(i * 2_usize + 1_usize)) as f32)
+        total += term
+    }
+    ret total
+}
+pub struct PoseVector {
+    x: f32
+    y: f32
+    z: f32
+}
+
+impl for PoseVector {
+    pub fn zero() -> Self {
+        ret Self { 0_f32, 0_f32, 0_f32 }
+    }
+    pub fn one() -> Self {
+        ret Self { 1_f32, 1_f32, 1_f32 }
+    }
+    pub fn add(self: Self, b: Self) -> Self {
+        ret Self { self.x + b.x, self.y + b.y, self.z + b.z }
+    }
+    pub fn sub(self: Self, b: Self) -> Self {
+        ret Self { self.x - b.x, self.y - b.y, self.z - b.z }
+    }
+    pub fn mul(self: Self, b: Self) -> Self {
+        ret Self { self.x * b.x, self.y * b.y, self.z * b.z }
+    }
+    pub fn scaled(self: Self, s: f32) -> Self {
+        ret Self { self.x * s, self.y * s, self.z * s }
+    }
+    pub fn dot(self: Self, b: Self) -> f32 {
+        ret self.x * b.x + self.y * b.y + self.z * b.z
+    }
+    pub fn cross(self: Self, b: Self) -> Self {
+        ret Self {
+            self.y * b.z - self.z * b.y, self.z * b.x - self.x * b.z, self.x * b.y - self.y * b.x
+        }
+    }
+    pub fn length(self: Self) -> f32 {
+        ret animation_sqrt(self.dot(self))
+    }
+    pub fn normalized(self: Self) -> Self {
+        let n = self.length() ret if n > 0.0000001_f32 {
+            self.scaled(1_f32 / n)
+        } else {
+            Self::zero()
+        }
+    }
+    pub fn lerp(self: Self, b: Self, t: f32) -> Self {
+        ret self.scaled(1_f32 - t).add(b.scaled(t))
+    }
+    pub fn finite(self: Self) -> bool {
+        ret animation_finite(self.x) && animation_finite(self.y) && animation_finite(self.z)
+    }
+}
+pub struct PoseRotation {
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+}
+
+impl for PoseRotation {
+    pub fn identity() -> Self {
+        ret Self { 0_f32, 0_f32, 0_f32, 1_f32 }
+    }
+    pub fn dot(self: Self, b: Self) -> f32 {
+        ret self.x * b.x + self.y * b.y + self.z * b.z + self.w * b.w
+    }
+    pub fn scaled(self: Self, s: f32) -> Self {
+        ret Self { self.x * s, self.y * s, self.z * s, self.w * s }
+    }
+    pub fn add(self: Self, b: Self) -> Self {
+        ret Self { self.x + b.x, self.y + b.y, self.z + b.z, self.w + b.w }
+    }
+    pub fn normalized(self: Self) -> Self {
+        let n = animation_sqrt(self.dot(self)) ret if n > 0.0000001_f32 {
+            self.scaled(1_f32 / n)
+        } else {
+            Self::identity()
+        }
+    }
+    pub fn inverse(self: Self) -> Self {
+        let q = self.normalized() ret Self { - q.x, - q.y, - q.z, q.w }
+    }
+    pub fn mul(self: Self, b: Self) -> Self {
+        ret Self {
+            self.w * b.x + self.x * b.w + self.y * b.z - self.z * b.y,
+            self.w * b.y - self.x * b.z + self.y * b.w + self.z * b.x,
+            self.w * b.z + self.x * b.y - self.y * b.x + self.z * b.w,
+            self.w * b.w - self.x * b.x - self.y * b.y - self.z * b.z
+        }
+        .normalized()
+    }
+    pub fn rotate(self: Self, v: PoseVector) -> PoseVector {
+        let q = self.normalized() let xyz = PoseVector { q.x, q.y, q.z }
+        let t = xyz.cross(v).scaled(2_f32) ret v.add(t.scaled(q.w)).add(xyz.cross(t))
+    }
+    /// Normalized shortest-arc interpolation; antipodal representations agree.
+    pub fn slerp(self: Self, target: Self, weight: f32) -> Self {
+        let a = self.normalized() let mut b = target.normalized() let t = animation_clamp(weight, 0_f32, 1_f32)
+        let mut cosine = a.dot(b)
+        if cosine < 0_f32 {
+            b = b.scaled( - 1_f32) cosine = - cosine
+        }
+        cosine = animation_clamp(cosine, 0_f32, 1_f32)
+        if cosine > 0.9995_f32 {
+            ret a.scaled(1_f32 - t).add(b.scaled(t)).normalized()
+        }
+        let sine = animation_sqrt(1_f32 - cosine * cosine)
+        let theta = if cosine < 0.0000001_f32 {
+            1.570796326795_f32
+        } else {
+            animation_atan_positive(sine / cosine)
+        }
+        ret a.scaled(animation_sin((1_f32 - t) * theta) / sine).add(b.scaled(animation_sin(t * theta) / sine)).normalized()
+    }
+    pub fn between(from: PoseVector, to: PoseVector) -> Self {
+        let a = from.normalized() let b = to.normalized()
+        if a.length() < 0.5_f32 || b.length() < 0.5_f32 {
+            ret Self::identity()
+        }
+        let cosine = animation_clamp(a.dot(b), - 1_f32, 1_f32)
+        if cosine < - 0.99999_f32 {
+            let basis = if animation_abs(a.x) < 0.9_f32 {
+                PoseVector { 1_f32, 0_f32, 0_f32 }
+            } else {
+                PoseVector {
+                    0_f32, 1_f32, 0_f32
+                }
+            }
+            let axis = a.cross(basis).normalized() ret Self { axis.x, axis.y, axis.z, 0_f32 }
+        }
+        let axis = a.cross(b) ret Self { axis.x, axis.y, axis.z, 1_f32 + cosine }.normalized()
+    }
+    pub fn valid(self: Self) -> bool {
+        ret animation_finite(self.x) && animation_finite(self.y) && animation_finite(self.z) && animation_finite(self.w) && animation_abs(self.dot(self) - 1_f32) < 0.001_f32
+    }
+}
+pub struct LocalTransform {
+    translation: PoseVector
+    rotation: PoseRotation
+    scale: PoseVector
+}
+
+impl for LocalTransform {
+    pub fn identity() -> Self {
+        ret Self {
+            PoseVector::zero(), PoseRotation::identity(), PoseVector::one()
+        }
+    }
+    pub fn blend(self: Self, b: Self, t: f32) -> Self {
+        ret Self {
+            self.translation.lerp(b.translation, t), self.rotation.slerp(b.rotation, t), self.scale.lerp(b.scale, t)
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret self.translation.finite() && self.rotation.valid() && self.scale.finite() && animation_abs(self.scale.x) > 0.000001_f32 && animation_abs(self.scale.y) > 0.000001_f32 && animation_abs(self.scale.z) > 0.000001_f32
+    }
+}
+
+pub struct PoseMatrix {
+    m00: f32
+    m01: f32
+    m02: f32
+    m03: f32
+    m10: f32
+    m11: f32
+    m12: f32
+    m13: f32
+    m20: f32
+    m21: f32
+    m22: f32
+    m23: f32
+}
+
+impl for PoseMatrix {
+    pub fn identity() -> Self {
+        ret Self {
+            1_f32, 0_f32, 0_f32, 0_f32, 0_f32, 1_f32, 0_f32, 0_f32, 0_f32, 0_f32, 1_f32, 0_f32
+        }
+    }
+    pub fn from_local(t: LocalTransform) -> Self {
+        let q = t.rotation.normalized() let x = q.x let y = q.y let z = q.z let w = q.w let s = t.scale let p = t.translation
+        ret Self {
+            (1_f32 - 2_f32 *(y * y + z * z)) * s.x, 2_f32 *(x * y - z * w) * s.y, 2_f32 *(x * z + y * w) * s.z, p.x,
+            2_f32 *(x * y + z * w) * s.x,(1_f32 - 2_f32 *(x * x + z * z)) * s.y, 2_f32 *(y * z - x * w) * s.z, p.y,
+            2_f32 *(x * z - y * w) * s.x, 2_f32 *(y * z + x * w) * s.y,(1_f32 - 2_f32 *(x * x + y * y)) * s.z, p.z
+        }
+    }
+    pub fn mul(self: Self, b: Self) -> Self {
+        ret Self {
+            self.m00 * b.m00 + self.m01 * b.m10 + self.m02 * b.m20,
+            self.m00 * b.m01 + self.m01 * b.m11 + self.m02 * b.m21,
+            self.m00 * b.m02 + self.m01 * b.m12 + self.m02 * b.m22,
+            self.m00 * b.m03 + self.m01 * b.m13 + self.m02 * b.m23 + self.m03,
+            self.m10 * b.m00 + self.m11 * b.m10 + self.m12 * b.m20,
+            self.m10 * b.m01 + self.m11 * b.m11 + self.m12 * b.m21,
+            self.m10 * b.m02 + self.m11 * b.m12 + self.m12 * b.m22,
+            self.m10 * b.m03 + self.m11 * b.m13 + self.m12 * b.m23 + self.m13,
+            self.m20 * b.m00 + self.m21 * b.m10 + self.m22 * b.m20,
+            self.m20 * b.m01 + self.m21 * b.m11 + self.m22 * b.m21,
+            self.m20 * b.m02 + self.m21 * b.m12 + self.m22 * b.m22,
+            self.m20 * b.m03 + self.m21 * b.m13 + self.m22 * b.m23 + self.m23
+        }
+    }
+    pub fn point(self: Self, p: PoseVector) -> PoseVector {
+        ret self.vector(p).add(PoseVector {
+                self.m03, self.m13, self.m23
+            }
+            ,
+        )
+    }
+    pub fn vector(self: Self, p: PoseVector) -> PoseVector {
+        ret PoseVector {
+            self.m00 * p.x + self.m01 * p.y + self.m02 * p.z, self.m10 * p.x + self.m11 * p.y + self.m12 * p.z, self.m20 * p.x + self.m21 * p.y + self.m22 * p.z
+        }
+    }
+    pub fn translation(self: Self) -> PoseVector {
+        ret PoseVector { self.m03, self.m13, self.m23 }
+    }
+    pub fn inverse(self: Self) -> Option[Self] {
+        let a = self.m00 let b = self.m01 let c = self.m02 let d = self.m10 let e = self.m11 let f = self.m12 let g = self.m20 let h = self.m21 let i = self.m22
+        let det = a *(e * i - f * h) - b *(d * i - f * g) + c *(d * h - e * g)
+        if !animation_finite(det) || animation_abs(det) < 0.000000000001_f32 {
+            ret Option::None
+        }
+        let k = 1_f32 / det
+        let r = Self {
+            (e * i - f * h) * k,(c * h - b * i) * k,(b * f - c * e) * k, 0_f32,(f * g - d * i) * k,(a * i - c * g) * k,(c * d - a * f) * k, 0_f32,(d * h - e * g) * k,(b * g - a * h) * k,(a * e - b * d) * k, 0_f32
+        }
+        let t = r.vector(self.translation()).scaled( - 1_f32)
+        ret Option::Some(Self {
+                r.m00, r.m01, r.m02, t.x, r.m10, r.m11, r.m12, t.y, r.m20, r.m21, r.m22, t.z
+            }
+        )
+    }
+    /// Inverse transpose is required for normals under non-uniform scaling.
+    pub fn normal(self: Self, n: PoseVector) -> PoseVector {
+        let r = match self.inverse() {
+            Some(r) => r None => {
+                ret PoseVector::zero()
+            }
+        }
+        ret PoseVector {
+            r.m00 * n.x + r.m10 * n.y + r.m20 * n.z, r.m01 * n.x + r.m11 * n.y + r.m21 * n.z, r.m02 * n.x + r.m12 * n.y + r.m22 * n.z
+        }
+        .normalized()
+    }
+    pub fn zero() -> Self {
+        ret Self {
+            0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32
+        }
+    }
+    pub fn scaled(self: Self, s: f32) -> Self {
+        ret Self {
+            self.m00 * s, self.m01 * s, self.m02 * s, self.m03 * s, self.m10 * s, self.m11 * s, self.m12 * s, self.m13 * s, self.m20 * s, self.m21 * s, self.m22 * s, self.m23 * s
+        }
+    }
+    pub fn add(self: Self, b: Self) -> Self {
+        ret Self {
+            self.m00 + b.m00, self.m01 + b.m01, self.m02 + b.m02, self.m03 + b.m03, self.m10 + b.m10, self.m11 + b.m11, self.m12 + b.m12, self.m13 + b.m13, self.m20 + b.m20, self.m21 + b.m21, self.m22 + b.m22, self.m23 + b.m23
+        }
+    }
+    pub fn finite(self: Self) -> bool {
+        ret animation_finite(self.m00) && animation_finite(self.m01) && animation_finite(self.m02) && animation_finite(self.m03) && animation_finite(self.m10) && animation_finite(self.m11) && animation_finite(self.m12) && animation_finite(self.m13) && animation_finite(self.m20) && animation_finite(self.m21) && animation_finite(self.m22) && animation_finite(self.m23)
+    }
+}

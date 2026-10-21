@@ -1,0 +1,182 @@
+import core::vec::Vec
+import graphene::animation::asset::{save_skeleton, load_skeleton, save_cooked_skeletal_mesh, load_skeletal_mesh, save_animation_clip, load_animation_clip}
+import graphene::animation::cook::{CookedSkeletalMesh, SkinGeometrySection, prepare_skeletal_geometry}
+import graphene::animation::deform::{DeformableCluster, PoseBounds, deform_vertex, deformable_cluster_bounds, DeformedVertex}
+import graphene::animation::math::PoseMatrix
+import graphene::animation::model::{Skeleton, SkeletalMesh, AnimationClip}
+import graphene::animation::pose::{AnimationPose, model_pose, skin_palette}
+import graphene::animation::source::{AnimationSource, decode_animation_source}
+import mod::static_regression::check_static
+import std::io::println
+import std::os::{mkdir_all, read_file, write_file}
+import std::time::perf_counter_ns
+fn main() -> u32 {
+    if check_static() != 0_u32 {
+        ret 1_u32
+    }
+    let source = match decode_animation_source("FIXTURE_ROOT/Fox.glb", "fox-cook-test") {
+        Ok(s) => s Err(_) => {
+            ret 2_u32
+        }
+    }
+    let started = perf_counter_ns()
+    let cooked = match prepare_skeletal_geometry(source.mesh, source.skeleton, source.clips) {
+        Ok(c) => c Err(error) => {
+            println(error) ret 3_u32
+        }
+    }
+    if cooked.validate(source.skeleton).is_err() || cooked.sections.len() != 1_usize || cooked.deformation_samples != 9_u32 {
+        ret 4_u32
+    }
+    let geometry = cooked.sections.get_unchecked_borrowed(0_usize)
+    println("Fox cook ns: " +(perf_counter_ns() - started).fmt() + ", LODs: " + geometry.geometry.lods().len().fmt())
+    if geometry.geometry.lods().len() < 2_usize {
+        ret 5_u32
+    }
+    for clip in source.clips {
+        for frame in 0_usize..8_usize {
+            let mut pose = AnimationPose::rest(source.skeleton, 0_usize)
+            pose = match sample(source, clip,(frame as f32) * clip.duration / 8_f32, pose) {
+                Ok(p) => p Err(_) => {
+                    ret 6_u32
+                }
+            }
+            let mut model = Vec[PoseMatrix]::new() model = match model_pose(source.skeleton, pose, model) {
+                Ok(m) => m Err(_) => {
+                    ret 7_u32
+                }
+            }
+            let mut palette = Vec[PoseMatrix]::new() palette = match skin_palette(model, source.mesh, palette) {
+                Ok(m) => m Err(_) => {
+                    ret 8_u32
+                }
+            }
+            let vertices = geometry.geometry.vertex_indices()
+            for index in 0_usize..geometry.clusters.len() {
+                let bound = match deformable_cluster_bounds(geometry.clusters.get_unchecked_borrowed(index), model) {
+                    Ok(b) => b Err(_) => {
+                        ret 9_u32
+                    }
+                }
+                let cluster = geometry.geometry.clusters().get_unchecked_borrowed(index)
+                for k in 0_usize..cluster.vertex_count() {
+                    let v = match deform_vertex(source.mesh, vertices.get_unchecked_borrowed(cluster.vertex_offset() + k) as usize, palette, Vec[f32]::new()) {
+                        Ok(v) => v Err(_) => {
+                            ret 10_u32
+                        }
+                    }
+                    if !bound.contains(v.position, 0.001_f32) {
+                        ret 11_u32
+                    }
+                }
+            }
+        }
+    }
+    let root = "FIXTURE_ROOT/cooked-test-" + perf_counter_ns().fmt()
+    if mkdir_all(root) != 0_i32 {
+        ret 12_u32
+    }
+    if save_skeleton(root + "/Fox.gskel", "absent-source.glb", "revision-test", source.skeleton).is_err() || save_cooked_skeletal_mesh(root + "/Fox.gskin", "absent-source.glb", "revision-test", cooked, source.skeleton).is_err() {
+        ret 13_u32
+    }
+    let skeleton = match load_skeleton(root + "/Fox.gskel", "") {
+        Ok(s) => s Err(_) => {
+            ret 14_u32
+        }
+    }
+    let started = perf_counter_ns()
+    let loaded = match load_skeletal_mesh(root + "/Fox.gskin", "", skeleton) {
+        Ok(m) => m Err(error) => {
+            println(error) ret 15_u32
+        }
+    }
+    println("Fox cooked load ns: " +(perf_counter_ns() - started).fmt())
+    if loaded.mesh.vertices.len() != source.mesh.vertices.len() || loaded.sections.get_unchecked_borrowed(0_usize).geometry.clusters().len() != geometry.geometry.clusters().len() {
+        ret 16_u32
+    }
+    if load_skeletal_mesh(root + "/Fox.gskin", "different-revision", skeleton).is_ok() {
+        ret 17_u32
+    }
+    let clip = source.clips.get_unchecked_borrowed(1_usize)
+    if save_animation_clip(root + "/Walk.ganim", "absent-source.glb", "revision-test", clip, skeleton, 0_usize).is_err() {
+        ret 18_u32
+    }
+    let loaded_clip = match load_animation_clip(root + "/Walk.ganim", "", skeleton, 0_usize) {
+        Ok(c) => c Err(_) => {
+            ret 19_u32
+        }
+    }
+    if loaded_clip.name != "Walk" || loaded_clip.tracks.len() != clip.tracks.len() {
+        ret 20_u32
+    }
+    let data = read_file(root + "/Fox.gskin")
+    if data.slice_bytes(0_usize, 4_usize) != "GAS1" || write_file(root + "/Bad.gskin", data.slice_bytes(0_usize, data.byte_len() - 1_usize)) != 0_i32 || load_skeletal_mesh(root + "/Bad.gskin", "", skeleton).is_ok() {
+        ret 21_u32
+    }
+    ret check_character(root)
+}
+import core::result::Result
+import graphene::animation::sample::sample_clip
+fn sample(source: AnimationSource, clip: AnimationClip, time: f32, pose: mut AnimationPose) -> Result[AnimationPose, str] {
+    ret sample_clip(clip, time, pose)
+}
+
+import graphene::animation::character::{CharacterAsset, import_character, load_character, save_character}
+import std::os::remove_file
+fn check_character(root: str) -> u32 {
+    let source = root + "/Original.glb"
+    if write_file(source, read_file("FIXTURE_ROOT/fixtures/rig.glb")) != 0_i32 {
+        ret 22_u32
+    }
+    let character = match import_character(root, source, "Original") {
+        Ok(a) => a Err(e) => {
+            println(e) ret 23_u32
+        }
+    }
+    let path = root + "/Content/Characters/Original.gcharacter"
+    let payload = read_file(path)
+    if character.clip_index("").is_err() || character.clip_index("missing").is_ok() {
+        ret 24_u32
+    }
+    let reimported = match import_character(root, source, "Original") {
+        Ok(a) => a Err(e) => {
+            println(e) ret 25_u32
+        }
+    }
+    if character.identity != reimported.identity || character.default_clip != reimported.default_clip {
+        ret 26_u32
+    }
+    let before_failed = read_file(path)
+    if write_file(source, "invalid source") != 0_i32 || import_character(root, source, "Original").is_ok() || read_file(path) != before_failed {
+        ret 27_u32
+    }
+    if load_character(path, "").is_err() {
+        ret 28_u32
+    }
+    if import_character(root, "FIXTURE_ROOT/fixtures/rig.glb", "Original").is_ok() || import_character(root, "FIXTURE_ROOT/fixtures/rig.glb", "../escape").is_ok() {
+        ret 29_u32
+    }
+    remove_file(source)
+    let loaded = match load_character(path, "") {
+        Ok(a) => a Err(e) => {
+            println(e) ret 30_u32
+        }
+    }
+    if loaded.identity != character.identity || loaded.materials.len() != 1_usize || loaded.geometry.mesh.vertices.len() != 3_usize {
+        ret 31_u32
+    }
+    let mut invalid = match load_character(path, "") {
+        Ok(a) => a Err(_) => {
+            ret 34_u32
+        }
+    }
+    invalid.default_clip = "absent"
+    let good = read_file(path)
+    if save_character(path, "absent", "revision", invalid).is_ok() || read_file(path) != good {
+        ret 32_u32
+    }
+    if write_file(root + "/Corrupt.gcharacter", payload.slice_bytes(0_usize, payload.byte_len() - 1_usize)) != 0_i32 || load_character(root + "/Corrupt.gcharacter", "").is_ok() {
+        ret 33_u32
+    }
+    ret 0_u32
+}

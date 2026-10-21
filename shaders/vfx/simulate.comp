@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x=128) in;
+void main(){uint id=gl_GlobalInvocationID.x,cap=capacity(),mode=uint(u.control.x);
+ if(mode==0){if(id<cap){pool[8+id]=cap-id-1;pool[8+2*cap+id]=0;for(uint c=0;c<32;c++)setv(id,c,0);}if(id==0){pool[0]=0;pool[1]=cap;pool[2]=1;pool[3]=0;pool[4]=0;pool[5]=0;pool[6]=0;pool[7]=0;commands[0]=6;commands[1]=0;commands[2]=0;commands[3]=0;commands[4]=0;commands[5]=1;eventCount=0;eventDropped=0;for(uint k=0;k<64;k++)data[cap*32+k]=0;}return;}
+ if(mode==1){if(id>=cap||pool[8+2*cap+id]==0)return;
+  for(uint c=0;c<3;c++)setv(id,16+c,getv(id,c));setv(id,3,getv(id,3)+u.state.y);
+  execute(id,1);setv(id,5,getv(id,5)+u.forces.x*u.state.y);float damping=exp(-max(0,u.forces.y)*u.state.y);
+  for(uint c=0;c<3;c++){float v=getv(id,4+c)*damping;setv(id,4+c,v);setv(id,c,getv(id,c)+v*u.state.y);}execute(id,7);if(gvfxCollision)execute(id,6);
+  if(getv(id,3)>=getv(id,7)){emitEvent(2,id,0);execute(id,6);setv(id,7,0);pool[8+2*cap+id]=0;pool[8+atomicAdd(pool[1],1)]=id;atomicAdd(pool[7],1);}else{uint i=atomicAdd(pool[0],1);pool[8+cap+i]=id;}return;
+ }
+ if(mode==2){uint available=min(uint(u.control.y),pool[2]);if(id>=available)return;uint freeIndex=atomicAdd(pool[1],0xffffffffu)-1;uint slot=pool[8+freeIndex];pool[8+2*cap+slot]=1;
+  for(uint c=0;c<32;c++)setv(slot,c,0);for(uint c=0;c<3;c++){setv(slot,c,u.control.w>.5?0:u.origin[c]);setv(slot,4+c,u.direction[c]*u.direction.w);setv(slot,12+c,u.forces.w);}
+  setv(slot,7,u.forces.z);storev(slot,2,u.color);uint base=uint(u.control.z)|(uint(u.topology.y)<<16),identity=base+id,generation=(uint(u.topology.z)|(uint(u.topology.w)<<16))+(identity<base?1u:0u);setv(slot,19,float(identity&65535u));setv(slot,21,float(identity>>16));setv(slot,22,float(generation&65535u));setv(slot,23,float(generation>>16));setv(slot,20,float(seedv()));execute(slot,0);
+  for(uint c=0;c<3;c++)setv(slot,16+c,getv(slot,c));emitEvent(1,slot,0);execute(slot,6);pool[8+cap+atomicAdd(pool[0],1)]=slot;atomicAdd(pool[6],1);return;
+ }
+ // Snapshot free count before parallel allocation. Kept separate from dispatch 2.
+ if(mode==3&&id==0){pool[2]=pool[1];pool[3]+=uint(u.control.y)-min(uint(u.control.y),pool[1]);return;}
+ if(mode==8){if(id<uint(u.control.y))pool[8+cap+id]=id;if(id==0){pool[0]=uint(u.control.y);commands[0]=6;commands[1]=uint(u.control.y);commands[2]=0;commands[3]=0;commands[4]=0;commands[5]=1;}return;}
+ if(mode==5&&id==0){gvfxScope=1;execute(0,2);gvfxScope=2;execute(0,4);return;}
+ if(mode==6&&id==0){gvfxScope=1;execute(0,3);gvfxScope=2;execute(0,5);return;}
+ if(mode==7&&id==0){gvfxScope=2;execute(0,4);return;}
+ if(mode==4&&id==0){commands[0]=6;commands[1]=pool[0];commands[2]=0;commands[3]=0;commands[4]=0;commands[5]=1;pool[5]++;return;}
+}

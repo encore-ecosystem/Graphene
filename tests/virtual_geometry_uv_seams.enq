@@ -1,0 +1,85 @@
+//! Coincident UV chart borders must survive every AutoLOD level.
+import core::option::Option
+import core::vec::Vec
+import graphene::virtual_geometry::build_virtual_geometry_lods_with_attributes
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut positions = Vec[Vec3]::new()
+    let mut attributes = Vec[f32]::new()
+    let mut indices = Vec[u32]::new()
+    for chart in 0..2_usize {
+        for y in 0..4_usize {
+            for x in 0..4_usize {
+                for corner in vec![0_usize, 2_usize, 1_usize, 1_usize, 2_usize, 3_usize] {
+                    let px =(x + corner % 2) as f32 / 4.0_f32
+                    let py =(y + corner / 2) as f32 / 4.0_f32
+                    let point = Vec3::new(px + chart as f32, 0.0_f32, py)
+                    indices.push(positions.len() as u32) positions.push(point)
+                    for value in vec![point.x(), point.y(), point.z(), 0.0_f32, 1.0_f32, 0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32, px * 0.3_f32 +(chart as f32) * 0.7_f32, py] {
+                        attributes.push(value)
+                    }
+                }
+            }
+        }
+    }
+    let geometry = build_virtual_geometry_lods_with_attributes(positions, indices, attributes, 11_usize, 12_usize, 8_usize)
+    if !geometry.valid() || geometry.lods().len() < 2_usize {
+        ret 1
+    }
+    let vertices = geometry.vertex_indices() let triangles = geometry.triangle_indices()
+    for cluster in geometry.clusters() {
+        for triangle in 0..cluster.triangle_count() {
+            let mut left = false let mut right = false
+            for corner in 0..3_usize {
+                let local = triangles.get(cluster.triangle_offset() + triangle * 3_usize + corner).unwrap_or(0) as usize
+                let original = vertices.get(cluster.vertex_offset() + local).unwrap_or(0) as usize
+                let u = attributes.get(original * 11_usize + 9_usize).unwrap_or(0.0_f32)
+                if u <= 0.30001_f32 {
+                    left = true
+                } elif u >= 0.69999_f32 {
+                    right = true
+                } else {
+                    ret 2
+                }
+            }
+            if left && right {
+                ret 3
+            }
+        }
+    }
+    let mut first_triangles = 0_usize let mut last_triangles = 0_usize
+    let lods = geometry.lods()
+    let first = match lods.get(0) {
+        Option::Some(value) => value Option::None => {
+            ret 5
+        }
+    }
+    let last = match lods.get(lods.len() - 1) {
+        Option::Some(value) => value Option::None => {
+            ret 6
+        }
+    }
+    let first_start = first.first_cluster()
+    let first_end = first_start + first.cluster_count()
+    for index in first_start..first_end {
+        first_triangles += match geometry.clusters().get(index) {
+            Option::Some(cluster) => cluster.triangle_count() Option::None => {
+                ret 7
+            }
+        }
+    }
+    let last_start = last.first_cluster()
+    let last_end = last_start + last.cluster_count()
+    for index in last_start..last_end {
+        last_triangles += match geometry.clusters().get(index) {
+            Option::Some(cluster) => cluster.triangle_count() Option::None => {
+                ret 7
+            }
+        }
+    }
+    if last_triangles >= first_triangles {
+        ret 4
+    }
+    ret 0
+}

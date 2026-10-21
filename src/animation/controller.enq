@@ -1,0 +1,574 @@
+//! Transactional logical clocks around the pure animation VM.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::blend::BoneMask
+import mod::blend_space::{BlendSpaceClock, BlendSpaceCursor, BlendWeights, CookedBlendSpace}
+import mod::graph::{AnimationProgram, AnimationWorkspace, PoseOperation, PoseInstruction, BlendSpaceNode, NodeSampleTime}
+import mod::math::{PoseMatrix, PoseRotation, animation_finite, animation_clamp}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip, AnimationNotify}
+import mod::player::{ClipPlayer, AnimationEvent}
+import mod::pose::AnimationPose
+import mod::root_motion::{RootMotionDelta, extract_root_motion}
+
+struct ControllerClock {
+    clip: ClipPlayer
+    space: BlendSpaceClock
+    cursor: BlendSpaceCursor
+    rate: f32
+    offset: f64
+    looping: bool
+    notify: bool
+}
+pub struct ControllerEvent {
+    node: u64
+    event: AnimationEvent
+}
+pub struct ControllerFrame {
+    frame: u64
+    time: f64
+    sampled: bool
+    events: u32
+}
+pub struct AnimationController {
+    program: AnimationProgram
+    skeleton: Skeleton
+    mesh: SkeletalMesh
+    workspace: AnimationWorkspace
+    parameters: Vec[f32]
+    clocks: Vec[ControllerClock]
+    work_clocks: Vec[ControllerClock]
+    times: Vec[NodeSampleTime]
+    sample_times: Vec[NodeSampleTime]
+    contributions: Vec[f32]
+    roots: Vec[RootMotionDelta]
+    event_scratch: Vec[AnimationEvent]
+    empty_notifies: Vec[AnimationNotify]
+    events: Vec[ControllerEvent]
+    work_events: Vec[ControllerEvent]
+    pose: AnimationPose
+    work_pose: AnimationPose
+    reference_pose: AnimationPose
+    root_bone: Option[u32]
+    reference: RootMotionDelta
+    root: RootMotionDelta
+    work_root: RootMotionDelta
+    frame: ControllerFrame
+    pending: ControllerFrame
+    begun: bool
+    prepared: bool
+    dirty: bool
+    speed: f32
+    playing: bool
+}
+fn mix_root(a: RootMotionDelta, b: RootMotionDelta, w: f32) -> RootMotionDelta {
+    ret RootMotionDelta { a.translation.lerp(b.translation, w), a.rotation.slerp(b.rotation, w) }
+}
+fn pose_root(skeleton: Skeleton, pose: AnimationPose, bone: u32) -> RootMotionDelta {
+    let mut matrix = PoseMatrix::identity() let mut rotation = PoseRotation::identity() let mut index = bone as i32
+    while index >= 0_i32 {
+        let local = pose.local(index as usize) matrix = PoseMatrix::from_local(local).mul(matrix) rotation = local.rotation.mul(rotation) index = skeleton.bones.get_unchecked_borrowed(index as usize).parent
+    }
+    ret RootMotionDelta { matrix.translation(), rotation }
+}
+fn space_period(asset: CookedBlendSpace, clips: Vec[AnimationClip], w: BlendWeights) -> f64 {
+    let mut duration = 0_f64
+    for i in 0_usize..3_usize {
+        let id = if i == 0_usize {
+            w.a
+        } elif i == 1_usize {
+            w.b
+        } else {
+            w.c
+        }
+        let weight = if i == 0_usize {
+            w.wa
+        } elif i == 1_usize {
+            w.wb
+        } else {
+            w.wc
+        }
+        let source = asset.source.samples.get_unchecked_borrowed(id as usize)
+        duration +=(clips.get_unchecked_borrowed(source.clip as usize).duration as f64) /(source.rate as f64) *(weight as f64)
+    }
+    ret duration
+}
+
+impl for AnimationController {
+    pub fn new(program: AnimationProgram, skeleton: Skeleton, mesh: SkeletalMesh) -> Result[AnimationController<H>, str] {
+        let mut workspace = AnimationWorkspace::new(program, skeleton, mesh)?
+        let mut parameters = Vec[f32]::with_capacity(program.parameters.len()) for p in program.parameters {
+            parameters.push(p.default_value)
+        }
+        let mut clocks = Vec[ControllerClock]::with_capacity(program.instructions.len())
+        let mut work_clocks = Vec[ControllerClock]::with_capacity(program.instructions.len())
+        let mut times = Vec[NodeSampleTime]::with_capacity(program.instructions.len())
+        let mut sample_times = Vec[NodeSampleTime]::with_capacity(program.instructions.len())
+        let mut contributions = Vec[f32]::with_capacity(program.instructions.len()) let mut roots = Vec[RootMotionDelta]::with_capacity(program.instructions.len())
+        for _i in 0_usize..program.instructions.len() {
+            let clock = ControllerClock {
+                ClipPlayer::new(), BlendSpaceClock::new(), BlendSpaceCursor::new(), 1_f32, 0_f64, true, true
+            }
+            clocks.push(clock) work_clocks.push(clock) times.push(NodeSampleTime { 0_f32, 0_f32 }) sample_times.push(NodeSampleTime {
+                    0_f32, 0_f32
+                }
+                ,
+            ) contributions.push(0_f32) roots.push(RootMotionDelta::identity())
+        }
+        let initial = workspace.evaluate_nodes(program, skeleton, mesh, times, parameters)?
+        let mut pose = AnimationPose::rest(skeleton, mesh.morphs.len()) let mut work_pose = AnimationPose::rest(skeleton, mesh.morphs.len()) let mut reference_pose = AnimationPose::rest(skeleton, mesh.morphs.len())
+        pose.copy_from(initial)? work_pose.copy_from(initial)? reference_pose.copy_from(initial)?
+        let frame = ControllerFrame { 0_u64, 0_f64, false, 0_u32 }
+        ret Result::Ok(AnimationController<H> {
+                program, skeleton, mesh, workspace, parameters, clocks, work_clocks, times, sample_times, contributions, roots, Vec[AnimationEvent]::with_capacity(16_usize), Vec[AnimationNotify]::new(), Vec[ControllerEvent]::with_capacity(16_usize), Vec[ControllerEvent]::with_capacity(16_usize), pose, work_pose, reference_pose, Option[u32]::None, RootMotionDelta::identity(), RootMotionDelta::identity(), RootMotionDelta::identity(), frame, frame, false, false, true, 1_f32, true
+            }
+            ,
+        )
+    }
+    pub fn parameter(self: mut Self&, name: str, value: f32) -> Result[bool, str] {
+        if self.prepared || !animation_finite(value) {
+            ret Result::Err("Cannot update a prepared controller or non-finite parameter")
+        }
+        for i in 0_usize..self.program.parameters.len() {
+            let p = self.program.parameters.get_unchecked_borrowed(i) if p.name == name {
+                let value = animation_clamp(value, p.minimum, p.maximum) if self.parameters.get_unchecked_borrowed(i) != value {
+                    self.parameters.set(i, value) self.dirty = true
+                }
+                ret Result::Ok(true)
+            }
+        }
+        ret Result::Err("Unknown animation parameter")
+    }
+    pub fn playback(self: mut Self&, speed: f32, playing: bool) -> Result[bool, str] {
+        if self.prepared || !(speed >= - 100_f32 && speed <= 100_f32) {
+            ret Result::Err("Invalid controller playback")
+        }
+        for clock in self.clocks {
+            let combined = speed * clock.rate if !(combined >= - 100_f32 && combined <= 100_f32) {
+                ret Result::Err("Combined node playback speed exceeds range")
+            }
+        }
+        self.speed = speed self.playing = playing ret Result::Ok(true)
+    }
+    pub fn configure_clock(self: mut Self&, node: u64, rate: f32, offset: f64, looping: bool, notify: bool) -> Result[bool, str] {
+        if self.prepared || !(rate >= - 100_f32 && rate <= 100_f32) || !(offset >= - 86400_f64 && offset <= 86400_f64) {
+            ret Result::Err("Invalid node clock settings")
+        }
+        let combined = self.speed * rate if !(combined >= - 100_f32 && combined <= 100_f32) {
+            ret Result::Err("Combined node playback speed exceeds range")
+        }
+        for i in 0_usize..self.program.instructions.len() {
+            let instruction = self.program.instructions.get_unchecked_borrowed(i) if instruction.id != node {
+                continue
+            }
+            let mut clock = self.clocks.get_unchecked_borrowed(i)
+            let time = self.frame.time *(rate as f64) + offset
+            match instruction.operation {
+                PoseOperation::Clip => {
+                    clock.clip.looping = looping clock.clip.seek(time, self.program.clips.get_unchecked_borrowed(instruction.clip as usize).duration)?
+                }
+                PoseOperation::BlendSpace(binding) => {
+                    let axes = self.axes(binding) let weights = clock.cursor.weights(binding.asset, axes.0, axes.1)? let period = space_period(binding.asset, self.program.clips, weights)
+                    let cycles = if period > 0_f64 {
+                        time / period
+                    } else {
+                        0_f64
+                    }
+                    if !(cycles >= - 1000000000_f64 && cycles <= 1000000000_f64) {
+                        ret Result::Err("Blend space node clock range exceeded")
+                    }
+                    clock.space.cycles = if looping {
+                        cycles
+                    } else {
+                        if cycles < 0_f64 {
+                            0_f64
+                        } elif cycles > 1_f64 {
+                            1_f64
+                        } else {
+                            cycles
+                        }
+                    }
+                }
+                _ => {
+                    ret Result::Err("Animation node has no playback clock")
+                }
+            }
+            clock.rate = rate clock.offset = offset clock.looping = looping clock.notify = notify self.clocks.set(i, clock) self.dirty = true ret Result::Ok(true)
+        }
+        ret Result::Err("Unknown animation clock node")
+    }
+    /// Silent, transactional seek. A failed node seek cannot partially retime
+    /// another leaf or re-emit last frame's notifications.
+    pub fn seek(self: mut Self&, time: f64) -> Result[bool, str] {
+        if self.prepared || !(time >= - 1000000000000_f64 && time <= 1000000000000_f64) {
+            ret Result::Err("Invalid controller seek")
+        }
+        self.work_clocks.clear()
+        for i in 0_usize..self.clocks.len() {
+            let mut clock = self.clocks.get_unchecked_borrowed(i) let instruction = self.program.instructions.get_unchecked_borrowed(i)
+            let target = time *(clock.rate as f64) + clock.offset
+            match instruction.operation {
+                PoseOperation::Clip => {
+                    clock.clip.looping = clock.looping clock.clip.seek(target, self.program.clips.get_unchecked_borrowed(instruction.clip as usize).duration)?
+                }
+                PoseOperation::BlendSpace(binding) => {
+                    let axes = self.axes(binding) let weights = clock.cursor.weights(binding.asset, axes.0, axes.1)? let period = space_period(binding.asset, self.program.clips, weights)
+                    let cycles = if period > 0_f64 {
+                        target / period
+                    } else {
+                        0_f64
+                    }
+                    if !(cycles >= - 1000000000_f64 && cycles <= 1000000000_f64) {
+                        ret Result::Err("Controller seek exceeds node clock range")
+                    }
+                    clock.space.cycles = if clock.looping {
+                        cycles
+                    } else {
+                        if cycles < 0_f64 {
+                            0_f64
+                        } elif cycles > 1_f64 {
+                            1_f64
+                        } else {
+                            cycles
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+            self.work_clocks.push(clock)
+        }
+        let previous = self.clocks self.clocks = self.work_clocks self.work_clocks = previous
+        self.frame.time = time self.events.clear() self.root = RootMotionDelta::identity() self.dirty = true ret Result::Ok(true)
+    }
+    pub fn root_motion(self: mut Self&, bone: Option[u32]) -> Result[bool, str] {
+        if self.prepared {
+            ret Result::Err("Controller frame is already prepared")
+        }
+        let mut reference = RootMotionDelta::identity()
+        match bone {
+            Some(index) => {
+                if index as usize >= self.skeleton.bones.len() {
+                    ret Result::Err("Unknown controller root bone")
+                }
+                reference = pose_root(self.skeleton, self.reference_pose, index)
+            }
+            None => {
+            }
+        }
+        self.root_bone = bone self.reference = reference self.dirty = true ret Result::Ok(true)
+    }
+    fn weight(self: Self&, instruction: PoseInstruction) -> f32 {
+        ret match instruction.parameter {
+            Some(index) => {
+                let p = self.program.parameters.get_unchecked_borrowed(index as usize) animation_clamp(self.parameters.get_unchecked_borrowed(index as usize), p.minimum, p.maximum)
+            }
+            None => instruction.weight
+        }
+    }
+    fn axes(self: Self&, binding: BlendSpaceNode) ->(f32, f32) {
+        let p = self.program.parameters.get_unchecked_borrowed(binding.x_parameter as usize)
+        let x = animation_clamp(self.parameters.get_unchecked_borrowed(binding.x_parameter as usize), p.minimum, p.maximum)
+        let mut y = binding.asset.source.y.minimum
+        match binding.y_parameter {
+            Some(index) => {
+                let p = self.program.parameters.get_unchecked_borrowed(index as usize) y = animation_clamp(self.parameters.get_unchecked_borrowed(index as usize), p.minimum, p.maximum)
+            }
+            None => {
+            }
+        }
+        ret(x, y)
+    }
+    fn add_events(self: mut Self&, node: u64, events: Vec[AnimationEvent], budget: usize) -> Result[bool, str] {
+        if self.work_events.len() > budget || events.len() > budget - self.work_events.len() {
+            ret Result::Err("Controller event budget exceeded")
+        }
+        for event in events {
+            self.work_events.push(ControllerEvent { node, event })
+        }
+        ret Result::Ok(true)
+    }
+    fn emit(self: mut Self&, player: mut ClipPlayer, clip: AnimationClip, delta: f64, node: u64, enabled: bool, budget: usize) -> Result[ClipPlayer, str] {
+        let source = if enabled {
+            clip
+        } else {
+            AnimationClip {
+                clip.version, clip.identity, clip.skeleton, clip.name, clip.duration, clip.tracks, self.empty_notifies
+            }
+        }
+        let step = player.advance_into(source, delta, budget - self.work_events.len(), self.event_scratch)? self.event_scratch = step.events
+        self.add_events(node, step.events, budget)? ret Result::Ok(player)
+    }
+    fn contribute(self: mut Self&) ->() {
+        for i in 0_usize..self.contributions.len() {
+            self.contributions.set(i, 0_f32)
+        }
+        self.contributions.set(self.program.output as usize, 1_f32)
+        for index in 0_usize..self.program.instructions.len() {
+            let i = self.program.instructions.len() - 1_usize - index let instruction = self.program.instructions.get_unchecked_borrowed(i) let alpha = self.contributions.get_unchecked_borrowed(i)
+            match instruction.operation {
+                PoseOperation::Blend => {
+                    let weight = self.weight(instruction) let mut minimum = 1_f32 let mut maximum = 0_f32
+                    let mask: BoneMask = self.program.masks.get_unchecked_borrowed(instruction.mask as usize)
+                    for v in mask.weights {
+                        if v < minimum {
+                            minimum = v
+                        }
+                        if v > maximum {
+                            maximum = v
+                        }
+                    }
+                    if self.mesh.morphs.len() > 0_usize {
+                        maximum = 1_f32
+                    }
+                    let a = instruction.inputs.get_unchecked_borrowed(0_usize) as usize let b = instruction.inputs.get_unchecked_borrowed(1_usize) as usize
+                    self.contributions.set(a, self.contributions.get_unchecked_borrowed(a) + alpha *(1_f32 - weight * minimum))
+                    self.contributions.set(b, self.contributions.get_unchecked_borrowed(b) + alpha * weight * maximum)
+                }
+                PoseOperation::Additive => {
+                    let a = instruction.inputs.get_unchecked_borrowed(0_usize) as usize let b = instruction.inputs.get_unchecked_borrowed(1_usize) as usize
+                    let mask: BoneMask = self.program.masks.get_unchecked_borrowed(instruction.mask as usize)
+                    let mut maximum = if self.mesh.morphs.len() > 0_usize {
+                        1_f32
+                    } else {
+                        0_f32
+                    }
+                    for value in mask.weights {
+                        if value > maximum {
+                            maximum = value
+                        }
+                    }
+                    self.contributions.set(a, self.contributions.get_unchecked_borrowed(a) + alpha)
+                    self.contributions.set(b, self.contributions.get_unchecked_borrowed(b) + alpha * self.weight(instruction) * maximum)
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    pub fn prepare(self: mut Self&, frame: u64, delta: f64, sample: bool, budget: usize) -> Result[bool, str] {
+        if self.prepared {
+            ret Result::Err("Controller frame is already prepared")
+        }
+        if self.begun && frame == self.frame.frame {
+            ret Result::Ok(false)
+        }
+        if (self.begun && frame < self.frame.frame) || !(delta >= 0_f64 && delta <= 86400_f64) || budget > 65536_usize {
+            ret Result::Err("Invalid controller frame")
+        }
+        let current = if self.playing {
+            self.frame.time + delta *(self.speed as f64)
+        } else {
+            self.frame.time
+        }
+        if !(current >= - 1000000000000_f64 && current <= 1000000000000_f64) {
+            ret Result::Err("Controller clock range exceeded")
+        }
+        self.work_events.clear() self.work_clocks.clear() self.contribute()
+        for i in 0_usize..self.program.instructions.len() {
+            let instruction = self.program.instructions.get_unchecked_borrowed(i) let mut clock = self.clocks.get_unchecked_borrowed(i)
+            let mut time = NodeSampleTime { 0_f32, 0_f32 } let mut root = RootMotionDelta::identity()
+            match instruction.operation {
+                PoseOperation::Clip => {
+                    let clip = self.program.clips.get_unchecked_borrowed(instruction.clip as usize) let previous = clock.clip.time
+                    clock.clip.speed = self.speed * clock.rate clock.clip.playing = self.playing clock.clip.looping = clock.looping
+                    clock.clip = self.emit(clock.clip, clip, delta, instruction.id, clock.notify && self.contributions.get_unchecked_borrowed(i) > 0_f32, budget)?
+                    let seconds = clock.clip.time
+                    let mut reader = clock.clip let step = reader.advance_into(clip, 0_f64, 0_usize, self.event_scratch)? self.event_scratch = step.events time.seconds = step.sample_time
+                    match self.root_bone {
+                        Some(bone) => {
+                            root = extract_root_motion(clip, self.skeleton, bone, previous, seconds, clock.looping)?
+                        }
+                        None => {
+                        }
+                    }
+                }
+                PoseOperation::BlendSpace(binding) => {
+                    let axes = self.axes(binding) let weights = clock.cursor.weights(binding.asset, axes.0, axes.1)?
+                    clock.space.playback(self.speed * clock.rate, self.playing)?
+                    let step = clock.space.advance(binding.asset, self.program.clips, weights, delta)?
+                    let previous = step.previous let mut current = step.current
+                    if !clock.looping {
+                        current = if current < 0_f64 {
+                            0_f64
+                        } elif current > 1_f64 {
+                            1_f64
+                        } else {
+                            current
+                        }
+                        clock.space.cycles = current
+                    }
+                    time.phase = if clock.looping {
+                        step.phase
+                    } else {
+                        current as f32
+                    }
+                    let mut best = weights.a let mut weight = weights.wa
+                    if weights.wb > weight {
+                        best = weights.b weight = weights.wb
+                    }
+                    if weights.wc > weight {
+                        best = weights.c
+                    }
+                    let source = binding.asset.source.samples.get_unchecked_borrowed(best as usize) let clip = self.program.clips.get_unchecked_borrowed(source.clip as usize)
+                    let mut reader = ClipPlayer::new() reader.time = previous *(clip.duration as f64) reader.looping = clock.looping reader.speed = if delta > 0_f64 {
+                        ((current - previous) *(clip.duration as f64) / delta) as f32
+                    } else {
+                        0_f32
+                    }
+                    self.emit(reader, clip, delta, instruction.id, clock.notify && self.contributions.get_unchecked_borrowed(i) > 0_f32, budget)?
+                    match self.root_bone {
+                        Some(bone) => {
+                            let mut a = RootMotionDelta::identity() let mut b = RootMotionDelta::identity() let mut c = RootMotionDelta::identity()
+                            for index in 0_usize..3_usize {
+                                let id = if index == 0_usize {
+                                    weights.a
+                                } elif index == 1_usize {
+                                    weights.b
+                                } else {
+                                    weights.c
+                                }
+                                let alpha = if index == 0_usize {
+                                    weights.wa
+                                } elif index == 1_usize {
+                                    weights.wb
+                                } else {
+                                    weights.wc
+                                }
+                                if alpha <= 0_f32 {
+                                    continue
+                                }
+                                let source = binding.asset.source.samples.get_unchecked_borrowed(id as usize) let clip = self.program.clips.get_unchecked_borrowed(source.clip as usize)
+                                let delta = extract_root_motion(clip, self.skeleton, bone, previous *(clip.duration as f64), current *(clip.duration as f64), clock.looping)?
+                                if index == 0_usize {
+                                    a = delta
+                                } elif index == 1_usize {
+                                    b = delta
+                                } else {
+                                    c = delta
+                                }
+                            }
+                            let sum = weights.wa + weights.wb
+                            let ab = if sum > 0_f32 {
+                                mix_root(a, b, weights.wb / sum)
+                            } else {
+                                RootMotionDelta::identity()
+                            }
+                            root = mix_root(ab, c, weights.wc)
+                        }
+                        None => {
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+            self.work_clocks.push(clock) self.times.set(i, time) self.roots.set(i, root)
+        }
+        for i in 0_usize..self.program.instructions.len() {
+            let instruction = self.program.instructions.get_unchecked_borrowed(i)
+            match instruction.operation {
+                PoseOperation::Blend => {
+                    let mut weight = self.weight(instruction)
+                    match self.root_bone {
+                        Some(bone) => {
+                            let mask: BoneMask = self.program.masks.get_unchecked_borrowed(instruction.mask as usize)
+                            weight *= mask.weights.get_unchecked_borrowed(bone as usize)
+                        }
+                        None => {
+                            weight = 0_f32
+                        }
+                    }
+                    self.roots.set(i, mix_root(self.roots.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(0_usize) as usize), self.roots.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(1_usize) as usize), weight))
+                }
+                PoseOperation::Additive => {
+                    let mut weight = self.weight(instruction)
+                    match self.root_bone {
+                        Some(bone) => {
+                            let mask: BoneMask = self.program.masks.get_unchecked_borrowed(instruction.mask as usize)
+                            weight *= mask.weights.get_unchecked_borrowed(bone as usize)
+                        }
+                        None => {
+                            weight = 0_f32
+                        }
+                    }
+                    let a = self.roots.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(0_usize) as usize) let b = self.roots.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(1_usize) as usize) let r = self.roots.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(2_usize) as usize)
+                    self.roots.set(i, a.mul(mix_root(RootMotionDelta::identity(), r.inverse().mul(b), weight)))
+                }
+                _ => {
+                }
+            }
+        }
+        let mut sampled = self.dirty
+        if sample && !sampled {
+            for i in 0_usize..self.times.len() {
+                let a = self.times.get_unchecked_borrowed(i) let b = self.sample_times.get_unchecked_borrowed(i) if a.seconds != b.seconds || a.phase != b.phase {
+                    sampled = true break
+                }
+            }
+        }
+        if sampled {
+            let pose = self.workspace.evaluate_nodes(self.program, self.skeleton, self.mesh, self.times, self.parameters)? self.work_pose.copy_from(pose)?
+        }
+        self.work_root = self.roots.get_unchecked_borrowed(self.program.output as usize)
+        self.pending = ControllerFrame { frame, current, sampled, self.work_events.len() as u32 } self.prepared = true ret Result::Ok(true)
+    }
+    pub fn pending_frame(self: Self&) -> Result[ControllerFrame, str] {
+        if !self.prepared {
+            ret Result::Err("No prepared controller frame")
+        }
+        ret Result::Ok(self.pending)
+    }
+    pub fn pending_pose(self: Self&) -> Result[AnimationPose, str] {
+        if !self.prepared {
+            ret Result::Err("No prepared controller frame")
+        }
+        ret Result::Ok(if self.pending.sampled {
+                self.work_pose
+            } else {
+                self.pose
+            }
+        )
+    }
+    pub fn pending_root(self: Self&) -> Result[RootMotionDelta, str] {
+        if !self.prepared {
+            ret Result::Err("No prepared controller frame")
+        }
+        ret Result::Ok(self.work_root)
+    }
+    pub fn pending_events(self: Self&) -> Result[Vec[ControllerEvent], str] {
+        if !self.prepared {
+            ret Result::Err("No prepared controller frame")
+        }
+        ret Result::Ok(self.work_events)
+    }
+    pub fn reference(self: Self&) -> RootMotionDelta {
+        ret self.reference
+    }
+    pub fn commit(self: mut Self&) -> Result[ControllerFrame, str] {
+        if !self.prepared {
+            ret Result::Err("No prepared controller frame")
+        }
+        let previous = self.clocks self.clocks = self.work_clocks self.work_clocks = previous
+        let events = self.events self.events = self.work_events self.work_events = events
+        if self.pending.sampled {
+            for i in 0_usize..self.times.len() {
+                self.sample_times.set(i, self.times.get_unchecked_borrowed(i))
+            }
+            let pose = self.pose self.pose = self.work_pose self.work_pose = pose
+        }
+        self.root = self.work_root self.frame = self.pending self.begun = true self.prepared = false self.dirty = false ret Result::Ok(self.frame)
+    }
+    pub fn discard(self: mut Self&) ->() {
+        self.prepared = false self.work_events.clear()
+    }
+    pub fn pose(self: Self&) -> AnimationPose {
+        ret self.pose
+    }
+    pub fn frame(self: Self&) -> ControllerFrame {
+        ret self.frame
+    }
+    pub fn events(self: Self&) -> Vec[ControllerEvent] {
+        ret self.events
+    }
+}

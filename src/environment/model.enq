@@ -1,0 +1,142 @@
+//! Simulation data shared by every environment visual style.
+import core::vec::Vec
+import linalg::Vec3
+
+pub fn environment_kinds() -> Vec[str] {
+    ret vec!["sky-atmosphere", "sky-light", "cloud-layer", "height-fog", "weather-controller", "weather-volume"]
+}
+pub fn is_environment_kind(kind: str) -> bool {
+    for item in environment_kinds() {
+        if item == kind {
+            ret true
+        }
+    }
+    ret false
+}
+pub fn bounded(value: f32, low: f32, high: f32) -> f32 {
+    if value < low {
+        ret low
+    }
+    if value > high {
+        ret high
+    }
+    ret value
+}
+pub fn unit(value: f32) -> bool {
+    ret value >= 0.0_f32 && value <= 1.0_f32
+}
+pub fn mix(a: f32, b: f32, weight: f32) -> f32 {
+    ret a +(b - a) * weight
+}
+
+pub struct WeatherSample {
+    cloudiness: f32
+    rain: f32
+    snow: f32
+    fog: f32
+    wind: Vec3
+    temperature: f32
+    wetness: f32
+    snow_coverage: f32
+    storm: f32
+}
+
+impl for WeatherSample {
+    pub fn clear() -> Self {
+        ret Self { 0.28_f32, 0, 0, 0.06_f32, Vec3::new(2, 0, 0.5_f32), 18, 0, 0, 0 }
+    }
+    pub fn preset(name: str) -> Self {
+        let mut sample = Self::clear()
+        if name == "overcast" {
+            sample.cloudiness = 0.92_f32 sample.fog = 0.18_f32 sample.temperature = 12
+        }
+        if name == "rain" || name == "storm" {
+            sample.cloudiness = 1 sample.rain = 0.8_f32 sample.fog = 0.34_f32 sample.temperature = 9
+            sample.wind = Vec3::new(8, 0, 3)
+            if name == "storm" {
+                sample.storm = 1 sample.wind = Vec3::new(18, 0, 7)
+            }
+        }
+        if name == "snow" {
+            sample.cloudiness = 0.85_f32 sample.snow = 0.8_f32 sample.temperature = - 6 sample.fog = 0.3_f32
+        }
+        ret sample
+    }
+    pub fn valid(self: Self) -> bool {
+        ret unit(self.cloudiness) && unit(self.rain) && unit(self.snow) && unit(self.fog) && unit(self.wetness) && unit(self.snow_coverage) && unit(self.storm) &&
+        self.temperature >= - 100 && self.temperature <= 100 && self.wind.x() >= - 200 && self.wind.x() <= 200 && self.wind.y() >= - 200 && self.wind.y() <= 200 && self.wind.z() >= - 200 && self.wind.z() <= 200
+    }
+    pub fn blend(self: Self, other: Self, weight: f32) -> Self {
+        let w = bounded(weight, 0, 1)
+        ret Self {
+            mix(self.cloudiness, other.cloudiness, w), mix(self.rain, other.rain, w), mix(self.snow, other.snow, w), mix(self.fog, other.fog, w),
+            self.wind.scale(1 - w).add(other.wind.scale(w)), mix(self.temperature, other.temperature, w), mix(self.wetness, other.wetness, w), mix(self.snow_coverage, other.snow_coverage, w), mix(self.storm, other.storm, w)
+        }
+    }
+}
+
+/// One persistent component per environment actor; references are stable scene IDs.
+pub struct EnvironmentComponent {
+    kind: str
+    sun: u64
+    moon: u64
+    controller: u64
+    material: str
+    panorama: str
+    style: str
+    quality: u32
+    time_hours: f32
+    day_duration: f32
+    preview: bool
+    weather: WeatherSample
+    density: f32
+    altitude: f32
+    thickness: f32
+    intensity: f32
+    turbidity: f32
+    blend_distance: f32
+    priority: f32
+    seed: u32
+    mode: str
+    transition: f32
+    sequence: str
+}
+
+impl for EnvironmentComponent {
+    pub fn new(kind: str) -> Self {
+        ret Self {
+            kind, 0, 0, 0, "", "", "realistic", 1, 14, 1200, false, WeatherSample::clear(),
+            if kind == "height-fog" {
+                0.008_f32
+            } else {
+                0.65_f32
+            }
+            ,
+            if kind == "cloud-layer" {
+                1200.0_f32
+            } else {
+                0.0_f32
+            }
+            ,
+            if kind == "cloud-layer" {
+                600.0_f32
+            } else {
+                100.0_f32
+            }
+            ,
+            1, 2, 5, 0, 1, "manual", 10, ""
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret is_environment_kind(self.kind) &&(self.style == "realistic" || self.style == "stylized" || self.style == "hdri") && self.quality <= 2 &&
+        self.time_hours >= 0 && self.time_hours < 24 && self.day_duration >= 1 && self.day_duration <= 10000000 && self.weather.valid() &&
+        self.density >= 0 && self.density <= 100 && self.altitude >= - 10000 && self.altitude <= 100000 && self.thickness >= 0.01_f32 && self.thickness <= 100000 &&
+        self.intensity >= 0 && self.intensity <= 100000 && self.turbidity >= 1 && self.turbidity <= 20 && self.blend_distance >= 0 && self.blend_distance <= 100000 &&
+        self.priority >= - 100000 && self.priority <= 100000 && self.transition >= 0 && self.transition <= 86400 &&
+        (self.mode == "manual" || self.mode == "sequence" || self.mode == "random")
+    }
+}
+
+pub fn weather_equal(a: WeatherSample, b: WeatherSample) -> bool {
+    ret a.cloudiness == b.cloudiness && a.rain == b.rain && a.snow == b.snow && a.fog == b.fog && a.temperature == b.temperature && a.wetness == b.wetness && a.snow_coverage == b.snow_coverage && a.storm == b.storm && a.wind.x() == b.wind.x() && a.wind.y() == b.wind.y() && a.wind.z() == b.wind.z()
+}

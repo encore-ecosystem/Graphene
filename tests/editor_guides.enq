@@ -1,0 +1,290 @@
+//! Guide command bounds, selected values and live raw markers.
+import core::option::Option
+import graphene::editor_gizmo_readout::gizmo_world_value
+import graphene::editor_guides::{GizmoGuideStyle, gizmo_guides, gizmo_step_label}
+import graphene::{GizmoGesture, GizmoProjection, GizmoSnap, Scene, Transform}
+import linalg::Vec3
+import luma::{DisplayCommand, DisplayList, Rect, StyleSheet}
+
+fn close(a: f32, b: f32) -> bool {
+    ret a - b < 0.0001 && a - b > - 0.0001
+}
+
+fn compact_linear(list: DisplayList) -> bool {
+    let mut ruler = false
+    for command in list.commands() {
+        match command {
+            DisplayCommand::Line(line) => {
+                let dx = line.x1() - line.x0()
+                let dy = line.y1() - line.y0()
+                if !(dx * dx + dy * dy <= 240.02 * 240.02) {
+                    ret false
+                }
+                if line.width() > 1.2 && line.color().red() > 230 && line.color().alpha() > 230 {
+                    ruler = true
+                }
+            }
+            DisplayCommand::GradientLine(line) => {
+                let dx = line.x1() - line.x0()
+                let dy = line.y1() - line.y0()
+                if !(dx * dx + dy * dy <= 240.02 * 240.02) {
+                    ret false
+                }
+                if line.width() > 1.2 && line.start_color().red() > 230 &&
+                (line.start_color().alpha() > 230 || line.end_color().alpha() > 230) {
+                    ruler = true
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    ret ruler
+}
+
+fn fading_ruler(list: DisplayList) -> bool {
+    let mut left = false
+    let mut center = false
+    let mut right = false
+    let mut pointer = false
+    let mut dim_label = false
+    let mut bright_label = false
+    for command in list.commands() {
+        match command {
+            DisplayCommand::GradientLine(line) => {
+                if close(line.width(), 1.25) && line.start_color().red() > 230 {
+                    let start = line.start_color().alpha()
+                    let end = line.end_color().alpha()
+                    if start == 0 && end > 230 {
+                        left = true
+                    }
+                    if start > 230 && end > 230 {
+                        center = true
+                    }
+                    if start > 230 && end == 0 {
+                        right = true
+                    }
+                }
+            }
+            DisplayCommand::Triangle(value) => {
+                if value.color().alpha() == 255 {
+                    pointer = true
+                }
+            }
+            DisplayCommand::StyledText(text) => {
+                if text.value() == "0" && text.style().opacity() < 0.5 {
+                    dim_label = true
+                }
+                if text.value() == "5" && text.style().opacity() > 0.89 {
+                    bright_label = true
+                }
+                if text.value().contains("World ") || text.value().contains("Δ:") {
+                    if text.style().opacity() != 1 {
+                        ret false
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    ret left && center && right && pointer && dim_label && bright_label
+}
+
+fn perspective_handles() -> bool {
+    // A common world-space size shrinks with depth instead of being enlarged
+    // by the camera's orbit distance. The tip uses the same projected scale.
+    let near = GizmoProjection::new(Vec3::new(0, 0, 5), 0, 0, 1.0471976, 800, 600)
+    let far = GizmoProjection::new(Vec3::new(0, 0, 10), 0, 0, 1.0471976, 800, 600)
+    let tip = Vec3::new(0.65 * 1.82, 0, 0)
+    let near_center = near.project(Vec3::zero()).unwrap_or(Vec3::zero())
+    let far_center = far.project(Vec3::zero()).unwrap_or(Vec3::zero())
+    let near_tip = near.project(tip).unwrap_or(Vec3::zero())
+    let far_tip = far.project(tip).unwrap_or(Vec3::zero())
+    if !close(near_tip.x() - near_center.x(), 2 *(far_tip.x() - far_center.x())) {
+        ret false
+    }
+    let behind = near.project(Vec3::new(0, 0, 6))
+    ret behind.is_none()
+}
+
+fn world_readout() -> bool {
+    let mut scene = Scene::new()
+    let root = scene.create_entity("parent", Transform::identity()
+        .with_position(Vec3::new(10, 0, 0)).with_scale(Vec3::new(2, 2, 2)),)
+    let child = scene.create_entity("child", Transform::identity()
+        .with_position(Vec3::new(0.37, 0, 0)).with_scale(Vec3::new(0.1, 0.1, 0.1)),)
+    let _parented = scene.set_parent(child, Option[u64]::Some(root))
+    if !close(gizmo_world_value(scene, child, "move", 1).unwrap_or(0), 10.74) ||
+    !close(gizmo_world_value(scene, child, "scale", 1).unwrap_or(0), 0.2) {
+        ret false
+    }
+    let _parent_rotation = scene.set_transform(root, Transform::identity()
+        .with_rotation(Vec3::new(0, 0, 0.3)).with_scale(Vec3::new(2, 3, 4)),)
+    let _child_rotation = scene.set_transform(child, Transform::identity().with_rotation(Vec3::new(0, 0, 0.2)))
+    if !close(gizmo_world_value(scene, child, "rotate", 3).unwrap_or(0), 0.5) {
+        ret false
+    }
+    let _parent_yaw = scene.set_transform(root, Transform::identity().with_rotation(Vec3::new(0, 0.4, 0)))
+    let _child_pitch = scene.set_transform(child, Transform::identity().with_rotation(Vec3::new(0.2, 0, 0)))
+    if !close(gizmo_world_value(scene, child, "rotate", 1).unwrap_or(0), 0.2) ||
+    !close(gizmo_world_value(scene, child, "rotate", 2).unwrap_or(0), 0.4) ||
+    !close(gizmo_world_value(scene, child, "rotate", 3).unwrap_or(1), 0) {
+        ret false
+    }
+    let _singular = scene.set_transform(child, Transform::identity().with_rotation(Vec3::new(1.5707964, 0, 0)))
+    if !close(gizmo_world_value(scene, child, "rotate", 1).unwrap_or(0), 1.5707964) ||
+    !close(gizmo_world_value(scene, child, "rotate", 2).unwrap_or(0), 0.4) {
+        ret false
+    }
+    let _turns = scene.set_transform(root, Transform::identity().with_rotation(Vec3::new(0, 0, 7.8539816)))
+    if !close(gizmo_world_value(scene, root, "rotate", 3).unwrap_or(0), 7.8539816) ||
+    gizmo_world_value(scene, 999, "move", 1).is_some() ||
+    gizmo_world_value(scene, child, "move", 0).is_some() {
+        ret false
+    }
+    ret true
+}
+
+fn main() -> u32 {
+    if !perspective_handles() {
+        ret 10
+    }
+    if !world_readout() {
+        ret 8
+    }
+    if gizmo_step_label(0.01) != "0.01" || gizmo_step_label(0.1) != "0.1" || gizmo_step_label(10) != "10" {
+        ret 7
+    }
+    let style = GizmoGuideStyle::from_sheet(StyleSheet::parse(
+            ".g-gizmo-guide { color: #ff7779; border-width: 1px; } " +
+            ".g-gizmo-linear { color: #f0f3f7; border-width: 1.25px; opacity: 0.95; width: 240px; } " +
+            ".g-gizmo-linear-shadow { color: #08090b; border-width: 3.5px; opacity: 0.8; } " +
+            ".g-gizmo-linear-label { color: #f2f4f8; background: #101114; font-family: Roboto Mono; font-size: 11px; opacity: 0.9; } " +
+            ".g-gizmo-tick { color: #f7f9fc; border-width: 1.1px; opacity: 1; } " +
+            ".g-gizmo-ring { color: #f0f3f7; border-width: 1.8px; opacity: 0.95; } " +
+            ".g-gizmo-ring-tick { color: #f7f9fc; border-width: 1.5px; opacity: 1; } " +
+            ".g-gizmo-ring-label { color: #f2f4f8; font-size: 11px; }"))
+    let camera = GizmoProjection::new(Vec3::new(0, 0, 25), 0, 0, 1.0471976, 800, 600)
+    let settings = GizmoSnap::new()
+    let clip = Rect::new(20, 30, 800, 600)
+    let mut move = GizmoGesture::begin("move", 1, camera, Vec3::zero(), 400, 300, settings)
+    let destination = camera.project(Vec3::new(6, 0, 0)).unwrap_or(Vec3::zero())
+    let _changed = move.update(destination.x(), destination.y())
+    let list = gizmo_guides(move, 1, clip, Option[f32]::Some(10.37), style)
+    if list.is_empty() || list.len() > 120 || !compact_linear(list) || !fading_ruler(list) {
+        ret 1
+    }
+    let mut global = false
+    let mut delta = false
+    let mut ruler_label = false
+    let mut value_pointer = false
+    for command in list.commands() {
+        match command {
+            DisplayCommand::StyledText(text) => {
+                if text.value() == "World X: 10.370 u" {
+                    global = true
+                }
+                if text.value() == "Δ: 10.000 u" {
+                    delta = true
+                }
+                if text.value() == "10" {
+                    ruler_label = true
+                }
+            }
+            DisplayCommand::Triangle(_) => {
+                value_pointer = true
+            }
+            _ => {
+            }
+        }
+    }
+    if !global || !delta || !ruler_label || !value_pointer {
+        ret 2
+    }
+    let _negative = move.update(300, 300)
+    let negative = gizmo_guides(move, 1, clip, Option[f32]::Some(0.37), style)
+    if negative.len() > 120 || !compact_linear(negative) {
+        ret 3
+    }
+    let mut raw = GizmoSnap::new()
+    raw.toggle("move")
+    let mut fractional = GizmoGesture::begin("move", 1, camera, Vec3::zero(), 400, 300, raw)
+    let _fraction = fractional.update(380, 300)
+    let fractional_list = gizmo_guides(fractional, 1, clip, Option[f32]::None, style)
+    let mut signed = false
+    for command in fractional_list.commands() {
+        match command {
+            DisplayCommand::StyledText(text) => {
+                if text.value().contains("Δ: -0.") {
+                    signed = true
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    if !signed {
+        ret 4
+    }
+    let radial = camera.project(Vec3::new(1, 0, 0)).unwrap_or(Vec3::zero())
+    let mut rotate = GizmoGesture::begin("rotate", 3, camera, Vec3::zero(), radial.x(), radial.y(), settings)
+    let top = camera.project(Vec3::new(0, 1, 0)).unwrap_or(Vec3::zero())
+    let _angle = rotate.update(top.x(), top.y())
+    let ring = gizmo_guides(rotate, 1, clip, Option[f32]::Some(rotate.applied() + 0.17453293), style)
+    let mut sector = false
+    let mut outline = false
+    let mut global_degrees = false
+    let mut delta_degrees = false
+    for command in ring.commands() {
+        match command {
+            DisplayCommand::Triangle(value) => {
+                sector = true
+            }
+            DisplayCommand::Path(path) => {
+                if path.closed() && path.points().len() == 96 {
+                    outline = path.width() > 1.7 && path.color().red() > 230 && path.color().alpha() > 230
+                }
+            }
+            DisplayCommand::StyledText(text) => {
+                if text.value() == "World Z: 100.000°" {
+                    global_degrees = true
+                }
+                if text.value() == "Δ: 90.000°" {
+                    delta_degrees = true
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    if !sector || !outline || !global_degrees || !delta_degrees || ring.len() > 260 {
+        ret 5
+    }
+    let mut scale = GizmoGesture::begin("scale", 1, camera, Vec3::zero(), 400, 300, settings)
+    let _scaled = scale.update(420, 300)
+    let scale_list = gizmo_guides(scale, 1, clip, Option[f32]::Some(2.4), style)
+    let mut world_scale = false
+    let mut delta_scale = false
+    for command in scale_list.commands() {
+        match command {
+            DisplayCommand::StyledText(text) => {
+                if text.value() == "World X: 2.400" {
+                    world_scale = true
+                }
+                if text.value() == "Δ: 0.200" {
+                    delta_scale = true
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    if !world_scale || !delta_scale || !compact_linear(scale_list) {
+        ret 9
+    }
+    if !gizmo_guides(GizmoGesture::idle(), 1, clip, Option[f32]::None, style).is_empty() {
+        ret 6
+    }
+    ret 0
+}

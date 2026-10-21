@@ -1,0 +1,258 @@
+//! Scene components and isolated preview share the GPU executor. IO runs off-thread.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::thread::JoinHandle
+
+import linalg::Vec3
+
+import mod::asset::{CookedParticleSystem, load_particle_system}
+import mod::gpu::{ParticleGpuEmitter, ParticleGpuSlot}
+import mod::model::*
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::world::Scene
+struct VfxSceneInstance {
+    actor: u64
+    path: str
+    seed: u32
+    scale: f32
+    emitters: Vec[ParticleGpuSlot]
+}
+struct VfxSceneAsset {
+    project: str
+    path: str
+    result: Result[CookedParticleSystem, str]
+}
+fn vfx_scene_load(project: str, path: str) -> sending VfxSceneAsset {
+    ret VfxSceneAsset {
+        project, path, load_particle_system(project, path)
+    }
+}
+pub struct SceneParticles {
+    device: GraphicsDevice
+    project: str
+    scene: Scene
+    playing: bool
+    pending: f32
+    instances: Vec[VfxSceneInstance]
+    retired: Vec[(u64, VfxSceneInstance)]
+    serial: u64
+    assets: Vec[VfxSceneAsset]
+    worker: Option[JoinHandle[VfxSceneAsset]]
+    message: str
+}
+
+impl for SceneParticles {
+    pub fn create(device: GraphicsDevice) -> SceneParticles<H> {
+        ret SceneParticles<H> {
+            device, "", Scene::new(), false, 0, Vec[VfxSceneInstance]::new(), Vec[(u64, VfxSceneInstance)]::new(), 0_u64, Vec[VfxSceneAsset]::new(), Option[JoinHandle[VfxSceneAsset]]::None, ""
+        }
+    }
+    pub fn configure(self: mut Self&, project: str) ->() {
+        if project == self.project {
+            ret()
+        }
+        for instance in self.instances {
+            self.retired.push((self.serial, instance))
+        }
+        self.instances.clear() self.project = project self.assets.clear()
+    }
+    pub fn sync(self: mut Self&, scene: Scene, playing: bool) ->() {
+        self.scene = scene self.playing = playing
+    }
+    pub fn reload(self: mut Self&, path: str) ->() {
+        let mut assets = Vec[VfxSceneAsset]::new() for entry in self.assets {
+            if entry.path != path && entry.path != path + ".gparticle" {
+                assets.push(entry)
+            }
+        }
+        self.assets = assets
+        let mut instances = Vec[VfxSceneInstance]::new() for instance in self.instances {
+            if instance.path == path || instance.path == path + ".gparticle" {
+                self.retired.push((self.serial, instance))
+            } else {
+                instances.push(instance)
+            }
+        }
+        self.instances = instances
+    }
+    pub fn active(self: Self&) -> bool {
+        if self.worker.is_some() {
+            ret true
+        }
+        for actor in self.scene.entities() {
+            match actor.component() {
+                Particle(c) => {
+                    if c.asset != "" &&((self.playing && c.autoplay) ||(!self.playing && c.preview)) {
+                        ret true
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        ret self.instances.len() > 0_usize || self.retired.len() > 0_usize
+    }
+    pub fn tick(self: mut Self&, dt: f32, playing: bool) -> bool {
+        self.playing = playing if dt > 0 && dt < 10 {
+            self.pending += if dt > 0.25_f32 {
+                0.25_f32
+            } else {
+                dt
+            }
+        }
+        if self.pending > 0.25_f32 {
+            self.pending = 0.25_f32
+        }
+        ret self.active()
+    }
+    pub fn prepare(self: mut Self&, frame: RenderFrame, camera: PerspectiveCamera, aspect: f32, target: Swapchain) -> bool {
+        self.serial += 1_u64
+        let mut waiting = Vec[(u64, VfxSceneInstance)]::new()
+        for retired in self.retired {
+            if self.serial > retired.0 +(target.frames_in_flight() as u64) * 2_u64 + 2_u64 {
+                for slot in retired.1.emitters {
+                    let emitter = slot.emitter
+                    emitter.destroy()
+                }
+            } else {
+                waiting.push(retired)
+            }
+        }
+        self.retired = waiting
+        let done = match self.worker {
+            Some(w) => w.is_finished() None => false
+        }
+        if done {
+            match self.worker {
+                Some(w) => {
+                    let ready = w.join() if ready.project == self.project {
+                        self.assets.push(ready)
+                    }
+                }
+                None => {
+                }
+            }
+            self.worker = Option[JoinHandle[VfxSceneAsset]]::None
+        }
+        let mut retained = Vec[VfxSceneInstance]::new()
+        for instance in self.instances {
+            let keep = match self.scene.get(instance.actor) {
+                Some(actor) => match actor.component() {
+                    Particle(c) => c.asset == instance.path && c.seed == instance.seed && c.rate_scale == instance.scale &&((self.playing && c.autoplay) ||(!self.playing && c.preview)) && self.scene.world_visible(actor.id()) _ => false
+                }
+                None => false
+            }
+            if keep {
+                retained.push(instance)
+            } else {
+                self.retired.push((self.serial, instance))
+            }
+        }
+        self.instances = retained
+        for actor in self.scene.entities() {
+            match actor.component() {
+                Particle(c) => {
+                    if c.asset == "" || !self.scene.world_visible(actor.id()) || !((self.playing && c.autoplay) ||(!self.playing && c.preview)) {
+                        continue
+                    }
+                    let mut found = false for instance in self.instances {
+                        if instance.actor == actor.id() {
+                            found = true
+                        }
+                    }
+                    if found {
+                        continue
+                    }
+                    let mut available = false
+                    for entry in self.assets {
+                        if entry.path == c.asset {
+                            available = true
+                            match entry.result {
+                                Ok(asset) => {
+                                    let mut instance = VfxSceneInstance {
+                                        actor.id(), c.asset, c.seed, c.rate_scale, Vec[ParticleGpuSlot]::new()
+                                    }
+                                    for i in 0_usize..asset.asset.emitters.len() {
+                                        let mut settings = asset.asset.emitters.get(i).unwrap_or(ParticleEmitter::new("")) if !settings.enabled {
+                                            continue
+                                        }
+                                        settings.rate *= c.rate_scale
+                                        let program = asset.programs.get(i).unwrap_or(ParticleProgram {
+                                                Vec[f32]::new(), Vec[ParticleDiagnostic]::new()
+                                            }
+                                            ,
+                                        )
+                                        match ParticleGpuEmitter::create(self.device, settings, program, asset.asset.seed ^ settings.seed ^ c.seed, asset.asset.parameters) {
+                                            Ok(emitter) => {
+                                                let mut values = Vec[f32]::new() for p in asset.asset.parameters {
+                                                    for value in p.value.values() {
+                                                        values.push(value)
+                                                    }
+                                                }
+                                                emitter.set_parameters(values) instance.emitters.push(ParticleGpuSlot {
+                                                        emitter
+                                                    }
+                                                )
+                                            }
+                                            Err(message) => {
+                                                self.message = message
+                                            }
+                                        }
+                                    }
+                                    self.instances.push(instance)
+                                }
+                                Err(message) => {
+                                    self.message = message
+                                }
+                            }
+                        }
+                    }
+                    if !available && self.worker.is_none() {
+                        self.worker = Option[JoinHandle[VfxSceneAsset]]::Some(spawn vfx_scene_load(self.project, c.asset))
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        for instance in self.instances {
+            let origin = self.scene.world_position(instance.actor).unwrap_or(Vec3::zero()) for slot in instance.emitters {
+                let emitter = slot.emitter
+                emitter.set_origin(origin) if !emitter.prepare(frame, camera, aspect, self.pending) {
+                    ret false
+                }
+            }
+        }
+        self.pending = 0 ret true
+    }
+    pub fn record(self: Self&, frame: RenderFrame, target: Swapchain) -> bool {
+        for instance in self.instances {
+            for slot in instance.emitters {
+                let emitter = slot.emitter
+                if !emitter.record(frame, target) {
+                    ret false
+                }
+            }
+        }
+        ret true
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        for instance in self.instances {
+            for slot in instance.emitters {
+                let emitter = slot.emitter
+                emitter.destroy()
+            }
+        }
+        for retired in self.retired {
+            for slot in retired.1.emitters {
+                let emitter = slot.emitter
+                emitter.destroy()
+            }
+        }
+        self.retired.clear()
+        self.instances.clear() self.pending = 0
+    }
+}

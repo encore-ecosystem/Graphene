@@ -4,27 +4,121 @@ import linalg::Vec3
 
 fn main() -> u32 {
     let source = StandardMaterial::new(Vec3::new(0.12_f32, 0.48_f32, 0.91_f32), 0.7_f32, 0.25_f32)
-        .with_unlit().with_double_sided()
+    .with_unlit().with_double_sided()
     match material_asset_parse(material_asset_stringify(source)) {
         Option::Some(decoded) => {
             if decoded.base_color().x() < 0.119_f32 || decoded.base_color().x() > 0.121_f32 ||
-                decoded.base_color().y() < 0.479_f32 || decoded.base_color().y() > 0.481_f32 ||
-                decoded.base_color().z() < 0.909_f32 || decoded.base_color().z() > 0.911_f32 ||
-                decoded.metallic() < 0.699_f32 || decoded.metallic() > 0.701_f32 ||
-                decoded.roughness() < 0.249_f32 || decoded.roughness() > 0.251_f32 ||
-                !decoded.unlit() || !decoded.double_sided() { ret 1_u32 }
+            decoded.base_color().y() < 0.479_f32 || decoded.base_color().y() > 0.481_f32 ||
+            decoded.base_color().z() < 0.909_f32 || decoded.base_color().z() > 0.911_f32 ||
+            decoded.metallic() < 0.699_f32 || decoded.metallic() > 0.701_f32 ||
+            decoded.roughness() < 0.249_f32 || decoded.roughness() > 0.251_f32 ||
+            !decoded.unlit() || !decoded.double_sided() {
+                ret 1_u32
+            }
         }
-        Option::None => { ret 2_u32 }
+        Option::None => {
+            ret 2_u32
+        }
     }
-    if material_asset_parse("{\"format\":\"other\",\"version\":1}").is_some() { ret 3_u32 }
-    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":1,\"base_color\":[1,2],\"metallic\":0,\"roughness\":1}").is_some() { ret 4_u32 }
+    if material_asset_parse("{\"format\":\"other\",\"version\":1}").is_some() {
+        ret 3_u32
+    }
+    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":1,\"base_color\":[1,2],\"metallic\":0,\"roughness\":1}").is_some() {
+        ret 4_u32
+    }
     match material_asset_parse("{\"format\":\"graphene-material\",\"version\":1,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1}") {
-        Option::Some(legacy) => { if legacy.double_sided() { ret 7_u32 } }
-        Option::None => { ret 8_u32 }
+        Option::Some(legacy) => {
+            if legacy.double_sided() {
+                ret 7_u32
+            }
+        }
+        Option::None => {
+            ret 8_u32
+        }
     }
     let edited = edit_default_material(edit_default_material(source, "material-metallic-plus"), "material-color-gold")
-    if edited.metallic() < 0.799_f32 || edited.metallic() > 0.801_f32 || edited.base_color().x() != 0.78_f32 { ret 5_u32 }
+    if edited.metallic() < 0.799_f32 || edited.metallic() > 0.801_f32 || edited.base_color().x() != 0.78_f32 {
+        ret 5_u32
+    }
     let reset = edit_default_material(edited, "material-reset")
-    if reset.metallic() != 0.08_f32 || reset.roughness() != 0.48_f32 || reset.unlit() { ret 6_u32 }
+    if reset.metallic() != 0.08_f32 || reset.roughness() != 0.48_f32 || reset.unlit() {
+        ret 6_u32
+    }
+    let textured = source.with_base_color_texture("Content/Textures/checker.png")
+    match material_asset_parse(material_asset_stringify(textured.with_metallic(0.2).with_roughness(0.9).with_base_color(Vec3::new(1.0, 1.0, 1.0)))) {
+        Option::Some(material) => {
+            if material.base_color_texture() != "Content/Textures/checker.png" || !material.unlit() || !material.double_sided() {
+                ret 9
+            }
+            if edit_default_material(material, "material-reset").base_color_texture() != "" {
+                ret 10
+            }
+        }
+        Option::None => {
+            ret 11
+        }
+    }
+    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":3,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,\"base_color_texture\":\"../bad.png\"}").is_some() {
+        ret 12
+    }
+    let normal = textured.with_normal_texture("Content/Textures/normal.png")
+    .with_normal_scale(2.0).with_normal_flip_y(true)
+    let preserved = normal.with_base_color(Vec3::new(0.1, 0.2, 0.3))
+    .with_metallic(0.4).with_roughness(0.5).with_unlit_value(false).with_double_sided_value(false)
+    .with_base_color_texture("Content/Textures/color.png")
+    match material_asset_parse(material_asset_stringify(preserved)) {
+        Option::Some(decoded) => {
+            if decoded.normal_texture() != "Content/Textures/normal.png" ||
+            decoded.normal_scale() != 2.0 || !decoded.normal_flip_y() ||
+            decoded.base_color_texture() != "Content/Textures/color.png" {
+                ret 13
+            }
+            let values = decoded.texture_uniform_values()
+            if values.len() != 4 || values.get(0).unwrap_or(0.0) != 2.0 ||
+            values.get(1).unwrap_or(0.0) != - 1.0 {
+                ret 14
+            }
+            if decoded.with_normal_texture("").texture_uniform_values().get(0).unwrap_or(1.0) != 0.0 {
+                ret 15
+            }
+        }
+        Option::None => {
+            ret 16
+        }
+    }
+    let legacy = "{\"format\":\"graphene-material\",\"version\":3,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1}"
+    match material_asset_parse(legacy) {
+        Option::Some(decoded) => {
+            if decoded.normal_texture() != "" || decoded.normal_scale() != 1.0 || decoded.normal_flip_y() {
+                ret 17
+            }
+        }
+        Option::None => {
+            ret 18
+        }
+    }
+    if normal.with_normal_scale( - 1.0).normal_scale() != 0.0 || normal.with_normal_scale(5.0).normal_scale() != 4.0 {
+        ret 19
+    }
+    let edited_normal = edit_default_material(edit_default_material(normal, "material-normal-minus"), "material-normal-flip-y")
+    if edited_normal.normal_flip_y() || edited_normal.normal_scale() < 1.899 || edited_normal.normal_scale() > 1.901 {
+        ret 20
+    }
+    let normal_reset = edit_default_material(normal, "material-reset")
+    if normal_reset.normal_texture() != "" || normal_reset.normal_flip_y() || normal_reset.normal_scale() != 1.0 {
+        ret 21
+    }
+    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":4,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,\"normal_texture\":\"../bad.png\"}").is_some() {
+        ret 22
+    }
+    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":4,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,\"normal_scale\":\"oops\"}").is_some() {
+        ret 23
+    }
+    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":4,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,\"normal_scale\":-1}").is_some() {
+        ret 24
+    }
+    if material_asset_parse("{\"format\":\"graphene-material\",\"version\":4,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,\"normal_flip_y\":1}").is_some() {
+        ret 25
+    }
     ret 0_u32
 }

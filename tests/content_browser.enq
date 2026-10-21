@@ -1,0 +1,147 @@
+//! Real project discovery, Unicode search, selection, navigation and file undo.
+import core::option::Option
+import core::vec::Vec
+import graphene::content_browser::files::{scan_content, content_stat, content_move, content_name_valid, lower}
+import graphene::content_browser::operations::{content_create, content_rename, content_delete, content_duplicate, content_history, content_move_selection}
+import graphene::content_browser::{ContentBrowser, ContentAsset, content_query_terms, content_query_matches, content_sorted}
+import graphene::{discover_obj_assets, material_graph_parse}
+import luma::TextEditor
+import std::os::{mkdir_all, write_file, read_file, file_exists}
+import std::time::{perf_counter_ms, sleep_ms}
+
+fn settle(browser: mut ContentBrowser) -> bool {
+    let start = perf_counter_ms()
+    while browser.scan.is_some() && perf_counter_ms() - start < 5000 {
+        let _changed = browser.poll() sleep_ms(1)
+    }
+    ret browser.scan.is_none()
+}
+fn check_assets(browser: mut ContentBrowser, project: str) -> u32 {
+    browser.project = project browser.view = "list" browser.entries = scan_content(project).entries browser.rebuild()
+    if browser.visible.len() < 6 {
+        ret 1_u32
+    }
+    if lower("МАТЕРИАЛ ЁЖИК AbC") != "материал ёжик abc" {
+        ret 2_u32
+    }
+    let sample = ContentAsset::new("Content/Materials/Red Paint.graphene-material.json", "Red Paint", "material", 70)
+    if !content_query_matches(sample, content_query_terms("t:material \"red paint\" -draft path:Materials")) {
+        ret 3_u32
+    }
+    if content_query_matches(sample, content_query_terms("t:mesh red")) || content_query_matches(sample, content_query_terms("paint -red")) {
+        ret 4_u32
+    }
+    let sorted = content_sorted(vec![ContentAsset::new("Content/z.obj", "z", "mesh", 7), ContentAsset::new("Content/a", "Folder", "folder", 0), ContentAsset::new("Content/A.obj", "A", "mesh", 2)], "name", true)
+    if sorted.get(0).unwrap_or(sample).kind != "folder" || sorted.get(1).unwrap_or(sample).name != "z" {
+        ret 5_u32
+    }
+    browser.navigate("Content/Meshes", true)
+    if browser.visible.len() != 2 {
+        ret 6_u32
+    }
+    let a = browser.visible.get(0).unwrap_or(sample).path let b = browser.visible.get(1).unwrap_or(sample).path
+    browser.select(a, false, false) browser.select(b, true, false)
+    if browser.selection.len() != 2 {
+        ret 7_u32
+    }
+    browser.select(a, false, false) browser.select(b, false, true)
+    if browser.selection.len() != 2 {
+        ret 8_u32
+    }
+    browser.go_history(false) if browser.directory != "@all" {
+        ret 9_u32
+    }
+    browser.go_history(true) if browser.directory != "Content/Meshes" {
+        ret 10_u32
+    }
+    browser.select(a, false, false) browser.toggle_favorite()
+    browser.query = TextEditor::new("t:mesh -Used") browser.save_search()
+    let mut reopened = ContentBrowser::new() reopened.project = project reopened.load_settings()
+    if reopened.favorites.len() != 1 || reopened.searches.len() != 1 {
+        ret 11_u32
+    }
+    browser.query = TextEditor::new("") browser.navigate("Content", true)
+    browser.popup = "folder" browser.name = TextEditor::new("Props") content_create(browser)
+    if !settle(browser) || content_stat(project, "Content/Props") != 2 {
+        ret 12_u32
+    }
+    browser.mesh_refresh = false content_history(browser, false, Vec[str]::new())
+    if !settle(browser) || file_exists(project + "/Content/Props") {
+        ret 13_u32
+    }
+    browser.mesh_refresh = false content_history(browser, true, Vec[str]::new())
+    if !settle(browser) || content_stat(project, "Content/Props") != 2 {
+        ret 14_u32
+    }
+    browser.primary = "Content/Meshes/Free.obj" browser.selection = vec![browser.primary]
+    browser.popup = "rename" browser.name = TextEditor::new("Renamed") content_rename(browser, Vec[str]::new())
+    if !settle(browser) || !file_exists(project + "/Content/Meshes/Renamed.obj") || file_exists(project + "/Content/Meshes/Free.obj") {
+        ret 15_u32
+    }
+    browser.popup = "rename" browser.name = TextEditor::new("Used") content_rename(browser, Vec[str]::new())
+    if browser.error == "" || !file_exists(project + "/Content/Meshes/Renamed.obj") {
+        ret 16_u32
+    }
+    browser.popup = "rename" browser.name = TextEditor::new("../Outside") content_rename(browser, Vec[str]::new())
+    if browser.error == "" || file_exists(project + "/Content/Outside.obj") {
+        ret 17_u32
+    }
+    browser.popup = "" browser.error = "" content_duplicate(browser)
+    if !settle(browser) || !file_exists(project + "/Content/Meshes/Renamed_Copy.obj") {
+        ret 18_u32
+    }
+    browser.name = TextEditor::new("Content/Props") browser.popup = "move" content_move_selection(browser, Vec[str]::new())
+    if !settle(browser) || !file_exists(project + "/Content/Props/Renamed_Copy.obj") {
+        ret 19_u32
+    }
+    browser.primary = "Content/Props/Renamed_Copy.obj" browser.selection = vec![browser.primary] browser.popup = "delete" content_delete(browser, Vec[str]::new())
+    if !settle(browser) || file_exists(project + "/Content/Props/Renamed_Copy.obj") {
+        ret 20_u32
+    }
+    browser.mesh_refresh = false content_history(browser, false, Vec[str]::new())
+    if !settle(browser) || !file_exists(project + "/Content/Props/Renamed_Copy.obj") {
+        ret 21_u32
+    }
+    browser.primary = "Content/Meshes/Used.obj" browser.selection = vec![browser.primary] browser.popup = "delete" content_delete(browser, vec!["Used.obj"])
+    if browser.error == "" || !file_exists(project + "/Content/Meshes/Used.obj") {
+        ret 22_u32
+    }
+    browser.popup = "rename" browser.name = TextEditor::new("Changed") content_rename(browser, Vec[str]::new())
+    if browser.error == "" || !file_exists(project + "/Content/Meshes/Used.obj") {
+        ret 23_u32
+    }
+    if content_move(project, "Content/Meshes/Used.obj", "Content/Meshes/Renamed.obj") || content_stat(project, "Content/../game/src/main.enq") != 0 {
+        ret 24_u32
+    }
+    if content_name_valid("..") || content_name_valid("a/b") || !content_name_valid("Материал_01") {
+        ret 25_u32
+    }
+    browser.navigate("Content/Props", true) browser.popup = "material" browser.name = TextEditor::new("M_Test") content_create(browser)
+    if !settle(browser) || material_graph_parse(read_file(project + "/Content/Props/M_Test.graphene-material-graph.json")).is_none() {
+        ret 26_u32
+    }
+    browser.popup = "blueprint" browser.name = TextEditor::new("BP_Test") content_create(browser)
+    if !settle(browser) || !file_exists(project + "/Content/Props/BP_Test.graphene-blueprint.json") {
+        ret 27_u32
+    }
+    let meshes = discover_obj_assets(project) let mut nested = false
+    for mesh in meshes {
+        if mesh.name() == "Content/Props/Renamed_Copy.obj" {
+            nested = true
+        }
+    }
+    if !nested {
+        ret 28_u32
+    }
+    ret 0_u32
+}
+fn main() -> u32 {
+    let root = "/tmp/graphene-content-browser-" + perf_counter_ms().fmt()
+    let _made = mkdir_all(root + "/Content/Meshes") let _props = mkdir_all(root + "/Content/Scenes") let _source = mkdir_all(root + "/game/src")
+    let obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+    let _a = write_file(root + "/Content/Meshes/Free.obj", obj) let _b = write_file(root + "/Content/Meshes/Used.obj", obj)
+    let _scene = write_file(root + "/Content/Scenes/Level.graphene.json", "{\"mesh\":\"Used.obj\"}")
+    let _script = write_file(root + "/game/src/main.enq", "fn main() -> u32 { ret 0 }")
+    let mut browser = ContentBrowser::new() let result = check_assets(browser, root)
+    browser.destroy() ret result
+}

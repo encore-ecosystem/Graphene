@@ -1,0 +1,534 @@
+//! Compact transport and mixer. Only visible meters repaint, at 10 Hz.
+import audio::output_devices
+import core::option::Option
+import core::vec::Vec
+import luma::{Widget, WidgetLayout, PreparedFrame, StyleSheet, DisplayList, Rect, Event, horizontal, vertical, event_pointer_down, event_pointer_move, event_pointer_up, event_key_down, event_focus_lost, key_left, key_right, key_enter, key_tab, key_escape}
+import mod::asset::{SoundImport, import_sound}
+import mod::model::{AudioSettings, audio_bus_names}
+import mod::runtime::SceneAudio
+import refrain::editor_guides::gizmo_step_label
+import std::os::{read_file, mkdir_all, write_file_atomic}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
+fn button(id: str, label: str, active: bool, disabled: bool) -> Widget {
+    ret Widget::button(id, label).with_classes("g-perf-button g-audio-button" + if id == "audio-headphones" || id == "audio-device" {
+            " g-audio-device"
+        } elif id == "audio-voices-less" || id == "audio-voices-more" {
+            " g-audio-step"
+        } elif id == "audio-scene-preview" {
+            " g-audio-listen"
+        } else {
+            ""
+        }
+    ).with_checked(active).with_disabled(disabled).with_attribute("aria-pressed", if active {
+            "true"
+        } else {
+            "false"
+        }
+        ,
+    ).with_attribute("title", label)
+}
+// Overlay commands use canvas coordinates, but must stay inside the scroller.
+fn audio_clip(bounds: Rect, panel: Rect) -> Rect {
+    let x = if bounds.x() > panel.x() {
+        bounds.x()
+    } else {
+        panel.x()
+    }
+    let y = if bounds.y() > panel.y() {
+        bounds.y()
+    } else {
+        panel.y()
+    }
+    let right = if bounds.right() < panel.right() {
+        bounds.right()
+    } else {
+        panel.right()
+    }
+    let bottom = if bounds.bottom() < panel.bottom() {
+        bounds.bottom()
+    } else {
+        panel.bottom()
+    }
+    ret Rect::new(x, y, if right > x {
+            right - x
+        } else {
+            0_f32
+        }
+        , if bottom > y {
+            bottom - y
+        } else {
+            0_f32
+        }
+        ,
+    )
+}
+
+pub struct AudioPanel {
+    runtime: SceneAudio
+    project: str
+    selected: str
+    worker: Option[JoinHandle[SoundImport]]
+    imported: str
+    message: str
+    dirty: bool
+    last_refresh: u64
+    dragging: str
+    focused: str
+    devices: Vec[str]
+    device: str
+    history: Vec[AudioSettings]
+    future: Vec[AudioSettings]
+    gesture_before: Option[AudioSettings]
+    paint: Vec[DisplayList]
+    paint_bounds: Vec[Rect]
+    paint_time: u64
+    paint_dirty: bool
+    presented_playing: bool
+}
+
+impl for AudioPanel {
+    pub fn new() -> Self {
+        ret Self {
+            SceneAudio::new(), "", "", Option::None, "", "", true, 0_u64, "", "", Vec[str]::new(), "", Vec[AudioSettings]::new(), Vec[AudioSettings]::new(), Option[AudioSettings]::None, Vec[DisplayList]::new(), Vec[Rect]::new(), 0_u64, true, false
+        }
+    }
+    pub fn configure(self: mut Self, project: str) ->() {
+        self.project = project self.selected = "" self.imported = "" self.message = "" self.device = read_file(project + "/.graphene/audio-device.txt") self.runtime.configure(project, AudioSettings::load(project)) self.history.clear() self.future.clear() self.gesture_before = Option[AudioSettings]::None self.dirty = true self.paint_dirty = true
+    }
+    pub fn import_sound(self: mut Self, source: str) -> bool {
+        if self.worker.is_some() {
+            ret false
+        }
+        self.worker = Option[JoinHandle[SoundImport]]::Some(spawn import_sound(self.project, source)) self.message = "Importing sound…" self.dirty = true self.paint_dirty = true ret true
+    }
+    pub fn select(self: mut Self, path: str) ->() {
+        if self.selected != path {
+            self.runtime.stop_preview() self.selected = path self.runtime.inspect(path) self.dirty = true self.paint_dirty = true
+        }
+    }
+    pub fn needs_tick(self: Self) -> bool {
+        ret self.worker.is_some() || self.runtime.busy() || self.runtime.preview_running() || self.runtime.scene_preview || self.runtime.playing
+    }
+    pub fn poll(self: mut Self, visible: bool) -> bool {
+        if self.presented_playing != self.runtime.playing {
+            self.presented_playing = self.runtime.playing
+            self.dirty = true self.paint_dirty = true
+        }
+        let ready = match self.worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if ready {
+            let result = match self.worker {
+                Some(worker) => worker.join() None => SoundImport {
+                    "", "", ""
+                }
+            }
+            self.worker = Option[JoinHandle[SoundImport]]::None if result.project == self.project {
+                self.message = result.error
+                if result.error == "" && result.path != "" {
+                    let settings = self.runtime.settings
+                    self.runtime.configure(self.project, settings)
+                    self.selected = ""
+                    self.imported = result.path
+                    self.select(result.path)
+                }
+                self.dirty = true self.paint_dirty = true
+            }
+        }
+        if self.runtime.poll() {
+            self.dirty = true self.paint_dirty = true
+        }
+        let now = perf_counter_ms()
+        if visible && self.needs_tick() && now - self.last_refresh >= 100_u64 {
+            self.dirty = true self.paint_dirty = true self.last_refresh = now
+        }
+        let out = visible && self.dirty if out {
+            self.dirty = false
+        }
+        ret out
+    }
+    pub fn take_imported(self: mut Self) -> str {
+        let path = self.imported self.imported = "" ret path
+    }
+    fn settings_equal(self: Self, a: AudioSettings, b: AudioSettings) -> bool {
+        if a.headphones != b.headphones || a.max_voices != b.max_voices {
+            ret false
+        }
+        for i in 0_usize..4_usize {
+            if a.gains.get(i).unwrap_or(1) != b.gains.get(i).unwrap_or(1) || a.mutes.get(i).unwrap_or(false) != b.mutes.get(i).unwrap_or(false) {
+                ret false
+            }
+        }
+        ret true
+    }
+    fn apply_settings(self: mut Self, settings: AudioSettings) ->() {
+        let previous = self.runtime.settings
+        if previous.headphones != settings.headphones || previous.max_voices != settings.max_voices {
+            self.runtime.configure(self.project, settings)
+            if self.selected != "" {
+                self.runtime.inspect(self.selected)
+            }
+        } else {
+            self.runtime.settings = settings self.runtime.apply_mix()
+        }
+        self.dirty = true self.paint_dirty = true
+    }
+    fn persist(self: mut Self, before: AudioSettings) ->() {
+        if self.settings_equal(before, self.runtime.settings) {
+            ret()
+        }
+        if !self.runtime.settings.save(self.project) {
+            self.apply_settings(before) self.message = "Unable to save audio settings" ret()
+        }
+        self.history.push(before) self.future.clear()
+        if self.history.len() > 128 {
+            let mut recent = Vec[AudioSettings]::new() for i in 1_usize..self.history.len() {
+                recent.push(self.history.get(i).unwrap_or(before))
+            }
+            self.history = recent
+        }
+    }
+    pub fn history_step(self: mut Self, redo: bool) -> bool {
+        let entries = if redo {
+            self.future
+        } else {
+            self.history
+        }
+        if entries.len() == 0 {
+            ret true
+        }
+        let restored = entries.get(entries.len() - 1).unwrap_or(AudioSettings::defaults())
+        if !restored.save(self.project) {
+            self.message = "Unable to save audio settings" self.dirty = true self.paint_dirty = true ret true
+        }
+        let mut remaining = Vec[AudioSettings]::new() for i in 0_usize..(entries.len() - 1) {
+            remaining.push(entries.get(i).unwrap_or(restored))
+        }
+        let current = self.runtime.settings.snapshot()
+        if redo {
+            self.future = remaining self.history.push(current)
+        } else {
+            self.history = remaining self.future.push(current)
+        }
+        self.apply_settings(restored)
+        ret true
+    }
+    pub fn action(self: mut Self, target: str) -> bool {
+        if !target.contains("audio-") {
+            ret false
+        }
+        if self.runtime.playing &&(target == "audio-play" || target == "audio-scene-preview" || target == "audio-headphones" || target == "audio-device" || target == "audio-voices-less" || target == "audio-voices-more") {
+            ret true
+        }
+        let before = self.runtime.settings.snapshot()
+        if target == "audio-undo" {
+            ret self.history_step(false)
+        } elif target == "audio-redo" {
+            ret self.history_step(true)
+        } elif target == "audio-play" {
+            if self.selected != "" {
+                self.runtime.preview(self.selected)
+            }
+        } elif target == "audio-pause" {
+            self.runtime.pause_preview()
+        } elif target == "audio-stop" {
+            self.runtime.stop_preview()
+        } elif target == "audio-scene-preview" {
+            self.runtime.set_scene_preview(!self.runtime.scene_preview)
+        } elif target == "audio-headphones" {
+            let mut settings = self.runtime.settings settings.headphones = !settings.headphones
+            if settings.save(self.project) {
+                self.apply_settings(settings)
+            } else {
+                self.message = "Unable to save audio settings"
+            }
+        } elif target == "audio-voices-less" || target == "audio-voices-more" {
+            let mut settings = self.runtime.settings
+            settings.max_voices = if target == "audio-voices-less" {
+                if settings.max_voices > 16 {
+                    settings.max_voices - 16
+                } else {
+                    1_u32
+                }
+            } else {
+                if settings.max_voices < 1008 {
+                    settings.max_voices + 16
+                } else {
+                    1024_u32
+                }
+            }
+            if settings.save(self.project) {
+                self.apply_settings(settings)
+            }
+        } elif target == "audio-device" {
+            self.devices.clear()
+            for name in output_devices() {
+                if name != "" {
+                    self.devices.push(name)
+                }
+            }
+            let mut next = "" let mut found = self.device == ""
+            for name in self.devices {
+                if found {
+                    next = name break
+                }
+                if name == self.device {
+                    found = true
+                }
+            }
+            self.device = next
+            if mkdir_all(self.project + "/.graphene") == 0 && write_file_atomic(self.project + "/.graphene/audio-device.txt", next) == 0 {
+                let settings = self.runtime.settings self.runtime.configure(self.project, settings)
+                if self.selected != "" {
+                    self.runtime.inspect(self.selected)
+                }
+            }
+        } elif target.contains("audio-mute-") {
+            for i in 0_usize..4_usize {
+                if target == "audio-mute-" + i.fmt() {
+                    let muted = self.runtime.settings.mutes.get(i).unwrap_or(false) self.runtime.settings.mutes.set(i, !muted) self.runtime.apply_mix()
+                }
+            }
+        } else {
+            ret false
+        }
+        self.persist(before) self.focused = target self.dirty = true self.paint_dirty = true ret true
+    }
+    fn gain(self: mut Self, id: str, value: f32, commit: bool) ->() {
+        let before = self.gesture_before.unwrap_or(self.runtime.settings.snapshot())
+        for i in 0_usize..4_usize {
+            if id == "audio-gain-" + i.fmt() {
+                let clamped = if value < 0 {
+                    0.0_f32
+                } elif value > 2 {
+                    2.0_f32
+                } else {
+                    value
+                }
+                self.runtime.settings.gains.set(i, clamped) self.runtime.apply_mix() if commit {
+                    self.persist(before) self.gesture_before = Option[AudioSettings]::None
+                }
+                self.dirty = true self.paint_dirty = true
+            }
+        }
+    }
+    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout) -> bool {
+        if event.kind() == event_focus_lost() {
+            if self.dragging != "" {
+                self.persist(self.gesture_before.unwrap_or(self.runtime.settings.snapshot())) self.gesture_before = Option[AudioSettings]::None
+            }
+            self.dragging = "" self.focused = "" ret false
+        }
+        if event.kind() == event_pointer_down() && event.key() == 1_u32 {
+            if target.contains("audio-") {
+                self.focused = target
+            } else {
+                self.focused = ""
+            }
+            if target.contains("audio-gain-") || target == "audio-waveform" {
+                self.dragging = target self.gesture_before = Option[AudioSettings]::Some(self.runtime.settings.snapshot())
+            }
+        }
+        if self.dragging != "" &&(event.kind() == event_pointer_down() || event.kind() == event_pointer_move() || event.kind() == event_pointer_up()) {
+            match layout.find_bounds(self.dragging) {
+                Some(bounds) => {
+                    let t =(event.x() - bounds.x()) / bounds.width() if self.dragging == "audio-waveform" {
+                        self.runtime.seek_preview(t) self.dirty = true self.paint_dirty = true
+                    } else {
+                        self.gain(self.dragging, t * 2, event.kind() == event_pointer_up())
+                    }
+                }
+                None => {
+                }
+            }
+            if event.kind() == event_pointer_up() {
+                self.dragging = ""
+            }
+            ret true
+        }
+        if self.focused != "" && event.kind() == event_key_down() {
+            if event.control() &&(event.key() == 122_u32 || event.key() == 121_u32) {
+                ret self.history_step(event.key() == 121_u32 || event.shift())
+            }
+            if event.key() == key_escape() {
+                self.focused = "" ret true
+            }
+            if event.key() == key_tab() {
+                let ids = vec!["audio-play", "audio-pause", "audio-stop", "audio-scene-preview", "audio-headphones", "audio-device", "audio-voices-less", "audio-voices-more", "audio-undo", "audio-redo", "audio-gain-0", "audio-mute-0", "audio-gain-1", "audio-mute-1", "audio-gain-2", "audio-mute-2", "audio-gain-3", "audio-mute-3"]
+                let mut index = 0_usize for i in 0_usize..ids.len() {
+                    if ids.get(i).unwrap_or("") == self.focused {
+                        index = i
+                    }
+                }
+                self.focused = ids.get(if event.shift() {
+                        if index == 0 {
+                            ids.len() - 1
+                        } else {
+                            index - 1
+                        }
+                    } else {
+                        (index + 1) % ids.len()
+                    }
+                ).unwrap_or("") self.dirty = true self.paint_dirty = true ret true
+            }
+            if self.focused.contains("audio-gain-") &&(event.key() == key_left() || event.key() == key_right()) {
+                for i in 0_usize..4_usize {
+                    if self.focused == "audio-gain-" + i.fmt() {
+                        self.gain(self.focused, self.runtime.settings.gains.get(i).unwrap_or(1) + if event.key() == key_left() {
+                                - 0.05_f32
+                            } else {
+                                0.05_f32
+                            }
+                            , true,)
+                    }
+                }
+                ret true
+            }
+            if event.key() == key_enter() || event.key() == 32_u32 {
+                ret self.action(self.focused)
+            }
+        }
+        ret false
+    }
+    pub fn widget(self: Self, playing: bool) -> Widget {
+        let settings = self.runtime.settings
+        let mut root = Widget::panel("audio-panel").with_classes("g-perf-panel g-audio-panel").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        let mut transport = Widget::panel("audio-transport").with_classes("g-audio-row").with_direction(horizontal())
+        transport.push(Widget::label("SOUND").with_classes("g-audio-label"))
+        transport.push(button("audio-play", "Play", self.runtime.preview_running(), self.selected == "" || playing).with_focus(self.focused == "audio-play"))
+        transport.push(button("audio-pause", if self.runtime.preview_paused {
+                    "Resume"
+                } else {
+                    "Pause"
+                }
+                , self.runtime.preview_paused, self.runtime.preview_voice.is_none(),).with_focus(self.focused == "audio-pause"))
+        transport.push(button("audio-stop", "Stop", false, self.runtime.preview_voice.is_none()).with_focus(self.focused == "audio-stop"))
+        transport.push(button("audio-scene-preview", "Listen to scene", self.runtime.scene_preview, playing).with_focus(self.focused == "audio-scene-preview"))
+        transport.push(button("audio-undo", "Undo", false, self.history.len() == 0).with_focus(self.focused == "audio-undo"))
+        transport.push(button("audio-redo", "Redo", false, self.future.len() == 0).with_focus(self.focused == "audio-redo"))
+        root.push(transport)
+        root.push(Widget::label(if self.selected == "" {
+                    "Select a Sound in Content Browser; double-click to audition."
+                } else {
+                    self.selected
+                }
+            ).with_classes("g-audio-path"))
+        root.push(Widget::canvas("audio-waveform").with_classes("g-audio-waveform").with_attribute("title", "Click or drag to seek"))
+        let mut mixer = Widget::panel("audio-mixer").with_classes("g-audio-row").with_direction(horizontal())
+        for i in 0_usize..4_usize {
+            let name = audio_bus_names().get(i).unwrap_or("Master") let gain = settings.gains.get(i).unwrap_or(1) let muted = settings.mutes.get(i).unwrap_or(false)
+            let mut bus = Widget::panel("audio-bus-" + i.fmt()).with_classes("g-audio-bus").with_direction(vertical())
+            bus.push(Widget::label(name + " · " + gizmo_step_label(gain * 100) + "%").with_classes("bp-section-label"))
+            bus.push(Widget::slider("audio-gain-" + i.fmt(), gain / 2).with_classes("g-audio-fader").with_focus(self.focused == "audio-gain-" + i.fmt()).with_attribute("aria-label", name + " volume"))
+            bus.push(Widget::canvas("audio-meter-" + i.fmt()).with_classes("g-audio-meter"))
+            bus.push(button("audio-mute-" + i.fmt(), "Mute", muted, false).with_focus(self.focused == "audio-mute-" + i.fmt())) mixer.push(bus)
+        }
+        root.push(mixer)
+        let mut config = Widget::panel("audio-settings").with_classes("g-audio-row").with_direction(horizontal())
+        config.push(button("audio-headphones", if settings.headphones {
+                    "Headphones · HRTF"
+                } else {
+                    "Speakers · Panning"
+                }
+                , settings.headphones, playing,).with_focus(self.focused == "audio-headphones"))
+        config.push(button("audio-device", if self.device == "" {
+                    "Default output"
+                } else {
+                    self.device
+                }
+                , false, playing,).with_focus(self.focused == "audio-device"))
+        config.push(Widget::label("Voices: " + settings.max_voices.fmt()).with_classes("g-audio-label"))
+        config.push(button("audio-voices-less", "−", false, playing).with_focus(self.focused == "audio-voices-less"))
+        config.push(button("audio-voices-more", "+", false, playing).with_focus(self.focused == "audio-voices-more"))
+        root.push(config)
+        let stats = self.runtime.stats()
+        root.push(Widget::label("Active resources " + stats.voices.fmt() + " · DSP " + gizmo_step_label((stats.callback_ns as f32) * 0.000001_f32) + " ms · Peak " + gizmo_step_label((stats.peak_callback_ns as f32) * 0.000001_f32) + " ms · Buffers " +(stats.pcm_bytes / 1024_u64).fmt() + " KiB · Underruns " + stats.underruns.fmt()).with_classes("g-audio-path"))
+        let message = if self.message != "" {
+            self.message
+        } else {
+            self.runtime.message
+        }
+        if message != "" {
+            root.push(Widget::label(message).with_classes("tone-warning"))
+        }
+        ret root
+    }
+    pub fn compose(self: mut Self, frame: PreparedFrame, layout: WidgetLayout, sheet: StyleSheet) -> PreparedFrame {
+        let visible_bounds = match layout.find_bounds("audio-waveform") {
+            Some(bounds) => bounds None => {
+                ret frame
+            }
+        }
+        let panel_bounds = layout.find_bounds("audio-panel").unwrap_or(visible_bounds)
+        let visible_clip = audio_clip(visible_bounds, panel_bounds)
+        let previous = self.paint_bounds.get(0_usize).unwrap_or(Rect::new(0, 0, 0, 0))
+        let same_bounds = previous.x() == visible_clip.x() && previous.y() == visible_clip.y() && previous.width() == visible_clip.width() && previous.height() == visible_clip.height()
+        let now = perf_counter_ms()
+        let mut composed = frame
+        if !self.paint_dirty && same_bounds && now - self.paint_time < 100_u64 {
+            for i in 0_usize..self.paint.len() {
+                match self.paint.get(i) {
+                    Some(list) => {
+                        composed = composed.with_display_overlay(list, self.paint_bounds.get(i).unwrap_or(visible_bounds))
+                    }
+                    None => {
+                    }
+                }
+            }
+            ret composed
+        }
+        self.paint.clear() self.paint_bounds.clear() self.paint_time = now self.paint_dirty = false
+        let accent = sheet.style(Widget::panel("").with_classes("g-audio-accent"), false, false, false).foreground()
+        let muted = sheet.style(Widget::panel("").with_classes("g-audio-path"), false, false, false).foreground()
+        match layout.find_bounds("audio-waveform") {
+            Some(bounds) => {
+                let mut list = DisplayList::new() let peaks = self.runtime.peaks(self.selected)
+                list.line(bounds.x(), bounds.y() + bounds.height() / 2, bounds.right(), bounds.y() + bounds.height() / 2, 1, muted)
+                if peaks.len() > 0 {
+                    let step = bounds.width() /(peaks.len() as f32) for i in 0_usize..peaks.len() {
+                        let x = bounds.x() +(i as f32) * step let h = peaks.get(i).unwrap_or(0) *(bounds.height() - 8) / 2 list.line(x, bounds.y() + bounds.height() / 2 - h, x, bounds.y() + bounds.height() / 2 + h, if step > 2 {
+                                2.0_f32
+                            } else {
+                                1.0_f32
+                            }
+                            , accent,)
+                    }
+                }
+                let frames = self.runtime.frames(self.selected) let cursor = if self.selected == self.runtime.preview_path {
+                    self.runtime.preview_cursor()
+                } else {
+                    0_u64
+                }
+                if frames > 0 {
+                    let x = bounds.x() + bounds.width() *((cursor as f32) /(frames as f32)) list.line(x, bounds.y(), x, bounds.bottom(), 1.5_f32, accent) list.text(bounds.x() + 5, bounds.y() + 3, gizmo_step_label((cursor as f32) / 48000) + " / " + gizmo_step_label((frames as f32) / 48000) + " s", muted)
+                }
+                self.paint.push(list) self.paint_bounds.push(audio_clip(bounds, panel_bounds))
+                composed = composed.with_display_overlay(list, audio_clip(bounds, panel_bounds))
+            }
+            None => {
+            }
+        }
+        for i in 0_usize..4_usize {
+            match layout.find_bounds("audio-meter-" + i.fmt()) {
+                Some(bounds) => {
+                    let mut list = DisplayList::new() let peak = if self.runtime.scene_preview || self.runtime.playing || self.runtime.preview_running() {
+                        self.runtime.bus_peak(i)
+                    } else {
+                        0.0_f32
+                    }
+                    list.fill_rect(Rect::new(bounds.x(), bounds.y(), bounds.width() * if peak > 1 {
+                                1.0_f32
+                            } else {
+                                peak
+                            }
+                            , bounds.height(),), accent) self.paint.push(list) self.paint_bounds.push(audio_clip(bounds, panel_bounds)) composed = composed.with_display_overlay(list, audio_clip(bounds, panel_bounds))
+                }
+                None => {
+                }
+            }
+        }
+        ret composed
+    }
+}

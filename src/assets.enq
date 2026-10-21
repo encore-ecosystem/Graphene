@@ -1,10 +1,11 @@
+pub import mod::standard_material::StandardMaterial
+import mod::mesh_prepare::prepare_mesh_geometry
 import core::option::Option
 import core::vec::Vec
-import linalg::Vec3
 import mod::rhi::{AccelerationStructure, GpuBuffer, GpuMesh, GraphicsDevice, RenderPassEncoder, buffer_acceleration_structure_input, buffer_shader_device_address, buffer_storage}
 import mod::scene::primitive::MeshData
 import mod::scene::renderable::{MaterialId, MeshId}
-import mod::virtual_geometry::{GeometryCluster, VirtualGeometry, build_virtual_geometry_lods}
+import mod::virtual_geometry::{GeometryCluster, VirtualGeometry}
 import mod::virtual_geometry_gpu::GpuClusterCullResult
 
 struct MeshAssetEntry {
@@ -17,104 +18,18 @@ struct MeshAssetEntry {
     ray_blas: AccelerationStructure
 }
 struct MaterialAssetEntry {
-    id: MaterialId material: StandardMaterial
+    id: MaterialId
+    material: StandardMaterial
 }
 
 pub struct MeshAssets {
-    entries: Vec[MeshAssetEntry] next_id: u64
+    entries: Vec[MeshAssetEntry]
+    next_id: u64
 }
 pub struct MaterialAssets {
-    entries: Vec[MaterialAssetEntry] next_id: u64
+    entries: Vec[MaterialAssetEntry]
+    next_id: u64
 }
-pub struct StandardMaterial {
-    base_color: Vec3 metallic: f32 roughness: f32 unlit: bool double_sided: bool
-}
-
-fn saturate(value: f32) -> f32 {
-    ret if value < 0.0_f32 {
-        0.0_f32
-    } else {
-        if value > 1.0_f32 {
-            1.0_f32
-        } else {
-            value
-        }
-    }
-}
-
-impl for StandardMaterial {
-    pub fn new(base_color: Vec3, metallic: f32, roughness: f32) -> StandardMaterial {
-        ret StandardMaterial {
-            base_color, saturate(metallic), saturate(roughness), false, false
-        }
-    }
-    pub fn default() -> StandardMaterial {
-        ret StandardMaterial::new(Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 0.0_f32, 0.5_f32)
-    }
-    pub fn editor_default() -> StandardMaterial {
-        ret StandardMaterial::new(Vec3::new(0.34_f32, 0.38_f32, 0.44_f32), 0.08_f32, 0.48_f32)
-    }
-    pub fn base_color(self: Self) -> Vec3 {
-        ret self.base_color
-    }
-    pub fn metallic(self: Self) -> f32 {
-        ret self.metallic
-    }
-    pub fn roughness(self: Self) -> f32 {
-        ret self.roughness
-    }
-    pub fn unlit(self: Self) -> bool {
-        ret self.unlit
-    }
-    pub fn double_sided(self: Self) -> bool {
-        ret self.double_sided
-    }
-    pub fn with_base_color(self: Self, value: Vec3) -> StandardMaterial {
-        ret StandardMaterial {
-            value, self.metallic, self.roughness, self.unlit, self.double_sided
-        }
-    }
-    pub fn with_metallic(self: Self, value: f32) -> StandardMaterial {
-        ret StandardMaterial {
-            self.base_color, saturate(value), self.roughness, self.unlit, self.double_sided
-        }
-    }
-    pub fn with_roughness(self: Self, value: f32) -> StandardMaterial {
-        ret StandardMaterial {
-            self.base_color, self.metallic, saturate(value), self.unlit, self.double_sided
-        }
-    }
-    pub fn with_unlit_value(self: Self, value: bool) -> StandardMaterial {
-        ret StandardMaterial {
-            self.base_color, self.metallic, self.roughness, value, self.double_sided
-        }
-    }
-    pub fn with_unlit(self: Self) -> StandardMaterial {
-        ret self.with_unlit_value(true)
-    }
-    pub fn with_double_sided_value(self: Self, value: bool) -> StandardMaterial {
-        ret StandardMaterial {
-            self.base_color, self.metallic, self.roughness, self.unlit, value
-        }
-    }
-    pub fn with_double_sided(self: Self) -> StandardMaterial {
-        ret self.with_double_sided_value(true)
-    }
-    pub fn uniform_values(self: Self) -> Vec[f32] {
-        let mut values = Vec[f32]::new()
-        values.push(self.base_color.x()) values.push(self.base_color.y()) values.push(self.base_color.z())
-        values.push(1.0_f32)
-        values.push(self.metallic) values.push(self.roughness)
-        values.push(if self.unlit {
-                1.0_f32
-            } else {
-                0.0_f32
-            }
-        ) values.push(0.0_f32)
-        ret values
-    }
-}
-
 impl for MeshAssets {
     pub fn new() -> MeshAssets {
         ret MeshAssets {
@@ -125,43 +40,15 @@ impl for MeshAssets {
         ret self.entries.len()
     }
     pub fn upload(self: mut Self, device: GraphicsDevice, data: MeshData) -> MeshId {
+        ret self.upload_prepared(device, data, prepare_mesh_geometry(data))
+    }
+    /// Uploads an imported mesh without running the AutoLOD simplifier.
+    pub fn upload_prepared(self: mut Self, device: GraphicsDevice, data: MeshData,
+        virtual_geometry: VirtualGeometry) -> MeshId {
+        let data = data.with_uvs()
         let values = data.vertices()
         let indices = data.indices()
-        let stride =(data.stride() / 4_u32) as usize
-        let mut positions = Vec[Vec3]::new()
-        if stride >= 3_usize {
-            let mut offset = 0_usize
-            while offset + 2_usize < values.len() {
-                let mut x = 0.0_f32
-                let mut y = 0.0_f32
-                let mut z = 0.0_f32
-                match values.get(offset) {
-                    Option::Some(value) => {
-                        x = value
-                    }
-                    Option::None => {
-                    }
-                }
-                match values.get(offset + 1_usize) {
-                    Option::Some(value) => {
-                        y = value
-                    }
-                    Option::None => {
-                    }
-                }
-                match values.get(offset + 2_usize) {
-                    Option::Some(value) => {
-                        z = value
-                    }
-                    Option::None => {
-                    }
-                }
-                positions.push(Vec3::new(x, y, z))
-                offset += stride
-            }
-        }
-        let virtual_geometry = build_virtual_geometry_lods(
-            positions, indices, 64_usize, 126_usize,)
+        let stride = (data.stride() / 4) as usize
         if !virtual_geometry.valid() {
             ret MeshId::new(0_u64)
         }
@@ -169,7 +56,7 @@ impl for MeshAssets {
         let packed_triangle_indices = virtual_geometry.triangle_indices()
         let mut packed_values = Vec[f32]::new()
         for vertex in packed_vertex_indices {
-            let source = vertex as usize * stride
+            let source = vertex as usize* stride
             let mut component = 0_usize
             while component < stride {
                 match values.get(source + component) {

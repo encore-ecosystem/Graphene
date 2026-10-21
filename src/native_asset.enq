@@ -1,0 +1,429 @@
+//! Graphene's versioned asset container. Encore binary encodes the schema;
+//! large RGBA8 texture samples remain a contiguous little-endian payload.
+import binary::{encode, decode}
+import core::result::Result
+import core::vec::Vec
+import mod::scene::primitive::MeshData
+import mod::standard_material::StandardMaterial
+import mod::texture_image::{TextureImage, texture_path_valid}
+import mod::virtual_geometry::VirtualGeometry
+import std::os::write_file_atomic
+import std::time::perf_counter_ns
+
+extern fn encore_text_sha256(contents: str) -> str
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+extern fn graphene_asset_source_stamp(path: str) -> str
+extern fn encore_file_open(path: str, writing: bool) -> u64
+extern fn encore_file_read(id: u64, size: usize) -> str
+extern fn encore_file_close(id: u64) -> bool
+extern fn encore_file_error_code() -> i32
+
+struct AssetHeader {
+    version: u32
+    kind: str
+    identity: str
+    source: str
+    revision: str
+    payload_sha256: str
+}
+struct AssetPackage {
+    header: AssetHeader
+    payload: str
+}
+extern fn graphene_audio_file_size(path: str) -> u64
+extern fn graphene_audio_range_hash(path: str, offset: u64, bytes: u64) -> str
+extern fn graphene_audio_package(path: str, header: str, payload: str) -> bool
+pub struct NativeSound { offset: u64 bytes: u64 identity: str source: str revision: str }
+
+/// Audio keeps the GAS1 envelope, but validates and hashes through bounded IO.
+#attr(safe)
+pub fn native_sound_header(path: str, verify: bool) -> Result[NativeSound, str] {
+    let file = encore_file_open(path, false)
+    if file == 0_u64 { ret Result::Err("Unable to open sound asset") }
+    let prefix = encore_file_read(file, 8_usize)
+    if prefix.byte_len() != 8 || prefix.slice_bytes(0, 4) != "GAS1" { encore_file_close(file) ret Result::Err("Invalid sound signature") }
+    let n = (prefix.byte_at(4) as usize) | ((prefix.byte_at(5) as usize) << 8) | ((prefix.byte_at(6) as usize) << 16) | ((prefix.byte_at(7) as usize) << 24)
+    if n == 0 || n > 1048576 { encore_file_close(file) ret Result::Err("Invalid sound header size") }
+    let data = encore_file_read(file, n)
+    let closed = encore_file_close(file)
+    if !closed || data.byte_len() != n { ret Result::Err("Truncated sound header") }
+    let h = match decode[AssetHeader](bytes(data)) { Ok(h) => h Err(_) => { ret Result::Err("Invalid sound header") } }
+    let offset = (n as u64) + 8_u64
+    let size = graphene_audio_file_size(path)
+    if h.version != 1 || h.kind != "sound" || h.identity.byte_len() != 64 || h.payload_sha256.byte_len() != 64 || size <= offset || size - offset > 4294967295_u64 { ret Result::Err("Unsupported or invalid sound asset") }
+    if verify && graphene_audio_range_hash(path, offset, size - offset) != h.payload_sha256 { ret Result::Err("Sound checksum mismatch") }
+    ret Result::Ok(NativeSound { offset, size - offset, h.identity, h.source, h.revision })
+}
+#attr(safe)
+pub fn save_native_sound(path: str, source: str, revision: str, prepared_wav: str) -> bool {
+    let length = graphene_audio_file_size(prepared_wav)
+    if length < 44_u64 || length > 4294967295_u64 { ret false }
+    let identity = match native_sound_header(path, false) { Ok(h) => h.identity Err(_) => digest(source + ":" + perf_counter_ns().fmt()) }
+    let h = AssetHeader { 1_u32, "sound", identity, source, revision, graphene_audio_range_hash(prepared_wav, 0_u64, length) }
+    let encoded = match encode(h) { Ok(value) => byte_string(value) Err(_) => { ret false } }
+    ret graphene_audio_package(path, encoded, prepared_wav)
+}
+pub struct NativeMesh {
+    mesh: MeshData
+    geometry: VirtualGeometry
+}
+
+impl for NativeMesh {
+    pub fn mesh(self: Self) -> MeshData {
+        ret self.mesh
+    }
+    pub fn geometry(self: Self) -> VirtualGeometry {
+        ret self.geometry
+    }
+}
+
+#attr(safe)
+pub fn asset_source_stamp(path: str) -> str {
+    unsafe {
+        ret graphene_asset_source_stamp(path)
+    }
+}
+#attr(safe)
+fn digest(bytes: str) -> str {
+    unsafe {
+        ret encore_text_sha256(bytes)
+    }
+}
+#attr(safe)
+fn byte_string(bytes: Vec[u8]) -> str {
+    unsafe {
+        ret graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+    }
+}
+fn bytes(source: str) -> Vec[u8] {
+    let mut out = Vec[u8]::with_capacity(source.byte_len())
+    for index in 0_usize..source.byte_len() {
+        out.push(source.byte_at(index))
+    }
+    ret out
+}
+#attr(safe)
+fn read_bounded(path: str) -> Result[str, str] {
+    unsafe {
+        let file = encore_file_open(path, false)
+        if file == 0 {
+            ret Result::Err("Unable to open native asset: " + path)
+        }
+        let data = encore_file_read(file, 269484033)
+        let failed = encore_file_error_code() != 0
+        let closed = encore_file_close(file)
+        if failed || !closed {
+            ret Result::Err("Unable to read native asset: " + path)
+        }
+        if data.byte_len() > 269484032 {
+            ret Result::Err("Native asset exceeds 257 MiB")
+        }
+        ret Result::Ok(data)
+    }
+}
+fn read_package(path: str, kind: str) -> Result[AssetPackage, str] {
+    let data = read_bounded(path)?
+    if data.byte_len() < 8 || data.slice_bytes(0, 4) != "GAS1" {
+        ret Result::Err("Invalid Graphene asset signature")
+    }
+    let length =(data.byte_at(4) as usize) |((data.byte_at(5) as usize) << 8) |
+    ((data.byte_at(6) as usize) << 16) |((data.byte_at(7) as usize) << 24)
+    if length > 1048576 || length > data.byte_len() - 8 {
+        ret Result::Err("Invalid Graphene asset header length")
+    }
+    let header = match decode[AssetHeader](bytes(data.slice_bytes(8, length))) {
+        Result::Ok(value) => value
+        Result::Err(error) => {
+            ret Result::Err("Invalid asset header: " + error.message())
+        }
+    }
+    if header.version != 1 {
+        ret Result::Err("Unsupported Graphene asset version")
+    }
+    if header.kind != kind {
+        ret Result::Err("Unexpected Graphene asset type")
+    }
+    if header.identity.byte_len() != 64 {
+        ret Result::Err("Invalid Graphene asset identity")
+    }
+    let payload = data.slice_bytes(8 + length, data.byte_len() - 8 - length)
+    if header.payload_sha256 != digest(payload) {
+        ret Result::Err("Native asset checksum mismatch")
+    }
+    ret Result::Ok(AssetPackage { header, payload })
+}
+fn write_package(path: str, kind: str, source: str, revision: str, payload: str) -> bool {
+    if payload.byte_len() > 269000000 {
+        ret false
+    }
+    // Identity survives reimport and file moves. Source location is provenance,
+    // never an instruction to load an arbitrary file from an asset header.
+    let identity = match read_package(path, kind) {
+        Result::Ok(previous) => previous.header.identity
+        Result::Err(_) => digest(source + ":" + perf_counter_ns().fmt())
+    }
+    let header = AssetHeader { 1, kind, identity, source, revision, digest(payload) }
+    let encoded = match encode(header) {
+        Result::Ok(value) => value
+        Result::Err(_) => {
+            ret false
+        }
+    }
+    let mut prefix = Vec[u8]::new()
+    prefix.push(71) prefix.push(65) prefix.push(83) prefix.push(49)
+    for shift in 0_usize..4_usize {
+        prefix.push(((encoded.len() as u32) >>((shift as u32) * 8)) as u8)
+    }
+    ret write_file_atomic(path, byte_string(prefix) + byte_string(encoded) + payload) == 0
+}
+fn revision_matches(header: AssetHeader, revision: str) -> bool {
+    // A native asset can ship without its source. Present sources must match.
+    ret revision == "" || revision == header.revision
+}
+/// Provenance is used only by an explicit reimport operation.
+pub fn native_asset_source(path: str, kind: str) -> Result[str, str] {
+    let package = read_package(path, kind)?
+    ret Result::Ok(package.header.source)
+}
+fn finite(value: f32) -> bool {
+    ret value >= - 340282346638528859811704183484516925440.0_f32 && value <= 340282346638528859811704183484516925440.0_f32
+}
+fn range_valid(first: usize, count: usize, length: usize) -> bool {
+    ret first <= length && count <= length - first
+}
+/// Validate offsets and references before handing decoded data to either GPU path.
+pub fn native_mesh_valid(mesh: MeshData, geometry: VirtualGeometry) -> bool {
+    if mesh.stride() != 44 || mesh.vertices().len() == 0 || mesh.vertices().len() % 11 != 0 ||
+    mesh.indices().len() == 0 || mesh.indices().len() % 3 != 0 || !geometry.valid() {
+        ret false
+    }
+    for value in mesh.vertices() {
+        if !finite(value) {
+            ret false
+        }
+    }
+    for index in mesh.indices() {
+        if index as usize >= mesh.vertex_count() {
+            ret false
+        }
+    }
+    for vertex in geometry.vertex_indices() {
+        if vertex as usize >= mesh.vertex_count() {
+            ret false
+        }
+    }
+    let clusters = geometry.clusters()
+    let nodes = geometry.hierarchy()
+    if clusters.len() == 0 || geometry.lods().len() == 0 || geometry.root_node() as usize >= nodes.len() {
+        ret false
+    }
+    for cluster in clusters {
+        if cluster.vertex_count() == 0 || cluster.vertex_count() > 64 || cluster.triangle_count() == 0 || cluster.triangle_count() > 126 ||
+        !range_valid(cluster.vertex_offset(), cluster.vertex_count(), geometry.vertex_indices().len()) ||
+        !range_valid(cluster.triangle_offset(), cluster.triangle_count() * 3, geometry.triangle_indices().len()) ||
+        !finite(cluster.radius()) || cluster.radius() < 0 || !finite(cluster.cone_cutoff()) ||
+        !finite(cluster.center().x()) || !finite(cluster.center().y()) || !finite(cluster.center().z()) ||
+        !finite(cluster.cone_axis().x()) || !finite(cluster.cone_axis().y()) || !finite(cluster.cone_axis().z()) {
+            ret false
+        }
+        let first = cluster.triangle_offset()
+        let end = first + cluster.triangle_count() * 3
+        for offset in first..end {
+            if geometry.triangle_indices().get_unchecked_borrowed(offset) as usize >= cluster.vertex_count() {
+                ret false
+            }
+        }
+    }
+    for lod in geometry.lods() {
+        if lod.cluster_count() == 0 || !range_valid(lod.first_cluster(), lod.cluster_count(), clusters.len()) ||
+        (lod.hierarchy_root() != 4294967295_u32 && lod.hierarchy_root() as usize >= nodes.len()) || !finite(lod.geometric_error()) || lod.geometric_error() < 0 {
+            ret false
+        }
+    }
+    let mut index = 0_usize
+    for node in nodes {
+        if node.cluster_count() == 0 || !range_valid(node.first_cluster(), node.cluster_count(), clusters.len()) ||
+        !finite(node.radius()) || node.radius() < 0 || !finite(node.geometric_error()) || node.geometric_error() < 0 ||
+        !finite(node.center().x()) || !finite(node.center().y()) || !finite(node.center().z()) {
+            ret false
+        }
+        if node.leaf() {
+            if node.right_child() != 4294967295_u32 {
+                ret false
+            }
+        } elif node.left_child() as usize >= index ||(node.right_child() != 4294967295_u32 && node.right_child() as usize >= index) {
+            ret false
+        }
+        index += 1
+    }
+    ret true
+}
+pub fn save_native_mesh(path: str, source: str, revision: str, mesh: MeshData, geometry: VirtualGeometry) -> bool {
+    if !native_mesh_valid(mesh, geometry) {
+        ret false
+    }
+    let payload = match encode(NativeMesh { mesh, geometry }) {
+        Result::Ok(value) => value
+        Result::Err(_) => {
+            ret false
+        }
+    }
+    ret write_package(path, "mesh", source, revision, byte_string(payload))
+}
+pub fn load_native_mesh(path: str, revision: str) -> Result[NativeMesh, str] {
+    let package = read_package(path, "mesh")?
+    if !revision_matches(package.header, revision) {
+        ret Result::Err("Mesh source changed; reimport required")
+    }
+    let mesh = match decode[NativeMesh](bytes(package.payload)) {
+        Result::Ok(value) => value
+        Result::Err(error) => {
+            ret Result::Err("Invalid native mesh: " + error.message())
+        }
+    }
+    if !native_mesh_valid(mesh.mesh, mesh.geometry) {
+        ret Result::Err("Invalid native mesh geometry")
+    }
+    ret Result::Ok(mesh)
+}
+fn material_valid(material: StandardMaterial) -> bool {
+    ret finite(material.base_color().x()) && finite(material.base_color().y()) && finite(material.base_color().z()) &&
+    finite(material.metallic()) && material.metallic() >= 0 && material.metallic() <= 1 &&
+    finite(material.roughness()) && material.roughness() >= 0 && material.roughness() <= 1 &&
+    finite(material.normal_scale()) && material.normal_scale() >= 0 && material.normal_scale() <= 4 &&
+    texture_path_valid(material.base_color_texture()) && texture_path_valid(material.normal_texture())
+}
+pub fn save_native_material(path: str, source: str, revision: str, material: StandardMaterial) -> bool {
+    if !material_valid(material) {
+        ret false
+    }
+    let payload = match encode(material) {
+        Result::Ok(value) => value
+        Result::Err(_) => {
+            ret false
+        }
+    }
+    ret write_package(path, "material", source, revision, byte_string(payload))
+}
+pub fn load_native_material(path: str, revision: str) -> Result[StandardMaterial, str] {
+    let package = read_package(path, "material")?
+    if !revision_matches(package.header, revision) {
+        ret Result::Err("Material source changed; reimport required")
+    }
+    match decode[StandardMaterial](bytes(package.payload)) {
+        Result::Ok(material) => {
+            if !material_valid(material) {
+                ret Result::Err("Invalid native material values")
+            }
+            ret Result::Ok(material)
+        }
+        Result::Err(error) => {
+            ret Result::Err("Invalid native material: " + error.message())
+        }
+    }
+}
+struct TextureMetadata {
+    width: u32
+    height: u32
+}
+extern fn graphene_asset_pixel_bytes(pointer: u32*, count: usize) -> str
+pub fn save_native_texture(path: str, source: str, revision: str, image: TextureImage) -> bool {
+    if image.width == 0 || image.height == 0 || image.width > 8192 || image.height > 8192 ||
+    image.pixels.len() !=(image.width as usize) *(image.height as usize) {
+        ret false
+    }
+    let metadata = match encode(TextureMetadata { image.width, image.height }) {
+        Result::Ok(value) => value
+        Result::Err(_) => {
+            ret false
+        }
+    }
+    let mut prefix = Vec[u8]::new()
+    for shift in 0_usize..4_usize {
+        prefix.push(((metadata.len() as u32) >>((shift as u32) * 8)) as u8)
+    }
+    let samples = unsafe {
+        graphene_asset_pixel_bytes(image.pixels.as_ptr(), image.pixels.len())
+    }
+    ret write_package(path, "texture", source, revision, byte_string(prefix) + byte_string(metadata) + samples)
+}
+pub fn load_native_texture(path: str, revision: str) -> Result[TextureImage, str] {
+    let package = read_package(path, "texture")?
+    if !revision_matches(package.header, revision) {
+        ret Result::Err("Texture source changed; reimport required")
+    }
+    let data = package.payload
+    if data.byte_len() < 4 {
+        ret Result::Err("Truncated texture")
+    }
+    let length =(data.byte_at(0) as usize) |((data.byte_at(1) as usize) << 8) |
+    ((data.byte_at(2) as usize) << 16) |((data.byte_at(3) as usize) << 24)
+    if length > 1048576 || length > data.byte_len() - 4 {
+        ret Result::Err("Invalid texture metadata length")
+    }
+    let metadata = match decode[TextureMetadata](bytes(data.slice_bytes(4, length))) {
+        Result::Ok(value) => value
+        Result::Err(error) => {
+            ret Result::Err("Invalid texture metadata: " + error.message())
+        }
+    }
+    if metadata.width == 0 || metadata.height == 0 || metadata.width > 8192 || metadata.height > 8192 {
+        ret Result::Err("Invalid texture dimensions")
+    }
+    let count =(metadata.width as usize) *(metadata.height as usize)
+    if data.byte_len() - 4 - length != count * 4 {
+        ret Result::Err("Invalid texture sample count")
+    }
+    let mut pixels = Vec[u32]::with_capacity(count)
+    for index in 0_usize..count {
+        let offset = 4 + length + index * 4
+        pixels.push((data.byte_at(offset) as u32) |((data.byte_at(offset + 1) as u32) << 8) |
+            ((data.byte_at(offset + 2) as u32) << 16) |((data.byte_at(offset + 3) as u32) << 24))
+    }
+    ret Result::Ok(TextureImage { metadata.width, metadata.height, pixels })
+}
+
+/// Versioned immutable environment/material resources use the same checked asset envelope.
+pub fn save_environment_payload(path: str, kind: str, source: str, revision: str, payload: str) -> bool {
+    if kind != "weather-preset" && kind != "weather-sequence" && kind != "texture-hdr" && kind != "material-graph" {
+        ret false
+    }
+    ret write_package(path, kind, source, revision, payload)
+}
+pub fn load_environment_payload(path: str, kind: str, revision: str) -> Result[str, str] {
+    if kind != "weather-preset" && kind != "weather-sequence" && kind != "texture-hdr" && kind != "material-graph" {
+        ret Result::Err("Invalid environment resource kind")
+    }
+    let package = read_package(path, kind)?
+    if !revision_matches(package.header, revision) {
+        ret Result::Err("Environment resource needs reimport")
+    }
+    ret Result::Ok(package.payload)
+}
+
+/// VFX resources share the checked GAS1 envelope; source paths are provenance only.
+pub fn save_vfx_payload(path: str,kind: str,source: str,revision: str,payload: str) -> bool {
+    if kind!="particle-system" && kind!="particle-emitter" && kind!="particle-module" && kind!="particle-parameters" && kind!="particle-cache" {ret false}
+    ret write_package(path,kind,source,revision,payload)
+}
+pub fn load_vfx_payload(path: str,kind: str,revision: str) -> Result[str,str] {
+    if kind!="particle-system" && kind!="particle-emitter" && kind!="particle-module" && kind!="particle-parameters" && kind!="particle-cache" {ret Result::Err("Invalid VFX resource kind")}
+    let package=read_package(path,kind)?
+    if !revision_matches(package.header,revision) {ret Result::Err("VFX resource needs reimport")}
+    ret Result::Ok(package.payload)
+}
+
+/// Animation resources use the same bounded, checksummed GAS1 container.
+pub fn save_animation_payload(path: str,kind: str,source: str,revision: str,payload: str) -> bool {
+    if !animation_asset_kind(kind) {ret false}
+    ret write_package(path,kind,source,revision,payload)
+}
+pub fn load_animation_payload(path: str,kind: str,revision: str) -> Result[str,str] {
+    if !animation_asset_kind(kind) {ret Result::Err("Invalid animation resource kind")}
+    let package=read_package(path,kind)?
+    if !revision_matches(package.header,revision){ret Result::Err("Animation source changed; reimport required")}
+    ret Result::Ok(package.payload)
+}
+fn animation_asset_kind(kind: str) -> bool {
+    ret kind=="character" || kind=="skeleton" || kind=="skeletal-mesh" || kind=="animation-clip" || kind=="animation-graph" || kind=="blend-space" || kind=="animation-montage" || kind=="control-rig" || kind=="retarget-profile" || kind=="pose-search" || kind=="sequence"
+}

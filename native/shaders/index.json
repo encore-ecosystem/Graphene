@@ -1,0 +1,98 @@
+{
+  "cluster_cull_spirv": {
+    "count": 534,
+    "id": 2111262111
+  },
+  "cube_fragment_spirv": {
+    "count": 5006,
+    "id": 1097370823
+  },
+  "cube_vertex_spirv": {
+    "count": 694,
+    "id": 3118740152
+  },
+  "depth_fragment_spirv": {
+    "count": 108,
+    "id": 894813113
+  },
+  "depth_vertex_spirv": {
+    "count": 188,
+    "id": 4152115942
+  },
+  "double_words": {
+    "count": 161,
+    "id": 3843395869
+  },
+  "gi_spatial_filter_spirv": {
+    "count": 1087,
+    "id": 777227442
+  },
+  "material_fragment_spirv": {
+    "count": 5610,
+    "id": 1713454215
+  },
+  "material_vertex_spirv": {
+    "count": 761,
+    "id": 1289356445
+  },
+  "mesh_triangle_spirv": {
+    "count": 400,
+    "id": 1294176720
+  },
+  "ray_query_gi_spirv": {
+    "count": 1970,
+    "id": 3920061503
+  },
+  "screen_probe_place_spirv": {
+    "count": 1348,
+    "id": 3080039518
+  },
+  "selection_mask_frag_spirv": {
+    "count": 221,
+    "id": 2043047690
+  },
+  "selection_mask_vert_spirv": {
+    "count": 375,
+    "id": 852193729
+  },
+  "selection_outline_frag_spirv": {
+    "count": 988,
+    "id": 1200677338
+  },
+  "selection_outline_vert_spirv": {
+    "count": 159,
+    "id": 211681041
+  },
+  "software_gi_spirv": {
+    "count": 1992,
+    "id": 2643119173
+  },
+  "virtual_geometry_mesh_spirv": {
+    "count": 1056,
+    "id": 3912550431
+  },
+  "virtual_scene_cull_spirv": {
+    "count": 6667,
+    "id": 2059453688
+  },
+  "virtual_scene_dispatch_spirv": {
+    "count": 334,
+    "id": 2744575276
+  },
+  "virtual_scene_fragment_spirv": {
+    "count": 5921,
+    "id": 3961835268
+  },
+  "virtual_scene_mesh_spirv": {
+    "count": 3075,
+    "id": 2568860078
+  },
+  "virtual_scene_post_cull_spirv": {
+    "count": 6543,
+    "id": 2138051903
+  },
+  "virtual_scene_triangle_spirv": {
+    "count": 6082,
+    "id": 3272378618
+  }
+}

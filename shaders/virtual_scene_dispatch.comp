@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) buffer SceneStream {uint values[];} scene;
+void main() {
+    uint clusters=scene.values[0], instances=uint(uintBitsToFloat(scene.values[39]));
+    uint capacity=clusters*instances;
+    uint base=64u+clusters*16u+scene.values[2]*12u+instances*28u+capacity*4u+clusters+6134u;
+    uint groups=(min(scene.values[base+3u],capacity)+63u)/64u;
+    // Vulkan guarantees at least 65535 workgroups per dimension. Cover large
+    // streams in 2D rather than truncating visible geometry at that limit.
+    scene.values[base+7u]=min(groups,65535u);
+    scene.values[base+8u]=(groups+65534u)/65535u;
+    scene.values[base+9u]=1u;
+}

@@ -1,0 +1,258 @@
+//! Cooked normalized pose/velocity/trajectory features with exact k-d search.
+//! The brute-force oracle remains available for validation and small databases.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::math::{animation_finite, animation_sqrt}
+
+pub struct PoseFeature {
+    name: str
+    weight: f32
+}
+pub struct PoseCandidate {
+    clip: u32
+    time: f32
+    continuation: u32
+}
+pub struct PoseSearchNode {
+    frame: u32
+    axis: u32
+    left: u32
+    right: u32
+}
+pub struct PoseSearchDatabase {
+    version: u32
+    schema: Vec[PoseFeature]
+    mean: Vec[f32]
+    multiplier: Vec[f32]
+    features: Vec[f32]
+    candidates: Vec[PoseCandidate]
+    nodes: Vec[PoseSearchNode]
+    root: u32
+}
+pub struct MotionMatch {
+    frame: u32
+    cost: f32
+    examined: u32
+}
+pub struct PoseSearchWorkspace {
+    query: Vec[f32]
+    stack: Vec[u32]
+}
+fn feature_less(features: Vec[f32], dimensions: usize, axis: usize, a: u32, b: u32) -> bool {
+    let x = features.get_unchecked_borrowed((a as usize) * dimensions + axis) let y = features.get_unchecked_borrowed((b as usize) * dimensions + axis)
+    ret x < y ||(x == y && a < b)
+}
+fn sort_frames(indices: mut Vec[u32], features: Vec[f32], dimensions: usize, axis: usize, begin: usize, end: usize) ->() {
+    if end - begin < 2_usize {
+        ret()
+    }
+    let pivot = indices.get_unchecked_borrowed(begin +(end - begin) / 2_usize)
+    let mut left = begin let mut right = end - 1_usize
+    while left <= right {
+        while feature_less(features, dimensions, axis, indices.get_unchecked_borrowed(left), pivot) {
+            left += 1_usize
+        }
+        while feature_less(features, dimensions, axis, pivot, indices.get_unchecked_borrowed(right)) {
+            if right == begin {
+                break
+            }
+            right -= 1_usize
+        }
+        if left <= right {
+            let a = indices.get_unchecked_borrowed(left) indices.set(left, indices.get_unchecked_borrowed(right)) indices.set(right, a) left += 1_usize if right == begin {
+                break
+            }
+            right -= 1_usize
+        }
+    }
+    if right >= begin && right + 1_usize < end {
+        sort_frames(indices, features, dimensions, axis, begin, right + 1_usize)
+    }
+    if left < end {
+        sort_frames(indices, features, dimensions, axis, left, end)
+    }
+}
+fn build_tree(indices: mut Vec[u32], features: Vec[f32], dimensions: usize, begin: usize, end: usize, depth: usize, nodes: mut Vec[PoseSearchNode]) -> u32 {
+    if begin == end {
+        ret 4294967295_u32
+    }
+    let axis = depth % dimensions
+    sort_frames(indices, features, dimensions, axis, begin, end)
+    let middle = begin +(end - begin) / 2_usize
+    let left = build_tree(indices, features, dimensions, begin, middle, depth + 1_usize, nodes)
+    let right = build_tree(indices, features, dimensions, middle + 1_usize, end, depth + 1_usize, nodes)
+    nodes.push(PoseSearchNode { indices.get_unchecked_borrowed(middle), axis as u32, left, right }) ret(nodes.len() - 1_usize) as u32
+}
+pub fn cook_pose_search(schema: Vec[PoseFeature], raw: Vec[f32], candidates: Vec[PoseCandidate]) -> Result[PoseSearchDatabase, str] {
+    let dimensions = schema.len() let count = candidates.len()
+    if dimensions == 0_usize || dimensions > 128_usize || count == 0_usize || count > 1000000_usize || raw.len() != count * dimensions || raw.len() > 33554432_usize {
+        ret Result::Err("Invalid pose-search dimensions or cook budget")
+    }
+    for i in 0_usize..dimensions {
+        let f = schema.get_unchecked_borrowed(i) if f.name == "" || !(f.weight >= 0_f32 && f.weight <= 1000000_f32) {
+            ret Result::Err("Invalid pose-search feature")
+        }
+        for j in 0_usize..i {
+            if schema.get_unchecked_borrowed(j).name == f.name {
+                ret Result::Err("Duplicate pose-search feature")
+            }
+        }
+    }
+    for candidate in candidates {
+        if !(candidate.time >= 0_f32 && candidate.time <= 86400_f32) || candidate.continuation as usize >= count {
+            ret Result::Err("Invalid pose-search candidate")
+        }
+    }
+    for value in raw {
+        if !(value >= - 1000000000000_f32 && value <= 1000000000000_f32) {
+            ret Result::Err("Invalid pose-search feature value")
+        }
+    }
+    let mut mean = Vec[f32]::with_capacity(dimensions) let mut multiplier = Vec[f32]::with_capacity(dimensions)
+    for axis in 0_usize..dimensions {
+        let mut sum = 0_f64 for frame in 0_usize..count {
+            sum += raw.get_unchecked_borrowed(frame * dimensions + axis) as f64
+        }
+        let average = sum /(count as f64) mean.push(average as f32)
+        let mut variance = 0_f64 for frame in 0_usize..count {
+            let delta = raw.get_unchecked_borrowed(frame * dimensions + axis) as f64 - average variance += delta * delta
+        }
+        let deviation = animation_sqrt((variance /(count as f64)) as f32)
+        multiplier.push(animation_sqrt(schema.get_unchecked_borrowed(axis).weight) / if deviation > 0.0001_f32 {
+                deviation
+            } else {
+                1_f32
+            }
+        )
+    }
+    let mut features = Vec[f32]::with_capacity(raw.len())
+    for i in 0_usize..raw.len() {
+        let axis = i % dimensions features.push((raw.get_unchecked_borrowed(i) - mean.get_unchecked_borrowed(axis)) * multiplier.get_unchecked_borrowed(axis))
+    }
+    let mut nodes = Vec[PoseSearchNode]::with_capacity(count) let mut indices = Vec[u32]::with_capacity(count)
+    for i in 0_usize..count {
+        indices.push(i as u32)
+    }
+    let root = build_tree(indices, features, dimensions, 0_usize, count, 0_usize, nodes)
+    ret Result::Ok(PoseSearchDatabase {
+            1_u32, schema, mean, multiplier, features, candidates, nodes, root
+        }
+    )
+}
+fn candidate_cost(database: PoseSearchDatabase, query: Vec[f32], frame: u32, continuation: Option[u32], continuity_penalty: f32) -> f32 {
+    let dimensions = database.schema.len() let mut cost = 0_f32
+    for axis in 0_usize..dimensions {
+        let delta = query.get_unchecked_borrowed(axis) - database.features.get_unchecked_borrowed((frame as usize) * dimensions + axis) cost += delta * delta
+    }
+    match continuation {
+        Some(preferred) => {
+            if frame != preferred {
+                cost += continuity_penalty
+            }
+        }
+        None => {
+        }
+    }
+    ret cost
+}
+
+impl for PoseSearchDatabase {
+    pub fn validate(self: Self) -> Result[bool, str] {
+        let count = self.candidates.len() let dimensions = self.schema.len()
+        if self.version != 1_u32 || count == 0_usize || count > 1000000_usize || dimensions == 0_usize || dimensions > 128_usize || self.features.len() != count * dimensions || self.mean.len() != dimensions || self.multiplier.len() != dimensions || self.nodes.len() != count || self.root as usize >= count {
+            ret Result::Err("Invalid cooked pose-search layout")
+        }
+        for value in self.features {
+            if !animation_finite(value) {
+                ret Result::Err("Non-finite pose-search feature")
+            }
+        }
+        for i in 0_usize..self.nodes.len() {
+            let node = self.nodes.get_unchecked_borrowed(i) if node.frame as usize >= count || node.axis as usize >= dimensions ||(node.left != 4294967295_u32 && node.left as usize >= i) ||(node.right != 4294967295_u32 && node.right as usize >= i) {
+                ret Result::Err("Invalid pose-search tree")
+            }
+        }
+        ret Result::Ok(true)
+    }
+}
+
+impl for PoseSearchWorkspace {
+    pub fn new(database: PoseSearchDatabase) -> Result[Self, str] {
+        database.validate()? let mut query = Vec[f32]::with_capacity(database.schema.len()) for _i in 0_usize..database.schema.len() {
+            query.push(0_f32)
+        }
+        ret Result::Ok(Self {
+                query, Vec[u32]::with_capacity(64_usize)
+            }
+            ,
+        )
+    }
+    pub fn prepare(self: mut Self, database: PoseSearchDatabase, raw: Vec[f32]) -> Result[bool, str] {
+        if raw.len() != database.schema.len() || self.query.len() != raw.len() {
+            ret Result::Err("Pose-search query schema mismatch")
+        }
+        for i in 0_usize..raw.len() {
+            let value =(raw.get_unchecked_borrowed(i) - database.mean.get_unchecked_borrowed(i)) * database.multiplier.get_unchecked_borrowed(i) if !animation_finite(value) {
+                ret Result::Err("Non-finite pose-search query")
+            }
+            self.query.set(i, value)
+        }
+        ret Result::Ok(true)
+    }
+    pub fn nearest(self: mut Self, database: PoseSearchDatabase, raw: Vec[f32], continuation: Option[u32], continuity_penalty: f32) -> Result[MotionMatch, str] {
+        self.prepare(database, raw)?
+        if !(continuity_penalty >= 0_f32 && continuity_penalty <= 1000000_f32) {
+            ret Result::Err("Invalid pose-search continuity penalty")
+        }
+        let mut best = MotionMatch {
+            4294967295_u32, 340282346638528859811704183484516925440_f32, 0_u32
+        }
+        self.stack.clear() self.stack.push(database.root)
+        while self.stack.len() > 0_usize {
+            let index = match self.stack.pop() {
+                Some(index) => index None => {
+                    break
+                }
+            }
+            let node = database.nodes.get_unchecked_borrowed(index as usize)
+            let cost = candidate_cost(database, self.query, node.frame, continuation, continuity_penalty) best.examined += 1_u32
+            if cost < best.cost ||(cost == best.cost && node.frame < best.frame) {
+                best.frame = node.frame best.cost = cost
+            }
+            let delta = self.query.get_unchecked_borrowed(node.axis as usize) - database.features.get_unchecked_borrowed((node.frame as usize) * database.schema.len() + node.axis as usize)
+            let close = if delta < 0_f32 {
+                node.left
+            } else {
+                node.right
+            }
+            let far = if delta < 0_f32 {
+                node.right
+            } else {
+                node.left
+            }
+            if far != 4294967295_u32 && delta * delta <= best.cost {
+                self.stack.push(far)
+            }
+            if close != 4294967295_u32 {
+                self.stack.push(close)
+            }
+        }
+        ret Result::Ok(best)
+    }
+    pub fn reference(self: mut Self, database: PoseSearchDatabase, raw: Vec[f32], continuation: Option[u32], continuity_penalty: f32) -> Result[MotionMatch, str] {
+        self.prepare(database, raw)?
+        if !(continuity_penalty >= 0_f32 && continuity_penalty <= 1000000_f32) {
+            ret Result::Err("Invalid pose-search continuity penalty")
+        }
+        let mut best = MotionMatch {
+            4294967295_u32, 340282346638528859811704183484516925440_f32, 0_u32
+        }
+        for frame in 0_usize..database.candidates.len() {
+            let cost = candidate_cost(database, self.query, frame as u32, continuation, continuity_penalty) best.examined += 1_u32 if cost < best.cost ||(cost == best.cost &&(frame as u32) < best.frame) {
+                best.frame = frame as u32 best.cost = cost
+            }
+        }
+        ret Result::Ok(best)
+    }
+}

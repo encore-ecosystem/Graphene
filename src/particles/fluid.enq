@@ -1,0 +1,274 @@
+//! Eulerian gas, PIC/FLIP liquid and conservative shallow-water compute stages.
+//! Grids use storage buffers so the same portable kernels support 2D and 3D.
+import core::result::Result
+import core::vec::Vec
+
+import linalg::Vec3
+
+import mod::model::*
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+extern fn graphene_vfx_shader_length(shader: u32) -> u32
+extern fn graphene_vfx_shader_word(shader: u32, index: u32) -> u32
+fn vfx_fluid_shader(shader: u32) -> Vec[u32] {
+    let mut words = Vec[u32]::new() unsafe {
+        let count = graphene_vfx_shader_length(shader) for i in 0_usize..(count as usize) {
+            words.push(graphene_vfx_shader_word(shader, i as u32))
+        }
+    }
+    ret words
+}
+fn vfx_fluid_parameter(parameters: Vec[ParticleParameter], name: str, fallback: ParticleValue) -> ParticleValue {
+    for p in parameters {
+        if p.name == name {
+            ret p.value
+        }
+    }
+    ret fallback
+}
+struct FluidPipeline {
+    target: usize
+    signature: u64
+    pipeline: RenderPipeline
+}
+pub struct FluidGpu {
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    compute: ComputePipeline
+    shaders: Vec[ShaderModule]
+    uniform: GpuBuffer
+    state: GpuBuffer
+    temporary: GpuBuffer
+    pressure: GpuBuffer
+    divergence: GpuBuffer
+    particles: GpuBuffer
+    bins: GpuBuffer
+    indices: GpuBuffer
+    group: BindGroup
+    pipelines: Vec[FluidPipeline]
+    kind: u32
+    dimensions: ParticleValue
+    source: ParticleValue
+    injection: ParticleValue
+    forces: ParticleValue
+    source_velocity: ParticleValue
+    obstacle: ParticleValue
+    obstacle_velocity: ParticleValue
+    liquid: ParticleValue
+    color: ParticleValue
+    origin: Vec3
+    relative: Vec3
+    clock: f32
+    accumulator: f32
+    killed: bool
+    paused: bool
+    emitting: bool
+    initialized: bool
+    reset: bool
+}
+
+impl for FluidGpu {
+    pub fn create(device: GraphicsDevice, emitter: ParticleEmitter, parameters: Vec[ParticleParameter], seed: u32) -> Result[FluidGpu<H>, str] {
+        let kind = if emitter.renderer == "liquid" {
+            1_u32
+        } elif emitter.renderer == "shallow-water" {
+            2_u32
+        } else {
+            0_u32
+        }
+        let dimensions = vfx_fluid_parameter(parameters, "Fluid.Grid", ParticleValue::vector(32, 64, if emitter.renderer == "gas-2d" || kind == 2_u32 {
+                    1_f32
+                } else {
+                    32_f32
+                }
+                , 0.1_f32,))
+        if dimensions.x < 4 || dimensions.x > 256 || dimensions.y < 4 || dimensions.y > 256 || dimensions.z < 1 || dimensions.z > 256 || dimensions.w < 0.001_f32 || dimensions.w > 100 || !(dimensions.x * dimensions.y * dimensions.z <= 16777216) {
+            ret Result::Err("Fluid grid exceeds its memory budget")
+        }
+        let nx = dimensions.x as u32 let ny = dimensions.y as u32 let nz = dimensions.z as u32 let cells =(nx as u64) *(ny as u64) *(nz as u64)
+        let mut liquid = vfx_fluid_parameter(parameters, "Fluid.Liquid", ParticleValue::vector(8192,(seed & 16777215_u32) as f32, 0.95_f32, 0.5_f32))
+        if liquid.x < 1 || liquid.x > 1048576 || liquid.z < 0 || liquid.z > 1 || liquid.w < 0 {
+            ret Result::Err("Invalid liquid particle budget or FLIP ratio")
+        }
+        if kind != 1_u32 {
+            liquid.x = 0
+        }
+        let stage = shader_stage_compute() | shader_stage_fragment()
+        let layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, stage), BindGroupLayoutEntry::storage(1, stage), BindGroupLayoutEntry::storage(2, shader_stage_compute()), BindGroupLayoutEntry::storage(3, shader_stage_compute()), BindGroupLayoutEntry::storage(4, shader_stage_compute()), BindGroupLayoutEntry::storage(5, shader_stage_compute()), BindGroupLayoutEntry::storage(6, shader_stage_compute())])
+        let cs = device.create_shader_module(vfx_fluid_shader(3_u32), shader_stage_compute()) let fs = device.create_shader_module(vfx_fluid_shader(4_u32), shader_stage_fragment()) let vs = device.create_shader_module(vfx_fluid_shader(5_u32), shader_stage_vertex()) let compute = device.create_compute_pipeline(cs, layout)
+        let usage = buffer_storage() | buffer_transfer_destination() | buffer_transfer_source()
+        let uniform = device.create_buffer(336_u64, buffer_uniform() | buffer_transfer_destination(), false) let state = device.create_buffer(cells * 32_u64, usage, false) let temporary = device.create_buffer(cells * 32_u64, usage, false) let pressure = device.create_buffer(cells * 8_u64, usage, false) let divergence = device.create_buffer(cells * 4_u64, usage, false) let particles = device.create_buffer(16_u64 +(liquid.x as u64) * 32_u64, usage, false) let bins = device.create_buffer((cells +(liquid.x as u64)) * 4_u64, usage, false) let indices = device.create_buffer(12_u64, buffer_index(), true)
+        let group = device.create_buffer_bind_group_many(layout, vec![0_u32, 1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 6_u32], vec![uniform, state, temporary, pressure, divergence, particles, bins], vec![0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64], vec![336_u64, state.size(), temporary.size(), pressure.size(), divergence.size(), particles.size(), bins.size()])
+        let source = vfx_fluid_parameter(parameters, "Fluid.Source", ParticleValue::vector(dimensions.x * dimensions.w * 0.5_f32, dimensions.y * dimensions.w * 0.2_f32, dimensions.z * dimensions.w * 0.5_f32, 0.4_f32))
+        let mut fluid = FluidGpu<H> {
+            device, layout, compute, vec![cs, fs, vs], uniform, state, temporary, pressure, divergence, particles, bins, indices, group, Vec[FluidPipeline]::new(), kind, dimensions, source, vfx_fluid_parameter(parameters, "Fluid.Injection", ParticleValue::vector(4, 3, 1, 0.1_f32)), vfx_fluid_parameter(parameters, "Fluid.Forces", ParticleValue::vector( - 9.81_f32, 2, 32, 1)), vfx_fluid_parameter(parameters, "Fluid.Velocity", ParticleValue::vector(0, 1, 0, 1)), vfx_fluid_parameter(parameters, "Fluid.Obstacle", ParticleValue::scalar(0)), vfx_fluid_parameter(parameters, "Fluid.ObstacleVelocity", ParticleValue::scalar(0)), liquid, emitter.color, emitter.position, emitter.position, 0, 0, false, false, true, false, false
+        }
+        if !group.available() || !compute.available() || !indices.write_u32s(0_u64, vec![0_u32, 1_u32, 2_u32]) {
+            fluid.destroy() ret Result::Err("Unable to allocate fluid GPU resources")
+        }
+        ret Result::Ok(fluid)
+    }
+    pub fn cells(self: Self&) -> u64 {
+        ret(self.dimensions.x as u64) *(self.dimensions.y as u64) *(self.dimensions.z as u64)
+    }
+    pub fn bytes(self: Self&) -> u64 {
+        ret self.uniform.size() + self.state.size() + self.temporary.size() + self.pressure.size() + self.divergence.size() + self.particles.size() + self.bins.size() + self.indices.size()
+    }
+    fn values(self: Self&, camera: PerspectiveCamera, aspect: f32, mode: u32, parity: u32) -> Vec[f32] {
+        let mut words = camera.view_projection(aspect).values() let forward = camera.target().sub(camera.position()).normalized() let right = forward.cross(camera.up).normalized() let up = right.cross(forward).normalized()
+        for v in vec![camera.position(), forward, right, up, self.origin] {
+            words.push(v.x()) words.push(v.y()) words.push(v.z()) words.push(0_f32)
+        }
+        // Keep the wire literals explicitly f32: Encore #101 can otherwise
+        // emit an integer argument to Vec::push[f32], corrupting the ABI.
+        let d = self.dimensions
+        for v in vec![d.x * d.w, d.y * d.w, if self.kind == 2_u32 {
+                d.y * d.w
+            } else {
+                d.z * d.w
+            }
+            , 0_f32, d.x, d.y, d.z, d.w, 0.008333334_f32, self.clock, mode as f32, parity as f32, self.source.x, self.source.y, self.source.z, self.source.w, if self.emitting {
+                self.injection.x
+            } else {
+                0_f32
+            }
+            , if self.emitting {
+                self.injection.y
+            } else {
+                0_f32
+            }
+            , if self.emitting {
+                self.injection.z
+            } else {
+                0_f32
+            }
+            , self.injection.w, self.source_velocity.x, self.source_velocity.y, self.source_velocity.z, self.source_velocity.w, self.forces.x, self.forces.y, self.forces.z, self.kind as f32, self.color.x, self.color.y, self.color.z, self.color.w, self.obstacle.x, self.obstacle.y, self.obstacle.z, self.obstacle.w, self.obstacle_velocity.x, self.obstacle_velocity.y, self.obstacle_velocity.z, 0_f32,( - 1_f32 / camera.projection(aspect).values().get(5_usize).unwrap_or( - 1_f32)), aspect, if self.kind == 0_u32 {
+                2_f32
+            } else {
+                8_f32
+            }
+            , - 1_f32, self.liquid.x, self.liquid.y, self.liquid.z, self.liquid.w] {
+            words.push(v)
+        }
+        ret words
+    }
+    fn dispatch(self: Self&, frame: RenderFrame, camera: PerspectiveCamera, aspect: f32, mode: u32, parity: u32, count: u32) -> bool {
+        ret frame.update_f32s(self.uniform, 0_u64, self.values(camera, aspect, mode, parity)) && frame.dispatch_compute(self.compute, self.group,(count + 127_u32) / 128_u32, 1_u32, 1_u32) && frame.compute_barrier()
+    }
+    pub fn prepare(self: mut Self&, frame: RenderFrame, camera: PerspectiveCamera, aspect: f32, delta: f32) -> bool {
+        let count =(self.dimensions.x as u32) *(self.dimensions.y as u32) *(self.dimensions.z as u32)
+        if !self.initialized || self.reset {
+            self.clock = 0 self.accumulator = 0 if !self.dispatch(frame, camera, aspect, 0_u32, 0_u32, count) {
+                ret false
+            }
+            if self.kind == 1_u32 && !self.dispatch(frame, camera, aspect, 11_u32, 0_u32, self.liquid.x as u32) {
+                ret false
+            }
+            self.initialized = true self.reset = false
+        }
+        if self.killed {
+            ret true
+        }
+        if !self.paused && delta > 0 && delta < 10 {
+            self.accumulator += if delta > 0.25_f32 {
+                0.25_f32
+            } else {
+                delta
+            }
+        }
+        let mut sub = 0_u32
+        while self.accumulator + 0.0000001_f32 >= 0.008333334_f32 && sub < 30_u32 {
+            self.accumulator -= 0.008333334_f32 if self.accumulator < 0 {
+                self.accumulator = 0
+            }
+            self.clock += 0.008333334_f32 sub += 1_u32
+            if !self.dispatch(frame, camera, aspect, 13_u32, 0_u32, 1_u32) {
+                ret false
+            }
+            if self.kind == 2_u32 {
+                if !self.dispatch(frame, camera, aspect, 12_u32, 0_u32, count) || !self.dispatch(frame, camera, aspect, 6_u32, 0_u32, count) {
+                    ret false
+                }
+            } else {
+                if self.kind == 1_u32 {
+                    if !self.dispatch(frame, camera, aspect, 7_u32, 0_u32, count) || !self.dispatch(frame, camera, aspect, 8_u32, 0_u32, self.liquid.x as u32) || !self.dispatch(frame, camera, aspect, 9_u32, 0_u32, count) {
+                        ret false
+                    }
+                } elif !self.dispatch(frame, camera, aspect, 1_u32, 0_u32, count) {
+                    ret false
+                }
+                if !self.dispatch(frame, camera, aspect, 2_u32, 0_u32, count) || !self.dispatch(frame, camera, aspect, 3_u32, 0_u32, count) {
+                    ret false
+                }
+                let iterations = if self.forces.z < 4 {
+                    4_usize
+                } elif self.forces.z > 80 {
+                    80_usize
+                } else {
+                    self.forces.z as usize
+                }
+                for iteration in 0_usize..iterations {
+                    if !self.dispatch(frame, camera, aspect, 4_u32,(iteration % 2_usize) as u32, count) {
+                        ret false
+                    }
+                }
+                if !self.dispatch(frame, camera, aspect, 5_u32,(iterations % 2_usize) as u32, count) {
+                    ret false
+                }
+                if self.kind == 1_u32 && !self.dispatch(frame, camera, aspect, 10_u32, 0_u32, self.liquid.x as u32) {
+                    ret false
+                }
+            }
+            if !self.dispatch(frame, camera, aspect, 14_u32, 0_u32, 1_u32) {
+                ret false
+            }
+        }
+        ret frame.update_f32s(self.uniform, 0_u64, self.values(camera, aspect, 5_u32, 0_u32))
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame, target: Swapchain) -> bool {
+        if self.killed {
+            ret true
+        }
+        let mut selected = self.pipelines.len() for i in 0_usize..self.pipelines.len() {
+            let p = self.pipelines.get_unchecked_borrowed(i) if p.target == target.handle() && p.signature == target.render_signature() {
+                selected = i break
+            }
+        }
+        if selected == self.pipelines.len() {
+            let pipeline = self.device.create_render_pipeline_with_options(target, self.shaders.get(2_usize).unwrap_or(ShaderModule::unavailable()), self.shaders.get(1_usize).unwrap_or(ShaderModule::unavailable()), VertexBufferLayout::empty(), self.layout, RenderPipelineOptions::depth().with_depth_write(false).with_depth_test(false).with_alpha_blending()) self.pipelines.push(FluidPipeline {
+                    target.handle(), target.render_signature(), pipeline
+                }
+                ,
+            )
+        }
+        let p = self.pipelines.get_unchecked_borrowed(selected) let pass = frame.continue_render_pass(p.pipeline) ret pass.bind_group(self.group) && pass.bind_index_buffer(self.indices) && pass.draw_indexed(3_u32)
+    }
+    pub fn action(self: mut Self&, action: u32) ->() {
+        if action == 0_u32 {
+            self.paused = true
+        } elif action == 1_u32 {
+            self.paused = false
+        } elif action == 2_u32 {
+            self.emitting = false
+        } elif action == 3_u32 {
+            self.killed = true self.emitting = false self.reset = true
+        } elif action == 4_u32 {
+            self.killed = false self.emitting = true self.paused = false self.reset = true
+        }
+    }
+    pub fn set_origin(self: mut Self&, origin: Vec3) ->() {
+        self.origin = origin.add(self.relative)
+    }
+    pub fn destroy(self: Self&) ->() {
+        for p in self.pipelines {
+            p.pipeline.destroy()
+        }
+        self.group.destroy() self.compute.destroy() for b in vec![self.uniform, self.state, self.temporary, self.pressure, self.divergence, self.particles, self.bins, self.indices] {
+            b.destroy()
+        }
+        for s in self.shaders {
+            s.destroy()
+        }
+        self.layout.destroy()
+    }
+}

@@ -1,0 +1,95 @@
+//! Environment mixer; changes use the scene command bus, never the simulation frame.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import luma::{Widget, horizontal, vertical}
+import mod::model::{EnvironmentComponent, WeatherSample, weather_equal}
+import refrain::scene::world::Scene
+
+pub fn environment_controller(scene: Scene) -> u64 {
+    let mut sky = 0_u64 let mut controller = 0_u64
+    for actor in scene.entities() {
+        match actor.component() {
+            Environment(c) => {
+                if c.kind == "sky-atmosphere" && scene.world_visible(actor.id()) &&(sky == 0 || actor.id() < sky) {
+                    sky = actor.id() controller = c.controller
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    ret controller
+}
+fn button(id: str, label: str, active: bool, disabled: bool) -> Widget {
+    ret Widget::button(id, label).with_classes("g-perf-button g-env-button").with_checked(active).with_attribute("title", label).with_disabled(disabled).with_attribute("aria-pressed", if active {
+            "true"
+        } else {
+            "false"
+        }
+        ,
+    )
+}
+pub fn environment_panel(scene: Scene, playing: bool) -> Widget {
+    let mut root = Widget::panel("environment-panel").with_classes("g-perf-panel").with_direction(vertical())
+    let controller = environment_controller(scene)
+    let mut found = false
+    for actor in scene.entities() {
+        if actor.component().kind() == "sky-atmosphere" {
+            found = true
+        }
+    }
+    let mut setup = Widget::panel("environment-setup").with_classes("g-env-toolbar g-env-setup").with_direction(horizontal())
+    setup.push(Widget::label("ENVIRONMENT").with_classes("bp-section-label"))
+    setup.push(button("env-setup-realistic", "Create realistic", false, playing || found))
+    setup.push(button("env-setup-stylized", "Create stylized", false, playing || found))
+    root.push(setup)
+    if !found {
+        root.push(Widget::label("Create an environment, then select its actors to edit their properties.").with_classes("bp-section-label")) ret root
+    }
+    match scene.get(controller) {
+        Some(actor) => {
+            match actor.component() {
+                Environment(c) => {
+                    let mut weather = Widget::panel("environment-weather").with_classes("g-env-toolbar").with_direction(horizontal())
+                    weather.push(button("env-preview", if c.preview {
+                                "Stop preview"
+                            } else {
+                                "Preview"
+                            }
+                            , c.preview, playing,))
+                    for preset in vec!["clear", "overcast", "rain", "snow", "storm"] {
+                        weather.push(button("env-weather-" + preset, preset, weather_equal(c.weather, WeatherSample::preset(preset)), playing))
+                    }
+                    root.push(weather)
+                    let mut time = Widget::panel("environment-time").with_classes("g-env-toolbar").with_direction(horizontal())
+                    time.push(Widget::label("TIME OF DAY").with_classes("bp-section-label"))
+                    time.push(button("env-time-dawn", "Dawn", c.time_hours == 6, playing))
+                    time.push(button("env-time-noon", "Noon", c.time_hours == 12, playing))
+                    time.push(button("env-time-dusk", "Dusk", c.time_hours == 18, playing))
+                    time.push(button("env-time-night", "Night", c.time_hours == 0, playing))
+                    root.push(time)
+                }
+                _ => {
+                }
+            }
+        }
+        None => {
+            root.push(Widget::label("Assign a Weather Controller in Sky Atmosphere details.").with_classes("tone-warning"))
+        }
+    }
+    let mut components = Widget::panel("environment-components").with_classes("g-env-toolbar g-env-components").with_direction(horizontal())
+    for actor in scene.entities() {
+        if actor.component().kind() != "" {
+            match actor.component() {
+                Environment(_) => {
+                    components.push(button("env-select-" + Debug::fmt(actor.id()), actor.name(), false, playing))
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    root.push(components)
+    ret root
+}

@@ -1,0 +1,101 @@
+import std::path::Path
+pub fn content_parent(path: str) -> str {
+    ret Path::new(path).parent().unwrap_or(Path::new("")).as_str()
+}
+pub fn content_leaf(path: str) -> str {
+    ret Path::new(path).file_name().unwrap_or(path)
+}
+pub fn content_kind(path: str) -> str {
+    let name = lower(path)
+    ret if ends(name,".gcharacter") {"character"} elif ends(name,".gskel") {"skeleton"} elif ends(name,".gskin") {"skeletal-mesh"} elif ends(name,".ganim") {"animation-clip"} elif ends(name,".graphene-particle.json") || ends(name,".gparticle") {"particle-system"} elif ends(name, ".graphene-material-graph.json") {
+        "material-graph"
+    } elif ends(name, ".gsound") || ends(name, ".wav") || ends(name, ".flac") || ends(name, ".mp3") || ends(name, ".ogg") {
+        "sound"
+    } elif ends(name, ".graphene-material.json") || ends(name, ".gmaterial") {
+        "material"
+    } elif ends(name, ".graphene-blueprint.json") {
+        "blueprint"
+    } elif ends(name, ".graphene.json") {
+        "scene"
+    } elif ends(name, ".obj") || ends(name, ".gmesh") || ends(name, ".fbx") || ends(name, ".glb") || ends(name, ".gltf") {
+        "mesh"
+    } elif ends(name, ".png") || ends(name, ".hdr") || ends(name, ".gtexture") {
+        "texture"
+    } elif ends(name, ".graphene-weather.json") || ends(name, ".gweather") {
+        "weather-preset"
+    } elif ends(name, ".enq") {
+        "script"
+    } else {
+        "file"
+    }
+}
+pub fn content_kind_name(kind: str) -> str {
+    ret match kind {
+        "character"=>"Character" "skeleton"=>"Skeleton" "skeletal-mesh"=>"Skeletal Mesh" "animation-clip"=>"Animation Clip" "particle-system"=>"Particle System" "folder" => "Folder" "mesh" => "Static Mesh" "material" => "Material"
+        "material-graph" => "Material Graph" "texture" => "Texture" "blueprint" => "Blueprint"
+        "weather-preset" => "Weather Preset" "script" => "Encore Script" "scene" => "Scene" "sound" => "Sound" _ => "File"
+    }
+}
+pub fn ends(value: str, suffix: str) -> bool {
+    ret value.byte_len() >= suffix.byte_len() && value.slice_bytes(value.byte_len() - suffix.byte_len(), suffix.byte_len()) == suffix
+}
+pub fn lower(value: str) -> str {
+    let alphabet = "abcdefghijklmnopqrstuvwxyz" let cyrillic = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+    let mut result = "" let mut index = 0_usize
+    while index < value.byte_len() {
+        let byte = value.byte_at(index)
+        if byte >= 65 && byte <= 90 {
+            result = result + alphabet.slice_bytes((byte - 65) as usize, 1) index += 1
+        } elif byte == 208 && index + 1 < value.byte_len() && value.byte_at(index + 1) == 129 {
+            result = result + "ё" index += 2
+        } elif byte == 208 && index + 1 < value.byte_len() && value.byte_at(index + 1) >= 144 && value.byte_at(index + 1) <= 175 {
+            let letter =(value.byte_at(index + 1) - 144) as usize
+            result = result + cyrillic.slice(letter + if letter >= 6 {
+                    1_usize
+                } else {
+                    0_usize
+                }
+                , 1,) index += 2
+        } else {
+            result = result + value.slice_bytes(index, 1) index += 1
+        }
+    }
+    ret result
+}
+pub fn content_under(path: str, directory: str) -> bool {
+    let prefix = directory + "/"
+    ret path.byte_len() > prefix.byte_len() && path.slice_bytes(0, prefix.byte_len()) == prefix
+}
+pub fn content_name(path: str, kind: str) -> str {
+    let leaf = content_leaf(path)
+    let suffix = if kind=="particle-system" {".graphene-particle.json"} elif kind == "material-graph" {
+        ".graphene-material-graph.json"
+    } elif kind == "material" {
+        ".graphene-material.json"
+    } elif kind == "weather-preset" {
+        ".graphene-weather.json"
+    } elif kind == "blueprint" {
+        ".graphene-blueprint.json"
+    } elif kind == "scene" {
+        ".graphene.json"
+    } else {
+        ""
+    }
+    ret if suffix != "" && ends(leaf, suffix) {
+        leaf.slice_bytes(0, leaf.byte_len() - suffix.byte_len())
+    } else {
+        leaf
+    }
+}
+pub fn content_name_valid(name: str) -> bool {
+    if name == "" || name == "." || name == ".." || name.byte_len() > 96 || name.slice_bytes(0, 1) == "." {
+        ret false
+    }
+    for i in 0..name.byte_len() {
+        let c = name.byte_at(i)
+        if c < 32 || c == 47 || c == 92 || c == 58 || c == 34 || c == 42 || c == 63 || c == 60 || c == 62 || c == 124 {
+            ret false
+        }
+    }
+    ret !ends(name, " ") && !ends(name, ".")
+}

@@ -1,0 +1,373 @@
+//! Reversible project file operations. Scene-referenced or open assets are protected.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::files::*
+import mod::model::{ContentBrowser, ContentAsset, ContentEdit, ContentMove}
+import mod::model::{content_contains, content_toggled}
+import refrain::automation_transport::automation_capability_token
+import refrain::blueprint::{BlueprintAsset, blueprint_parse, blueprint_stringify}
+import refrain::material_graph::{MaterialGraph, material_graph_stringify}
+import refrain::particles::presets::particle_template
+import refrain::particles::codec::particle_system_stringify
+import std::os::{file_exists, mkdir_all, copy_file, read_file, write_file_atomic}
+import std::path::Path
+
+pub fn content_suffix(asset: ContentAsset) -> str {
+    for suffix in vec![".obj.gmesh", ".gmesh", ".gtexture", ".gmaterial"] {
+        if ends(asset.path, suffix) {
+            ret suffix
+        }
+    }
+    ret match asset.kind {
+        "particle-system"=>".graphene-particle.json" "mesh" => ".obj" "texture" => ".png" "script" => ".enq"
+        "blueprint" => ".graphene-blueprint.json" "material" => ".graphene-material.json"
+        "material-graph" => ".graphene-material-graph.json" "scene" => ".graphene.json"
+        "folder" => "" _ => {
+            let extension = Path::new(asset.path).extension().unwrap_or("") if extension == "" {
+                ""
+            } else {
+                "." + extension
+            }
+        }
+    }
+}
+pub fn content_stem(asset: ContentAsset) -> str {
+    let name = content_leaf(asset.path) let suffix = content_suffix(asset)
+    ret if suffix != "" && ends(lower(name), suffix) {
+        name.slice_bytes(0, name.byte_len() - suffix.byte_len())
+    } else {
+        name
+    }
+}
+pub fn content_trash(browser: ContentBrowser, name: str) -> str {
+    let token = automation_capability_token()
+    if token.byte_len() < 16 {
+        ret ""
+    }
+    let directory = ".graphene/Trash/" + token
+    if mkdir_all(browser.project + "/" + directory) != 0 {
+        ret ""
+    }
+    ret directory + "/" + name
+}
+fn record(browser: mut ContentBrowser, moves: Vec[ContentMove], label: str) ->() {
+    if browser.undo.len() >= 32 {
+        let mut retained = Vec[ContentEdit]::new() for i in 1..browser.undo.len() {
+            match browser.undo.get(i) {
+                Some(edit) => retained.push(edit) None => {
+                }
+            }
+        }
+        browser.undo = retained
+    }
+    browser.undo.push(ContentEdit { moves, label }) browser.redo.clear()
+    browser.popup = "" browser.error = "" browser.message = label browser.emit("rescan", "") browser.refresh()
+}
+pub fn content_blocked(browser: ContentBrowser, asset: ContentAsset, live: Vec[str]) -> str {
+    if !asset.mutable() {
+        ret "Built-in and source assets are read-only here"
+    }
+    if asset.kind == "folder" {
+        for child in browser.entries {
+            if content_under(child.path, asset.path) {
+                let reference = content_referencer(browser.project, child, browser.entries, live)
+                if reference != "" {
+                    ret "Used by " + reference
+                }
+            }
+        }
+    }
+    let reference = content_referencer(browser.project, asset, browser.entries, live)
+    ret if reference == "" {
+        ""
+    } else {
+        "Used by " + reference
+    }
+}
+pub fn content_create(browser: mut ContentBrowser) ->() {
+    let name = browser.name.value()
+    if !content_name_valid(name) {
+        browser.error = "Use a name without /, \\, control characters or a leading dot" browser.dirty = true ret()
+    }
+    let directory = if browser.directory.byte_len() >= 7 && browser.directory.slice_bytes(0, 7) == "Content" {
+        browser.directory
+    } else {
+        "Content"
+    }
+    if mkdir_all(browser.project + "/" + directory) != 0 || content_stat(browser.project, directory) != 2 {
+        browser.error = "Unable to create assets in this folder" browser.dirty = true ret()
+    }
+    let kind = browser.popup
+    let suffix = if kind=="particle" {".graphene-particle.json"} elif kind == "material" {
+        ".graphene-material-graph.json"
+    } elif kind == "blueprint" {
+        ".graphene-blueprint.json"
+    } else {
+        ""
+    }
+    let path = directory + "/" + name + suffix
+    if file_exists(browser.project + "/" + path) {
+        browser.error = "That name already exists" browser.dirty = true ret()
+    }
+    let mut success = false
+    if kind == "folder" {
+        success = mkdir_all(browser.project + "/" + path) == 0
+    } elif kind == "material" {
+        let base = MaterialGraph::default() let graph = MaterialGraph {
+            name, base.domain, base.nodes, base.links
+        }
+        success = write_file_atomic(browser.project + "/" + path, material_graph_stringify(graph, false) + "\n") == 0
+    } elif kind=="particle" {let mut asset=particle_template("Sparks") asset.name=name success=write_file_atomic(browser.project+"/"+path,particle_system_stringify(asset))==0_i32
+    } elif kind == "blueprint" {
+        let token = automation_capability_token()
+        if token != "" {
+            success = write_file_atomic(browser.project + "/" + path, blueprint_stringify(BlueprintAsset::new("BP_" + token, name))) == 0
+        }
+    }
+    if !success {
+        browser.error = "Unable to create the asset" browser.dirty = true ret()
+    }
+    let trash = content_trash(browser, content_leaf(path))
+    if trash != "" {
+        record(browser, vec![ContentMove { trash, path }], "Created " + name)
+    } else {
+        browser.error = "Created asset; unable to prepare undo" browser.refresh()
+    }
+    browser.primary = path browser.selection = vec![path] browser.anchor = path
+    if browser.directory != directory {
+        browser.navigate(directory, true)
+    }
+}
+pub fn content_rename(browser: mut ContentBrowser, live: Vec[str]) ->() {
+    match browser.find(browser.primary) {
+        Some(asset) => {
+            let blocked = content_blocked(browser, asset, live)
+            if blocked != "" {
+                browser.error = blocked browser.dirty = true ret()
+            }
+            if !content_name_valid(browser.name.value()) {
+                browser.error = "Invalid asset name" browser.dirty = true ret()
+            }
+            let destination = asset.parent() + "/" + browser.name.value() + content_suffix(asset)
+            if destination == asset.path {
+                browser.popup = "" browser.dirty = true ret()
+            }
+            if !content_move(browser.project, asset.path, destination) {
+                browser.error = "Rename failed; the destination may already exist" browser.dirty = true ret()
+            }
+            record(browser, vec![ContentMove { asset.path, destination }], "Renamed " + asset.name)
+            browser.primary = destination browser.selection = vec![destination] browser.anchor = destination
+        }
+        None => {
+            browser.popup = ""
+        }
+    }
+}
+pub fn content_duplicate(browser: mut ContentBrowser) ->() {
+    let mut copies = Vec[ContentMove]::new() let mut selected = Vec[str]::new()
+    for path in browser.selection {
+        match browser.find(path) {
+            Some(asset) => {
+                if asset.mutable() && asset.kind != "folder" && asset.bytes <= 67108864 {
+                    let destination = content_unique_path(browser.project, asset.parent(), content_stem(asset) + "_Copy", content_suffix(asset))
+                    let trash = content_trash(browser, content_leaf(destination))
+                    if destination != "" && trash != "" && !file_exists(browser.project + "/" + destination) {
+                        let mut ok = false
+                        if asset.kind == "blueprint" {
+                            match blueprint_parse(read_file(browser.project + "/" + path)) {
+                                Ok(original) => {
+                                    let token = automation_capability_token()
+                                    let copy = BlueprintAsset {
+                                        "BP_" + token, original.name + " Copy", original.components, original.properties, original.nodes, original.links
+                                    }
+                                    ok = token != "" && write_file_atomic(browser.project + "/" + destination, blueprint_stringify(copy)) == 0
+                                }
+                                Err(_) => {
+                                }
+                            }
+                        } else {
+                            ok = copy_file(browser.project + "/" + path, browser.project + "/" + destination) == 0
+                        }
+                        if ok {
+                            copies.push(ContentMove { trash, destination }) selected.push(destination)
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+    }
+    if copies.len() == 0 {
+        browser.message = "Choose project files to duplicate (up to 64 MiB each)" browser.popup = "" browser.dirty = true
+    } else {
+        record(browser, copies, "Duplicated " + selected.len().fmt() + " assets") browser.selection = selected browser.primary = selected.get(0).unwrap_or("")
+    }
+}
+pub fn content_delete(browser: mut ContentBrowser, live: Vec[str]) ->() {
+    let mut moves = Vec[ContentMove]::new()
+    for path in browser.selection {
+        match browser.find(path) {
+            Some(asset) => {
+                let blocked = content_blocked(browser, asset, live)
+                if blocked != "" {
+                    browser.error = asset.name + ": " + blocked browser.dirty = true ret()
+                }
+                // A folder operation subsumes selected descendants.
+                let mut covered = false
+                for parent in browser.selection {
+                    if parent != path && content_under(path, parent) {
+                        covered = true
+                    }
+                }
+                if !covered {
+                    let trash = content_trash(browser, content_leaf(path)) if trash == "" {
+                        browser.error = "Unable to prepare recoverable deletion" browser.dirty = true ret()
+                    }
+                    moves.push(ContentMove {
+                            path, trash
+                        }
+                        ,
+                    )
+                }
+            }
+            None => {
+            }
+        }
+    }
+    let mut applied = Vec[ContentMove]::new()
+    for change in moves {
+        if !content_move(browser.project, change.from, change.to) {
+            for previous in applied {
+                let _restored = content_move(browser.project, previous.to, previous.from)
+            }
+            browser.error = "Delete failed; assets were preserved" browser.dirty = true ret()
+        }
+        applied.push(change)
+    }
+    if applied.len() > 0 {
+        record(browser, applied, "Moved " + applied.len().fmt() + " assets to Trash") browser.selection.clear() browser.primary = ""
+    }
+}
+pub fn content_history(browser: mut ContentBrowser, redo: bool, live: Vec[str]) ->() {
+    let source = if redo {
+        browser.redo
+    } else {
+        browser.undo
+    }
+    if source.len() == 0 {
+        ret()
+    }
+    let edit = source.get(source.len() - 1).unwrap_or(ContentEdit { Vec[ContentMove]::new(), "" })
+    let mut steps = Vec[ContentMove]::new()
+    if redo {
+        steps = edit.moves
+    } else {
+        let mut index = edit.moves.len()
+        while index > 0 {
+            index -= 1 match edit.moves.get(index) {
+                Some(change) => steps.push(ContentMove {
+                        change.to, change.from
+                    }
+                    ,
+                ) None => {
+                }
+            }
+        }
+    }
+    for change in steps {
+        if file_exists(browser.project + "/" + change.to) {
+            browser.message = "Undo/redo blocked: destination already exists" browser.dirty = true ret()
+        }
+        match browser.find(change.from) {
+            Some(asset) => {
+                let blocked = content_blocked(browser, asset, live) if blocked != "" {
+                    browser.message = "Undo/redo blocked: " + blocked browser.dirty = true ret()
+                }
+            }
+            None => {
+            }
+        }
+    }
+    let mut applied = Vec[ContentMove]::new()
+    for change in steps {
+        if !content_move(browser.project, change.from, change.to) {
+            for previous in applied {
+                let _restored = content_move(browser.project, previous.to, previous.from)
+            }
+            browser.message = "Unable to undo/redo file operation" browser.dirty = true ret()
+        }
+        applied.push(change)
+    }
+    let mut remaining = Vec[ContentEdit]::new() for index in 0..(source.len() - 1) {
+        match source.get(index) {
+            Some(item) => remaining.push(item) None => {
+            }
+        }
+    }
+    if redo {
+        browser.redo = remaining browser.undo.push(edit)
+    } else {
+        browser.undo = remaining browser.redo.push(edit)
+    }
+    browser.message =(if redo {
+            "Redo: "
+        } else {
+            "Undo: "
+        }
+    ) + edit.label browser.emit("rescan", "") browser.refresh()
+}
+
+pub fn content_move_selection(browser: mut ContentBrowser, live: Vec[str]) ->() {
+    let destination = browser.name.value()
+    if destination != "Content" && !(destination.byte_len() > 8 && destination.slice_bytes(0, 8) == "Content/") {
+        browser.error = "Choose a project folder under Content" browser.dirty = true ret()
+    }
+    if content_stat(browser.project, destination) != 2 {
+        browser.error = "Destination folder does not exist" browser.dirty = true ret()
+    }
+    let mut moves = Vec[ContentMove]::new()
+    for path in browser.selection {
+        match browser.find(path) {
+            Some(asset) => {
+                let blocked = content_blocked(browser, asset, live)
+                if blocked != "" {
+                    browser.error = asset.name + ": " + blocked browser.dirty = true ret()
+                }
+                if asset.kind == "folder" &&(destination == path || content_under(destination, path)) {
+                    browser.error = "A folder cannot be moved into itself" browser.dirty = true ret()
+                }
+                let mut covered = false for other in browser.selection {
+                    if other != path && content_under(path, other) {
+                        covered = true
+                    }
+                }
+                let to = destination + "/" + content_leaf(path)
+                if !covered && to != path {
+                    if file_exists(browser.project + "/" + to) {
+                        browser.error = "An asset with that name already exists in the destination" browser.dirty = true ret()
+                    }
+                    moves.push(ContentMove { path, to })
+                }
+            }
+            None => {
+            }
+        }
+    }
+    let mut applied = Vec[ContentMove]::new()
+    for change in moves {
+        if !content_move(browser.project, change.from, change.to) {
+            for previous in applied {
+                let _restored = content_move(browser.project, previous.to, previous.from)
+            }
+            browser.error = "Move failed; assets were preserved" browser.dirty = true ret()
+        }
+        applied.push(change)
+    }
+    if applied.len() > 0 {
+        record(browser, applied, "Moved assets to " + destination) browser.navigate(destination, true)
+    } else {
+        browser.popup = "" browser.dirty = true
+    }
+}

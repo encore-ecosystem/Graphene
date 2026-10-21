@@ -7,13 +7,48 @@ pub struct PerspectiveCamera {
     fov_y: f32
     near: f32
     far: f32
+    jitter_x: f32
+    jitter_y: f32
+    projection_aspect: f32
 }
 
 impl for PerspectiveCamera {
     pub fn new(position: Vec3, target: Vec3, fov_y: f32, near: f32, far: f32) -> PerspectiveCamera {
         ret PerspectiveCamera {
-            position, target, Vec3::new(0.0_f32, 1.0_f32, 0.0_f32), fov_y, near, far
+            position, target, Vec3::new(0.0_f32, 1.0_f32, 0.0_f32), fov_y, near, far, 0.0_f32, 0.0_f32, 0.0_f32
         }
+    }
+    pub fn with_up(self: Self, up: Vec3) -> PerspectiveCamera {
+        ret PerspectiveCamera {
+            self.position, self.target, up, self.fov_y, self.near, self.far, self.jitter_x, self.jitter_y, self.projection_aspect
+        }
+    }
+    pub fn with_jitter(self: Self, x: f32, y: f32) -> Self {
+        ret Self {
+            self.position, self.target, self.up, self.fov_y, self.near, self.far, x, y, self.projection_aspect
+        }
+    }
+    /// Preserve the display projection when an upscaler rounds input dimensions.
+    pub fn with_aspect_ratio(self: Self, aspect: f32) -> Self {
+        ret Self {
+            self.position, self.target, self.up, self.fov_y, self.near, self.far, self.jitter_x, self.jitter_y, aspect
+        }
+    }
+    pub fn aspect_ratio(self: Self, fallback: f32) -> f32 {
+        ret if self.projection_aspect > 0_f32 {
+            self.projection_aspect
+        } else {
+            fallback
+        }
+    }
+    pub fn far_clip(self: Self) -> f32 {
+        ret self.far
+    }
+    pub fn vertical_fov(self: Self) -> f32 {
+        ret self.fov_y
+    }
+    pub fn near_clip(self: Self) -> f32 {
+        ret self.near
     }
     pub fn position(self: Self) -> Vec3 {
         ret self.position
@@ -25,7 +60,8 @@ impl for PerspectiveCamera {
         ret Mat4::look_at(self.position, self.target, self.up)
     }
     pub fn projection(self: Self, aspect: f32) -> Mat4 {
-        ret Mat4::perspective(self.fov_y, aspect, self.near, self.far)
+        let shift = Mat4::translation(Vec3::new(self.jitter_x, self.jitter_y, 0.0_f32))
+        ret shift.mul(Mat4::perspective(self.fov_y, self.aspect_ratio(aspect), self.near, self.far))
     }
     pub fn view_projection(self: Self, aspect: f32) -> Mat4 {
         ret self.projection(aspect).mul(self.view())
@@ -33,4 +69,30 @@ impl for PerspectiveCamera {
     pub fn model_view_projection(self: Self, model: Mat4, aspect: f32) -> Mat4 {
         ret self.view_projection(aspect).mul(model)
     }
+}
+
+/// Fits the photographic frame into a viewport without stretching it.
+pub fn camera_frame_extent(width: u32, height: u32, aspect: f32) ->(u32, u32) {
+    if width == 0 || height == 0 || aspect <= 0.0_f32 {
+        ret(width, height)
+    }
+    let width_f = width as f32
+    let height_f = height as f32
+    if width_f / height_f > aspect {
+        let fitted = height_f * aspect
+        ret(if fitted < 1.0_f32 {
+                1_u32
+            } else {
+                fitted as u32
+            }
+            , height,)
+    }
+    let fitted = width_f / aspect
+    ret(width, if fitted < 1.0_f32 {
+            1_u32
+        } else {
+            fitted as u32
+        }
+        ,
+    )
 }

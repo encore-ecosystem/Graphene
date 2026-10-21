@@ -1,0 +1,6 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn virtual_scene_dispatch_spirv() -> Vec[u32] {
+    ret builtin_spirv(2744575276_u32)
+}

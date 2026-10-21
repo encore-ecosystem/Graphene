@@ -1,0 +1,109 @@
+{
+  "format": "graphene-material-graph",
+  "version": 2,
+  "domain": "sky",
+  "name": "M_Sky_Stylized",
+  "nodes": [
+    {
+      "id": 1,
+      "operation": "view-direction",
+      "kind": "vec3",
+      "value": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "position": [
+        30,
+        60,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "operation": "gradient",
+      "kind": "vec3",
+      "value": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "position": [
+        310,
+        60,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "operation": "color",
+      "kind": "vec3",
+      "value": [
+        0.18,
+        0.42,
+        0.8
+      ],
+      "position": [
+        30,
+        250,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "operation": "multiply",
+      "kind": "vec3",
+      "value": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "position": [
+        590,
+        80,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "operation": "output-sky",
+      "kind": "vec3",
+      "value": [
+        0,
+        0,
+        0
+      ],
+      "position": [
+        870,
+        80,
+        0
+      ]
+    }
+  ],
+  "links": [
+    {
+      "source": 1,
+      "output": "value",
+      "target": 2,
+      "input": "a"
+    },
+    {
+      "source": 2,
+      "output": "value",
+      "target": 4,
+      "input": "a"
+    },
+    {
+      "source": 3,
+      "output": "value",
+      "target": 4,
+      "input": "b"
+    },
+    {
+      "source": 4,
+      "output": "value",
+      "target": 5,
+      "input": "radiance"
+    }
+  ]
+}

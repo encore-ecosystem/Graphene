@@ -12,7 +12,14 @@ fn ring_angle(value: f32) -> f32 {
 }
 
 fn ring_sin(value: f32) -> f32 {
-    let x = ring_angle(value)
+    let angle = ring_angle(value)
+    let x = if angle > 1.5707964_f32 {
+        3.1415927_f32 - angle
+    } elif angle < - 1.5707964_f32 {
+        - 3.1415927_f32 - angle
+    } else {
+        angle
+    }
     let x2 = x * x
     let x3 = x * x2 let x5 = x3 * x2 let x7 = x5 * x2
     let x9 = x7 * x2 let x11 = x9 * x2
@@ -20,17 +27,32 @@ fn ring_sin(value: f32) -> f32 {
 }
 
 fn ring_cos(value: f32) -> f32 {
-    let x = ring_angle(value)
+    let angle = ring_angle(value)
+    let outside = angle > 1.5707964_f32 || angle < - 1.5707964_f32
+    let x = if angle > 1.5707964_f32 {
+        3.1415927_f32 - angle
+    } elif angle < - 1.5707964_f32 {
+        - 3.1415927_f32 - angle
+    } else {
+        angle
+    }
     let x2 = x * x let x4 = x2 * x2 let x6 = x4 * x2
     let x8 = x6 * x2 let x10 = x8 * x2
-    ret 1.0_f32 - x2 / 2.0_f32 + x4 / 24.0_f32 - x6 / 720.0_f32 + x8 / 40320.0_f32 - x10 / 3628800.0_f32
+    let result = 1.0_f32 - x2 / 2.0_f32 + x4 / 24.0_f32 - x6 / 720.0_f32 + x8 / 40320.0_f32 - x10 / 3628800.0_f32
+    ret if outside {
+        - result
+    } else {
+        result
+    }
 }
 
 pub struct MeshData {
-    vertices: Vec[f32] indices: Vec[u32] stride: u32
+    vertices: Vec[f32]
+    indices: Vec[u32]
+    stride: u32
 }
 
-fn append_vertex(values: Vec[f32], x: f32, y: f32, z: f32,
+fn append_vertex(values: mut Vec[f32], x: f32, y: f32, z: f32,
     nx: f32, ny: f32, nz: f32, red: f32, green: f32, blue: f32,) -> Vec[f32] {
     let mut out = values
     out.push(x) out.push(y) out.push(z)
@@ -39,32 +61,32 @@ fn append_vertex(values: Vec[f32], x: f32, y: f32, z: f32,
     ret out
 }
 
-fn append_face(indices: Vec[u32], base: u32) -> Vec[u32] {
+fn append_face(indices: mut Vec[u32], base: u32) -> Vec[u32] {
     let mut out = indices
     out.push(base) out.push(base + 1_u32) out.push(base + 2_u32)
     out.push(base + 2_u32) out.push(base + 3_u32) out.push(base)
     ret out
 }
 
-fn append_triangle(indices: Vec[u32], base: u32) -> Vec[u32] {
+fn append_triangle(indices: mut Vec[u32], base: u32) -> Vec[u32] {
     let mut out = indices
     out.push(base) out.push(base + 1_u32) out.push(base + 2_u32)
     ret out
 }
 
-fn append_double_sided_face(indices: Vec[u32], base: u32) -> Vec[u32] {
+fn append_double_sided_face(indices: mut Vec[u32], base: u32) -> Vec[u32] {
     let mut out = append_face(indices, base)
     out.push(base + 2_u32) out.push(base + 1_u32) out.push(base)
     out.push(base) out.push(base + 3_u32) out.push(base + 2_u32)
     ret out
 }
 
-fn append_grid_vertex(values: Vec[f32], x: f32, y: f32, z: f32,
+fn append_grid_vertex(values: mut Vec[f32], x: f32, y: f32, z: f32,
     red: f32, green: f32, blue: f32,) -> Vec[f32] {
     ret append_vertex(values, x, y, z, 0.0_f32, 1.0_f32, 0.0_f32, red, green, blue)
 }
 
-fn append_grid_line(vertices: Vec[f32], indices: Vec[u32], coordinate: f32, extent: f32,
+fn append_grid_line(vertices: mut Vec[f32], indices: mut Vec[u32], coordinate: f32, extent: f32,
     half_width: f32, parallel_z: bool, red: f32, green: f32, blue: f32,) ->(Vec[f32], Vec[u32]) {
     let mut out_vertices = vertices
     let base =(out_vertices.len() / 9_usize) as u32
@@ -91,6 +113,29 @@ fn append_grid_line(vertices: Vec[f32], indices: Vec[u32], coordinate: f32, exte
 }
 
 impl for MeshData {
+    /// The renderer's common vertex format is position, normal, color, UV.
+    /// Legacy non-textured meshes receive zero UVs, never the next vertex's data.
+    pub fn with_uvs(self: Self) -> MeshData {
+        if self.stride == 44 {
+            ret self
+        }
+        let stride =(self.stride / 4) as usize
+        if stride < 9 {
+            ret self
+        }
+        let mut values = Vec[f32]::with_capacity(self.vertex_count() * 11)
+        for vertex in 0..self.vertex_count() {
+            for component in 0..11 {
+                values.push(if component < 9 {
+                        self.vertices.get(vertex * stride + component).unwrap_or(0.0)
+                    } else {
+                        0.0_f32
+                    }
+                )
+            }
+        }
+        ret MeshData::new(values, self.indices, 44)
+    }
     pub fn new(vertices: Vec[f32], indices: Vec[u32], stride: u32) -> MeshData {
         ret MeshData {
             vertices, indices, stride
@@ -159,7 +204,7 @@ pub fn cube_mesh(size: f32) -> MeshData {
     vertices = append_vertex(vertices, h, - h, h, 0.0_f32, - 1.0_f32, 0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32)
     vertices = append_vertex(vertices, - h, - h, h, 0.0_f32, - 1.0_f32, 0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32)
     indices = append_face(indices, 20_u32)
-    ret MeshData::new(vertices, indices, 36_u32)
+    ret quad_uvs(MeshData::new(vertices, indices, 36_u32))
 }
 
 pub fn plane_mesh(size: f32) -> MeshData {
@@ -179,7 +224,30 @@ pub fn plane_mesh(size: f32) -> MeshData {
     vertices = append_vertex(vertices, h, 0.0_f32, - h, 0.0_f32, 1.0_f32, 0.0_f32, 0.72_f32, 0.74_f32,
         0.78_f32,)
     indices = append_double_sided_face(indices, 0_u32)
-    ret MeshData::new(vertices, indices, 36_u32)
+    ret quad_uvs(MeshData::new(vertices, indices, 36_u32))
+}
+
+fn quad_uvs(data: MeshData) -> MeshData {
+    let mut vertices = Vec[f32]::with_capacity(data.vertex_count() * 11)
+    for vertex in 0..data.vertex_count() {
+        for component in 0..9 {
+            vertices.push(data.vertices.get(vertex * 9 + component).unwrap_or(0.0))
+        }
+        let corner = vertex % 4
+        vertices.push(if corner == 1 || corner == 2 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        )
+        vertices.push(if corner < 2 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        )
+    }
+    ret MeshData::new(vertices, data.indices, 44)
 }
 
 pub fn sphere_mesh(radius: f32, rings: u32, segments: u32) -> MeshData {
@@ -226,10 +294,10 @@ pub fn sphere_mesh(radius: f32, rings: u32, segments: u32) -> MeshData {
             let first = ring * row + segment
             let second = first + row
             if ring > 0_u32 {
-                indices.push(first) indices.push(second) indices.push(first + 1_u32)
+                indices.push(first) indices.push(first + 1_u32) indices.push(second)
             }
             if ring + 1_u32 < ring_count {
-                indices.push(first + 1_u32) indices.push(second) indices.push(second + 1_u32)
+                indices.push(first + 1_u32) indices.push(second + 1_u32) indices.push(second)
             }
             segment = segment + 1_u32
         }

@@ -1,0 +1,128 @@
+//! Trusted module/instance handles. The native registry rejects unknown handles;
+//! destruction is explicit and modules cannot unload while instances are alive.
+import core::option::Option
+import core::result::Result
+import linalg::Vec3
+import mod::model::{BlueprintAsset, BlueprintInstance, BlueprintValue}
+import mod::validate::{validate_blueprint, validate_blueprint_instance}
+import refrain::scene::transform::Transform
+
+extern fn graphene_bp_open(path: str) -> usize
+extern fn graphene_bp_close(handle: usize) -> bool
+extern fn graphene_bp_error_text() -> str
+extern fn graphene_bp_create(handle: usize, class_id: str) -> usize
+extern fn graphene_bp_destroy(handle: usize) -> bool
+extern fn graphene_bp_add_component(handle: usize, id: u64, parent: u64, px: f32, py: f32, pz: f32, rx: f32, ry: f32, rz: f32, sx: f32, sy: f32, sz: f32, visible: bool) -> bool
+extern fn graphene_bp_has_component(handle: usize, id: u64) -> bool
+extern fn graphene_bp_axis(handle: usize, id: u64, field: u32, axis: u32) -> f32
+extern fn graphene_bp_is_visible(handle: usize, id: u64) -> bool
+extern fn graphene_bp_property(handle: usize, id: u64, kind: u32, boolean: bool, integer: i32, x: f32, y: f32, z: f32, reference: u64, string: str) -> bool
+extern fn graphene_bp_invoke(handle: usize, kind: str, action: str, delta: f32) -> bool
+extern fn graphene_bp_instance_error(handle: usize) -> str
+extern fn graphene_bp_error_node(handle: usize) -> u64
+extern fn graphene_bp_take_log(handle: usize) -> str
+
+pub struct BlueprintModule {
+    handle: usize
+}
+pub struct BlueprintRuntimeInstance {
+    handle: usize
+}
+
+impl for BlueprintModule {
+    /// Native Blueprint modules are trusted executable code, not a sandbox.
+    #attr(safe)
+    pub fn open(path: str) -> Result[BlueprintModule, str] {
+        let handle = graphene_bp_open(path)
+        if handle == 0 {
+            ret Result[BlueprintModule, str]::Err(graphene_bp_error_text())
+        }
+        ret Result[BlueprintModule, str]::Ok(BlueprintModule { handle })
+    }
+    #attr(safe)
+    pub fn close(self: Self) -> bool {
+        ret graphene_bp_close(self.handle)
+    }
+    #attr(safe)
+    pub fn instantiate(self: Self, asset: BlueprintAsset, instance: BlueprintInstance, transform: Transform) -> Result[BlueprintRuntimeInstance, str] {
+        if validate_blueprint(asset).len() != 0 || validate_blueprint_instance(asset, instance).len() != 0 {
+            ret Result[BlueprintRuntimeInstance, str]::Err("invalid Blueprint asset or instance overrides")
+        }
+        let handle = graphene_bp_create(self.handle, asset.id)
+        if handle == 0 {
+            ret Result[BlueprintRuntimeInstance, str]::Err(graphene_bp_error_text())
+        }
+        let runtime = BlueprintRuntimeInstance { handle }
+        if !runtime.add_component(0, 0, transform, true) {
+            runtime.destroy()
+            ret Result[BlueprintRuntimeInstance, str]::Err("unable to initialize Blueprint actor transform")
+        }
+        for component in asset.components {
+            if !runtime.add_component(component.id, component.parent, component.transform, component.visible) {
+                runtime.destroy()
+                ret Result[BlueprintRuntimeInstance, str]::Err("unable to initialize Blueprint component")
+            }
+        }
+        for override_value in instance.overrides {
+            if !runtime.set_property(override_value.property, override_value.value) {
+                runtime.destroy()
+                ret Result[BlueprintRuntimeInstance, str]::Err("compiled property schema does not match instance override")
+            }
+        }
+        ret Result[BlueprintRuntimeInstance, str]::Ok(runtime)
+    }
+}
+
+impl for BlueprintRuntimeInstance {
+    #attr(safe)
+    pub fn destroy(self: Self) -> bool {
+        ret graphene_bp_destroy(self.handle)
+    }
+    #attr(safe)
+    fn add_component(self: Self, id: u64, parent: u64, transform: Transform, visible: bool) -> bool {
+        let p = transform.position() let r = transform.rotation() let s = transform.scale()
+        ret graphene_bp_add_component(self.handle, id, parent, p.x(), p.y(), p.z(), r.x(), r.y(), r.z(), s.x(), s.y(), s.z(), visible)
+    }
+    #attr(safe)
+    pub fn set_property(self: Self, id: u64, value: BlueprintValue) -> bool {
+        ret match value {
+            Bool(flag) => graphene_bp_property(self.handle, id, 1, flag, 0, 0, 0, 0, 0, "")
+            I32(integer) => graphene_bp_property(self.handle, id, 2, false, integer, 0, 0, 0, 0, "")
+            F32(number) => graphene_bp_property(self.handle, id, 3, false, 0, number, 0, 0, 0, "")
+            String(text) => graphene_bp_property(self.handle, id, 4, false, 0, 0, 0, 0, 0, text)
+            Vector(vector) => graphene_bp_property(self.handle, id, 5, false, 0, vector.x(), vector.y(), vector.z(), 0, "")
+            Actor(reference) => graphene_bp_property(self.handle, id, 6, false, 0, 0, 0, 0, reference, "")
+            Component(reference) => graphene_bp_property(self.handle, id, 7, false, 0, 0, 0, 0, reference, "")
+        }
+    }
+    #attr(safe)
+    pub fn transform(self: Self, id: u64) -> Option[Transform] {
+        if !graphene_bp_has_component(self.handle, id) {
+            ret Option[Transform]::None
+        }
+        let p = Vec3::new(graphene_bp_axis(self.handle, id, 0, 0), graphene_bp_axis(self.handle, id, 0, 1), graphene_bp_axis(self.handle, id, 0, 2))
+        let r = Vec3::new(graphene_bp_axis(self.handle, id, 1, 0), graphene_bp_axis(self.handle, id, 1, 1), graphene_bp_axis(self.handle, id, 1, 2))
+        let s = Vec3::new(graphene_bp_axis(self.handle, id, 2, 0), graphene_bp_axis(self.handle, id, 2, 1), graphene_bp_axis(self.handle, id, 2, 2))
+        ret Option[Transform]::Some(Transform::new(p, r, s))
+    }
+    #attr(safe)
+    pub fn visible(self: Self, id: u64) -> bool {
+        ret graphene_bp_is_visible(self.handle, id)
+    }
+    #attr(safe)
+    pub fn invoke(self: Self, kind: str, action: str, delta: f32) -> bool {
+        ret graphene_bp_invoke(self.handle, kind, action, delta)
+    }
+    #attr(safe)
+    pub fn error(self: Self) -> str {
+        ret graphene_bp_instance_error(self.handle)
+    }
+    #attr(safe)
+    pub fn error_node(self: Self) -> u64 {
+        ret graphene_bp_error_node(self.handle)
+    }
+    #attr(safe)
+    pub fn take_log(self: Self) -> str {
+        ret graphene_bp_take_log(self.handle)
+    }
+}

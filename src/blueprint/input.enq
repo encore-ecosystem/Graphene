@@ -1,0 +1,39 @@
+//! Project input bindings are data, not hardcoded Blueprint event names.
+import core::result::Result
+import json::parse
+import mod::codec::{blueprint_json_field, blueprint_json_id, blueprint_json_text}
+import refrain::runtime::InputMap
+import std::os::{file_exists, read_file}
+import std::path::Path
+
+pub fn load_blueprint_input(project: str) -> Result[InputMap, str] {
+    let path = Path::new(project).resolve().join("Content/Input.graphene-input.json")
+    let mut input = InputMap::new()
+    if !file_exists(path.as_str()) {
+        ret Result[InputMap, str]::Ok(input)
+    }
+    let root = match parse(read_file(path.as_str())) {
+        Ok(value) => value
+        Err(error) => {
+            ret Result[InputMap, str]::Err("Invalid input bindings: " + error.message())
+        }
+    }
+    if blueprint_json_text(root, "format")? != "graphene-input" || blueprint_json_id(root, "version")? != 1 {
+        ret Result[InputMap, str]::Err("Unsupported input bindings format/version")
+    }
+    let bindings = match blueprint_json_field(root, "bindings")?.as_array() {
+        Some(values) => values
+        None => {
+            ret Result[InputMap, str]::Err("Input bindings must be an array")
+        }
+    }
+    for binding in bindings {
+        let action = blueprint_json_text(binding, "action")?
+        let key = blueprint_json_id(binding, "key")?
+        if action == "" || key > 4294967295_u64 {
+            ret Result[InputMap, str]::Err("Input binding requires an action and a u32 key")
+        }
+        input.bind_key(action, key as u32)
+    }
+    ret Result[InputMap, str]::Ok(input)
+}

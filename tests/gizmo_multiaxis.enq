@@ -1,0 +1,122 @@
+//! Constraint geometry, captured projection, snapping and proportional scaling.
+import graphene::editor_gizmo_handle::{gizmo_handle_mask, gizmo_handle_contains, gizmo_handle_vector, gizmo_handle_normal, gizmo_handle_components, gizmo_handle_scale, gizmo_plane_handle_mesh, gizmo_extra_hit}
+import graphene::{GizmoGesture, GizmoProjection, GizmoSnap}
+import linalg::Vec3
+fn close(a: f32, b: f32) -> bool {
+    ret a - b < 0.0002 && a - b > - 0.0002
+}
+fn same(a: Vec3, b: Vec3) -> bool {
+    ret close(a.x(), b.x()) && close(a.y(), b.y()) && close(a.z(), b.z())
+}
+fn main() -> u32 {
+    if gizmo_handle_mask(3) != 4 || gizmo_handle_mask(4) != 3 || gizmo_handle_mask(5) != 5 || gizmo_handle_mask(6) != 6 || gizmo_handle_mask(7) != 7 || gizmo_handle_contains(0, 1) || gizmo_handle_contains(7, 4) {
+        ret 1
+    }
+    let yaw = 0.65_f32 let pitch = 0.4_f32
+    let position = Vec3::from_spherical(yaw, pitch).scale(8)
+    let projection = GizmoProjection::new(position, yaw, pitch, 1.0471976, 800, 600)
+    let pivot = Vec3::new(0.37, 0.23, - 0.17)
+    let screen = projection.project(pivot).unwrap_or(Vec3::zero())
+    let mut snap = GizmoSnap::new()
+    snap.set_step("move", 0.5)
+    for handle in 4..7 {
+        let id = handle as u32
+        let square = gizmo_plane_handle_mesh(id, false)
+        let triangle = gizmo_plane_handle_mesh(id, true)
+        if square.vertex_count() != 4 || triangle.vertex_count() != 3 || square.stride() != 44 || square.indices().len() != 6 || triangle.indices().len() != 3 {
+            ret 2
+        }
+        let normal = gizmo_handle_normal(id)
+        let point = gizmo_handle_vector(id).scale(0.20)
+        if gizmo_extra_hit(point.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 1) != id || gizmo_extra_hit(point.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 3) != id {
+            ret 3
+        }
+        let outside = gizmo_handle_vector(id).scale(0.50)
+        if gizmo_extra_hit(outside.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 3) != 0 || gizmo_extra_hit(outside.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 1) != id {
+            ret 4
+        }
+        // The former distant area is empty, and the axis strip stays clear.
+        let old_area = gizmo_handle_vector(id).scale(0.70)
+        let axis_strip = if id == 4 {
+            Vec3::new(0.40, 0.06, 0)
+        } elif id == 5 {
+            Vec3::new(0.40, 0, 0.06)
+        } else {
+            Vec3::new(0, 0.40, 0.06)
+        }
+        if gizmo_extra_hit(old_area.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 1) != 0 || gizmo_extra_hit(old_area.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 3) != 0 || gizmo_extra_hit(axis_strip.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 1) != 0 {
+            ret 16
+        }
+        // The center retains priority where the inward corners overlap it.
+        let center = gizmo_handle_vector(id).scale(0.11)
+        if gizmo_extra_hit(center.add(normal.scale(3)), normal.scale( - 1), Vec3::zero(), 1, 1) != 7 {
+            ret 17
+        }
+        let raw = gizmo_handle_components(Vec3::new(0.6, - 0.6, 1.1), id)
+        let target = projection.project(pivot.add(raw)).unwrap_or(screen)
+        let mut gesture = GizmoGesture::begin("move", id, projection, pivot, screen.x(), screen.y(), snap)
+        if !gesture.active() || gesture.update(screen.x(), screen.y()) {
+            ret 5
+        }
+        let _moved = gesture.update(target.x(), target.y())
+        let expected = gizmo_handle_components(Vec3::new(0.5, - 0.5, 1), id)
+        if !same(gesture.translation(), expected) {
+            ret 6
+        }
+        let mut scaling = GizmoGesture::begin("scale", id, projection, pivot, screen.x(), screen.y(), snap)
+        if !scaling.active() {
+            ret 7
+        }
+        let _scaled = scaling.update(screen.x() + 31, screen.y() - 23)
+        let factor = 1 + scaling.applied()
+        let result = gizmo_handle_scale(Vec3::new(2, 3, 4), id, factor)
+        for axis in 1..4 {
+            let unit = gizmo_handle_vector(axis as u32)
+            let old = Vec3::new(2, 3, 4).dot(unit)
+            if !close(result.dot(unit), old * if gizmo_handle_contains(id, axis as u32) {
+                    factor
+                } else {
+                    1_f32
+                }
+                ,
+            ) {
+                ret 8
+            }
+        }
+    }
+    if gizmo_extra_hit(Vec3::new(3, 3, 3), Vec3::new( - 1, - 1, - 1).normalized(), Vec3::zero(), 0.65, 1) != 7 || gizmo_extra_hit(Vec3::new(3, 3, 3), Vec3::new( - 1, - 1, - 1).normalized(), Vec3::zero(), 0.65, 2) != 0 {
+        ret 9
+    }
+    if gizmo_extra_hit(Vec3::new(0.5, 0.5, 4), Vec3::new(1, 0, 0), Vec3::zero(), 1, 1) != 0 {
+        ret 10
+    }
+    snap.toggle("move")
+    let mut free = GizmoGesture::begin("move", 7, projection, pivot, screen.x(), screen.y(), snap)
+    let _moved = free.update(screen.x() + 30, screen.y() - 20)
+    let forward = Vec3::zero().sub(Vec3::from_spherical(yaw, pitch)).normalized()
+    if !free.active() || !close(free.translation().dot(forward), 0) {
+        ret 11
+    }
+    let before = free.translation()
+    free.adjust_depth(1)
+    let _depth = free.update(screen.x() + 30, screen.y() - 20)
+    if free.translation().sub(before).dot(forward) >= - 0.1 {
+        ret 12
+    }
+    let mut uniform = GizmoGesture::begin("scale", 7, projection, pivot, screen.x(), screen.y(), snap)
+    let _scaled = uniform.update(screen.x() + 30, screen.y() - 30)
+    let result = gizmo_handle_scale(Vec3::new(2, 3, - 4), 7, 1 + uniform.applied())
+    if !close(result.x() / 2, result.y() / 3) || !close(result.y() / 3, result.z() / - 4) {
+        ret 13
+    }
+    let _negative = uniform.update(screen.x() - 1000, screen.y() + 1000)
+    uniform.limit_scale(2)
+    if 1 + uniform.applied() < 0.0499 {
+        ret 14
+    }
+    let edge = GizmoProjection::new(Vec3::new(5, 0, 0), 1.5707963, 0, 1.0471976, 800, 600)
+    if GizmoGesture::begin("move", 4, edge, Vec3::zero(), 400, 300, snap).active() || GizmoGesture::begin("rotate", 7, projection, pivot, screen.x(), screen.y(), snap).active() {
+        ret 15
+    }
+    ret 0
+}

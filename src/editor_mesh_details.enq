@@ -1,0 +1,86 @@
+import mod::lod_groups::LodGroups
+//! Shared mesh-asset controls shown for a selected asset or one of its actors.
+import core::vec::Vec
+import luma::{Widget, SvgDocument, property_row, horizontal, vertical}
+import mod::autolod_settings::AutoLodSettings
+import mod::project_assets::ImportedMeshAsset
+import mod::scene::renderable::MeshId
+
+pub struct MeshDetails {
+    path: str
+    name: str
+    mesh: MeshId
+    source_triangles: usize
+    settings: AutoLodSettings
+    statistics: str
+    disabled: bool
+}
+
+impl for MeshDetails {
+    pub fn new() -> Self {
+        ret Self {
+            "", "", MeshId::new(0), 0, AutoLodSettings::defaults(), "", false
+        }
+    }
+    pub fn sync(self: mut Self, assets: Vec[ImportedMeshAsset], gpu: Vec[MeshId], selected_asset: str, actor_mesh: str, disabled: bool) ->() {
+        self.disabled = disabled
+        let mut path = ""
+        for index in 0_usize..assets.len() {
+            let asset = assets.get_unchecked_borrowed(index)
+            if selected_asset == "asset-imported-mesh-" + index.fmt() ||(selected_asset == "" && actor_mesh != "" && asset.name() == actor_mesh) {
+                path = asset.project_path()
+                if path != self.path {
+                    self.settings = AutoLodSettings::load(path)
+                    self.name = asset.name()
+                    self.source_triangles = asset.mesh().index_count() / 3_usize
+                    self.statistics = "Waiting for rendered frame"
+                }
+                self.mesh = gpu.get(index).unwrap_or(MeshId::new(0))
+                break
+            }
+        }
+        self.path = path
+    }
+    pub fn available(self: Self) -> bool {
+        ret self.path != ""
+    }
+    pub fn statistics_widget(self: Self) -> Widget {
+        ret Widget::label(self.statistics).with_text_wrap(true).with_id("autolod-mesh-statistics").with_classes("g-autolod-runtime")
+    }
+    pub fn widget(self: Self, groups: LodGroups) -> Widget {
+        let mut content = Widget::panel("autolod-properties").with_classes("g-property-content").with_direction(vertical())
+        content.push(property_row("autolod-enabled-row", "AutoLOD", Widget::button("autolod-enabled", if self.settings.enabled {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    }
+                    ,
+                )
+                .with_classes("g-autolod-toggle" + if self.settings.enabled {
+                        " state-active"
+                    } else {
+                        ""
+                    }
+                )
+                .with_attribute("aria-pressed", if self.settings.enabled {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                    ,
+                ).with_disabled(self.disabled),))
+        let mut controls = Widget::panel("autolod-group-controls").with_classes("g-autolod-quality").with_direction(horizontal())
+        let mut selector = Widget::button("ui-autolod-group", "").with_direction(horizontal()).with_classes("g-autolod-group").with_attribute("aria-haspopup", "menu").with_attribute("aria-label", "LOD group: " + groups.resolve(self.settings.group_id).name).with_disabled(self.disabled || !self.settings.enabled)
+        selector.push(Widget::label(groups.resolve(self.settings.group_id).name).with_classes("g-autolod-group-name"))
+        selector.push(Widget::icon("", SvgDocument::parse("<svg width=\"12\" height=\"12\" viewBox=\"0 0 12 12\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"M 3 4.5 L 6 7.5 L 9 4.5\"/></svg>")).with_classes("g-snap-chevron"))
+        controls.push(selector)
+        controls.push(Widget::button("autolod-edit-group", "…").with_classes("g-property-menu").with_attribute("aria-label", "Edit LOD group").with_disabled(self.disabled))
+        content.push(property_row("autolod-group-row", "LOD Group", controls))
+        if groups.find(self.settings.group_id).is_none() && groups.resolve(self.settings.group_id).id == "default" && self.settings.group_id != "default" {
+            content.push(Widget::label("Missing group · using Default").with_classes("g-lod-message"))
+        }
+        content.push(self.statistics_widget())
+        content.push(Widget::label("Drawn after culling · min = simplification limit").with_classes("g-autolod-help"))
+        ret content
+    }
+}

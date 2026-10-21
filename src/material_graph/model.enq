@@ -1,0 +1,273 @@
+//! Material expression documents are independent of Blueprint execution graphs.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+
+pub struct MaterialNode {
+    id: u64
+    operation: str
+    kind: str
+    value: Vec3
+    x: f32
+    y: f32
+}
+pub struct MaterialEndpoint {
+    node: u64
+    pin: str
+}
+pub struct MaterialLink {
+    source: MaterialEndpoint
+    target: MaterialEndpoint
+}
+pub enum MaterialDomain {
+    Surface
+    Sky
+    Volume
+    Particle
+}
+
+impl for MaterialDomain {
+    pub fn key(self: Self) -> str {
+        ret match self {
+            Surface => "surface" Sky => "sky" Volume => "volume" Particle => "particle"
+        }
+    }
+    pub fn parse(key: str) -> Option[Self] {
+        ret match key {
+            "surface" => Option::Some(Self::Surface) "sky" => Option::Some(Self::Sky) "volume" => Option::Some(Self::Volume) "particle" => Option::Some(Self::Particle) _ => Option::None
+        }
+    }
+}
+pub fn material_polymorphic(node: MaterialNode) -> bool {
+    ret node.operation == "add" || node.operation == "multiply" || node.operation == "subtract" || node.operation == "divide" || node.operation == "lerp" || node.operation == "clamp" || node.operation == "step" || node.operation == "gradient"
+}
+pub fn material_has_value(node: MaterialNode) -> bool {
+    ret node.operation == "scalar" || node.operation == "color" || node.operation == "noise" || material_polymorphic(node)
+}
+pub fn material_is_output(node: MaterialNode) -> bool {
+    ret node.operation == "output" || node.operation == "output-sky" || node.operation == "output-volume" || node.operation == "output-particle"
+}
+pub struct MaterialGraph {
+    name: str
+    domain: MaterialDomain
+    nodes: Vec[MaterialNode]
+    links: Vec[MaterialLink]
+}
+pub struct MaterialPin {
+    key: str
+    kind: str
+    output: bool
+}
+pub struct MaterialDiagnostic {
+    node: u64
+    pin: str
+    message: str
+}
+
+pub fn material_operations() -> Vec[str] {
+    ret vec!["scalar", "color", "add", "multiply", "subtract", "divide", "lerp", "clamp", "step", "noise", "gradient", "world-position", "view-direction", "uv", "time", "time-of-day", "sun-direction", "moon-direction", "wind", "cloudiness", "rain", "snow", "fog", "wetness", "snow-coverage", "temperature", "sky-light"]
+}
+pub fn material_node_title(operation: str) -> str {
+    ret match operation {
+        "scalar" => "Scalar" "color" => "Color" "add" => "Add" "multiply" => "Multiply"
+        "output" => "Surface Output" "output-sky" => "Sky Output" "output-volume" => "Volume Output" "output-particle" => "Particle Output"
+        "subtract" => "Subtract" "divide" => "Divide" "lerp" => "Lerp" "clamp" => "Clamp 0–1" "step" => "Stepped color" "noise" => "3D Noise" "gradient" => "Gradient"
+        "world-position" => "World Position" "view-direction" => "View Direction" "uv" => "UV" "time" => "Time" "time-of-day" => "Time of Day"
+        "sun-direction" => "Sun Direction" "moon-direction" => "Moon Direction" "wind" => "Wind" "cloudiness" => "Cloud Cover" "rain" => "Rain" "snow" => "Snow"
+        "fog" => "Fog" "wetness" => "Wetness" "snow-coverage" => "Snow Coverage" "temperature" => "Temperature" "sky-light" => "Sky Light" _ => "Unknown Expression"
+    }
+}
+pub fn material_pins(node: MaterialNode) -> Vec[MaterialPin] {
+    if node.operation == "output-sky" {
+        ret vec![MaterialPin { "radiance", "vec3", false }]
+    }
+    if node.operation == "output-volume" {
+        ret vec![MaterialPin { "scattering", "vec3", false }, MaterialPin {
+                "density", "scalar", false
+            }
+            , MaterialPin {
+                "emission", "vec3", false
+            }
+        ]
+    }
+    if node.operation == "output-particle" {
+        ret vec![MaterialPin { "color", "vec3", false }, MaterialPin {
+                "opacity", "scalar", false
+            }
+            , MaterialPin {
+                "emission", "vec3", false
+            }
+        ]
+    }
+    if node.operation == "output" {
+        ret vec![MaterialPin { "base_color", "vec3", false }, MaterialPin {
+                "metallic", "scalar", false
+            }
+            , MaterialPin {
+                "roughness", "scalar", false
+            }
+        ]
+    }
+    if node.operation == "scalar" {
+        ret vec![MaterialPin { "value", "scalar", true }]
+    }
+    if node.operation == "color" {
+        ret vec![MaterialPin { "value", "vec3", true }]
+    }
+    if node.operation == "lerp" {
+        ret vec![MaterialPin { "a", node.kind, false }, MaterialPin {
+                "b", node.kind, false
+            }
+            , MaterialPin {
+                "weight", "scalar", false
+            }
+            , MaterialPin {
+                "value", node.kind, true
+            }
+        ]
+    }
+    if node.operation == "clamp" || node.operation == "step" || node.operation == "gradient" {
+        ret vec![MaterialPin {
+                "a", node.kind, false
+            }
+            , MaterialPin {
+                "value", node.kind, true
+            }
+        ]
+    }
+    if node.operation == "noise" {
+        ret vec![MaterialPin { "position", "vec3", false }, MaterialPin {
+                "value", "scalar", true
+            }
+        ]
+    }
+    if node.operation == "add" || node.operation == "multiply" || node.operation == "subtract" || node.operation == "divide" {
+        ret vec![MaterialPin { "a", node.kind, false }, MaterialPin { "b", node.kind, false }, MaterialPin {
+                "value", node.kind, true
+            }
+        ]
+    }
+    for operation in material_operations() {
+        if operation == node.operation {
+            ret vec![MaterialPin {
+                    "value", node.kind, true
+                }
+            ]
+        }
+    }
+    ret Vec[MaterialPin]::new()
+}
+pub fn material_pin(node: MaterialNode, key: str, output: bool) -> Option[MaterialPin] {
+    for pin in material_pins(node) {
+        if pin.key == key && pin.output == output {
+            ret Option::Some(pin)
+        }
+    }
+    ret Option::None
+}
+
+impl for MaterialNode {
+    pub fn new(id: u64, operation: str, x: f32, y: f32) -> MaterialNode {
+        ret MaterialNode {
+            id, operation, if operation == "color" || operation == "output" || operation == "world-position" || operation == "view-direction" || operation == "uv" || operation == "sun-direction" || operation == "moon-direction" || operation == "wind" || operation == "sky-light" {
+                "vec3"
+            } else {
+                "scalar"
+            }
+            ,
+            if operation == "color" {
+                Vec3::new(0.12, 0.35, 0.8)
+            } else {
+                Vec3::new(0.5, 0.5, 0.5)
+            }
+            , x, y
+        }
+    }
+    pub fn at(self: Self, x: f32, y: f32) -> Self {
+        ret MaterialNode {
+            self.id, self.operation, self.kind, self.value, x, y
+        }
+    }
+    pub fn with_value(self: Self, value: Vec3) -> Self {
+        ret MaterialNode {
+            self.id, self.operation, self.kind, value, self.x, self.y
+        }
+    }
+    pub fn with_kind(self: Self, kind: str) -> Self {
+        ret MaterialNode {
+            self.id, self.operation, kind, self.value, self.x, self.y
+        }
+    }
+}
+
+impl for MaterialGraph {
+    pub fn default() -> MaterialGraph {
+        ret MaterialGraph {
+            "M_Graph", MaterialDomain::Surface, vec![MaterialNode::new(1, "color", 40, 70), MaterialNode::new(2, "scalar", 40, 230), MaterialNode::new(3, "output", 390, 100)],
+            vec![MaterialLink {
+                    MaterialEndpoint { 1, "value" }, MaterialEndpoint {
+                        3, "base_color"
+                    }
+                }
+                ,
+                MaterialLink {
+                    MaterialEndpoint { 2, "value" }, MaterialEndpoint { 3, "roughness" }
+                }
+            ]
+        }
+    }
+    pub fn with_domain(self: Self, domain: MaterialDomain) -> Self {
+        let mut graph = self.snapshot() graph.domain = domain
+        for index in 0..graph.nodes.len() {
+            let mut node = graph.nodes.get(index).unwrap_or(MaterialNode::new(0, "", 0, 0))
+            if material_is_output(node) {
+                node.operation = if domain.key() == "surface" {
+                    "output"
+                } else {
+                    "output-" + domain.key()
+                }
+                graph.nodes.set(index, node)
+            }
+        }
+        let mut links = Vec[MaterialLink]::new()
+        for link in graph.links {
+            match graph.node(link.target.node) {
+                Some(node) => {
+                    if material_pin(node, link.target.pin, false).is_some() {
+                        links.push(link)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        graph.links = links ret graph
+    }
+    pub fn node(self: Self, id: u64) -> Option[MaterialNode] {
+        for node in self.nodes {
+            if node.id == id {
+                ret Option::Some(node)
+            }
+        }
+        ret Option::None
+    }
+    pub fn next_id(self: Self) -> u64 {
+        let mut id = 1_u64
+        for node in self.nodes {
+            if node.id >= id {
+                id = node.id + 1
+            }
+        }
+        ret id
+    }
+    pub fn snapshot(self: Self) -> Self {
+        let mut nodes = Vec[MaterialNode]::new() let mut links = Vec[MaterialLink]::new()
+        for node in self.nodes {
+            nodes.push(node)
+        }
+        for link in self.links {
+            links.push(link)
+        }
+        ret MaterialGraph { self.name, self.domain, nodes, links }
+    }
+}

@@ -1,0 +1,123 @@
+//! Integrate root motion through arbitrary forward/reverse loop crossings.
+//! Extraction is independent of pose sampling frequency and view count.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{PoseRotation, PoseVector, LocalTransform, PoseMatrix}
+import mod::model::{AnimationClip, Skeleton, TrackPath}
+import mod::player::{playback_floor, playback_time_valid}
+import mod::pose::AnimationPose
+import mod::sample::sample_track
+
+pub struct RootMotionDelta {
+    translation: PoseVector
+    rotation: PoseRotation
+}
+
+impl for RootMotionDelta {
+    pub fn identity() -> Self {
+        ret Self { PoseVector::zero(), PoseRotation::identity() }
+    }
+    pub fn mul(self: Self, b: Self) -> Self {
+        ret Self {
+            self.translation.add(self.rotation.rotate(b.translation)), self.rotation.mul(b.rotation)
+        }
+    }
+    pub fn inverse(self: Self) -> Self {
+        let r = self.rotation.inverse() ret Self {
+            r.rotate(self.translation.scaled( - 1_f32)), r
+        }
+    }
+    pub fn power(self: Self, exponent: i64) -> Self {
+        let mut n = if exponent < 0_i64 {
+            - exponent
+        } else {
+            exponent
+        }
+        let mut base = if exponent < 0_i64 {
+            self.inverse()
+        } else {
+            self
+        }
+        let mut result = Self::identity()
+        while n > 0_i64 {
+            if n % 2_i64 == 1_i64 {
+                result = result.mul(base)
+            }
+            n /= 2_i64 if n > 0_i64 {
+                base = base.mul(base)
+            }
+        }
+        ret result
+    }
+}
+fn local_sample(clip: AnimationClip, rest: LocalTransform, bone: u32, time: f32) -> LocalTransform {
+    let mut local = rest
+    for track in clip.tracks {
+        if track.target == bone {
+            match track.path {
+                TrackPath::Translation => {
+                    local.translation = sample_track(track, time).vector()
+                }
+                TrackPath::Rotation => {
+                    local.rotation = sample_track(track, time).rotation().normalized()
+                }
+                TrackPath::Scale => {
+                    local.scale = sample_track(track, time).vector()
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    ret local
+}
+/// A root-motion bone may sit below scene/armature nodes. Translation includes
+/// their complete affine transforms; orientation composes the authored rotations.
+pub fn root_motion_pose(clip: AnimationClip, skeleton: Skeleton, bone: u32, time: f32) -> RootMotionDelta {
+    let source = skeleton.bones.get_unchecked_borrowed(bone as usize)
+    let local = local_sample(clip, source.rest, bone, time)
+    let mut matrix = PoseMatrix::from_local(local) let mut rotation = local.rotation let mut parent = source.parent
+    while parent >= 0_i32 {
+        let source = skeleton.bones.get_unchecked_borrowed(parent as usize)
+        let local = local_sample(clip, source.rest, parent as u32, time)
+        matrix = PoseMatrix::from_local(local).mul(matrix) rotation = local.rotation.mul(rotation) parent = source.parent
+    }
+    ret RootMotionDelta { matrix.translation(), rotation.normalized() }
+}
+pub fn remove_root_motion(skeleton: Skeleton, pose: AnimationPose, model: mut Vec[PoseMatrix], bone: u32, origin: RootMotionDelta) ->() {
+    let mut rotation = pose.local(bone as usize).rotation let mut parent = skeleton.bones.get_unchecked_borrowed(bone as usize).parent
+    while parent >= 0_i32 {
+        rotation = pose.local(parent as usize).rotation.mul(rotation) parent = skeleton.bones.get_unchecked_borrowed(parent as usize).parent
+    }
+    let current = RootMotionDelta {
+        model.get_unchecked_borrowed(bone as usize).translation(), rotation.normalized()
+    }
+    let cancel = current.mul(origin.inverse()).inverse()
+    let matrix = PoseMatrix::from_local(LocalTransform {
+            cancel.translation, cancel.rotation, PoseVector::one()
+        }
+        ,
+    )
+    for i in 0_usize..model.len() {
+        model.set(i, matrix.mul(model.get_unchecked_borrowed(i)))
+    }
+}
+pub fn extract_root_motion(clip: AnimationClip, skeleton: Skeleton, bone: u32, previous: f64, current: f64, looping: bool) -> Result[RootMotionDelta, str] {
+    if clip.skeleton != skeleton.identity || bone as usize >= skeleton.bones.len() || !playback_time_valid(previous, clip.duration) || !playback_time_valid(current, clip.duration) {
+        ret Result::Err("Invalid root-motion extraction")
+    }
+    let start = root_motion_pose(clip, skeleton, bone, 0_f32)
+    if !looping || clip.duration <= 0_f32 {
+        ret Result::Ok(start.mul(root_motion_pose(clip, skeleton, bone, previous as f32).inverse()).mul(root_motion_pose(clip, skeleton, bone, current as f32)).mul(start.inverse()))
+    }
+    let duration = clip.duration as f64
+    let previous_cycle = playback_floor(previous / duration) let current_cycle = playback_floor(current / duration)
+    let previous_local =(previous -(previous_cycle as f64) * duration) as f32
+    let current_local =(current -(current_cycle as f64) * duration) as f32
+    let cycle = root_motion_pose(clip, skeleton, bone, clip.duration).mul(start.inverse())
+    let a = root_motion_pose(clip, skeleton, bone, previous_local).mul(start.inverse())
+    let b = root_motion_pose(clip, skeleton, bone, current_local).mul(start.inverse())
+    // Integrate only the cycles crossed by this step. Absolute C^n transforms
+    // lose sub-frame motion after long playback due to float cancellation.
+    ret Result::Ok(a.inverse().mul(cycle.power(current_cycle - previous_cycle)).mul(b))
+}

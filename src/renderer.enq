@@ -3,21 +3,40 @@ import core::option::Option
 import core::vec::Vec
 import linalg::{Mat4, Vec3}
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
-import mod::rhi:: *
+import mod::rhi::*
 import mod::scene::camera::PerspectiveCamera
 import mod::scene::light::DirectionalLight
 import mod::scene::renderable::RenderItem
 import mod::scene::world::Scene
+import mod::temporal_view::TemporalView
 import std::io::println
 
 pub struct ObjectUniforms {
-    buffers: Vec[GpuBuffer] groups: Vec[BindGroup] frame_count: u32 available: bool
+    buffers: Vec[GpuBuffer]
+    groups: Vec[BindGroup]
+    frame_count: u32
+    available: bool
 }
 pub struct SceneRenderer {
-    device: GraphicsDevice layout: BindGroupLayout frame_count: u32
-    frame_buffers: Vec[GpuBuffer] instance_buffers: Vec[GpuBuffer] groups: Vec[BindGroup]
-    solid_pipeline: RenderPipeline double_sided_pipeline: RenderPipeline
-    rendered_objects: usize available: bool indirect_ambient: Vec3
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    frame_count: u32
+    frame_buffers: Vec[GpuBuffer]
+    instance_buffers: Vec[GpuBuffer]
+    groups: Vec[BindGroup]
+    solid_pipeline: RenderPipeline
+    double_sided_pipeline: RenderPipeline
+    rendered_objects: usize
+    available: bool
+    indirect_ambient: Vec3
+    frame_values: Vec[f32]
+    instance_values: Vec[f32]
+    gi_buffers: Vec[GpuBuffer]
+    light_values: Vec[f32]
+    temporal: bool
+    temporal_view: TemporalView<H>
+    sky_entity: u64
+    shelter_texture: GpuTexture
 }
 
 impl for ObjectUniforms {
@@ -104,10 +123,10 @@ impl for SceneRenderer {
         solid_pipeline.available() && double_sided_pipeline.available()
         let mut slot = 0_u32
         while slot < frame_count {
-            let frame_buffer = device.create_buffer(128_u64, buffer_uniform(), true)
+            let frame_buffer = device.create_buffer(12752_u64, buffer_uniform(), true)
             let instance_buffer = device.create_buffer(98304_u64, buffer_storage(), true)
             let group = device.create_scene_bind_group(
-                layout, 0_u32, frame_buffer, 128_u64, 1_u32, instance_buffer, 98304_u64,)
+                layout, 0_u32, frame_buffer, 12752_u64, 1_u32, instance_buffer, 98304_u64,)
             if !frame_buffer.available() || !instance_buffer.available() || !group.available() {
                 available = false
             }
@@ -119,13 +138,15 @@ impl for SceneRenderer {
         ret SceneRenderer {
             device, layout, frame_count, frame_buffers, instance_buffers, groups,
             solid_pipeline, double_sided_pipeline, 0_usize, available,
-            Vec3::new(0.28_f32, 0.28_f32, 0.28_f32)
+            Vec3::new(0.28_f32, 0.28_f32, 0.28_f32),
+            Vec[f32]::with_capacity(32_usize), Vec[f32]::new(), Vec[GpuBuffer]::new(), Vec[f32]::new(), false, TemporalView::new(), 0_u64, GpuTexture::unavailable()
         }
     }
     pub fn create_with_gi(device: GraphicsDevice, layout: BindGroupLayout,
         frame_count: u32, solid_pipeline: RenderPipeline,
         double_sided_pipeline: RenderPipeline,
-        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,) ->
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
+        texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler,) ->
     SceneRenderer {
         let mut frame_buffers = Vec[GpuBuffer]::new()
         let mut instance_buffers = Vec[GpuBuffer]::new()
@@ -136,8 +157,8 @@ impl for SceneRenderer {
         gi_surfaces.available() && gi_history.available()
         let mut slot = 0_u32
         while slot < frame_count {
-            let frame_buffer = device.create_buffer(128_u64, buffer_uniform(), true)
-            let instance_buffer = device.create_buffer(98304_u64, buffer_storage(), true)
+            let frame_buffer = device.create_buffer(12752_u64, buffer_uniform(), true)
+            let instance_buffer = device.create_buffer(196608_u64, buffer_storage(), true)
             let mut bindings = Vec[u32]::new()
             bindings.push(0_u32) bindings.push(1_u32) bindings.push(2_u32)
             bindings.push(3_u32) bindings.push(4_u32)
@@ -148,11 +169,11 @@ impl for SceneRenderer {
             offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
             offsets.push(0_u64) offsets.push(0_u64)
             let mut ranges = Vec[u64]::new()
-            ranges.push(128_u64) ranges.push(98304_u64)
+            ranges.push(12752_u64) ranges.push(196608_u64)
             ranges.push(gi_scene.size()) ranges.push(gi_surfaces.size())
             ranges.push(gi_history.size())
-            let group = device.create_buffer_bind_group_many(
-                layout, bindings, buffers, offsets, ranges,)
+            let group = device.create_buffer_textures_bind_group_many(
+                layout, bindings, buffers, offsets, ranges, vec![5_u32, 6_u32, 7_u32], vec![texture, normal, texture], vec![sampler, sampler, sampler],)
             if !frame_buffer.available() || !instance_buffer.available() ||
             !group.available() {
                 available = false
@@ -165,14 +186,57 @@ impl for SceneRenderer {
         ret SceneRenderer {
             device, layout, frame_count, frame_buffers, instance_buffers, groups,
             solid_pipeline, double_sided_pipeline, 0_usize, available,
-            Vec3::new(0.28_f32, 0.28_f32, 0.28_f32)
+            Vec3::new(0.28_f32, 0.28_f32, 0.28_f32),
+            Vec[f32]::with_capacity(32_usize), Vec[f32]::new(), vec![gi_scene, gi_surfaces, gi_history], Vec[f32]::new(), false, TemporalView::new(), 0_u64, texture
         }
+    }
+    /// Prepares replacement descriptor sets without mutating in-flight ones.
+    pub fn set_shelter_texture(self: mut Self, texture: GpuTexture) ->() {
+        self.shelter_texture = texture
+    }
+    pub fn texture_groups(self: Self, texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler) -> Vec[BindGroup] {
+        let mut groups = Vec[BindGroup]::new()
+        for slot in 0..self.groups.len() {
+            let mut buffers = Vec[GpuBuffer]::new()
+            buffers.push(self.frame_buffers.get(slot).unwrap_or(GpuBuffer::unavailable()))
+            buffers.push(self.instance_buffers.get(slot).unwrap_or(GpuBuffer::unavailable()))
+            for buffer in self.gi_buffers {
+                buffers.push(buffer)
+            }
+            let mut bindings = Vec[u32]::new()
+            let mut offsets = Vec[u64]::new()
+            let mut ranges = Vec[u64]::new()
+            for index in 0..buffers.len() {
+                bindings.push(index as u32) offsets.push(0)
+                ranges.push(buffers.get(index).unwrap_or(GpuBuffer::unavailable()).size())
+            }
+            let group = self.device.create_buffer_textures_bind_group_many(
+                self.layout, bindings, buffers, offsets, ranges, vec![5_u32, 6_u32, 7_u32], vec![texture, normal, self.shelter_texture], vec![sampler, sampler, sampler],)
+            if !group.available() {
+                group.destroy()
+                for previous in groups {
+                    previous.destroy()
+                }
+                ret Vec[BindGroup]::new()
+            }
+            groups.push(group)
+        }
+        ret groups
+    }
+    pub fn replace_texture_groups(self: mut Self, groups: Vec[BindGroup]) -> Vec[BindGroup] {
+        let previous = self.groups self.groups = groups ret previous
     }
     pub fn available(self: Self) -> bool {
         ret self.available
     }
     pub fn object_count(self: Self) -> usize {
         ret self.rendered_objects
+    }
+    pub fn set_sky_entity(self: mut Self, entity: u64) ->() {
+        self.sky_entity = entity
+    }
+    pub fn set_lights(self: mut Self, values: Vec[f32]) ->() {
+        self.light_values = values
     }
     pub fn set_indirect_ambient(self: mut Self, value: Vec3) ->() {
         self.indirect_ambient = value
@@ -199,30 +263,69 @@ impl for SceneRenderer {
             ret false
         }
         self.rendered_objects = items.len()
-        let mut frame_values = Vec[f32]::with_capacity(24_usize)
+        // CPU staging storage is reusable once write_f32s has copied it into
+        // the selected frame slot's mapped GPU buffer.
+        self.frame_values.clear()
         for value in camera.view_projection(aspect).values() {
-            frame_values.push(value)
+            self.frame_values.push(value)
         }
         for value in light.uniform_values() {
-            frame_values.push(value)
+            self.frame_values.push(value)
         }
-        frame_values.push(self.indirect_ambient.x())
-        frame_values.push(self.indirect_ambient.y())
-        frame_values.push(self.indirect_ambient.z())
-        frame_values.push(1.0_f32)
-        frame_values.push(camera.position().x())
-        frame_values.push(camera.position().y())
-        frame_values.push(camera.position().z())
-        frame_values.push(1.0_f32)
-        let mut instance_values = Vec[f32]::with_capacity(items.len() * 24_usize)
+        self.frame_values.push(self.indirect_ambient.x())
+        self.frame_values.push(self.indirect_ambient.y())
+        self.frame_values.push(self.indirect_ambient.z())
+        self.frame_values.push(1.0_f32)
+        self.frame_values.push(camera.position().x())
+        self.frame_values.push(camera.position().y())
+        self.frame_values.push(camera.position().z())
+        self.frame_values.push(1.0_f32)
+        if self.light_values.len() == 3140_usize {
+            for value in self.light_values {
+                self.frame_values.push(value)
+            }
+        } else {
+            while self.frame_values.len() < 3172_usize {
+                self.frame_values.push(0.0_f32)
+            }
+        }
+        if self.temporal {
+            for value in self.temporal_view.view_projection().values() {
+                self.frame_values.push(value)
+            }
+        }
+        self.instance_values.clear()
+        self.instance_values.reserve(items.len() * 28_usize)
         for item in items {
             match materials.get(item.material()) {
                 Option::Some(material) => {
                     for value in item.world().values() {
-                        instance_values.push(value)
+                        self.instance_values.push(value)
                     }
+                    let material_start = self.instance_values.len()
                     for value in material.uniform_values() {
-                        instance_values.push(value)
+                        self.instance_values.push(value)
+                    }
+                    if item.entity() == self.sky_entity {
+                        self.instance_values.set(material_start + 6_usize, 2.0_f32)
+                    }
+                    if self.gi_buffers.len() > 0 {
+                        for value in material.texture_uniform_values() {
+                            self.instance_values.push(value)
+                        }
+                    }
+                    if self.temporal {
+                        let previous = self.temporal_view.previous(item)
+                        for value in previous.0.values() {
+                            self.instance_values.push(value)
+                        }
+                        self.instance_values.push(if previous.1 {
+                                1.0_f32
+                            } else {
+                                0.0_f32
+                            }
+                        )
+                        self.instance_values.push(0.0_f32) self.instance_values.push(0.0_f32) self.instance_values.push(0.0_f32)
                     }
                 }
                 Option::None => {
@@ -235,14 +338,14 @@ impl for SceneRenderer {
             Option::Some(frame_buffer) => {
                 match self.instance_buffers.get(frame_slot as usize) {
                     Option::Some(instance_buffer) => {
-                        let frame_uploaded = frame_buffer.write_f32s(0_u64, frame_values)
-                        let instances_uploaded = instance_buffer.write_f32s(0_u64, instance_values)
+                        let frame_uploaded = frame_buffer.write_f32s(0_u64, self.frame_values)
+                        let instances_uploaded = instance_buffer.write_f32s(0_u64, self.instance_values)
                         if !frame_uploaded {
                             println("Graphene scene render: frame uniform write failed")
                         }
                         if !instances_uploaded {
                             println("Graphene scene render: instance storage write failed values=" +
-                                Debug::fmt(instance_values.len()) + " bytes=" +
+                                Debug::fmt(self.instance_values.len()) + " bytes=" +
                                 Debug::fmt(instance_buffer.size()))
                         }
                         uploaded = frame_uploaded && instances_uploaded
@@ -337,5 +440,11 @@ impl for SceneRenderer {
             }
         }
         ret destroyed
+    }
+}
+
+impl for SceneRenderer {
+    pub fn set_view_pipelines(self: mut Self, solid: RenderPipeline, double_sided: RenderPipeline, temporal: bool, view: TemporalView<H>) ->() {
+        self.solid_pipeline = solid self.double_sided_pipeline = double_sided self.temporal = temporal self.temporal_view.copy_from(view)
     }
 }

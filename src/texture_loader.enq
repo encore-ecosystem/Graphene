@@ -1,0 +1,55 @@
+//! One bounded CPU worker, with stale-result rejection when projects change.
+
+import core::option::Option
+import mod::texture_asset::{TextureLoad, load_material_texture}
+import std::thread::JoinHandle
+
+pub struct TextureLoader {
+    worker: Option[JoinHandle[TextureLoad]]
+    project: str
+    cancelled: bool
+    importing: bool
+}
+
+impl for TextureLoader {
+    pub fn new() -> Self {
+        ret Self { Option::None, "", false, false }
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.worker.is_some()
+    }
+    pub fn importing(self: Self) -> bool {
+        ret self.importing
+    }
+    pub fn cancel(self: mut Self) ->() {
+        self.cancelled = true
+    }
+    pub fn start(self: mut Self, project: str, path: str, importing: bool) -> bool {
+        if self.busy() {
+            ret false
+        }
+        self.project = project self.cancelled = false self.importing = importing
+        self.worker = Option[JoinHandle[TextureLoad]]::Some(spawn load_material_texture(project, path, importing))
+        ret true
+    }
+    pub fn poll(self: mut Self, project: str) -> Option[TextureLoad] {
+        let ready = match self.worker {
+            Option::Some(worker) => worker.is_finished()
+            Option::None => false
+        }
+        if !ready {
+            ret Option::None
+        }
+        let result = match self.worker {
+            Option::Some(worker) => worker.join()
+            Option::None => {
+                ret Option::None
+            }
+        }
+        self.worker = Option[JoinHandle[TextureLoad]]::None
+        if self.cancelled || self.project != project {
+            ret Option::None
+        }
+        ret Option::Some(result)
+    }
+}

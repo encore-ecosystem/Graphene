@@ -1,0 +1,550 @@
+//! Paint-only transform scales. No scene entities, SVG or hit-test widgets.
+import mod::editor_gizmo_handle::gizmo_handle_label
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import luma::{Color, DisplayList, DisplayPoint, Rect, Style, StyleSheet, Widget}
+import mod::editor_gesture::{GizmoGesture, gesture_axis, ring_basis, gizmo_sin, gizmo_cos}
+
+fn abs(value: f32) -> f32 {
+    ret if value < 0 {
+        - value
+    } else {
+        value
+    }
+}
+fn guide_clamp(value: f32, low: f32, high: f32) -> f32 {
+    ret if value < low {
+        low
+    } elif value > high {
+        high
+    } else {
+        value
+    }
+}
+fn scalar(value: f32) -> str {
+    let scaled =(abs(value) * 1000 + 0.5) as u64
+    let fraction = scaled % 1000
+    ret if value < 0 && scaled > 0 {
+        "-"
+    } else {
+        ""
+    }
+    + Debug::fmt(scaled / 1000) + "." +
+    if fraction < 10 {
+        "00"
+    } elif fraction < 100 {
+        "0"
+    } else {
+        ""
+    }
+    + Debug::fmt(fraction)
+}
+/// Stable short decimals for human-selected steps, not binary float expansion.
+pub fn gizmo_step_label(value: f32) -> str {
+    let mut text = scalar(value)
+    while text.byte_len() > 1 && text.byte_at(text.byte_len() - 1) == 48_u8 {
+        text = text.slice(0, text.byte_len() - 1)
+    }
+    if text.byte_at(text.byte_len() - 1) == 46_u8 {
+        text = text.slice(0, text.byte_len() - 1)
+    }
+    ret text
+}
+
+fn point(value: Vec3, bounds: Rect) -> DisplayPoint {
+    ret DisplayPoint::new(bounds.x() + value.x(), bounds.y() + value.y())
+}
+fn styled(sheet: StyleSheet, classes: str) -> Style {
+    ret sheet.apply(Widget::label("").with_classes(classes), "", "", "").style()
+}
+fn faded(color: Color, opacity: f32) -> Color {
+    ret Color::rgba(color.red(), color.green(), color.blue(),((color.alpha() as f32) * opacity) as u8)
+}
+
+/// CSS is evaluated once, not for each mouse sample.
+pub struct GizmoGuideStyle {
+    x: Style
+    y: Style
+    z: Style
+    tick: Style
+    ghost: Style
+    panel: Style
+    text: Style
+    sector: Style
+    ring: Style
+    ring_tick: Style
+    ring_label: Style
+    linear: Style
+    linear_shadow: Style
+    linear_label: Style
+}
+
+impl for GizmoGuideStyle {
+    pub fn from_sheet(sheet: StyleSheet) -> Self {
+        ret Self {
+            styled(sheet, "g-gizmo-guide axis-x"), styled(sheet, "g-gizmo-guide axis-y"),
+            styled(sheet, "g-gizmo-guide axis-z"), styled(sheet, "g-gizmo-tick"),
+            styled(sheet, "g-gizmo-ghost"), styled(sheet, "g-gizmo-readout"),
+            styled(sheet, "g-gizmo-caption"), styled(sheet, "g-gizmo-sector"),
+            styled(sheet, "g-gizmo-ring"), styled(sheet, "g-gizmo-ring-tick"),
+            styled(sheet, "g-gizmo-ring-label"), styled(sheet, "g-gizmo-linear"),
+            styled(sheet, "g-gizmo-linear-shadow"), styled(sheet, "g-gizmo-linear-label")
+        }
+    }
+    fn axis(self: Self, axis: u32) -> Style {
+        ret match axis {
+            1 => self.x 2 => self.y _ => self.z
+        }
+    }
+}
+
+fn marker(list: mut DisplayList, at: Vec3, normal: Vec3, size: f32, width: f32, color: Color, bounds: Rect) ->() {
+    let a = point(at.sub(normal.scale(size)), bounds)
+    let b = point(at.add(normal.scale(size)), bounds)
+    list.line(a.x(), a.y(), b.x(), b.y(), width, color)
+}
+
+fn linear_point(gesture: GizmoGesture, origin: Vec3, direction: Vec3, normal: Vec3, value: f32) -> Option[Vec3] {
+    if gesture.tool() == "scale" {
+        ret Option[Vec3]::Some(origin.add(direction.scale(value * 100)).add(normal.scale(32)))
+    }
+    match gesture.projection().project(gesture.pivot().add(gesture_axis(gesture.axis()).scale(value))) {
+        Option::Some(projected) => {
+            ret Option[Vec3]::Some(projected.add(normal.scale(32)))
+        }
+        Option::None => {
+            ret Option[Vec3]::None
+        }
+    }
+}
+
+// A readable 1/2/5 scale is independent of the chosen snapping step. Coarse
+// snapping must not erase all graduations; fine snapping must not crowd them.
+fn linear_tick_step(required: f32) -> f32 {
+    if !(required > 0) || !(required - required == 0) {
+        ret 1
+    }
+    let mut decade = 1.0_f32
+    while decade < required {
+        decade *= 10
+    }
+    while decade * 0.1 >= required {
+        decade *= 0.1
+    }
+    ret if decade * 0.2 >= required {
+        decade * 0.2
+    } elif decade * 0.5 >= required {
+        decade * 0.5
+    } else {
+        decade
+    }
+}
+
+fn linear_opacity(offset: f32, low: f32, high: f32) -> f32 {
+    let edge = if offset - low < high - offset {
+        offset - low
+    } else {
+        high - offset
+    }
+    ret guide_clamp(edge * 4 /(high - low), 0, 1)
+}
+
+// Two gradient wings and an unchanged middle. Interpolation happens in the
+// renderer, not through dozens of translucent overlapping short strokes.
+fn linear_stroke(list: mut DisplayList, base: Vec3, direction: Vec3,
+    first: f32, last: f32, low: f32, high: f32, width: f32, color: Color, bounds: Rect,) ->() {
+    let left = low +(high - low) * 0.25
+    let right = high -(high - low) * 0.25
+    let mut offset = first
+    while offset < last {
+        let boundary = if offset < left {
+            left
+        } elif offset < right {
+            right
+        } else {
+            high
+        }
+        let next = if boundary < last {
+            boundary
+        } else {
+            last
+        }
+        if next <= offset {
+            break
+        }
+        let a = point(base.add(direction.scale(offset)), bounds)
+        let b = point(base.add(direction.scale(next)), bounds)
+        list.gradient_line(a.x(), a.y(), b.x(), b.y(), width,
+            faded(color, linear_opacity(offset, low, high)),
+            faded(color, linear_opacity(next, low, high)),)
+        offset = next
+    }
+}
+
+fn linear_guide(list: mut DisplayList, gesture: GizmoGesture, bounds: Rect, style: GizmoGuideStyle) -> Option[Vec3] {
+    let projection = gesture.projection()
+    let origin = projection.project(gesture.pivot())
+    let end = projection.project(gesture.pivot().add(gesture_axis(gesture.axis())))
+    if origin.is_none() || end.is_none() {
+        ret Option[Vec3]::None
+    }
+    let start = origin.unwrap_or(Vec3::zero())
+    let projected = end.unwrap_or(start).sub(start)
+    let vector = Vec3::new(projected.x(), projected.y(), 0)
+    let largest = if abs(vector.x()) > abs(vector.y()) {
+        abs(vector.x())
+    } else {
+        abs(vector.y())
+    }
+    if largest < 0.01 {
+        ret Option[Vec3]::None
+    }
+    let scaled_vector = vector.scale(1 / largest)
+    let length = scaled_vector.length() * largest
+    let direction = scaled_vector.normalized()
+    let mut normal = Vec3::new( - direction.y(), direction.x(), 0)
+    // Keep the graduations and their horizontal labels on the lower/right
+    // side, rather than flipping their layout with the sign of the axis.
+    if normal.y() < - 0.01 ||(abs(normal.y()) <= 0.01 && normal.x() < 0) {
+        normal = normal.scale( - 1)
+    }
+    let units = if gesture.tool() == "scale" {
+        100.0_f32
+    } else {
+        length
+    }
+    let base = start.add(normal.scale(32))
+    let current = linear_point(gesture, start, direction, normal, gesture.applied()).unwrap_or(base)
+    let current_offset = current.sub(base).dot(direction)
+    let configured_span = if style.linear.layout().width() > 0 {
+        style.linear.layout().width()
+    } else {
+        240.0_f32
+    }
+    let available_span =(abs(direction.x()) * bounds.width() + abs(direction.y()) * bounds.height()) * 0.6
+    let span = if configured_span < available_span {
+        configured_span
+    } else {
+        available_span
+    }
+    if span <= 0 {
+        ret Option[Vec3]::None
+    }
+    let half = span * 0.5
+    // Include the start while it is nearby; on longer drags keep a short
+    // segment around the live value, rather than extending across the scene.
+    let inset = span * 0.075
+    let center_offset = guide_clamp(current_offset * 0.5,
+        current_offset - half + inset, current_offset + half - inset,)
+    let low_offset = center_offset - half
+    let high_offset = center_offset + half
+    let first = base.add(direction.scale(low_offset))
+    let last_point = base.add(direction.scale(high_offset))
+    let axis_style = style.axis(gesture.axis())
+    let color = faded(axis_style.foreground(), axis_style.opacity())
+    let shadow = faded(style.linear_shadow.foreground(), style.linear_shadow.opacity())
+    // A narrow dark under-stroke preserves contrast on bright objects without
+    // adding a solid panel or a second parallel measurement line.
+    linear_stroke(list, base, direction, low_offset, high_offset, low_offset, high_offset,
+        style.linear_shadow.border_width(), shadow, bounds,)
+    linear_stroke(list, base, direction, low_offset, high_offset, low_offset, high_offset,
+        style.linear.border_width(), faded(style.linear.foreground(), style.linear.opacity()), bounds,)
+    if abs(current_offset) > 0.5 {
+        let start_offset = guide_clamp(if current_offset < 0 {
+                current_offset
+            } else {
+                0.0_f32
+            }
+            , low_offset, high_offset,)
+        let end_offset = guide_clamp(if current_offset > 0 {
+                current_offset
+            } else {
+                0.0_f32
+            }
+            , low_offset, high_offset,)
+        linear_stroke(list, base, direction, start_offset, end_offset, low_offset, high_offset, 2, color, bounds)
+    }
+    let mut low = low_offset / units
+    let mut high = high_offset / units
+    if gesture.tool() == "move" {
+        // Map just the finite segment back to world-space tick values. Tick
+        // positions still use the exact captured perspective projection.
+        let plane = projection.axis_plane_normal(gesture.axis())
+        let first_axis = first.sub(normal.scale(32))
+        let last_axis = last_point.sub(normal.scale(32))
+        match projection.plane_point(first_axis.x(), first_axis.y(), gesture.pivot(), plane) {
+            Option::Some(world) => {
+                low = world.sub(gesture.pivot()).dot(gesture_axis(gesture.axis()))
+            }
+            Option::None => {
+            }
+        }
+        match projection.plane_point(last_axis.x(), last_axis.y(), gesture.pivot(), plane) {
+            Option::Some(world) => {
+                high = world.sub(gesture.pivot()).dot(gesture_axis(gesture.axis()))
+            }
+            Option::None => {
+            }
+        }
+    }
+    if low > high {
+        let swap = low low = high high = swap
+    }
+    let visible_units = high - low
+    if !(visible_units > 0) || !(visible_units - visible_units == 0) {
+        ret Option[Vec3]::Some(current.add(normal.scale( - 48)))
+    }
+    let interval = linear_tick_step(visible_units * 64 / span) / 5
+    let mut index =(low / interval) as i64 - 1
+    let last =(high / interval) as i64 + 1
+    let mut count = 0_u32
+    let mut last_label = - 10000.0_f32
+    while index <= last && count < 48 {
+        let value =(index as f32) * interval
+        match linear_point(gesture, start, direction, normal, value) {
+            Option::Some(at) => {
+                let along = at.sub(base).dot(direction)
+                if along >= low_offset && along <= high_offset &&
+                at.x() >= - 16.0 && at.x() <= bounds.width() + 16 &&
+                at.y() >= - 16.0 && at.y() <= bounds.height() + 16 {
+                    let major = index % 5 == 0
+                    let opacity = linear_opacity(along, low_offset, high_offset)
+                    let tip = at.add(normal.scale(if major {
+                                8.0_f32
+                            } else {
+                                4.0_f32
+                            }
+                        ))
+                    let tick_a = point(at, bounds)
+                    let tick_b = point(tip, bounds)
+                    list.line(tick_a.x(), tick_a.y(), tick_b.x(), tick_b.y(),
+                        style.linear_shadow.border_width(), faded(shadow, opacity),)
+                    list.line(tick_a.x(), tick_a.y(), tick_b.x(), tick_b.y(),
+                        style.tick.border_width(), faded(style.tick.foreground(),
+                            style.tick.opacity() * opacity * if major {
+                                1.0_f32
+                            } else {
+                                0.5_f32
+                            }
+                            ,),)
+                    if major && abs(along - last_label) >= 52 {
+                        let text = gizmo_step_label(value)
+                        let text_width =(text.byte_len() as f32) * style.linear_label.font_size() * 0.6
+                        let label = at.add(normal.scale(20))
+                        let x = bounds.x() + label.x() - text_width * 0.5
+                        let y = bounds.y() + label.y() - style.linear_label.font_size() * 0.5
+                        list.round_rect(Rect::new(x - 3, y - 1, text_width + 6,
+                                style.linear_label.font_size() + 4,), 3,
+                            faded(style.linear_label.background(), style.linear_label.opacity() * opacity), true,)
+                        list.styled_text(x, y, text, style.linear_label.with_opacity(style.linear_label.opacity() * opacity))
+                        last_label = along
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        count += 1
+        index += 1
+    }
+    if low_offset <= 0 && high_offset >= 0 {
+        let opacity = linear_opacity(0, low_offset, high_offset)
+        marker(list, base.add(normal.scale(4)), normal, 6,
+            style.linear_shadow.border_width(), faded(shadow, opacity), bounds,)
+        marker(list, base.add(normal.scale(4)), normal, 6, 1.5,
+            faded(style.linear.foreground(), style.linear.opacity() * opacity), bounds,)
+    }
+    match linear_point(gesture, start, direction, normal, gesture.raw()) {
+        Option::Some(raw) => {
+            let along = raw.sub(base).dot(direction)
+            if along >= low_offset && along <= high_offset && abs(along - current_offset) > 3 {
+                marker(list, raw.sub(normal.scale(4)), normal, 4, style.ghost.border_width(),
+                    faded(style.ghost.foreground(), style.ghost.opacity() * linear_opacity(along, low_offset, high_offset)), bounds,)
+            }
+        }
+        Option::None => {
+        }
+    }
+    // The live value is a single pointer, not another full-height crossing.
+    let cursor = point(current.sub(normal.scale(1)), bounds)
+    let left = point(current.sub(normal.scale(9)).sub(direction.scale(4)), bounds)
+    let right = point(current.sub(normal.scale(9)).add(direction.scale(4)), bounds)
+    list.triangle(cursor, left, right, color)
+    ret Option[Vec3]::Some(current.add(normal.scale( - 48.0)))
+}
+
+fn ring_point(gesture: GizmoGesture, angle: f32, radius: f32) -> Option[Vec3] {
+    let basis = ring_basis(gesture.axis())
+    ret gesture.projection().project(gesture.pivot().add(basis.0.scale(gizmo_cos(angle) * radius))
+        .add(basis.1.scale(gizmo_sin(angle) * radius)))
+}
+
+fn ring_guide(list: mut DisplayList, gesture: GizmoGesture, radius: f32, bounds: Rect, style: GizmoGuideStyle) -> Option[Vec3] {
+    let axis_style = style.axis(gesture.axis())
+    let color = faded(axis_style.foreground(), axis_style.opacity())
+    let mut outline = Vec[DisplayPoint]::new()
+    let mut i = 0_u32
+    while i < 96 {
+        match ring_point(gesture,(i as f32) * 6.2831855 / 96, radius) {
+            Option::Some(p) => {
+                outline.push(point(p, bounds))
+            }
+            Option::None => {
+                ret Option[Vec3]::None
+            }
+        }
+        i += 1
+    }
+    list.path(outline, style.ring.border_width(), faded(style.ring.foreground(), style.ring.opacity()), true)
+    let center = gesture.projection().project(gesture.pivot()).unwrap_or(Vec3::zero())
+    let mut sweep = gesture.applied()
+    if abs(sweep) > 6.2831855 {
+        sweep -=((sweep / 6.2831855) as i64 as f32) * 6.2831855
+    }
+    let segments =(abs(sweep) * 16 + 1) as u32
+    let mut arc = Vec[DisplayPoint]::new()
+    let mut previous = ring_point(gesture, gesture.start_angle(), radius).unwrap_or(center)
+    arc.push(point(previous, bounds))
+    i = 1
+    while i <= segments {
+        let angle = gesture.start_angle() + sweep *(i as f32) /(segments as f32)
+        let next = ring_point(gesture, angle, radius).unwrap_or(previous)
+        list.triangle(point(center, bounds), point(previous, bounds), point(next, bounds),
+            faded(color, style.sector.opacity()),)
+        arc.push(point(next, bounds))
+        previous = next
+        i += 1
+    }
+    list.path(arc, 2, color, false)
+    let mut interval = if gesture.snapping() {
+        gesture.step()
+    } else {
+        0.17453293_f32
+    }
+    // At most 64 ticks; visual thinning never changes the actual snap step.
+    let stride = if interval >= 0.09817477 {
+        1_u32
+    } else {
+        (0.09817477 / interval) as u32 + 1
+    }
+    interval *= stride as f32
+    i = 0
+    while i < 64 &&(i as f32) * interval < 6.2831855 - 0.0001 {
+        let angle =(i as f32) * interval
+        let major = i % 3 == 0
+        let inner = ring_point(gesture, angle, radius * if major {
+                0.91_f32
+            } else {
+                0.96_f32
+            }
+            ,
+        ).unwrap_or(center)
+        let outer = ring_point(gesture, angle, radius * 1.04).unwrap_or(inner)
+        let a = point(inner, bounds)
+        let b = point(outer, bounds)
+        list.line(a.x(), a.y(), b.x(), b.y(), style.ring_tick.border_width(),
+            faded(style.ring_tick.foreground(), style.ring_tick.opacity()),)
+        if major {
+            let p = ring_point(gesture, angle, radius * 1.2).unwrap_or(outer)
+            list.styled_text(bounds.x() + p.x(), bounds.y() + p.y(),
+                Debug::fmt((angle * 57.29578 + 0.5) as i32) + "°", style.ring_label,)
+        }
+        i += 1
+    }
+    for angle in vec![gesture.start_angle(), gesture.start_angle() + gesture.applied(), gesture.start_angle() + gesture.raw()] {
+        let inner = ring_point(gesture, angle, radius * 0.82).unwrap_or(center)
+        let outer = ring_point(gesture, angle, radius * 1.1).unwrap_or(inner)
+        let a = point(inner, bounds)
+        let b = point(outer, bounds)
+        let raw = angle == gesture.start_angle() + gesture.raw() && gesture.raw() != gesture.applied()
+        list.line(a.x(), a.y(), b.x(), b.y(), if raw {
+                style.ghost.border_width()
+            } else {
+                2.0_f32
+            }
+            ,
+            if raw {
+                faded(style.ghost.foreground(), style.ghost.opacity())
+            } else {
+                color
+            }
+            ,)
+    }
+    ret ring_point(gesture, gesture.start_angle() + gesture.applied(), radius * 1.35)
+}
+
+/// One value source for transform, selected tick, readout and snap step.
+pub fn gizmo_guides(gesture: GizmoGesture, radius: f32, bounds: Rect, world_value: Option[f32], style: GizmoGuideStyle) -> DisplayList {
+    let mut list = DisplayList::new()
+    if !gesture.active() {
+        ret list
+    }
+    if gesture.axis() > 3 {
+        let origin = gesture.projection().project(gesture.pivot()).unwrap_or(Vec3::zero())
+        let moved = gesture.projection().project(gesture.pivot().add(gesture.translation())).unwrap_or(origin)
+        if gesture.tool() == "move" && origin.x() >= 0 && origin.x() <= bounds.width() && origin.y() >= 0 && origin.y() <= bounds.height() && moved.x() >= 0 && moved.x() <= bounds.width() && moved.y() >= 0 && moved.y() <= bounds.height() {
+            list.line(bounds.x() + origin.x(), bounds.y() + origin.y(), bounds.x() + moved.x(), bounds.y() + moved.y(), 1.5, style.text.foreground())
+        }
+        let width = if bounds.width() < 320 { bounds.width() } else { 320_f32 }
+        let x = bounds.x() + guide_clamp(moved.x() + 18, 4, bounds.width() - width - 4)
+        let y = bounds.y() + guide_clamp(moved.y() + 18, 4, bounds.height() - 70)
+        list.round_rect(Rect::new(x, y, width, 64), style.panel.radius(), faded(style.panel.background(), style.panel.opacity()), true)
+        let delta = gesture.translation()
+        let value = if gesture.tool() == "move" { "Δ XYZ: " + scalar(delta.x()) + ", " + scalar(delta.y()) + ", " + scalar(delta.z()) }
+            else { "Factor: " + scalar(1 + gesture.applied()) }
+        list.styled_text(x + 10, y + 5, (if gesture.tool() == "move" { "Move " } else { "Scale " }) + gizmo_handle_label(gesture.axis()), style.text)
+        list.styled_text(x + 10, y + 25, value, style.text)
+        list.styled_text(x + 10, y + 45, (if gesture.snapping() { "step " + gizmo_step_label(gesture.step()) } else { "snap off" }) + " · Esc cancels", style.text)
+        ret list
+    }
+    let label = if gesture.tool() == "rotate" {
+        ring_guide(list, gesture, radius, bounds, style)
+    } else {
+        linear_guide(list, gesture, bounds, style)
+    }
+    if label.is_none() {
+        ret list
+    }
+    let axis = match gesture.axis() {
+        1 => "X" 2 => "Y" _ => "Z"
+    }
+    let factor = if gesture.tool() == "rotate" {
+        57.29578_f32
+    } else {
+        1.0_f32
+    }
+    let units = if gesture.tool() == "rotate" {
+        "°"
+    } elif gesture.tool() == "move" {
+        " u"
+    } else {
+        ""
+    }
+    let global = match world_value {
+        Option::Some(value) => scalar(value * factor) + units
+        Option::None => "unavailable"
+    }
+    let text = "World " + axis + ": " + global
+    let delta = "Δ: " + scalar(gesture.applied() * factor) + units
+    let step = if gesture.snapping() {
+        "step " + gizmo_step_label(gesture.step() * factor) + units
+    } else {
+        "snap off"
+    }
+    let anchor = label.unwrap_or(Vec3::zero())
+    let width = if bounds.width() < 338 {
+        bounds.width()
+    } else {
+        338.0_f32
+    }
+    let x = bounds.x() + guide_clamp(anchor.x() + 16, 4, bounds.width() - width - 4)
+    let y = bounds.y() + guide_clamp(anchor.y() - 68, 4, bounds.height() - 68)
+    list.round_rect(Rect::new(x, y, width, 64), style.panel.radius(),
+        faded(style.panel.background(), style.panel.opacity()), true,)
+    list.styled_text(x + 10, y + 5, text, style.axis(gesture.axis()))
+    list.styled_text(x + 10, y + 25, delta, style.axis(gesture.axis()))
+    list.styled_text(x + 10, y + 45, step + "  ·  Esc cancels", style.text)
+    ret list
+}

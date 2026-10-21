@@ -1,0 +1,223 @@
+//! GPU precipitation and a geometry-derived shelter map. No particle CPU simulation/readback.
+import core::vec::Vec
+import linalg::Vec3
+import mod::frame::*
+import mod::sky_view::environment_spirv
+import mod::system::EnvironmentFrame
+import refrain::assets::{MeshAssets, MaterialAssets}
+import refrain::material_graph::runtime::{RuntimeMaterial, material_path_valid}
+import refrain::renderer::SceneRenderer
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::light::DirectionalLight
+import refrain::scene::renderable::RenderItem
+
+struct ParticlePipeline {
+    target: usize
+    signature: u64
+    key: str
+    fragment: ShaderModule
+    pipeline: RenderPipeline
+    uniforms: Vec[GpuBuffer]
+    groups: Vec[BindGroup]
+}
+pub struct PrecipitationView {
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    vertex: ShaderModule
+    fragment: ShaderModule
+    quad: GpuMesh
+    pipelines: Vec[ParticlePipeline]
+    shelter_target: Swapchain
+    shelter_layout: BindGroupLayout
+    shelter_pipeline: RenderPipeline
+    shelter_shaders: Vec[ShaderModule]
+    shelter_renderer: SceneRenderer
+    shelter_texture: GpuTexture
+    sampler: GpuSampler
+    shelter_center: Vec3
+    shelter_revision: u64
+    shelter_ready: bool
+    project: str
+    material_path: str
+    material: RuntimeMaterial<H>
+    graph_key: str
+    graph_code: Vec[u32]
+}
+fn snapped(value: f32) -> f32 {
+    let mut cell =(value / 32) as i32
+    if (cell as f32) * 32 > value {
+        cell -= 1
+    }
+    ret(cell as f32) * 32
+}
+
+impl for PrecipitationView {
+    pub fn create(device: GraphicsDevice) -> PrecipitationView<H> {
+        let target = device.create_render_target(RenderTargetDescriptor::new(256, 256, format_rgba16_float()))
+        let shelter_layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, shader_stage_vertex()), BindGroupLayoutEntry::storage(1, shader_stage_vertex())])
+        let sv = device.create_shader_module(environment_spirv(3), shader_stage_vertex())
+        let sf = device.create_shader_module(environment_spirv(4), shader_stage_fragment())
+        let pipeline = device.create_render_pipeline_with_options(target, sv, sf, VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0)]), shelter_layout, RenderPipelineOptions::depth())
+        let renderer = SceneRenderer::create(device, shelter_layout, target.frames_in_flight(), pipeline, pipeline)
+        // Attachments exist before the first present; external_image() does not.
+        let texture = device.borrow_sampled_texture(target.attachment_image(0), 256, 256, format_rgba16_float(), texture_layout_shader_read())
+        let initial = target.try_acquire_frame()
+        if initial.available() && initial.sampled_color_barrier() {
+            let clear = initial.begin_render_pass(pipeline, - 65504, 0, 0, 1)
+            let _initialized = clear.end() && initial.present()
+        }
+        initial.destroy()
+        let mut vertices = Vec[f32]::new()
+        for i in 0..44 {
+            vertices.push(0)
+        }
+        ret PrecipitationView<H> {
+            device, device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, shader_stage_vertex() | shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(1, shader_stage_vertex())]),
+            device.create_shader_module(environment_spirv(1), shader_stage_vertex()), device.create_shader_module(environment_spirv(2), shader_stage_fragment()),
+            device.create_mesh(vertices, vec![0_u32, 1, 2, 2, 1, 3]), Vec[ParticlePipeline]::new(), target, shelter_layout, pipeline, vec![sv, sf], renderer, texture, device.create_sampler(), Vec3::zero(), 0, false, "", "", RuntimeMaterial::new(), "", Vec[u32]::new()
+        }
+    }
+    pub fn set_project(self: mut Self&, project: str) ->() {
+        self.project = project
+    }
+    pub fn set_graph(self: mut Self&, key: str, code: Vec[u32]) ->() {
+        self.graph_key = key self.graph_code = code
+    }
+    pub fn shelter_texture(self: Self&) -> GpuTexture {
+        ret self.shelter_texture
+    }
+    pub fn shelter_info(self: Self&, camera: Vec3) -> Vec[f32] {
+        ret vec![snapped(camera.x()), snapped(camera.z()), 256.0_f32, 1.0_f32]
+    }
+    pub fn prepare_shelter(self: mut Self&, items: Vec[RenderItem], meshes: MeshAssets, materials: MaterialAssets, camera: Vec3, revision: u64, state: EnvironmentFrame) -> bool {
+        if !state.enabled || !state.needs_shelter() {
+            ret true
+        }
+        let center = Vec3::new(snapped(camera.x()), snapped(camera.y()) + 128, snapped(camera.z()))
+        if self.shelter_ready && self.shelter_revision == revision && self.shelter_center.x() == center.x() && self.shelter_center.y() == center.y() && self.shelter_center.z() == center.z() {
+            ret true
+        }
+        let frame = self.shelter_target.try_acquire_frame()
+        if !frame.available() {
+            frame.destroy() ret false
+        }
+        if !frame.sampled_color_barrier() {
+            frame.destroy() ret false
+        }
+        let view = PerspectiveCamera::new(center, center.add(Vec3::new(0, - 1, 0)), 1, 0.1_f32, 1000)
+        frame.timing_mark(16, true)
+        let pass = frame.begin_render_pass(self.shelter_pipeline, - 65504, 0, 0, 1)
+        let recorded = self.shelter_renderer.render_items(items, view, DirectionalLight::new(Vec3::new(0, - 1, 0), Vec3::zero(), 0), meshes, materials, pass, frame.slot(), 1) && pass.end()
+        frame.timing_mark(16, false)
+        let submitted = recorded && frame.present() frame.destroy()
+        if submitted {
+            self.shelter_center = center self.shelter_revision = revision self.shelter_ready = true
+        }
+        ret submitted
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame, target: Swapchain, camera: PerspectiveCamera, state: EnvironmentFrame) -> bool {
+        let path = if material_path_valid(state.controller.material) && state.controller.material != "" {
+            self.project + "/" + state.controller.material
+        } else {
+            ""
+        }
+        if path != self.material_path {
+            self.material_path = path self.material.request(path) if path == "" {
+                self.graph_key = "" self.graph_code.clear()
+            }
+        }
+        match self.material.tick() {
+            Some(asset) => {
+                if asset.domain == "particle" {
+                    match asset.shaders() {
+                        Ok(code) => {
+                            self.set_graph(asset.semantic, code.get(0).unwrap_or(Vec[u32]::new()))
+                        }
+                        Err(_) => {
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if !state.enabled || !state.has_precipitation() {
+            ret true
+        }
+        if !self.shelter_ready {
+            ret false
+        }
+        let mut selected = self.pipelines.len()
+        for i in 0..self.pipelines.len() {
+            if self.pipelines.get_unchecked_borrowed(i).target == target.handle() && self.pipelines.get_unchecked_borrowed(i).signature == target.render_signature() && self.pipelines.get_unchecked_borrowed(i).key == self.graph_key {
+                selected = i break
+            }
+        }
+        if selected == self.pipelines.len() {
+            let fragment = self.device.create_shader_module(if self.graph_code.len() > 0 {
+                    self.graph_code
+                } else {
+                    environment_spirv(2)
+                }
+                , shader_stage_fragment(),)
+            let pipeline = self.device.create_render_pipeline_with_options(target, self.vertex, fragment, VertexBufferLayout::empty(), self.layout, RenderPipelineOptions::depth().with_depth_write(false).with_alpha_blending())
+            let mut uniforms = Vec[GpuBuffer]::new() let mut groups = Vec[BindGroup]::new()
+            for slot in 0..(target.frames_in_flight() as usize) {
+                let buffer = self.device.create_buffer(8592, buffer_uniform(), true)
+                let group = self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![8592_u64], vec![1_u32], vec![self.shelter_texture], vec![self.sampler])
+                uniforms.push(buffer) groups.push(group)
+            }
+            self.pipelines.push(ParticlePipeline {
+                    target.handle(), target.render_signature(), self.graph_key, fragment, pipeline, uniforms, groups
+                }
+                ,
+            )
+        }
+        let pipeline = self.pipelines.get_unchecked_borrowed(selected)
+        let forward = camera.target().sub(camera.position()).normalized()
+        let right = forward.cross(Vec3::new(0, 1, 0)).normalized() let up = right.cross(forward).normalized()
+        let mut data = state.shader_values()
+        for v in vec![camera.position(), forward, right, up] {
+            data.push(v.x()) data.push(v.y()) data.push(v.z()) data.push(0)
+        }
+        for value in camera.view_projection(target.width() as f32 / target.height() as f32).values() {
+            data.push(value)
+        }
+        data.push(self.shelter_center.x()) data.push(self.shelter_center.z()) data.push(256) data.push(self.shelter_center.y())
+        if !pipeline.uniforms.get(frame.slot() as usize).unwrap_or(GpuBuffer::unavailable()).write_f32s(0, data) {
+            ret false
+        }
+        frame.timing_mark(14, true)
+        let pass = frame.continue_render_pass(pipeline.pipeline)
+        let count = if state.atmosphere.quality == 0 {
+            1024_u32
+        } elif state.atmosphere.quality == 1 {
+            4096_u32
+        } else {
+            8192_u32
+        }
+        let recorded = pass.bind_group(pipeline.groups.get(frame.slot() as usize).unwrap_or(BindGroup::unavailable())) && pass.draw_mesh_instanced(self.quad, count)
+        frame.timing_mark(14, false)
+        ret recorded
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        self.material.destroy()
+        for stage in self.pipelines {
+            for group in stage.groups {
+                group.destroy()
+            }
+            for buffer in stage.uniforms {
+                buffer.destroy()
+            }
+            stage.pipeline.destroy() stage.fragment.destroy()
+        }
+        self.pipelines.clear() self.shelter_renderer.destroy() self.shelter_texture.destroy() self.sampler.destroy()
+        self.shelter_target.destroy()
+        self.shelter_pipeline.destroy() self.shelter_layout.destroy()
+        for shader in self.shelter_shaders {
+            shader.destroy()
+        }
+        self.quad.destroy() self.vertex.destroy() self.fragment.destroy() self.layout.destroy()
+    }
+}

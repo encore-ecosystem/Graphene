@@ -1,0 +1,1263 @@
+import mod::animation::component::{CharacterMorphChoice, CharacterMorphControl}
+import mod::editor_guides::gizmo_step_label
+import mod::environment::model::EnvironmentComponent
+import mod::particles::model::ParticleComponent
+//! Compact component inspector; scene mutations always pass through Command Bus.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import luma::{Widget, Style, TextEditor, ColorPicker, PickerColor, Event, WidgetLayout, Rect, Point, Size, SvgDocument, property_row, horizontal, vertical, anchored_popup_bounds, event_pointer_down, event_pointer_up, event_key_down, event_text_input, event_scroll, event_focus_lost, key_enter, key_escape, key_tab, key_backspace, key_delete, key_left, key_right, key_home, key_end, key_up, key_down}
+import mod::audio::model::{sound_fields, sound_value, sound_set}
+import mod::command_bus::{EditorState, GrapheneCommand, ActorComponentCommand}
+import mod::environment::editor::{environment_fields, environment_value, environment_set}
+import mod::scene::component::SceneComponent
+import mod::scene::json_value::parse_number
+import mod::scene::world::Scene
+
+pub struct ActorDetails {
+    source: Scene
+    actor: u64
+    component: SceneComponent
+    disabled: bool
+    field: str
+    original_text: str
+    editor: TextEditor
+    invalid: bool
+    picker: ColorPicker
+    picker_open: bool
+    preview: bool
+    pilot: bool
+    clips: Vec[(str, str)]
+    clip_menu: bool
+    clip_focus: usize
+    clip_first: usize
+    morphs: Vec[CharacterMorphChoice]
+    animation_message: str
+}
+
+impl for ActorDetails {
+    pub fn new() -> Self {
+        ret Self {
+            Scene::new(), 0_u64, SceneComponent::None, false, "", "", TextEditor::new(""), false, ColorPicker::new("actor-color-picker", PickerColor::linear(1, 1, 1)).with_compact(), false, true, false, Vec[(str, str)]::new(), false, 0_usize, 0_usize, Vec[CharacterMorphChoice]::new(), ""
+        }
+    }
+    pub fn set_clip_choices(self: mut Self, choices: Vec[(str, str)]) -> bool {
+        let mut changed = self.clips.len() != choices.len()
+        if !changed {
+            for i in 0_usize..choices.len() {
+                let a = self.clips.get_unchecked_borrowed(i) let b = choices.get_unchecked_borrowed(i) if a.0 != b.0 || a.1 != b.1 {
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            self.clips = choices self.clip_menu = false
+        }
+        ret changed
+    }
+    pub fn set_animation_info(self: mut Self, choices: Vec[CharacterMorphChoice], message: str) -> bool {
+        let mut changed = self.animation_message != message || self.morphs.len() != choices.len()
+        if !changed {
+            for i in 0_usize..choices.len() {
+                let a = self.morphs.get_unchecked_borrowed(i) let b = choices.get_unchecked_borrowed(i) if a.name != b.name || a.minimum != b.minimum || a.maximum != b.maximum || a.default_weight != b.default_weight {
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            self.morphs = choices self.animation_message = message
+        }
+        ret changed
+    }
+    fn reveal_clip(self: mut Self) ->() {
+        if self.clip_focus < self.clip_first {
+            self.clip_first = self.clip_focus
+        }
+        if self.clip_focus >= self.clip_first + 12_usize {
+            self.clip_first = self.clip_focus - 11_usize
+        }
+    }
+    pub fn sync(self: mut Self, scene: Scene, actor: u64, disabled: bool) ->() {
+        if self.actor != actor {
+            self.field = "" self.invalid = false self.picker_open = false self.clip_menu = false
+        }
+        if disabled {
+            self.clip_menu = false
+        }
+        self.source = scene self.actor = actor self.disabled = disabled
+        self.component = match scene.get(actor) {
+            Some(entity) => entity.component() None => SceneComponent::None
+        }
+    }
+    pub fn focused_id(self: Self) -> str {
+        ret self.field
+    }
+    pub fn kind(self: Self, id: u64) -> str {
+        match self.source.get(id) {
+            Some(entity) => {
+                ret entity.component().kind()
+            }
+            None => {
+                ret ""
+            }
+        }
+    }
+    pub fn popup_open(self: Self) -> bool {
+        ret self.picker_open || self.clip_menu
+    }
+    pub fn editing(self: Self) -> bool {
+        ret(self.field != "" && !animation_button(self.field)) || self.picker_open || self.clip_menu
+    }
+    pub fn component_kind(self: Self) -> str {
+        ret self.component.kind()
+    }
+    fn fields(self: Self) -> Vec[str] {
+        match self.component {
+            SkeletalMesh(c) => {
+                let mut fields = vec!["actor-anim-asset"] if self.clips.len() > 1_usize {
+                    fields.push("actor-anim-clip")
+                }
+                for field in vec!["actor-anim-speed", "actor-anim-start", "actor-anim-root", "actor-anim-loop", "actor-anim-autoplay", "actor-anim-preview"] {
+                    fields.push(field)
+                }
+                for i in 0_usize..self.morphs.len() {
+                    fields.push("actor-anim-morph-" + i.fmt())
+                }
+                if c.morphs.len() > 0_usize {
+                    fields.push("actor-anim-morph-reset")
+                }
+                ret fields
+            }
+            Particle(_) => {
+                ret vec!["actor-vfx-asset", "actor-vfx-preview", "actor-vfx-autoplay", "actor-vfx-rate", "actor-vfx-seed"]
+            }
+            Audio(_) => {
+                let mut out = vec!["actor-audio-asset", "actor-audio-spatial", "actor-audio-loop", "actor-audio-autoplay", "actor-audio-bus"]
+                for row in sound_fields() {
+                    out.push("actor-audio-" + row.0)
+                }
+                ret out
+            }
+            Light(light) => {
+                if light.kind == "directional-light" {
+                    ret vec!["actor-intensity", "actor-sun-angle", "actor-color"]
+                }
+                if light.kind == "point-light" {
+                    ret vec!["actor-intensity", "actor-range", "actor-color"]
+                }
+                ret vec!["actor-intensity", "actor-range", "actor-inner", "actor-outer", "actor-color"]
+            }
+            Camera(_) => {
+                ret vec!["actor-fov", "actor-aspect", "actor-near", "actor-far", "actor-preview", "actor-pilot"]
+            }
+            Environment(c) => {
+                let mut fields = Vec[str]::new()
+                for row in environment_fields(c) {
+                    fields.push("actor-env-" + row.0)
+                }
+                fields.push("actor-env-material")
+                if c.kind == "sky-atmosphere" {
+                    fields.push("actor-env-panorama")
+                }
+                if c.kind == "weather-controller" {
+                    fields.push("actor-env-preview") fields.push("actor-env-mode") fields.push("actor-env-sequence")
+                }
+                if c.kind == "sky-atmosphere" {
+                    fields.push("actor-env-style") fields.push("actor-env-quality")
+                }
+                ret fields
+            }
+            None => {
+                ret Vec[str]::new()
+            }
+        }
+    }
+    fn value(self: Self, id: str) -> f32 {
+        match self.component {
+            SkeletalMesh(c) => {
+                ret if id == "actor-anim-speed" {
+                    c.speed
+                } else {
+                    c.start_time
+                }
+            }
+            Particle(c) => {
+                ret if id == "actor-vfx-seed" {
+                    c.seed as f32
+                } else {
+                    c.rate_scale
+                }
+            }
+            Audio(c) => {
+                ret sound_value(c, id.slice_bytes(12, id.byte_len() - 12))
+            }
+            Light(light) => {
+                if id == "actor-intensity" {
+                    ret light.intensity
+                }
+                if id == "actor-range" {
+                    ret light.range
+                }
+                if id == "actor-inner" {
+                    ret light.inner_angle
+                }
+                if id == "actor-outer" {
+                    ret light.outer_angle
+                }
+                ret light.sun_angle
+            }
+            Camera(camera) => {
+                if id == "actor-fov" {
+                    ret camera.fov
+                }
+                if id == "actor-aspect" {
+                    ret camera.aspect
+                }
+                if id == "actor-near" {
+                    ret camera.near
+                }
+                ret camera.far
+            }
+            Environment(c) => {
+                ret environment_value(c, id.slice_bytes(10, id.byte_len() - 10))
+            }
+            None => {
+                ret 0.0_f32
+            }
+        }
+    }
+    fn display(self: Self, id: str) -> str {
+        match self.component {
+            SkeletalMesh(c) => {
+                if id == "actor-anim-asset" {
+                    ret c.asset
+                }
+                if id == "actor-anim-clip" {
+                    ret c.clip
+                }
+                if id == "actor-anim-root" {
+                    ret c.root_motion_bone
+                }
+                for i in 0_usize..self.morphs.len() {
+                    if id == "actor-anim-morph-" + i.fmt() {
+                        let morph = self.morphs.get_unchecked_borrowed(i) for control in c.morphs {
+                            if control.name == morph.name {
+                                ret gizmo_step_label(control.weight)
+                            }
+                        }
+                        ret gizmo_step_label(morph.default_weight)
+                    }
+                }
+            }
+            Particle(c) => {
+                if id == "actor-vfx-asset" {
+                    ret c.asset
+                }
+            }
+            Audio(c) => {
+                if id == "actor-audio-asset" {
+                    ret c.asset
+                }
+            }
+            Environment(c) => {
+                for key in vec!["sun", "moon", "controller", "seed"] {
+                    if id == "actor-env-" + key {
+                        ret Debug::fmt(if key == "sun" {
+                                c.sun
+                            } elif key == "moon" {
+                                c.moon
+                            } elif key == "controller" {
+                                c.controller
+                            } else {
+                                c.seed as u64
+                            }
+                        )
+                    }
+                }
+                if id == "actor-env-panorama" {
+                    ret c.panorama
+                }
+                if id == "actor-env-sequence" {
+                    ret c.sequence
+                }
+                if id == "actor-env-material" {
+                    ret c.material
+                }
+            }
+            _ => {
+            }
+        }
+        ret gizmo_step_label(self.value(id))
+    }
+    fn input_row(self: Self, id: str, title: str) -> Widget {
+        let focused = self.field == id
+        ret property_row(id + "-row", title, Widget::input(id, if focused {
+                    self.editor.value()
+                } else {
+                    self.display(id)
+                }
+                ,
+            )
+            .with_classes("g-property-value" + if focused && self.invalid {
+                    " state-invalid"
+                } else {
+                    ""
+                }
+            )
+            .with_attribute("aria-label", title).with_focus(focused).with_selection(self.editor.selection_start(), self.editor.selection_end()).with_disabled(self.disabled),)
+    }
+    pub fn widget(self: Self) -> Widget {
+        let mut content = Widget::panel("actor-component-details").with_classes("g-property-content").with_direction(vertical())
+        match self.component {
+            SkeletalMesh(c) => {
+                content.push(self.input_row("actor-anim-asset", "Character"))
+                let mut label = "No clips"
+                for i in 0_usize..self.clips.len() {
+                    let row = self.clips.get_unchecked_borrowed(i) if row.0 == c.clip ||(c.clip == "" && i == 0_usize) {
+                        label = row.1
+                    }
+                }
+                let mut selector = Widget::button("actor-anim-clip", "").with_direction(horizontal()).with_classes("g-property-value g-animation-clip-selector").with_focus(self.field == "actor-anim-clip").with_disabled(self.disabled || self.clips.len() < 2_usize).with_attribute("aria-label", "Animation clip: " + label).with_attribute("role", "combobox").with_attribute("aria-controls", "actor-anim-clip-menu").with_attribute("aria-activedescendant", if self.clip_menu {
+                        "actor-anim-choice-" + self.clip_focus.fmt()
+                    } else {
+                        ""
+                    }
+                    ,
+                ).with_attribute("aria-haspopup", "listbox").with_attribute("aria-expanded", if self.clip_menu {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                    ,
+                )
+                selector.push(Widget::label(label).with_classes("g-animation-clip-label"))
+                selector.push(Widget::icon("", SvgDocument::parse("<svg width=\"12\" height=\"12\" viewBox=\"0 0 12 12\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"M 3 4.5 L 6 7.5 L 9 4.5\"/></svg>")).with_classes("g-snap-chevron"))
+                content.push(property_row("actor-anim-clip-row", "Clip", selector))
+                content.push(self.input_row("actor-anim-speed", "Speed"))
+                content.push(self.input_row("actor-anim-start", "Start · s"))
+                content.push(self.input_row("actor-anim-root", "Root bone"))
+                for key in vec!["loop", "autoplay", "preview"] {
+                    let id = "actor-anim-" + key
+                    let active = if key == "loop" {
+                        c.looping
+                    } elif key == "autoplay" {
+                        c.autoplay
+                    } else {
+                        c.preview
+                    }
+                    let title = if key == "loop" {
+                        "Loop"
+                    } elif key == "autoplay" {
+                        "Auto play"
+                    } else {
+                        "Editor preview"
+                    }
+                    content.push(property_row(id + "-row", title, Widget::button(id, if active {
+                                    "On"
+                                } else {
+                                    "Off"
+                                }
+                                ,
+                            ).with_classes("g-property-value").with_checked(active).with_focus(self.field == id).with_disabled(self.disabled).with_attribute("aria-label", title).with_attribute("role", "switch").with_attribute("aria-checked", if active {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                                ,
+                            )))
+                }
+                if self.morphs.len() > 0_usize {
+                    content.push(Widget::label("MORPH CONTROLS").with_classes("g-popup-caption"))
+                    for i in 0_usize..self.morphs.len() {
+                        let morph = self.morphs.get_unchecked_borrowed(i) content.push(self.input_row("actor-anim-morph-" + i.fmt(), morph.name).with_attribute("title", "Range " + gizmo_step_label(morph.minimum) + " … " + gizmo_step_label(morph.maximum) + " · clear to use animation"))
+                    }
+                    content.push(Widget::button("actor-anim-morph-reset", "Use animated morphs").with_classes("g-property-value").with_focus(self.field == "actor-anim-morph-reset").with_disabled(self.disabled || c.morphs.len() == 0_usize))
+                }
+                if self.animation_message != "" {
+                    content.push(Widget::label(self.animation_message).with_classes("tone-warning").with_text_wrap(true))
+                }
+            }
+            Particle(c) => {
+                content.push(self.input_row("actor-vfx-asset", "Particle system"))
+                content.push(self.input_row("actor-vfx-rate", "Spawn rate scale"))
+                content.push(self.input_row("actor-vfx-seed", "Seed"))
+                for key in vec!["preview", "autoplay"] {
+                    let active = if key == "preview" {
+                        c.preview
+                    } else {
+                        c.autoplay
+                    }
+                    content.push(property_row("actor-vfx-" + key + "-row", if key == "preview" {
+                                "Preview in editor"
+                            } else {
+                                "Auto play"
+                            }
+                            , Widget::button("actor-vfx-" + key, if active {
+                                    "On"
+                                } else {
+                                    "Off"
+                                }
+                                ,
+                            ).with_classes("g-property-value").with_checked(active).with_disabled(self.disabled),))
+                }
+            }
+            Audio(c) => {
+                content.push(self.input_row("actor-audio-asset", "Sound asset"))
+                for key in vec!["spatial", "loop", "autoplay", "bus"] {
+                    let active = if key == "spatial" {
+                        c.spatial
+                    } elif key == "loop" {
+                        c.looped
+                    } elif key == "autoplay" {
+                        c.autoplay
+                    } else {
+                        false
+                    }
+                    let label = if key == "spatial" {
+                        if c.spatial {
+                            "3D"
+                        } else {
+                            "2D"
+                        }
+                    } elif key == "bus" {
+                        c.bus
+                    } else {
+                        if active {
+                            "On"
+                        } else {
+                            "Off"
+                        }
+                    }
+                    content.push(property_row("actor-audio-" + key + "-row", if key == "spatial" {
+                                "Spatialization"
+                            } elif key == "loop" {
+                                "Loop"
+                            } elif key == "autoplay" {
+                                "Auto play"
+                            } else {
+                                "Bus"
+                            }
+                            , Widget::button("actor-audio-" + key, label).with_classes("g-property-value").with_checked(active).with_focus(self.field == "actor-audio-" + key).with_disabled(self.disabled),))
+                }
+                for row in sound_fields() {
+                    content.push(self.input_row("actor-audio-" + row.0, row.1))
+                }
+            }
+            Light(light) => {
+                content.push(self.input_row("actor-intensity", "Intensity"))
+                if light.kind == "directional-light" {
+                    content.push(self.input_row("actor-sun-angle", "Sun size °"))
+                } else {
+                    content.push(self.input_row("actor-range", "Range"))
+                }
+                if light.kind == "spot-light" {
+                    content.push(self.input_row("actor-inner", "Inner cone °"))
+                    content.push(self.input_row("actor-outer", "Outer cone °"))
+                }
+                let color = PickerColor::linear(light.color.x(), light.color.y(), light.color.z())
+                content.push(property_row("actor-color-row", "Light color", Widget::color_picker("actor-color", color.hex(), color.display()).with_classes("g-property-value").with_focus(self.field == "actor-color").with_disabled(self.disabled)))
+            }
+            Camera(_) => {
+                content.push(self.input_row("actor-fov", "Vertical FOV °"))
+                content.push(self.input_row("actor-aspect", "Aspect ratio"))
+                content.push(self.input_row("actor-near", "Near clip"))
+                content.push(self.input_row("actor-far", "Far clip"))
+                content.push(property_row("actor-preview-row", "Preview", Widget::button("actor-preview", if self.preview {
+                                "On"
+                            } else {
+                                "Off"
+                            }
+                            ,
+                        ).with_classes("g-property-value").with_focus(self.field == "actor-preview").with_disabled(self.disabled)))
+                content.push(property_row("actor-pilot-row", "Camera", Widget::button("actor-pilot", if self.pilot {
+                                "Stop piloting"
+                            } else {
+                                "Pilot"
+                            }
+                            ,
+                        ).with_classes("g-property-value" + if self.pilot {
+                                " state-active"
+                            } else {
+                                ""
+                            }
+                        ).with_focus(self.field == "actor-pilot").with_disabled(self.disabled)))
+            }
+            Environment(c) => {
+                for row in environment_fields(c) {
+                    content.push(self.input_row("actor-env-" + row.0, row.1))
+                }
+                content.push(self.input_row("actor-env-material", "Material graph"))
+                if c.kind == "sky-atmosphere" {
+                    content.push(self.input_row("actor-env-panorama", "HDRI panorama"))
+                }
+                if c.kind == "weather-controller" {
+                    content.push(self.input_row("actor-env-sequence", "Weather sequence"))
+                    content.push(property_row("env-preview-row", "Animate in editor", Widget::button("actor-env-preview", if c.preview {
+                                    "Stop preview"
+                                } else {
+                                    "Preview"
+                                }
+                                ,
+                            ).with_classes("g-property-value" + if c.preview {
+                                    " state-active"
+                                } else {
+                                    ""
+                                }
+                            ).with_focus(self.field == "actor-env-preview").with_disabled(self.disabled)))
+                    content.push(property_row("env-mode-row", "Weather mode", Widget::button("actor-env-mode", c.mode).with_classes("g-property-value").with_focus(self.field == "actor-env-mode").with_disabled(self.disabled)))
+                }
+                if c.kind == "sky-atmosphere" {
+                    content.push(property_row("env-style-row", "Visual style", Widget::button("actor-env-style", c.style).with_classes("g-property-value").with_focus(self.field == "actor-env-style").with_disabled(self.disabled)))
+                    content.push(property_row("env-quality-row", "Quality", Widget::button("actor-env-quality", if c.quality == 0 {
+                                    "Low"
+                                } elif c.quality == 1 {
+                                    "Medium"
+                                } else {
+                                    "High"
+                                }
+                                ,
+                            ).with_classes("g-property-value").with_focus(self.field == "actor-env-quality").with_disabled(self.disabled)))
+                }
+            }
+            None => {
+            }
+        }
+        if self.invalid {
+            content.push(Widget::label("Invalid value or range").with_classes("tone-warning"))
+        }
+        ret content
+    }
+    fn commit(self: mut Self, state: mut EditorState) -> bool {
+        for i in 0_usize..self.morphs.len() {
+            if self.field != "actor-anim-morph-" + i.fmt() {
+                continue
+            }
+            let morph = self.morphs.get_unchecked_borrowed(i) let text = self.editor.value()
+            let weight = if text == "" {
+                morph.default_weight
+            } else {
+                match parse_number(text) {
+                    Some(v) => v None => {
+                        self.invalid = true ret false
+                    }
+                }
+            }
+            if weight < morph.minimum || weight > morph.maximum {
+                self.invalid = true ret false
+            }
+            let mut c = match self.component {
+                SkeletalMesh(c) => c _ => {
+                    ret false
+                }
+            }
+            let mut controls = Vec[CharacterMorphControl]::with_capacity(c.morphs.len() + 1_usize)
+            for previous in c.morphs {
+                if previous.name != morph.name {
+                    controls.push(previous)
+                }
+            }
+            if text != "" {
+                controls.push(CharacterMorphControl { morph.name, weight })
+            }
+            c.morphs = controls
+            let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                        self.actor, SceneComponent::SkeletalMesh(c)
+                    }
+                    ,
+                ))
+            self.invalid = !result.success() if result.success() {
+                self.component = SceneComponent::SkeletalMesh(c)
+            }
+            ret result.success()
+        }
+        if self.field == "actor-vfx-preview" || self.field == "actor-vfx-autoplay" {
+            ret true
+        }
+        if animation_button(self.field) {
+            ret true
+        }
+        if self.field == "actor-anim-asset" || self.field == "actor-anim-clip" || self.field == "actor-anim-root" {
+            let mut c = match self.component {
+                SkeletalMesh(c) => c _ => {
+                    ret false
+                }
+            }
+            if self.field == "actor-anim-asset" {
+                c.asset = self.editor.value()
+            } elif self.field == "actor-anim-clip" {
+                c.clip = self.editor.value()
+            } else {
+                c.root_motion_bone = self.editor.value()
+            }
+            if !c.valid() {
+                self.invalid = true ret false
+            }
+            let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                        self.actor, SceneComponent::SkeletalMesh(c)
+                    }
+                    ,
+                ))
+            self.invalid = !result.success() if result.success() {
+                self.component = SceneComponent::SkeletalMesh(c)
+            }
+            ret result.success()
+        }
+
+        if self.field == "actor-vfx-asset" {
+            match self.component {
+                Particle(stored) => {
+                    let mut c = stored c.asset = self.editor.value() let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, SceneComponent::Particle(c)
+                            }
+                            ,
+                        )) self.invalid = !result.success() if result.success() {
+                        self.component = SceneComponent::Particle(c)
+                    }
+                    ret result.success()
+                }
+                _ => {
+                    ret false
+                }
+            }
+        }
+        if self.field == "actor-audio-spatial" || self.field == "actor-audio-loop" || self.field == "actor-audio-autoplay" || self.field == "actor-audio-bus" {
+            ret true
+        }
+        if self.field == "actor-audio-asset" {
+            match self.component {
+                Audio(stored) => {
+                    if self.editor.value() == stored.asset {
+                        ret true
+                    }
+                    let mut c = stored c.asset = self.editor.value()
+                    let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, SceneComponent::Audio(c)
+                            }
+                            ,
+                        ))
+                    self.invalid = !result.success()
+                    if result.success() {
+                        self.component = SceneComponent::Audio(c)
+                    }
+                    ret result.success()
+                }
+                _ => {
+                    ret false
+                }
+            }
+        }
+        if self.field == "" || self.field == "actor-color" || self.field == "actor-pilot" || self.field == "actor-preview" || self.field == "actor-env-preview" || self.field == "actor-env-mode" || self.field == "actor-env-style" || self.field == "actor-env-quality" {
+            ret true
+        }
+        if self.editor.value() == self.original_text {
+            ret true
+        }
+        if self.field == "actor-env-panorama" || self.field == "actor-env-material" || self.field == "actor-env-sequence" {
+            let value = self.editor.value()
+            if value.contains("..") || value.contains(":") || value.contains("\\") ||(value != "" && !(value.byte_len() > 8 && value.slice_bytes(0, 8) == "Content/")) {
+                self.invalid = true ret false
+            }
+            match self.component {
+                Environment(stored) => {
+                    let mut c = stored
+                    if self.field == "actor-env-panorama" {
+                        c.panorama = value
+                    } elif self.field == "actor-env-sequence" {
+                        c.sequence = value
+                    } else {
+                        c.material = value
+                    }
+                    let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, SceneComponent::Environment(c)
+                            }
+                            ,
+                        ))
+                    self.invalid = !result.success()
+                    if result.success() {
+                        self.component = SceneComponent::Environment(c)
+                    }
+                    ret result.success()
+                }
+                _ => {
+                    ret false
+                }
+            }
+        }
+        for key in vec!["sun", "moon", "controller", "seed"] {
+            if self.field == "actor-env-" + key {
+                let value = match refrain::environment::codec::environment_identity(self.editor.value()) {
+                    Some(value) => value None => {
+                        self.invalid = true ret false
+                    }
+                }
+                match self.component {
+                    Environment(stored) => {
+                        let mut c = stored
+                        if key == "sun" {
+                            c.sun = value
+                        } elif key == "moon" {
+                            c.moon = value
+                        } elif key == "controller" {
+                            c.controller = value
+                        } else {
+                            if value > 4294967295_u64 {
+                                self.invalid = true ret false
+                            }
+                            c.seed = value as u32
+                        }
+                        let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                    self.actor, SceneComponent::Environment(c)
+                                }
+                                ,
+                            ))
+                        self.invalid = !result.success() if result.success() {
+                            self.component = SceneComponent::Environment(c)
+                        }
+                        ret result.success()
+                    }
+                    _ => {
+                        self.invalid = true ret false
+                    }
+                }
+            }
+        }
+        let value = match parse_number(self.editor.value()) {
+            Some(number) => number None => {
+                self.invalid = true ret false
+            }
+        }
+        if value == self.value(self.field) {
+            self.invalid = false ret true
+        }
+        if self.component.kind() == "skeletal-mesh" {
+            let mut c = match self.component {
+                SkeletalMesh(c) => c _ => {
+                    ret false
+                }
+            }
+            if self.field == "actor-anim-speed" {
+                c.speed = value
+            } else {
+                c.start_time = value
+            }
+            let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                        self.actor, SceneComponent::SkeletalMesh(c)
+                    }
+                    ,
+                ))
+            self.invalid = !result.success() if result.success() {
+                self.component = SceneComponent::SkeletalMesh(c)
+            }
+            ret result.success()
+        }
+        let mut component = self.component
+        match self.component {
+            SkeletalMesh(_) => {
+            }
+            Particle(stored) => {
+                let mut c = stored if self.field == "actor-vfx-rate" {
+                    c.rate_scale = value
+                } else {
+                    if value >= 0 && value <= 16777215 {
+                        c.seed = value as u32
+                    } else {
+                        self.invalid = true ret false
+                    }
+                }
+                component = SceneComponent::Particle(c)
+            }
+            Audio(c) => {
+                component = SceneComponent::Audio(sound_set(c, self.field.slice_bytes(12, self.field.byte_len() - 12), value))
+            }
+            Light(stored) => {
+                let mut light = stored
+                if self.field == "actor-intensity" {
+                    light.intensity = value
+                } elif self.field == "actor-range" {
+                    light.range = value
+                } elif self.field == "actor-inner" {
+                    light.inner_angle = value
+                } elif self.field == "actor-outer" {
+                    light.outer_angle = value
+                } else {
+                    light.sun_angle = value
+                }
+                component = SceneComponent::Light(light)
+            }
+            Camera(stored) => {
+                let mut camera = stored
+                if self.field == "actor-fov" {
+                    camera.fov = value
+                } elif self.field == "actor-aspect" {
+                    camera.aspect = value
+                } elif self.field == "actor-near" {
+                    camera.near = value
+                } else {
+                    camera.far = value
+                }
+                component = SceneComponent::Camera(camera)
+            }
+            Environment(c) => {
+                if self.field == "actor-env-sun" || self.field == "actor-env-moon" || self.field == "actor-env-controller" || self.field == "actor-env-seed" {
+                    if value < 0 || value > 16777215 ||(value as u64) as f32 != value {
+                        self.invalid = true ret false
+                    }
+                }
+                component = SceneComponent::Environment(environment_set(c, self.field.slice_bytes(10, self.field.byte_len() - 10), value))
+            }
+            None => {
+            }
+        }
+        if !component.valid() {
+            self.invalid = true ret false
+        }
+        let changed = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                    self.actor, component
+                }
+                ,
+            ))
+        self.invalid = !changed.success()
+        if changed.success() {
+            self.component = component
+        }
+        ret changed.success()
+    }
+    fn activate(self: mut Self, id: str, state: mut EditorState) ->() {
+        self.field = id self.invalid = false
+        if id == "actor-anim-morph-reset" {
+            let mut c = match self.component {
+                SkeletalMesh(c) => c _ => {
+                    ret()
+                }
+            }
+            c.morphs = Vec[CharacterMorphControl]::new()
+            let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                        self.actor, SceneComponent::SkeletalMesh(c)
+                    }
+                    ,
+                ))
+            if result.success() {
+                self.component = SceneComponent::SkeletalMesh(c) self.field = "actor-anim-clip"
+            }
+        } elif id == "actor-anim-clip" {
+            if self.clips.len() > 1_usize {
+                self.clip_menu = !self.clip_menu self.clip_focus = 0_usize
+                match self.component {
+                    SkeletalMesh(c) => {
+                        for i in 0_usize..self.clips.len() {
+                            if self.clips.get_unchecked_borrowed(i).0 == c.clip {
+                                self.clip_focus = i
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            self.reveal_clip()
+        } elif id == "actor-anim-loop" || id == "actor-anim-autoplay" || id == "actor-anim-preview" {
+            let mut c = match self.component {
+                SkeletalMesh(c) => c _ => {
+                    ret()
+                }
+            }
+            if id == "actor-anim-loop" {
+                c.looping = !c.looping
+            } elif id == "actor-anim-autoplay" {
+                c.autoplay = !c.autoplay
+            } else {
+                c.preview = !c.preview
+            }
+            let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                        self.actor, SceneComponent::SkeletalMesh(c)
+                    }
+                    ,
+                ))
+            if result.success() {
+                self.component = SceneComponent::SkeletalMesh(c)
+            }
+        } elif id == "actor-vfx-preview" || id == "actor-vfx-autoplay" {
+            match self.component {
+                Particle(stored) => {
+                    let mut c = stored if id == "actor-vfx-preview" {
+                        c.preview = !c.preview
+                    } else {
+                        c.autoplay = !c.autoplay
+                    }
+                    let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, SceneComponent::Particle(c)
+                            }
+                            ,
+                        )) if result.success() {
+                        self.component = SceneComponent::Particle(c)
+                    }
+                }
+                _ => {
+                }
+            }
+        } elif id == "actor-audio-spatial" || id == "actor-audio-loop" || id == "actor-audio-autoplay" || id == "actor-audio-bus" {
+            match self.component {
+                Audio(stored) => {
+                    let mut c = stored
+                    if id == "actor-audio-spatial" {
+                        c.spatial = !c.spatial
+                    }
+                    if id == "actor-audio-loop" {
+                        c.looped = !c.looped
+                    }
+                    if id == "actor-audio-autoplay" {
+                        c.autoplay = !c.autoplay
+                    }
+                    if id == "actor-audio-bus" {
+                        c.bus = if c.bus == "SFX" {
+                            "Music"
+                        } elif c.bus == "Music" {
+                            "UI"
+                        } else {
+                            "SFX"
+                        }
+                    }
+                    let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, SceneComponent::Audio(c)
+                            }
+                            ,
+                        ))
+                    if result.success() {
+                        self.component = SceneComponent::Audio(c)
+                    }
+                }
+                _ => {
+                }
+            }
+        } elif id == "actor-env-preview" || id == "actor-env-mode" || id == "actor-env-style" || id == "actor-env-quality" {
+            match self.component {
+                Environment(stored) => {
+                    let mut c = stored
+                    if id == "actor-env-preview" {
+                        c.preview = !c.preview
+                    }
+                    if id == "actor-env-mode" {
+                        c.mode = if c.mode == "manual" {
+                            "sequence"
+                        } elif c.mode == "sequence" {
+                            "random"
+                        } else {
+                            "manual"
+                        }
+                    }
+                    if id == "actor-env-style" {
+                        c.style = if c.style == "realistic" {
+                            "stylized"
+                        } elif c.style == "stylized" {
+                            "hdri"
+                        } else {
+                            "realistic"
+                        }
+                    }
+                    if id == "actor-env-quality" {
+                        c.quality =(c.quality + 1) % 3
+                    }
+                    let changed = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, SceneComponent::Environment(c)
+                            }
+                            ,
+                        ))
+                    if changed.success() {
+                        self.component = SceneComponent::Environment(c)
+                    }
+                }
+                _ => {
+                }
+            }
+        } elif id == "actor-preview" {
+            self.preview = !self.preview
+        } elif id == "actor-pilot" {
+            self.pilot = !self.pilot
+        } elif id == "actor-color" {
+            match self.component {
+                Light(light) => {
+                    self.picker = ColorPicker::new("actor-color-picker", PickerColor::linear(light.color.x(), light.color.y(), light.color.z())).with_compact()
+                    let begun = state.begin_interactive(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                self.actor, self.component
+                            }
+                            ,
+                        ))
+                    self.picker_open = begun.success()
+                }
+                _ => {
+                }
+            }
+        } else {
+            self.original_text = self.display(id)
+            self.editor = TextEditor::new(self.original_text).select_all()
+        }
+    }
+    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout, state: mut EditorState) -> bool {
+        if self.disabled {
+            ret false
+        }
+        if self.field == "" && event.kind() == event_key_down() {
+            for id in self.fields() {
+                if id == target {
+                    self.field = id self.original_text = self.display(id) self.editor = TextEditor::new(self.original_text).select_all() break
+                }
+            }
+        }
+        if self.clip_menu {
+            if event.kind() == event_scroll() {
+                if self.clips.len() > 12_usize {
+                    let maximum = self.clips.len() - 12_usize
+                    if event.wheel_y() > 0_f32 {
+                        self.clip_first = if self.clip_first > 3_usize {
+                            self.clip_first - 3_usize
+                        } else {
+                            0_usize
+                        }
+                    } elif event.wheel_y() < 0_f32 {
+                        self.clip_first = if self.clip_first + 3_usize < maximum {
+                            self.clip_first + 3_usize
+                        } else {
+                            maximum
+                        }
+                    }
+                }
+                if self.clip_focus < self.clip_first {
+                    self.clip_focus = self.clip_first
+                }
+                if self.clip_focus >= self.clip_first + 12_usize {
+                    self.clip_focus = self.clip_first + 11_usize
+                }
+                ret true
+            }
+            if event.kind() == event_focus_lost() {
+                self.clip_menu = false ret true
+            }
+            if event.kind() == event_pointer_down() {
+                for i in 0_usize..self.clips.len() {
+                    if target == "actor-anim-choice-" + i.fmt() {
+                        self.choose_clip(i, state) ret true
+                    }
+                }
+                self.clip_menu = false ret true
+            }
+            if event.kind() == event_key_down() {
+                if event.key() == key_escape() {
+                    self.clip_menu = false ret true
+                }
+                if event.key() == key_tab() {
+                    self.clip_menu = false
+                } elif event.key() == key_enter() || event.key() == 32_u32 {
+                    self.choose_clip(self.clip_focus, state) ret true
+                } elif event.key() == key_up() {
+                    self.clip_focus =(self.clip_focus + self.clips.len() - 1_usize) % self.clips.len() self.reveal_clip() ret true
+                } elif event.key() == key_down() {
+                    self.clip_focus =(self.clip_focus + 1_usize) % self.clips.len() self.reveal_clip() ret true
+                } elif event.key() == key_home() {
+                    self.clip_focus = 0_usize self.reveal_clip() ret true
+                } elif event.key() == key_end() {
+                    self.clip_focus = self.clips.len() - 1_usize self.reveal_clip() ret true
+                } else {
+                    ret true
+                }
+            } else {
+                ret true
+            }
+        }
+        if self.picker_open {
+            if event.kind() == event_focus_lost() ||(event.kind() == event_pointer_down() && !layout.find_bounds("actor-color-picker").unwrap_or(Rect::new(0, 0, 0, 0)).contains(Point::new(event.x(), event.y()))) {
+                let _cancel = state.cancel_interactive() self.picker_open = false ret true
+            }
+            let outcome = self.picker.input(event, target, layout)
+            if outcome == 1 || outcome == 2 {
+                match self.component {
+                    Light(stored) => {
+                        let mut light = stored let color = self.picker.color()
+                        light.color = Vec3::new(color.red(), color.green(), color.blue())
+                        let _preview = state.preview_interactive(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                    self.actor, SceneComponent::Light(light)
+                                }
+                                ,
+                            ))
+                    }
+                    _ => {
+                    }
+                }
+            }
+            if outcome == 2 {
+                let _commit = state.commit_interactive() self.picker_open = false
+            }
+            if outcome == 3 {
+                let _cancel = state.cancel_interactive() self.picker_open = false
+            }
+            ret event.kind() != 0
+        }
+        if event.kind() == event_pointer_down() {
+            for id in self.fields() {
+                if id == target {
+                    if !self.commit(state) {
+                        ret true
+                    }
+                    self.activate(id, state) ret true
+                }
+            }
+            if self.field != "" {
+                if self.commit(state) {
+                    self.field = ""
+                } else {
+                    ret true
+                }
+            }
+        }
+        if self.field != "" && event.kind() == event_key_down() {
+            if event.key() == key_escape() {
+                self.field = "" self.invalid = false ret true
+            }
+            if (event.key() == 32_u32 || event.key() == key_enter()) && animation_button(self.field) {
+                self.activate(self.field, state) ret true
+            }
+            if event.key() == key_enter() {
+                if self.field == "actor-color" || self.field == "actor-pilot" || self.field == "actor-preview" || self.field == "actor-env-preview" || self.field == "actor-env-mode" || self.field == "actor-env-style" || self.field == "actor-env-quality" {
+                    self.activate(self.field, state)
+                } else {
+                    if self.commit(state) {
+                        self.field = ""
+                    }
+                }
+                ret true
+            }
+            if event.key() == key_tab() {
+                if !self.commit(state) {
+                    ret true
+                }
+                let choices = self.fields() let mut index = 0_usize
+                for offset in 0..choices.len() {
+                    if choices.get(offset).unwrap_or("") == self.field {
+                        index = offset
+                    }
+                }
+                self.field = choices.get((index + if event.shift() {
+                            choices.len() - 1
+                        } else {
+                            1
+                        }
+                    ) % choices.len()).unwrap_or("")
+                self.original_text = self.display(self.field)
+                self.editor = TextEditor::new(self.original_text).select_all() ret true
+            }
+            if animation_button(self.field) {
+                ret false
+            }
+            self.editor = edit_text(self.editor, event) self.invalid = false ret true
+        }
+        if self.field != "" && !animation_button(self.field) && event.kind() == event_text_input() {
+            self.editor = self.editor.insert(event.text()) self.invalid = false ret true
+        }
+        ret false
+    }
+    fn choose_clip(self: mut Self, index: usize, state: mut EditorState) ->() {
+        if index >= self.clips.len() {
+            ret()
+        }
+        let mut c = match self.component {
+            SkeletalMesh(c) => c _ => {
+                ret()
+            }
+        }
+        c.clip = self.clips.get_unchecked_borrowed(index).0
+        let result = state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                    self.actor, SceneComponent::SkeletalMesh(c)
+                }
+                ,
+            ))
+        self.invalid = !result.success() if result.success() {
+            self.component = SceneComponent::SkeletalMesh(c)
+        }
+        self.clip_menu = false self.field = "actor-anim-clip"
+    }
+    pub fn popup(self: Self, width: f32, height: f32, layout: WidgetLayout) -> Widget {
+        if self.clip_menu {
+            let owner = layout.find_bounds("actor-anim-clip").unwrap_or(Rect::new(0, 0, 0, 0))
+            let menu_height = if self.clips.len() > 12_usize {
+                364_f32
+            } else {
+                (self.clips.len() as f32) * 28_f32 + 8_f32
+            }
+            let bounds = anchored_popup_bounds(owner, Size::new(if owner.width() > 240_f32 {
+                        owner.width()
+                    } else {
+                        240_f32
+                    }
+                    , menu_height,), Rect::new(8, 8, width - 16, height - 16))
+            let mut popup = Widget::panel("actor-anim-clip-menu").with_classes("g-local-popup g-animation-clips").with_direction(vertical()).with_attribute("role", "listbox").with_attribute("aria-label", "Animation clips").with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_height(bounds.height()))
+            if self.clips.len() > 12_usize {
+                popup.push(Widget::label((self.clip_first + 1_usize).fmt() + "-" +(self.clip_first + 12_usize).fmt() + " of " + self.clips.len().fmt() + " · Scroll").with_classes("g-popup-caption").with_attribute("aria-hidden", "true"))
+            }
+            let first = self.clip_first
+            let last = if first + 12_usize < self.clips.len() {
+                first + 12_usize
+            } else {
+                self.clips.len()
+            }
+            for i in first..last {
+                let row = self.clips.get_unchecked_borrowed(i) let mut selected = false
+                match self.component {
+                    SkeletalMesh(c) => {
+                        selected = c.clip == row.0 ||(c.clip == "" && i == 0_usize)
+                    }
+                    _ => {
+                    }
+                }
+                popup.push(Widget::button("actor-anim-choice-" + i.fmt(), row.1).with_classes("popup-action" + if selected {
+                            " state-active"
+                        } else {
+                            ""
+                        }
+                        + if i == self.clip_focus {
+                            " state-keyboard-focus"
+                        } else {
+                            ""
+                        }
+                    ).with_checked(selected).with_focus(i == self.clip_focus).with_attribute("role", "option").with_attribute("tabindex", "-1").with_attribute("aria-posinset",(i + 1_usize).fmt()).with_attribute("aria-setsize", self.clips.len().fmt()).with_attribute("aria-selected", if selected {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                        ,
+                    ))
+            }
+            ret popup
+        }
+        let owner = layout.find_bounds("actor-color").unwrap_or(Rect::new(0, 0, 0, 0))
+        let bounds = anchored_popup_bounds(owner, self.picker.preferred_size(), Rect::new(8, 8, width - 16, height - 16))
+        ret self.picker.widget(width, height).with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_max_height(bounds.height()))
+    }
+}
+fn edit_text(editor: TextEditor, event: Event) -> TextEditor {
+    if event.control() && event.key() == 97 {
+        ret editor.select_all()
+    }
+    if event.key() == key_backspace() {
+        ret editor.backspace()
+    }
+    if event.key() == key_delete() {
+        ret editor.delete()
+    }
+    if event.key() == key_left() {
+        ret editor.move_left(event.shift())
+    }
+    if event.key() == key_right() {
+        ret editor.move_right(event.shift())
+    }
+    if event.key() == key_home() {
+        ret editor.move_home(event.shift())
+    }
+    if event.key() == key_end() {
+        ret editor.move_end(event.shift())
+    }
+    ret editor
+}
+
+fn animation_button(id: str) -> bool {
+    ret id == "actor-anim-morph-reset" || id == "actor-anim-clip" || id == "actor-anim-loop" || id == "actor-anim-autoplay" || id == "actor-anim-preview"
+}

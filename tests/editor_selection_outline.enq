@@ -1,0 +1,77 @@
+//! Mask depth participation, stable entity selection and unchanged materials.
+import core::option::Option
+import core::vec::Vec
+import graphene::editor_selection_outline::{selection_mask_items, selection_silhouette_items}
+import graphene::{Scene, Transform, Renderable, MeshId, MaterialId}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let mesh = MeshId::new(4)
+    let original = MaterialId::new(17)
+    let a = scene.create_entity("selected", Transform::identity().with_position(Vec3::new(1, 2, 3)))
+    let b = scene.create_entity("occluder", Transform::identity())
+    let hidden = scene.create_entity("hidden selected", Transform::identity())
+    for entity in vec![a, b, hidden] {
+        scene.set_renderable(entity, Option[Renderable]::Some(Renderable::new(mesh, original)))
+    }
+    scene.set_visible(hidden, false)
+    let on = MaterialId::new(1) let off = MaterialId::new(2)
+    let visible = scene.visible_render_items()
+    let mask = selection_mask_items(visible, vec![a, hidden], on, off)
+    if mask.len() != 2 {
+        ret 1
+    }
+    let first = match mask.get(0) {
+        Option::Some(value) => value Option::None => {
+            ret 7
+        }
+    }
+    let second = match mask.get(1) {
+        Option::Some(value) => value Option::None => {
+            ret 8
+        }
+    }
+    if first.entity() != a || first.material().value() != on.value() || first.mesh().value() != mesh.value() || first.world().transform_point(Vec3::zero()).x() != 1 {
+        ret 2
+    }
+    if second.entity() != b || second.material().value() != off.value() {
+        ret 3
+    }
+    // Group selection colors both actors; an empty selection clears the mask.
+    for item in selection_mask_items(visible, vec![b, a], on, off) {
+        if item.material().value() != on.value() {
+            ret 4
+        }
+    }
+    for item in selection_mask_items(visible, Vec[u64]::new(), on, off) {
+        if item.material().value() != off.value() {
+            ret 5
+        }
+    }
+    for item in scene.visible_render_items() {
+        if item.material().value() != original.value() {
+            ret 6
+        }
+    }
+    // Occluders participate in scene depth, but never in the selected object's
+    // complete silhouette. Duplicate selection IDs cannot duplicate a mesh.
+    let silhouette = selection_silhouette_items(visible, vec![a, a, hidden], on)
+    if silhouette.len() != 1 {
+        ret 9
+    }
+    match silhouette.get(0) {
+        Option::Some(item) => {
+            if item.entity() != a || item.mesh().value() != mesh.value() || item.material().value() != on.value() || item.world().transform_point(Vec3::zero()).z() != 3 {
+                ret 10
+            }
+        }
+        Option::None => {
+            ret 11
+        }
+    }
+    if selection_silhouette_items(visible, Vec[u64]::new(), on).len() != 0 || selection_silhouette_items(visible, vec![a, b], on).len() != 2 {
+        ret 12
+    }
+    ret 0
+}

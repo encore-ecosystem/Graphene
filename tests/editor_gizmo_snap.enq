@@ -1,0 +1,79 @@
+//! Snap actions are tied to their tool; the compact menu has no wrapped or clipped rows.
+import core::fmt::Debug
+import core::option::Option
+import graphene::GizmoSnap
+import graphene::editor_gizmo_snap::{snap_step_values, snap_step_grid, snap_value_action, snap_step_label}
+import graphene::editor_guides::gizmo_step_label
+import luma::{Widget, Rect, Size, Style, StyleSheet, layout_widget, anchored_popup_bounds, vertical}
+import std::io::println
+import std::os::read_file
+
+fn main() -> u32 {
+    let mut settings = GizmoSnap::new()
+    for action in vec!["snap-value-move-0.5", "snap-value-rotate-45", "snap-value-scale-0.25"] {
+        match snap_value_action(action) {
+            Option::Some(choice) => {
+                settings.set_step(choice.0, choice.1)
+            }
+            Option::None => {
+                ret 1_u32
+            }
+        }
+    }
+    if settings.step("move") != 0.5 || settings.step("rotate") != 45 || settings.step("scale") != 0.25 {
+        ret 2_u32
+    }
+    settings.toggle("rotate")
+    if !settings.enabled("move") || settings.enabled("rotate") || !settings.enabled("scale") {
+        ret 3_u32
+    }
+    for action in vec!["snap-value-0.5", "snap-value-scale-45", "snap-value-move--1", "snap-value-select-1"] {
+        if snap_value_action(action).is_some() {
+            ret 4_u32
+        }
+    }
+    if snap_step_label(45, "rotate") != "45°" || snap_step_label(0.5, "move") != "0.5 u" {
+        ret 5_u32
+    }
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    for tool in vec!["move", "rotate", "scale"] {
+        let height = if tool == "scale" {
+            128.0_f32
+        } else {
+            156.0_f32
+        }
+        for viewport in vec![Rect::new(0, 0, 480, 320), Rect::new(0, 0, 1280, 720)] {
+            let bounds = anchored_popup_bounds(Rect::new(viewport.right() - 40, 24, 36, 24), Size::new(172, height), viewport)
+            if bounds.right() > viewport.right() || bounds.bottom() > viewport.bottom() {
+                ret 6_u32
+            }
+            let mut popup = Widget::panel("ui-local-popup").with_classes("g-local-popup g-snap-popup").with_direction(vertical())
+            popup.push(Widget::label("Snap step").with_classes("g-popup-caption"))
+            popup.push(snap_step_grid(tool, settings))
+            popup = popup.with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_height(bounds.height()))
+            let overlay = Widget::panel("overlay-layer").with_classes("g-overlay-layer").with_child(popup)
+            let layout = layout_widget(sheet.apply(overlay, "", "", ""), viewport)
+            let mut previous = Rect::new(0, 0, 0, 0)
+            let mut index = 0_usize
+            for value in snap_step_values(tool) {
+                let id = "snap-value-" + tool + "-" + gizmo_step_label(value)
+                let cell = layout.find_bounds(id).unwrap_or(Rect::new(0, 0, 0, 0))
+                if cell.width() < 60 || cell.height() < 22 || cell.x() < bounds.x() || cell.y() < bounds.y() + 24 ||
+                cell.right() > bounds.right() || cell.bottom() > bounds.bottom() {
+                    println(id + " cell " + Debug::fmt(cell.x()) + "," + Debug::fmt(cell.y()) + " " + Debug::fmt(cell.width()) + "x" + Debug::fmt(cell.height()) + " popup " + Debug::fmt(bounds.x()) + "," + Debug::fmt(bounds.y()) + " " + Debug::fmt(bounds.width()) + "x" + Debug::fmt(bounds.height()))
+                    ret 7_u32
+                }
+                if index > 0 {
+                    if index % 2 == 1 && cell.x() < previous.right() {
+                        ret 8_u32
+                    }
+                    if index % 2 == 0 && cell.y() < previous.bottom() {
+                        ret 9_u32
+                    }
+                }
+                previous = cell index = index + 1
+            }
+        }
+    }
+    ret 0_u32
+}

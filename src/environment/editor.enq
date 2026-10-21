@@ -1,0 +1,87 @@
+//! Compact, shared property metadata for environment actors.
+import core::vec::Vec
+import linalg::Vec3
+import mod::model::EnvironmentComponent
+
+pub fn environment_fields(c: EnvironmentComponent) -> Vec[(str, str)] {
+    if c.kind == "weather-controller" {
+        ret vec![("time", "Time of day · h"),("dayDuration", "Day length · s"),("cloudiness", "Cloud cover"),("rain", "Rain"),("snow", "Snow"),("fog", "Haze"),("temperature", "Temperature · °C"),("windX", "Wind X · m/s"),("windZ", "Wind Z · m/s"),("storm", "Thunderstorm"),("transition", "Transition · s"),("seed", "Random seed")]
+    }
+    if c.kind == "weather-volume" {
+        ret vec![("cloudiness", "Cloud cover"),("rain", "Rain"),("snow", "Snow"),("fog", "Haze"),("temperature", "Temperature · °C"),("wetness", "Surface wetness"),("snowCoverage", "Snow coverage"),("blendDistance", "Blend distance · m"),("priority", "Priority")]
+    }
+    if c.kind == "sky-atmosphere" {
+        ret vec![("sun", "Sun · actor ID"),("moon", "Moon · actor ID"),("controller", "Weather · actor ID"),("turbidity", "Turbidity"),("intensity", "Exposure")]
+    }
+    if c.kind == "sky-light" {
+        ret vec![("controller", "Weather · actor ID"),("intensity", "Intensity")]
+    }
+    if c.kind == "cloud-layer" {
+        ret vec![("controller", "Weather · actor ID"),("density", "Density"),("altitude", "Base height · m"),("thickness", "Thickness · m"),("intensity", "Lighting")]
+    }
+    ret vec![("controller", "Weather · actor ID"),("density", "Density"),("altitude", "Base height · m"),("thickness", "Height falloff · m"),("intensity", "Intensity")]
+}
+pub fn environment_value(c: EnvironmentComponent, key: str) -> f32 {
+    ret match key {
+        "sun" => c.sun as f32 "moon" => c.moon as f32 "controller" => c.controller as f32
+        "quality" => c.quality as f32 "seed" => c.seed as f32 "time" => c.time_hours "dayDuration" => c.day_duration
+        "density" => c.density "altitude" => c.altitude "thickness" => c.thickness "intensity" => c.intensity "turbidity" => c.turbidity
+        "blendDistance" => c.blend_distance "priority" => c.priority "transition" => c.transition
+        "cloudiness" => c.weather.cloudiness "rain" => c.weather.rain "snow" => c.weather.snow "fog" => c.weather.fog
+        "temperature" => c.weather.temperature "windX" => c.weather.wind.x() "windZ" => c.weather.wind.z()
+        "storm" => c.weather.storm "wetness" => c.weather.wetness "snowCoverage" => c.weather.snow_coverage _ => 0.0_f32
+    }
+}
+pub fn environment_set(c: EnvironmentComponent, key: str, value: f32) -> EnvironmentComponent {
+    let mut result = c
+    if key == "sun" {
+        result.sun = value as u64
+    } elif key == "moon" {
+        result.moon = value as u64
+    } elif key == "controller" {
+        result.controller = value as u64
+    } elif key == "seed" {
+        result.seed = value as u32
+    } elif key == "time" {
+        result.time_hours = value
+    } elif key == "dayDuration" {
+        result.day_duration = value
+    } elif key == "density" {
+        result.density = value
+    } elif key == "altitude" {
+        result.altitude = value
+    } elif key == "thickness" {
+        result.thickness = value
+    } elif key == "intensity" {
+        result.intensity = value
+    } elif key == "turbidity" {
+        result.turbidity = value
+    } elif key == "blendDistance" {
+        result.blend_distance = value
+    } elif key == "priority" {
+        result.priority = value
+    } elif key == "transition" {
+        result.transition = value
+    } elif key == "cloudiness" {
+        result.weather.cloudiness = value
+    } elif key == "rain" {
+        result.weather.rain = value
+    } elif key == "snow" {
+        result.weather.snow = value
+    } elif key == "fog" {
+        result.weather.fog = value
+    } elif key == "temperature" {
+        result.weather.temperature = value
+    } elif key == "storm" {
+        result.weather.storm = value
+    } elif key == "wetness" {
+        result.weather.wetness = value
+    } elif key == "snowCoverage" {
+        result.weather.snow_coverage = value
+    } elif key == "windX" {
+        result.weather.wind = Vec3::new(value, result.weather.wind.y(), result.weather.wind.z())
+    } elif key == "windZ" {
+        result.weather.wind = Vec3::new(result.weather.wind.x(), result.weather.wind.y(), value)
+    }
+    ret result
+}

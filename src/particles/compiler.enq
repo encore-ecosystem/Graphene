@@ -1,0 +1,227 @@
+//! Graphs lower to the same typed, bounded vector program on CPU and GPU.
+import core::option::Option
+import core::vec::Vec
+import mod::model::*
+pub fn vfx_opcode(name: str) -> u32 {
+    let ops = particle_operations()
+    for i in 0_usize..ops.len() {
+        if ops.get(i).unwrap_or("") == name {
+            ret(i as u32) + 1_u32
+        }
+    }
+    ret 0_u32
+}
+fn vfx_report(out: mut ParticleProgram, emitter: usize, module: usize, node: u64, message: str) ->() {
+    out.diagnostics.push(ParticleDiagnostic { emitter, module, node, message })
+}
+pub fn vfx_arity(op: u32) -> u32 {
+    if op == 3_u32 || op == 10_u32 || op == 11_u32 || op == 12_u32 || op == 13_u32 || op == 19_u32 || op == 28_u32 || op == 29_u32 || op == 30_u32 || op == 31_u32 || op == 35_u32 || op == 36_u32 || op == 9_u32 {
+        ret 1_u32
+    }
+    if op == 8_u32 || op == 20_u32 {
+        ret 3_u32
+    }
+    if (op >= 4_u32 && op <= 7_u32) || op == 14_u32 || op == 16_u32 ||(op >= 21_u32 && op <= 23_u32) ||(op >= 32_u32 && op <= 34_u32) {
+        ret 2_u32
+    }
+    ret 0_u32
+}
+pub fn compile_particle_emitter(system: ParticleSystem, index: usize) -> ParticleProgram {
+    let mut out = ParticleProgram { Vec[f32]::new(), Vec[ParticleDiagnostic]::new() }
+    for _i in 0_usize..16_usize {
+        out.words.push(0)
+    }
+    let emitter = match system.emitters.get(index) {
+        Some(v) => v None => {
+            vfx_report(out, index, 0_usize, 0_u64, "Emitter is missing") ret out
+        }
+    }
+    if emitter.capacity == 0 || emitter.capacity > 4194304_u32 {
+        vfx_report(out, index, 0_usize, 0_u64, "Capacity must be 1..4194304")
+    }
+    if emitter.backend != "cpu" && emitter.backend != "gpu" && emitter.backend != "analytic" {
+        vfx_report(out, index, 0_usize, 0_u64, "Unknown simulation backend")
+    }
+    let fluid = emitter.renderer == "gas-2d" || emitter.renderer == "gas-3d" || emitter.renderer == "liquid" || emitter.renderer == "shallow-water"
+    if fluid && emitter.backend != "gpu" {
+        vfx_report(out, index, 0_usize, 0_u64, "Fluid modules require the GPU backend")
+    }
+    if emitter.renderer != "sprite" && !fluid {
+        vfx_report(out, index, 0_usize, 0_u64, "Unknown or unavailable particle renderer")
+    }
+    if emitter.backend != "cpu" && emitter.capacity > 1048576_u32 {
+        vfx_report(out, index, 0_usize, 0_u64, "GPU particle pool exceeds 1048576 slots")
+    }
+    if system.parameters.len() > 64_usize {
+        vfx_report(out, index, 0_usize, 0_u64, "At most 64 vector parameters are supported")
+    }
+    for v in emitter.config() {
+        if !(v >= - 340282300000000000000000000000000000000_f32 && v <= 340282300000000000000000000000000000000_f32) {
+            vfx_report(out, index, 0_usize, 0_u64, "Emitter settings must be finite")
+        }
+    }
+    if emitter.rate < 0 || emitter.rate > 10000000 || emitter.lifetime <= 0 || emitter.lifetime > 3600 || emitter.size < 0 || emitter.drag < 0 || emitter.duration < 0 || emitter.delay < 0 || emitter.modules.len() > 256_usize {
+        vfx_report(out, index, 0_usize, 0_u64, "Emitter settings exceed simulation limits")
+    }
+    let mut curves = Vec[(usize, Vec[ParticleCurvePoint])]::new()
+    let mut count = 0_u32
+    for mi in 0_usize..emitter.modules.len() {
+        let module = emitter.modules.get(mi).unwrap_or(ParticleModule::new("", 0_u32))
+        if !module.enabled {
+            continue
+        }
+        if module.version != 1_u32 {
+            vfx_report(out, index, mi, 0_u64, "Unsupported module version") continue
+        }
+        if module.stage > 7_u32 {
+            vfx_report(out, index, mi, 0_u64, "Unknown execution stage") continue
+        }
+        if module.nodes.len() > 32_usize {
+            vfx_report(out, index, mi, 0_u64, "Module exceeds 32 live vector registers") continue
+        }
+        let mut bad = false
+        for ni in 0_usize..module.nodes.len() {
+            let node = module.nodes.get(ni).unwrap_or(ParticleNode::new(0_u64, "", 0, 0))
+            let op = vfx_opcode(node.operation)
+            if op == 0_u32 || node.id == 0_u64 || node.attribute > 7_u32 ||(node.kind != "vec4" && node.kind != "vec3" && node.kind != "scalar") {
+                vfx_report(out, index, mi, node.id, "Invalid operation, identity, attribute or value type") bad = true
+            }
+            for sj in 0_usize..ni {
+                if module.nodes.get(sj).unwrap_or(node).id == node.id {
+                    vfx_report(out, index, mi, node.id, "Duplicate node identity") bad = true
+                }
+            }
+            for input in 0_usize..(vfx_arity(op) as usize) {
+                let mut links = 0_u32
+                for edge in module.links {
+                    if edge.to == node.id && edge.input ==(input as u32) {
+                        links += 1_u32
+                    }
+                }
+                if links != 1_u32 {
+                    vfx_report(out, index, mi, node.id, "Every input needs exactly one connection") bad = true
+                }
+            }
+            if op == 3_u32 &&(node.attribute == 4_u32 || node.attribute == 5_u32) {
+                vfx_report(out, index, mi, node.id, "Particle identity, previous position and seed are read-only") bad = true
+            }
+        }
+        for edge in module.links {
+            let mut from = false let mut to = false
+            for node in module.nodes {
+                if node.id == edge.from {
+                    from = true
+                }
+                if node.id == edge.to {
+                    to = true if edge.input >= vfx_arity(vfx_opcode(node.operation)) {
+                        vfx_report(out, index, mi, node.id, "Connection targets a nonexistent input") bad = true
+                    }
+                }
+            }
+            if !from || !to {
+                vfx_report(out, index, mi, edge.to, "Connection endpoint does not exist") bad = true
+            }
+        }
+        if bad {
+            continue
+        }
+        let mut emitted = Vec[u64]::new()
+        for _pass in 0_usize..module.nodes.len() {
+            for ni in 0_usize..module.nodes.len() {
+                let node = module.nodes.get(ni).unwrap_or(ParticleNode::new(0_u64, "", 0, 0))
+                let mut done = false for id in emitted {
+                    if id == node.id {
+                        done = true
+                    }
+                }
+                if done {
+                    continue
+                }
+                let mut sources = vec![0_f32, 0_f32, 0_f32] let mut ready = true
+                for edge in module.links {
+                    if edge.to == node.id {
+                        if edge.input > 2_u32 {
+                            vfx_report(out, index, mi, node.id, "Input index exceeds the operation arity") continue
+                        }
+                        let mut found = false
+                        for si in 0_usize..module.nodes.len() {
+                            let source = module.nodes.get(si).unwrap_or(node)
+                            if source.id == edge.from {
+                                found = true let mut available = false for id in emitted {
+                                    if id == edge.from {
+                                        available = true
+                                    }
+                                }
+                                if !available {
+                                    ready = false
+                                }
+                                sources.set(edge.input as usize, si as f32)
+                                if source.kind != node.kind && source.kind != "scalar" && node.operation != "store" && node.operation != "select" && node.operation != "length" && node.operation != "dot" && node.operation != "curve" {
+                                    vfx_report(out, index, mi, node.id, "Incompatible vector types")
+                                }
+                            }
+                        }
+                        if !found {
+                            vfx_report(out, index, mi, node.id, "Connection source does not exist")
+                        }
+                    }
+                }
+                if !ready {
+                    continue
+                }
+                let op = vfx_opcode(node.operation)
+                if op == 0_u32 {
+                    vfx_report(out, index, mi, node.id, "Unknown particle operation") continue
+                }
+                if node.attribute > 7_u32 {
+                    vfx_report(out, index, mi, node.id, "Particle attribute index exceeds the dataset") continue
+                }
+                let start = out.words.len()
+                let mut value = node.value
+                if node.operation == "parameter" {
+                    let mut found = false
+                    for pi in 0_usize..system.parameters.len() {
+                        if system.parameters.get(pi).unwrap_or(ParticleParameter {
+                                "", "", value
+                            }
+                            ,
+                        ).name == node.parameter {
+                            value.x = pi as f32 found = true
+                        }
+                    }
+                    if !found {
+                        vfx_report(out, index, mi, node.id, "Parameter is not defined")
+                    }
+                }
+                if node.operation == "curve" {
+                    if node.points.len() == 0 || node.points.len() > 4096_usize {
+                        vfx_report(out, index, mi, node.id, "Curve needs at least one point")
+                    }
+                    curves.push((start + 4_usize, node.points)) value.x = 0 value.y = node.points.len() as f32
+                }
+                for word in vec![op as f32, ni as f32, sources.get(0_usize).unwrap_or(0), sources.get(1_usize).unwrap_or(0), value.x, value.y, value.z, value.w, sources.get(2_usize).unwrap_or(0), node.attribute as f32, module.stage as f32, node.id as f32, 0, 0, 0, 0] {
+                    out.words.push(word)
+                }
+                emitted.push(node.id) count += 1_u32
+            }
+        }
+        if emitted.len() != module.nodes.len() {
+            vfx_report(out, index, mi, 0_u64, "Module contains a cycle or duplicate node identities")
+        }
+    }
+    out.words.set(0_usize, count as f32)
+    for curve in curves {
+        out.words.set(curve.0, out.words.len() as f32)
+        let mut previous = - 100000000_f32
+        for point in curve.1 {
+            if point.time < previous {
+                vfx_report(out, index, 0_usize, 0_u64, "Curve points must be ordered")
+            }
+            previous = point.time
+            for v in vec![point.time, 0, 0, 0, point.value.x, point.value.y, point.value.z, point.value.w] {
+                out.words.push(v)
+            }
+        }
+    }
+    ret out
+}

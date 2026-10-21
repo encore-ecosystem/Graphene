@@ -109,7 +109,7 @@ fn main() -> u32 {
             let initial_resident =
                 gpu_virtual_geometry_resident_pages(virtual_scene.geometry)
             if gpu_virtual_geometry_staging_bytes(virtual_scene.geometry) !=
-            8_u64 *(64_u64 * 11_u64 + 126_u64 * 3_u64) * 4_u64 {
+            16_u64 *(64_u64 * 11_u64 + 126_u64 * 3_u64) * 4_u64 {
                 gpu_virtual_geometry_destroy(virtual_scene.geometry)
                 gi_history.destroy() gi_surfaces.destroy() gi_scene.destroy()
                 target.destroy() device.destroy() instance.destroy()

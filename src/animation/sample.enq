@@ -1,0 +1,101 @@
+//! glTF-compatible STEP, LINEAR and time-scaled CUBICSPLINE sampling.
+import core::result::Result
+import mod::math::{PoseRotation, animation_finite, animation_clamp}
+import mod::model::{AnimationClip, AnimationTrack, AnimationValue, TrackPath, KeyInterpolation}
+import mod::pose::AnimationPose
+
+pub fn sample_track(track: AnimationTrack, time: f32) -> AnimationValue {
+    let n = track.keys.len()
+    if n == 0_usize {
+        ret AnimationValue::zero()
+    }
+    if time <= track.keys.get_unchecked_borrowed(0_usize).time {
+        ret track.keys.get_unchecked_borrowed(0_usize).value
+    }
+    if time >= track.keys.get_unchecked_borrowed(n - 1_usize).time {
+        ret track.keys.get_unchecked_borrowed(n - 1_usize).value
+    }
+    let mut low = 0_usize let mut high = n - 1_usize
+    while high - low > 1_usize {
+        let mid = low +(high - low) / 2_usize if track.keys.get_unchecked_borrowed(mid).time <= time {
+            low = mid
+        } else {
+            high = mid
+        }
+    }
+    let a = track.keys.get_unchecked_borrowed(low) let b = track.keys.get_unchecked_borrowed(high)
+    let span = b.time - a.time let t = animation_clamp((time - a.time) / span, 0_f32, 1_f32)
+    match track.interpolation {
+        KeyInterpolation::Step => {
+            ret a.value
+        }
+        KeyInterpolation::Linear => {
+            match track.path {
+                TrackPath::Rotation => {
+                    let q = a.value.rotation().slerp(b.value.rotation(), t) ret AnimationValue {
+                        q.x, q.y, q.z, q.w
+                    }
+                }
+                _ => {
+                    ret a.value.scaled(1_f32 - t).add(b.value.scaled(t))
+                }
+            }
+        }
+        KeyInterpolation::CubicSpline => {
+            let t2 = t * t let t3 = t2 * t
+            let value = a.value.scaled(2_f32 * t3 - 3_f32 * t2 + 1_f32).add(a.outgoing.scaled((t3 - 2_f32 * t2 + t) * span)).add(b.value.scaled( - 2_f32 * t3 + 3_f32 * t2)).add(b.incoming.scaled((t3 - t2) * span))
+            match track.path {
+                TrackPath::Rotation => {
+                    let q = value.rotation().normalized() ret AnimationValue {
+                        q.x, q.y, q.z, q.w
+                    }
+                }
+                _ => {
+                    ret value
+                }
+            }
+        }
+    }
+}
+/// Caller resets the pose to its rest/default state before applying a clip.
+/// Missing channels intentionally preserve that state; this is also useful for layers.
+pub fn sample_clip(clip: AnimationClip, time: f32, pose: mut AnimationPose) -> Result[AnimationPose, str] {
+    if clip.skeleton != pose.skeleton || !animation_finite(time) {
+        ret Result::Err("Invalid clip sample or incompatible pose")
+    }
+    let mut out = pose
+    for track in clip.tracks {
+        let index = track.target as usize
+        let value = sample_track(track, time)
+        if !value.finite() {
+            ret Result::Err("Non-finite animation sample")
+        }
+        match track.path {
+            TrackPath::Translation => {
+                if index >= out.translations.len() {
+                    ret Result::Err("Translation target out of range")
+                }
+                out.translations.set(index, value.vector())
+            }
+            TrackPath::Rotation => {
+                if index >= out.rotations.len() {
+                    ret Result::Err("Rotation target out of range")
+                }
+                out.rotations.set(index, value.rotation().normalized())
+            }
+            TrackPath::Scale => {
+                if index >= out.scales.len() {
+                    ret Result::Err("Scale target out of range")
+                }
+                out.scales.set(index, value.vector())
+            }
+            TrackPath::Morph => {
+                if index >= out.morphs.len() {
+                    ret Result::Err("Morph target out of range")
+                }
+                out.morphs.set(index, value.x)
+            }
+        }
+    }
+    ret Result::Ok(out)
+}

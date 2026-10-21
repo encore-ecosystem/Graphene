@@ -1,0 +1,425 @@
+import mod::content_browser::path::lower
+//! Project-owned AutoLOD quality curves. Distances are world units from camera to mesh bounds center.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import mod::scene::json_value::parse_number
+import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
+
+pub struct LodCurvePoint {
+    distance: f32
+    triangle_ratio: f32
+}
+pub enum LodInterpolation {
+    Linear
+    Smooth
+}
+
+impl for LodInterpolation {
+    pub fn smooth(self: Self) -> bool {
+        ret match self {
+            Smooth => true Linear => false
+        }
+    }
+    pub fn name(self: Self) -> str {
+        ret if self.smooth() {
+            "smooth"
+        } else {
+            "linear"
+        }
+    }
+}
+
+pub struct LodGroup {
+    id: str
+    name: str
+    curve: Vec[LodCurvePoint]
+    interpolation: LodInterpolation
+}
+pub struct LodGroups {
+    groups: Vec[LodGroup]
+    error: str
+}
+fn number(value: Json, fallback: f32) -> f32 {
+    ret parse_number(value.as_number().unwrap_or("")).unwrap_or(fallback)
+}
+pub fn trim_name(value: str) -> str {
+    let mut start = 0_usize let mut end = value.byte_len()
+    while start < end && value.byte_at(start) <= 32 {
+        start += 1
+    }
+    while end > start && value.byte_at(end - 1) <= 32 {
+        end -= 1
+    }
+    ret value.slice_bytes(start, end - start)
+}
+
+// Approximate migration only: old pixel tolerances have no mesh-independent
+// inverse. Anchor the former factory curve and preserve the v1 file on save.
+pub fn legacy_triangle_ratio(error: f32) -> f32 {
+    if error <= 1 {
+        ret 1.0_f32
+    }
+    if error <= 4 {
+        ret 1.0_f32 -(error - 1.0_f32) / 3.0_f32 * 0.5_f32
+    }
+    if error <= 16 {
+        ret 0.5_f32 -(error - 4.0_f32) / 12.0_f32 * 0.4_f32
+    }
+    if error <= 32 {
+        ret 0.1_f32 -(error - 16.0_f32) / 16.0_f32 * 0.08_f32
+    }
+    ret 0.64_f32 / error
+}
+
+// Screen coverage has no mesh-independent conversion to world distance.
+// Preserve the curve's quality values/order using explicit migration anchors.
+fn legacy_distance(coverage: f32) -> f32 {
+    if coverage >= 0.5_f32 {
+        ret(1.0_f32 - coverage) * 20.0_f32
+    }
+    if coverage >= 0.2_f32 {
+        ret 10.0_f32 +(0.5_f32 - coverage) / 0.3_f32 * 20.0_f32
+    }
+    if coverage >= 0.05_f32 {
+        ret 30.0_f32 +(0.2_f32 - coverage) / 0.15_f32 * 70.0_f32
+    }
+    if coverage >= 0.01_f32 {
+        ret 100.0_f32 +(0.05_f32 - coverage) / 0.04_f32 * 200.0_f32
+    }
+    ret 300.0_f32 +(0.01_f32 - coverage) / 0.01_f32 * 300.0_f32
+}
+
+impl for LodGroup {
+    pub fn independent(self: Self) -> Self {
+        let mut curve = Vec[LodCurvePoint]::new()
+        for point in self.curve {
+            curve.push(point)
+        }
+        ret Self { self.id, self.name, curve, self.interpolation }
+    }
+
+    pub fn defaults() -> Self {
+        ret Self {
+            "default", "Default", vec![LodCurvePoint { 10.0_f32, 1.0_f32 }, LodCurvePoint {
+                    30.0_f32, 0.5_f32
+                }
+                , LodCurvePoint {
+                    100.0_f32, 0.1_f32
+                }
+                , LodCurvePoint {
+                    300.0_f32, 0.02_f32
+                }
+            ], LodInterpolation::Linear
+        }
+    }
+    pub fn constant(id: str, name: str, ratio: f32) -> Self {
+        ret Self {
+            id, name, vec![LodCurvePoint { 0.0_f32, ratio }, LodCurvePoint { 300.0_f32, ratio }], LodInterpolation::Linear
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        if self.id == "" || trim_name(self.name) == "" || self.name.byte_len() > 64 || self.name.contains("\n") || self.name.contains("\r") || self.curve.len() < 2 || self.curve.len() > 8 {
+            ret false
+        }
+        if self.id == "default" && self.name != "Default" {
+            ret false
+        }
+        let mut previous_distance = - 1.0_f32 let mut previous_ratio = 1.0_f32
+        for point in self.curve {
+            if !(point.distance >= 0 && point.distance <= 340282346638528859811704183484516925440.0_f32 && point.triangle_ratio > 0 && point.triangle_ratio <= 1 && point.distance > previous_distance && point.triangle_ratio <= previous_ratio) {
+                ret false
+            }
+            previous_distance = point.distance previous_ratio = point.triangle_ratio
+        }
+        ret true
+    }
+    fn secant(self: Self, index: usize) -> f32 {
+        let a = self.curve.get_unchecked_borrowed(index) let b = self.curve.get_unchecked_borrowed(index + 1)
+        ret(b.triangle_ratio - a.triangle_ratio) /(b.distance - a.distance)
+    }
+    fn slope(self: Self, index: usize) -> f32 {
+        let n = self.curve.len()
+        if n == 2 {
+            ret self.secant(0)
+        }
+        if index == 0 || index == n - 1 {
+            let first = if index == 0 {
+                0_usize
+            } else {
+                n - 2
+            }
+            let second = if index == 0 {
+                1_usize
+            } else {
+                n - 3
+            }
+            let h0 = self.curve.get_unchecked_borrowed(first + 1).distance - self.curve.get_unchecked_borrowed(first).distance
+            let h1 = self.curve.get_unchecked_borrowed(second + 1).distance - self.curve.get_unchecked_borrowed(second).distance
+            let d0 = self.secant(first) let d1 = self.secant(second)
+            let w = h0 /(h0 + h1)
+            let m =(1 + w) * d0 - w * d1
+            ret if d0 == 0 || m >= 0 {
+                0.0_f32
+            } elif m < 3 * d0 {
+                3 * d0
+            } else {
+                m
+            }
+        }
+        let d0 = self.secant(index - 1) let d1 = self.secant(index)
+        if d0 == 0 || d1 == 0 {
+            ret 0.0_f32
+        }
+        let h0 = self.curve.get_unchecked_borrowed(index).distance - self.curve.get_unchecked_borrowed(index - 1).distance
+        let h1 = self.curve.get_unchecked_borrowed(index + 1).distance - self.curve.get_unchecked_borrowed(index).distance
+        let w =(1 + h1 /(h0 + h1)) / 3
+        ret 1 /(w / d0 +(1 - w) / d1)
+    }
+    pub fn evaluate(self: Self, distance: f32) -> f32 {
+        let mut previous = self.curve.get(0).unwrap_or(LodCurvePoint { 1.0_f32, 1.0_f32 })
+        if distance <= previous.distance {
+            ret previous.triangle_ratio
+        }
+        for index in 1_usize..self.curve.len() {
+            let point = self.curve.get_unchecked_borrowed(index)
+            if distance <= point.distance {
+                let t =(distance - previous.distance) /(point.distance - previous.distance)
+                if !self.interpolation.smooth() || self.curve.len() == 2 {
+                    ret previous.triangle_ratio +(point.triangle_ratio - previous.triangle_ratio) * t
+                }
+                let h = point.distance - previous.distance
+                let a = self.slope(index - 1) * h
+                let b = self.slope(index) * h
+                let t2 = t * t let t3 = t2 * t
+                let value =(2 * t3 - 3 * t2 + 1) * previous.triangle_ratio +(t3 - 2 * t2 + t) * a +( - 2 * t3 + 3 * t2) * point.triangle_ratio +(t3 - t2) * b
+                ret if value < point.triangle_ratio {
+                    point.triangle_ratio
+                } elif value > previous.triangle_ratio {
+                    previous.triangle_ratio
+                } else {
+                    value
+                }
+            }
+            previous = point
+        }
+        ret previous.triangle_ratio
+    }
+}
+
+impl for LodGroups {
+    pub fn defaults() -> Self {
+        ret Self { vec![LodGroup::defaults()], "" }
+    }
+    pub fn independent(self: Self) -> Self {
+        let mut groups = Vec[LodGroup]::new()
+        for group in self.groups {
+            groups.push(group.independent())
+        }
+        ret Self { groups, self.error }
+    }
+    pub fn find(self: Self, id: str) -> Option[LodGroup] {
+        for group in self.groups {
+            if group.id == id {
+                ret Option[LodGroup]::Some(group)
+            }
+        }
+        ret Option[LodGroup]::None
+    }
+    pub fn resolve(self: Self, id: str) -> LodGroup {
+        match self.find(id) {
+            Some(group) => {
+                ret group
+            }
+            None => {
+            }
+        }
+        // Deterministic legacy identifiers also work before the catalog's first save.
+        if id.byte_len() > 7 && id.slice_bytes(0, 7) == "legacy-" {
+            let error = parse_number(id.slice_bytes(7, id.byte_len() - 7)).unwrap_or( - 1.0_f32)
+            if error >= 0.25_f32 && error <= 16 {
+                ret LodGroup::constant(id, "Legacy " + error.fmt(), legacy_triangle_ratio(error))
+            }
+        }
+        ret self.find("default").unwrap_or(LodGroup::defaults())
+    }
+    pub fn migrate_legacy(self: mut Self, id: str) -> bool {
+        if self.find(id).is_some() {
+            ret false
+        }
+        let mut group = self.resolve(id)
+        if group.id != id {
+            ret false
+        }
+        let base = group.name let mut suffix = 2_usize let mut collision = true
+        while collision {
+            collision = false
+            for other in self.groups {
+                if lower(trim_name(other.name)) == lower(group.name) {
+                    collision = true
+                }
+            }
+            if collision {
+                group.name = base + " " + suffix.fmt() suffix += 1
+            }
+        }
+        self.groups.push(group) ret true
+    }
+    pub fn valid(self: Self) -> bool {
+        let mut has_default = false
+        for i in 0_usize..self.groups.len() {
+            let group = self.groups.get_unchecked_borrowed(i)
+            if !group.valid() {
+                ret false
+            }
+            if group.id == "default" {
+                has_default = true
+            }
+            for j in 0_usize..i {
+                let other = self.groups.get_unchecked_borrowed(j)
+                if group.id == other.id || lower(trim_name(group.name)) == lower(trim_name(other.name)) {
+                    ret false
+                }
+            }
+        }
+        ret has_default
+    }
+    pub fn decode(text: str) -> Self {
+        let failed = Self {
+            vec![LodGroup::defaults()], "Invalid Config/LODGroups.json; existing file preserved"
+        }
+        let root = match parse(text) {
+            Ok(value) => value Err(_) => {
+                ret failed
+            }
+        }
+        let version = number(root.get("version").unwrap_or(Json::Null), 1.0_f32)
+        if version != 1 && version != 2 && version != 3 && version != 4 {
+            ret failed
+        }
+        let entries = match root.get("groups").unwrap_or(Json::Null).as_array() {
+            Some(value) => value None => {
+                ret failed
+            }
+        }
+        let mut groups = Vec[LodGroup]::new()
+        for entry in entries {
+            let mut previous_error = 0.0_f32
+            let mut previous_coverage = 2.0_f32
+            let mut previous_distance = - 1.0_f32
+            let mut curve = Vec[LodCurvePoint]::new()
+            for point in entry.get("curve").unwrap_or(Json::Array(Vec[Json]::new())).as_array().unwrap_or(Vec[Json]::new()) {
+                let mut ratio = number(point.get("triangle_ratio").unwrap_or(Json::Null), - 1.0_f32)
+                if version == 1 {
+                    let error = number(point.get("error_px").unwrap_or(Json::Null), - 1.0_f32)
+                    if !(error >= 0.25_f32 && error <= 340282346638528859811704183484516925440.0_f32 && error >= previous_error) {
+                        ret failed
+                    }
+                    previous_error = error
+                    ratio = legacy_triangle_ratio(error)
+                }
+                let mut distance = number(point.get("distance").unwrap_or(Json::Null), - 1.0_f32)
+                if version < 3 {
+                    let coverage = number(point.get("screen_coverage").unwrap_or(Json::Null), - 1.0_f32)
+                    if !(coverage >= 0 && coverage <= 1 && coverage < previous_coverage) {
+                        ret failed
+                    }
+                    previous_coverage = coverage
+                    distance = legacy_distance(coverage)
+                    if distance <= previous_distance {
+                        distance = previous_distance + 0.001_f32
+                    }
+                    previous_distance = distance
+                }
+                curve.push(LodCurvePoint {
+                        distance, ratio
+                    }
+                    ,
+                )
+            }
+            let mode = entry.get("interpolation").unwrap_or(Json::String("linear")).as_str().unwrap_or("")
+            if mode != "linear" && mode != "smooth" {
+                ret failed
+            }
+            groups.push(LodGroup {
+                    entry.get("id").unwrap_or(Json::Null).as_str().unwrap_or(""), entry.get("name").unwrap_or(Json::Null).as_str().unwrap_or(""), curve, if version == 4 && mode == "smooth" {
+                        LodInterpolation::Smooth
+                    } else {
+                        LodInterpolation::Linear
+                    }
+                }
+                ,
+            )
+        }
+        let result = Self { groups, "" }
+        ret if result.valid() {
+            result
+        } else {
+            failed
+        }
+    }
+    pub fn load(project: str) -> Self {
+        let path = project + "/Config/LODGroups.json"
+        ret if file_exists(path) {
+            Self::decode(read_file(path))
+        } else {
+            Self::defaults()
+        }
+    }
+    pub fn encode(self: Self) -> str {
+        let mut entries = Vec[Json]::new()
+        for group in self.groups {
+            let mut points = Vec[Json]::new()
+            for point in group.curve {
+                points.push(Json::Object(vec![field("distance", Json::Number(point.distance.fmt())), field("triangle_ratio", Json::Number(point.triangle_ratio.fmt()))]))
+            }
+            entries.push(Json::Object(vec![field("id", Json::String(group.id)), field("name", Json::String(group.name)), field("curve", Json::Array(points)), field("interpolation", Json::String(group.interpolation.name()))]))
+        }
+        ret stringify(Json::Object(vec![field("version", Json::Number("4")), field("groups", Json::Array(entries))])) + "\n"
+    }
+    pub fn needs_migration(project: str) -> bool {
+        if !file_exists(project + "/Config/LODGroups.json") {
+            ret false
+        }
+        let root = match parse(read_file(project + "/Config/LODGroups.json")) {
+            Ok(value) => value Err(_) => {
+                ret false
+            }
+        }
+        let version = number(root.get("version").unwrap_or(Json::Null), 1.0_f32)
+        ret version == 1 || version == 2
+    }
+
+    pub fn save(self: Self, project: str) -> bool {
+        if self.error != "" || !self.valid() || project == "" || mkdir_all(project + "/Config") != 0 {
+            ret false
+        }
+        let path = project + "/Config/LODGroups.json"
+        if Self::needs_migration(project) {
+            let original = read_file(path)
+            let stem = project + "/Config/LODGroups.before-distance"
+            let mut backup = stem + ".json" let mut suffix = 2_usize
+            while file_exists(backup) && read_file(backup) != original {
+                backup = stem + "." + suffix.fmt() + ".json" suffix += 1_usize
+            }
+            if !file_exists(backup) && write_file_atomic(backup, original) != 0 {
+                ret false
+            }
+        }
+        ret write_file_atomic(path, self.encode()) == 0
+    }
+}
+#attr(test)
+fn lod_groups_curve_and_validation() -> bool {
+    let group = LodGroup::defaults()
+    let roundtrip = LodGroups::decode(LodGroups::defaults().encode())
+    let invalid = LodGroup {
+        "bad", "Bad", vec![LodCurvePoint { 30.0_f32, 0.1_f32 }, LodCurvePoint {
+                10.0_f32, 0.5_f32
+            }
+        ]
+        , LodInterpolation::Linear
+    }
+    ret group.valid() && group.evaluate(0) == 1 && group.evaluate(1000) == 0.02_f32 && group.evaluate(30) == 0.5_f32 && group.evaluate(20) > 0.749_f32 && group.evaluate(20) < 0.751_f32 && roundtrip.valid() && !invalid.valid() && LodGroups::decode("{}").error != ""
+}

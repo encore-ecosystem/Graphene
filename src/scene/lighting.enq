@@ -1,0 +1,125 @@
+//! Shared bounded forward-light payload: count, then four vec4 per light.
+import core::vec::Vec
+import linalg::Vec3
+import mod::component::SceneComponent
+import mod::light::DirectionalLight
+import mod::world::Scene
+
+pub fn scene_sun_id(scene: Scene) -> u64 {
+    let mut environment_id = 0_u64 let mut environment_sun = 0_u64
+    for actor in scene.entities() {
+        if scene.world_visible(actor.id()) {
+            match actor.component() {
+                Environment(c) => {
+                    if c.kind == "sky-atmosphere" &&(environment_id == 0 || actor.id() < environment_id) {
+                        environment_id = actor.id() environment_sun = c.sun
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    if environment_id > 0 {
+        ret environment_sun
+    }
+    let mut found = 0_u64
+    for entity in scene.entities() {
+        if entity.component().kind() == "directional-light" && scene.world_visible(entity.id()) &&(found == 0_u64 || entity.id() < found) {
+            found = entity.id()
+        }
+    }
+    ret found
+}
+pub fn scene_sun(scene: Scene) -> DirectionalLight {
+    let sun_id = scene_sun_id(scene)
+    for entity in scene.entities() {
+        if entity.id() == sun_id && scene.world_visible(entity.id()) {
+            match entity.component() {
+                Light(light) => {
+                    if light.kind == "directional-light" {
+                        match scene.world_matrix(entity.id()) {
+                            Some(world) => {
+                                let origin = world.transform_point(Vec3::zero())
+                                let direction = world.transform_point(Vec3::new(0.0_f32, 0.0_f32, - 1.0_f32)).sub(origin).normalized()
+                                ret DirectionalLight::new(direction, light.color, light.intensity)
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    ret DirectionalLight::new(Vec3::new(0.0_f32, - 1.0_f32, 0.0_f32), Vec3::zero(), 0.0_f32)
+}
+pub fn scene_light_values(scene: Scene) -> Vec[f32] {
+    let mut values = vec![0.0_f32, 0.0_f32, 0.0_f32, 0.5357_f32]
+    let mut count = 0_usize
+    let sun_id = scene_sun_id(scene)
+    let mut moon_id = 0_u64
+    for actor in scene.entities() {
+        if scene.world_visible(actor.id()) {
+            match actor.component() {
+                Environment(c) => {
+                    if c.kind == "sky-atmosphere" && c.sun == sun_id {
+                        moon_id = c.moon break
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    for entity in scene.entities() {
+        if scene.world_visible(entity.id()) {
+            match entity.component() {
+                Light(light) => {
+                    let primary = entity.id() == sun_id
+                    if primary {
+                        values.set(3, light.sun_angle)
+                    }
+                    if !primary && count < 64_usize {
+                        match scene.world_matrix(entity.id()) {
+                            Some(world) => {
+                                let position = world.transform_point(Vec3::zero())
+                                let direction = world.transform_point(Vec3::new(0.0_f32, 0.0_f32, - 1.0_f32)).sub(position).normalized()
+                                values.push(position.x()) values.push(position.y()) values.push(position.z()) values.push(light.range)
+                                values.push(direction.x()) values.push(direction.y()) values.push(direction.z())
+                                values.push(if light.kind == "point-light" {
+                                        1.0_f32
+                                    } elif light.kind == "spot-light" {
+                                        2.0_f32
+                                    } else {
+                                        3.0_f32
+                                    }
+                                )
+                                values.push(light.color.x()) values.push(light.color.y()) values.push(light.color.z()) values.push(light.intensity)
+                                // Angles remain degrees; shader computes cosine once per contributing light.
+                                values.push(light.inner_angle) values.push(light.outer_angle) values.push(if entity.id() == moon_id {
+                                        1.0_f32
+                                    } else {
+                                        0.0_f32
+                                    }
+                                ) values.push(light.intensity)
+                                count += 1
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    values.set(0, count as f32)
+    while values.len() < 3140_usize {
+        values.push(0.0_f32)
+    }
+    ret values
+}

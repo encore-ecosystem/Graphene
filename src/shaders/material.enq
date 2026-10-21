@@ -1,0 +1,10 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn material_vertex_spirv() -> Vec[u32] {
+    ret builtin_spirv(1289356445_u32)
+}
+
+pub fn material_fragment_spirv() -> Vec[u32] {
+    ret builtin_spirv(1713454215_u32)
+}

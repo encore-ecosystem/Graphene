@@ -1,0 +1,263 @@
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import graphene::{decode_png, texture_path_valid, load_material_texture}
+import std::io::println
+import std::os::{mkdir_all, write_file, read_file, file_exists}
+import std::time::perf_counter_ms
+
+extern fn encore_str_from_buffer(bytes: u8*, length: usize) -> str
+
+// The runtime copies exactly length bytes while this owning vector is alive.
+#attr(safe)
+fn bytes_string(bytes: Vec[u8]) -> str {
+    unsafe {
+        ret encore_str_from_buffer(bytes.as_ptr(), bytes.len())
+    }
+}
+
+fn be32(bytes: mut Vec[u8], value: u32) ->() {
+    bytes.push((value >> 24) as u8) bytes.push((value >> 16) as u8)
+    bytes.push((value >> 8) as u8) bytes.push(value as u8)
+}
+
+fn chunk(bytes: mut Vec[u8], name: str, payload: Vec[u8]) ->() {
+    be32(bytes, payload.len() as u32)
+    let mut crc = 4294967295_u32
+    for index in 0..4 {
+        let value = name.byte_at(index)
+        bytes.push(value) crc ^= value as u32
+        for _ in 0..8 {
+            crc =(crc >> 1) ^(if (crc & 1) == 1 {
+                    3988292384_u32
+                } else {
+                    0_u32
+                }
+            )
+        }
+    }
+    for value in payload {
+        bytes.push(value) crc ^= value as u32
+        for _ in 0..8 {
+            crc =(crc >> 1) ^(if (crc & 1) == 1 {
+                    3988292384_u32
+                } else {
+                    0_u32
+                }
+            )
+        }
+    }
+    be32(bytes, crc ^ 4294967295_u32)
+}
+
+fn stored(raw: Vec[u8]) -> Vec[u8] {
+    let mut result = vec![120_u8, 1, 1]
+    let length = raw.len() as u32
+    result.push(length as u8) result.push((length >> 8) as u8)
+    result.push((length ^ 65535) as u8) result.push(((length ^ 65535) >> 8) as u8)
+    let mut a = 1_u32 let mut b = 0_u32
+    for value in raw {
+        result.push(value) a =(a + value as u32) % 65521 b =(b + a) % 65521
+    }
+    be32(result,(b << 16) | a)
+    ret result
+}
+
+fn png(width: u32, height: u32, color: u8, interlace: u8, compressed: Vec[u8]) -> Vec[u8] {
+    let mut bytes = vec![137_u8, 80, 78, 71, 13, 10, 26, 10]
+    let mut header = Vec[u8]::new()
+    be32(header, width) be32(header, height)
+    header.push(8) header.push(color) header.push(0) header.push(0) header.push(interlace)
+    chunk(bytes, "IHDR", header)
+    // Split IDAT to verify that chunk boundaries do not reset DEFLATE state.
+    let mut first = Vec[u8]::new() let mut second = Vec[u8]::new()
+    for index in 0..compressed.len() {
+        let byte = compressed.get(index).unwrap_or(0)
+        if index < 3 {
+            first.push(byte)
+        } else {
+            second.push(byte)
+        }
+    }
+    chunk(bytes, "IDAT", first) chunk(bytes, "IDAT", second)
+    chunk(bytes, "IEND", Vec[u8]::new())
+    ret bytes
+}
+
+fn rejected(bytes: Vec[u8]) -> bool {
+    ret match decode_png(bytes_string(bytes)) {
+        Result::Err(_) => true Result::Ok(_) => false
+    }
+}
+
+fn main() -> u32 {
+    // Adjacent rows and pixels differ: the previous row must not change as
+    // the current row is reconstructed (especially Paeth's upper-left byte).
+    let transitions = vec![0_u8, 239, 85, 73, 239, 85, 73,
+        4, 119, 105, 39, 0, 0, 0,
+        3, 225, 191, 240, 19, 236, 24,
+        2, 246, 246, 246, 216, 216, 216,
+        1, 200, 180, 160, 196, 196, 196]
+    let expected = vec![4282996207_u32, 4282996207, 4285578854, 4285578854,
+        4280819220, 4284766800, 4280161290, 4282135080, 4288722120, 4284774540]
+    match decode_png(bytes_string(png(2, 5, 2, 0, stored(transitions)))) {
+        Result::Ok(image) => {
+            for index in 0..expected.len() {
+                if image.pixels.get(index) != expected.get(index) {
+                    ret 30
+                }
+            }
+        }
+        Result::Err(_) => {
+            ret 31
+        }
+    }
+    // The alpha channel participates in filtering too. Cover a changing
+    // Paeth row followed by Average, with non-opaque alpha at both pixels.
+    let rgba_rows = vec![0_u8, 239, 85, 73, 31, 239, 85, 73, 255,
+        4, 119, 105, 39, 32, 0, 0, 0, 128,
+        3, 225, 191, 240, 225, 19, 236, 24, 137]
+    let rgba_expected = vec![524899823_u32, 4282996207, 1064353382, 2138095206, 2629140, 3362019920]
+    match decode_png(bytes_string(png(2, 3, 6, 0, stored(rgba_rows)))) {
+        Result::Ok(image) => {
+            for index in 0..rgba_expected.len() {
+                if image.pixels.get(index) != rgba_expected.get(index) {
+                    ret 32
+                }
+            }
+        }
+        Result::Err(_) => {
+            ret 33
+        }
+    }
+    let raw = vec![0_u8, 100, 50, 25, 200, 100, 50,
+        1, 100, 50, 25, 100, 50, 25,
+        2, 0, 0, 0, 0, 0, 0,
+        3, 50, 25, 13, 50, 25, 13,
+        4, 0, 0, 0, 0, 0, 0]
+    let mut valid = png(2, 5, 2, 0, stored(raw))
+    match decode_png(bytes_string(valid)) {
+        Result::Ok(image) => {
+            if image.width != 2 || image.height != 5 || image.pixels.len() != 10 {
+                ret 1
+            }
+            for row in 0..5 {
+                if image.pixels.get(row * 2).unwrap_or(0) != 4279841380_u32 ||
+                image.pixels.get(row * 2 + 1).unwrap_or(0) != 4281492680_u32 {
+                    ret 2
+                }
+            }
+        }
+        Result::Err(error) => {
+            println(error)
+            ret 3
+        }
+    }
+    let rgba = vec![0_u8, 255, 0, 0, 31, 0, 255, 0, 255]
+    match decode_png(bytes_string(png(2, 1, 6, 0, stored(rgba)))) {
+        Result::Ok(image) => {
+            if image.pixels.get(0).unwrap_or(0) != 520093951_u32 || image.pixels.get(1).unwrap_or(0) != 4278255360_u32 {
+                ret 4
+            }
+        }
+        Result::Err(_) => {
+            ret 5
+        }
+    }
+    let fixed = vec![120_u8, 1, 99, 72, 49, 146, 60, 145, 98, 196, 8, 164, 128, 136, 137, 1, 12, 152, 141, 36, 121, 129, 136, 5, 194, 3, 0, 106, 186, 4, 38]
+    match decode_png(bytes_string(png(2, 5, 2, 0, fixed))) {
+        Result::Ok(image) => {
+            if image.pixels.get(9).unwrap_or(0) != 4281492680_u32 {
+                ret 13
+            }
+        }
+        Result::Err(_) => {
+            ret 14
+        }
+    }
+    // Independently generated zlib dynamic-Huffman stream, including overlapping
+    // back-references. Uncompressed bytes are index % 91, including filter 0.
+    let dynamic = vec![120_u8, 156, 237, 204, 83, 2, 2, 1, 0, 64, 193, 205, 174, 205, 214, 102, 219, 182, 237, 238, 127, 144, 110, 209, 215, 155, 3, 140, 32, 147, 43, 148, 42, 181, 70, 171, 211, 27, 140, 38, 179, 69, 180, 218, 236, 14, 167, 203, 237, 241, 250, 252, 129, 96, 40, 28, 137, 74, 177, 120, 34, 153, 74, 103, 178, 185, 124, 161, 88, 42, 87, 170, 181, 122, 163, 217, 106, 119, 186, 189, 254, 96, 56, 26, 79, 166, 179, 249, 98, 185, 90, 111, 182, 187, 253, 225, 120, 58, 95, 174, 183, 251, 227, 249, 122, 127, 190, 2, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 245, 191, 234, 31, 85, 247, 220, 150]
+    match decode_png(bytes_string(png(3333, 1, 2, 0, dynamic))) {
+        Result::Ok(image) => {
+            for x in 0..3333 {
+                let red =(x * 3 + 1) % 91
+                let green =(x * 3 + 2) % 91
+                let blue =(x * 3 + 3) % 91
+                let expected = 4278190080_u32 | red as u32 |((green as u32) << 8) |((blue as u32) << 16)
+                if image.pixels.get(x).unwrap_or(0) != expected {
+                    ret 15
+                }
+            }
+        }
+        Result::Err(_) => {
+            ret 16
+        }
+    }
+    valid.set(45, valid.get(45).unwrap_or(0) ^ 1)
+    if !rejected(valid) {
+        ret 6
+    }
+    if !rejected(png(2, 1, 6, 1, stored(rgba))) {
+        ret 7
+    }
+    if !rejected(png(4097, 1, 6, 0, stored(rgba))) {
+        ret 8
+    }
+    if !rejected(png(2, 1, 3, 0, stored(rgba))) {
+        ret 9
+    }
+    if !rejected(png(1, 1, 6, 0, stored(vec![5_u8, 0, 0, 0, 0]))) {
+        ret 10
+    }
+    if !rejected(png(1, 1, 6, 0, stored(vec![0_u8, 0, 0, 0, 0, 1]))) {
+        ret 11
+    }
+    let mut bad_adler = stored(rgba)
+    bad_adler.set(bad_adler.len() - 1, 0)
+    if !rejected(png(2, 1, 6, 0, bad_adler)) {
+        ret 17
+    }
+    if !rejected(png(1, 1, 6, 0, vec![120_u8, 1, 7, 0, 0, 0, 1])) {
+        ret 18
+    }
+    if !texture_path_valid("Content/Textures/example.png") || texture_path_valid("../texture.png") ||
+    texture_path_valid("Content/Textures/../outside.png") || texture_path_valid("/tmp/texture.png") {
+        ret 12
+    }
+    let scratch = f "target/texture-test-{perf_counter_ms()}"
+    if mkdir_all(scratch) != 0 {
+        ret 19
+    }
+    let source = scratch + "/source.png"
+    let encoded = bytes_string(png(2, 1, 6, 0, stored(rgba)))
+    if write_file(source, encoded) != 0 {
+        ret 20
+    }
+    let worker = spawn load_material_texture(scratch, source, true)
+    let imported = worker.join()
+    if imported.error != "" {
+        println(imported.error) ret 21
+    }
+    if !texture_path_valid(imported.path) || !file_exists(scratch + "/" + imported.path) ||
+    read_file(scratch + "/" + imported.path) != encoded || imported.image.width != 2 {
+        ret 22
+    }
+    let reloading = spawn load_material_texture(scratch, imported.path, false)
+    let reloaded = reloading.join()
+    if reloaded.error != "" || reloaded.path != imported.path || reloaded.image.pixels.get(0).unwrap_or(0) != 520093951_u32 {
+        ret 23
+    }
+    let missing = spawn load_material_texture(scratch, "Content/Textures/missing.png", false)
+    if missing.join().error == "" {
+        ret 24
+    }
+    if write_file(source, "broken PNG") != 0 {
+        ret 25
+    }
+    let broken = spawn load_material_texture(scratch, source, true)
+    if broken.join().error == "" || read_file(scratch + "/" + imported.path) != encoded {
+        ret 26
+    }
+    ret 0
+}

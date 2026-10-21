@@ -1,0 +1,35 @@
+//! The acceptance class uses the same public model and compiler as user assets.
+import linalg::Vec3
+import mod::model::*
+import refrain::scene::transform::Transform
+
+pub fn rotator_blueprint() -> BlueprintAsset {
+    let mut asset = BlueprintAsset::new("bp-rotator", "BP_Rotator")
+    asset.components.push(BlueprintComponent {
+            2, 1, "Mesh", "static-mesh", Transform::identity(), "cube", "default", true
+        }
+        ,
+    )
+    asset.properties.push(BlueprintProperty { 1, "Speed", BlueprintValue::F32(1) })
+    asset.nodes.push(BlueprintNode::new(1, "tick", BlueprintType::Exec).at(40, 60))
+    asset.nodes.push(BlueprintNode::new(2, "get-variable", BlueprintType::F32).with_reference(1).at(40, 200))
+    asset.nodes.push(BlueprintNode::new(3, "multiply", BlueprintType::F32).at(300, 170))
+    asset.nodes.push(BlueprintNode::new(4, "constant", BlueprintType::F32).with_value(BlueprintValue::F32(0)).at(300, 350))
+    asset.nodes.push(BlueprintNode::new(5, "make-vector", BlueprintType::Vector).at(550, 160))
+    asset.nodes.push(BlueprintNode::new(6, "add-rotation", BlueprintType::Vector).at(800, 60))
+    asset.nodes.push(BlueprintNode::new(7, "input-pressed", BlueprintType::Exec).with_text("ToggleVisibility").at(40, 560))
+    asset.nodes.push(BlueprintNode::new(8, "get-visible", BlueprintType::Bool).at(40, 700))
+    asset.nodes.push(BlueprintNode::new(9, "branch", BlueprintType::Bool).at(300, 560))
+    asset.nodes.push(BlueprintNode::new(10, "set-visible", BlueprintType::Bool).at(800, 560))
+    asset.nodes.push(BlueprintNode::new(11, "constant", BlueprintType::Bool).with_value(BlueprintValue::Bool(false)).at(550, 700))
+    asset.nodes.push(BlueprintNode::new(12, "constant", BlueprintType::Bool).with_value(BlueprintValue::Bool(true)).at(550, 880))
+    asset.nodes.push(BlueprintNode::new(13, "set-visible", BlueprintType::Bool).at(800, 880))
+    asset.connect(1, "then", 6, "in")
+    asset.connect(2, "value", 3, "a") asset.connect(1, "delta", 3, "b")
+    asset.connect(4, "value", 5, "x") asset.connect(3, "value", 5, "y") asset.connect(4, "value", 5, "z")
+    asset.connect(5, "value", 6, "value")
+    asset.connect(7, "then", 9, "in") asset.connect(8, "value", 9, "condition")
+    asset.connect(9, "true", 10, "in") asset.connect(11, "value", 10, "value")
+    asset.connect(9, "false", 13, "in") asset.connect(12, "value", 13, "value")
+    ret asset
+}

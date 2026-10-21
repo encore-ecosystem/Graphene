@@ -1,0 +1,460 @@
+//! Scene-independent Content Browser state. Disk work never runs during painting.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import luma::{TextEditor, Rect, VirtualGrid, VirtualGridWindow}
+import mod::files::*
+import mod::thumbnail::content_thumbnail
+import refrain::automation_transport::automation_capability_token
+import refrain::blueprint::{BlueprintAsset, blueprint_parse, blueprint_stringify}
+import refrain::material_graph::{MaterialGraph, material_graph_stringify}
+import refrain::texture_asset::{TextureLoad, load_material_texture}
+import std::os::{read_file, write_file_atomic, mkdir_all, file_exists, copy_file}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+pub import mod::model::*
+
+pub import mod::view::ContentIcons
+
+impl for ContentBrowser {
+    pub fn new() -> Self {
+        ret Self {
+            Option::None, "", Option::None, false, 0, false, "", Vec[ContentAsset]::new(), Vec[ContentAsset]::new(), "@all", vec!["@all"], 0,
+            Vec[str]::new(), "", "", vec!["Content", "@engine", "@engine/Primitives"], Vec[str]::new(), Vec[SavedSearch]::new(), Vec[str]::new(),
+            TextEditor::new(""), false, false, false, "grid", 96, "name", false, true, false,
+            Rect::new(0, 0, 900, 150), 0, true, "", false, 0, 0, "", 8, 8, 0, TextEditor::new(""), "", "", "", "", "", false, "", 0, 0, false,
+            "", 0, Vec[ContentEdit]::new(), Vec[ContentEdit]::new(), Option::None, false, Vec[ContentThumb]::new(), Option::None, 0, 0, true
+        }
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.scan.is_some() || self.thumbnail.is_some() || self.import_worker.is_some() || self.mesh_refresh || self.thumbnail_pending > 0
+    }
+    pub fn typing(self: Self) -> bool {
+        ret self.query_focused || self.popup == "folder" || self.popup == "rename" || self.popup == "material" || self.popup == "blueprint" || self.popup == "move"
+    }
+    pub fn open_project(self: mut Self, project: str) ->() {
+        if self.project == project && self.entries.len() > 0 {
+            ret()
+        }
+        self.pressed_path = "" self.pending_open = false self.drag_request = false
+        self.entries.clear() self.visible.clear()
+        self.project = project self.directory = "@all" self.history = vec!["@all"] self.history_index = 0
+        self.selection.clear() self.primary = "" self.favorites.clear() self.searches.clear() self.undo.clear() self.redo.clear()
+        self.query = TextEditor::new("") self.query_focused = false self.popup = "" self.thumbnails.clear()
+        self.load_settings() self.refresh()
+    }
+    pub fn refresh(self: mut Self) ->() {
+        self.generation += 1
+        self.thumbnail_pending = 0
+        self.thumbnails.clear()
+        if self.scan.is_some() {
+            self.rescan = true
+        } else {
+            self.scan = Option[JoinHandle[ContentScan]]::Some(spawn scan_content(self.project))
+        }
+        if self.message == "" {
+            self.message = "Refreshing assets…"
+        }
+        self.dirty = true
+    }
+    pub fn import_texture(self: mut Self, source: str) -> bool {
+        if self.import_worker.is_some() || self.project == "" {
+            ret false
+        }
+        self.import_project = self.project
+        self.import_worker = Option[JoinHandle[TextureLoad]]::Some(spawn load_material_texture(self.project, source, true))
+        self.message = "Importing PNG…" self.dirty = true ret true
+    }
+    pub fn take_import_result(self: mut Self) -> Option[TextureLoad] {
+        let result = self.import_result self.import_result = Option[TextureLoad]::None ret result
+    }
+    pub fn poll(self: mut Self) -> bool {
+        let mut changed = false
+        let import_ready = match self.import_worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if import_ready {
+            let result = match self.import_worker {
+                Some(worker) => Option[TextureLoad]::Some(worker.join()) None => Option[TextureLoad]::None
+            }
+            self.import_worker = Option[JoinHandle[TextureLoad]]::None
+            if self.import_project == self.project {
+                self.import_result = result self.refresh() changed = true
+            }
+        }
+
+        let ready = match self.scan {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if ready {
+            let result = match self.scan {
+                Some(worker) => worker.join() None => ContentScan {
+                    "", Vec[ContentAsset]::new()
+                }
+            }
+            self.scan = Option[JoinHandle[ContentScan]]::None
+            if result.project == self.project && !self.rescan {
+                self.entries = result.entries
+                let mut retained = Vec[str]::new()
+                for path in self.selection {
+                    if self.find(path).is_some() {
+                        retained.push(path)
+                    }
+                }
+                self.selection = retained
+                if !content_contains(self.selection, self.primary) {
+                    self.primary = self.selection.get(0).unwrap_or("")
+                }
+                if self.directory != "@all" && self.directory != "@favorites" && self.directory != "@engine" && self.find(self.directory).is_none() {
+                    self.directory = "@all"
+                }
+                self.message = if self.entries.len() >= 16384 {
+                    "Index limit reached (16,384 entries)"
+                } else {
+                    if self.message == "Refreshing assets…" {
+                        ""
+                    } else {
+                        self.message
+                    }
+                }
+                self.rebuild() changed = true
+            }
+            if self.rescan || result.project != self.project {
+                self.rescan = false self.refresh()
+            }
+        }
+        let finished = match self.thumbnail {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if finished {
+            let thumb = match self.thumbnail {
+                Some(worker) => worker.join() None => ContentThumb {
+                    0, "", "", ""
+                }
+            }
+            self.thumbnail = Option[JoinHandle[ContentThumb]]::None
+            if thumb.generation == self.generation && thumb.project == self.project && self.find(thumb.path).is_some() {
+                if self.thumbnails.len() >= 256 {
+                    let mut next = Vec[ContentThumb]::new() for i in 1..self.thumbnails.len() {
+                        match self.thumbnails.get(i) {
+                            Some(t) => next.push(t) None => {
+                            }
+                        }
+                    }
+                    self.thumbnails = next
+                }
+                self.thumbnails.push(thumb) self.thumbnail_pending += 1
+            }
+        }
+        if self.thumbnail.is_none() && self.scan.is_none() && self.view == "grid" {
+            let visible = self.window()
+            let first = visible.start() let end = visible.end()
+            let limited_end = if end > first + 256 {
+                first + 256
+            } else {
+                end
+            }
+            for index in first..limited_end {
+                match self.visible.get(index) {
+                    Some(asset) => {
+                        if (asset.kind == "texture" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "material-graph") && !self.has_thumbnail(asset.path) {
+                            self.thumbnail = Option[JoinHandle[ContentThumb]]::Some(spawn content_thumbnail(self.project, asset, self.generation)) break
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+        // Publish several completed previews together. Worker polling itself
+        // must not invalidate the retained browser or restart its CSS cascade.
+        let now = perf_counter_ms()
+        if self.thumbnail_pending > 0 &&(self.thumbnail.is_none() || self.thumbnail_pending >= 8 || now - self.thumbnail_published >= 120) {
+            self.thumbnail_pending = 0 self.thumbnail_published = now self.dirty = true changed = true
+        }
+        ret changed
+    }
+    pub fn find(self: Self, path: str) -> Option[ContentAsset] {
+        for asset in self.entries {
+            if asset.path == path {
+                ret Option::Some(asset)
+            }
+        }
+        ret Option::None
+    }
+    pub fn has_thumbnail(self: Self, path: str) -> bool {
+        for t in self.thumbnails {
+            if t.path == path {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn thumbnail_payload(self: Self, path: str) -> str {
+        for t in self.thumbnails {
+            if t.path == path {
+                ret t.payload
+            }
+        }
+        ret ""
+    }
+    pub fn columns(self: Self) -> usize {
+        ret if self.view == "list" {
+            1_usize
+        } else {
+            VirtualGrid::fitting_columns(self.bounds.width() - 12, self.size as f32, 6.0_f32, 32_usize)
+        }
+    }
+    pub fn stride(self: Self) -> f32 {
+        ret if self.view == "list" {
+            26.0_f32
+        } else {
+            (self.size as f32) * 0.75_f32 + 42
+        }
+    }
+    pub fn window(self: Self) -> VirtualGridWindow {
+        ret VirtualGrid::new(self.visible.len(), self.columns(), self.stride(), 1).window(self.scroll, self.bounds.height())
+    }
+    pub fn rebuild(self: mut Self) ->() {
+        let terms = content_query_terms(self.query.value()) let mut visible = Vec[ContentAsset]::new()
+        for asset in self.entries {
+            let source = if self.directory == "@all" {
+                asset.kind != "folder"
+            } elif self.directory == "@favorites" {
+                content_contains(self.favorites, asset.path)
+            } elif self.directory == "@engine" {
+                asset.path == "@engine/Primitives"
+            } elif self.recursive || terms.len() > 0 {
+                asset.path != self.directory && content_under(asset.path, self.directory)
+            } else {
+                asset.parent() == self.directory
+            }
+            let mut kind = self.types.len() == 0 || asset.kind == "folder"
+            for value in self.types {
+                kind = kind || asset.kind == value ||(value == "material" && asset.kind == "material-graph")
+            }
+            if source && kind && content_query_matches(asset, terms) {
+                visible.push(asset)
+            }
+        }
+        self.visible = content_sorted(visible, self.sort, self.descending) self.scroll = 0 self.reset_scroll = true self.dirty = true
+    }
+    pub fn navigate(self: mut Self, directory: str, record: bool) ->() {
+        if directory == self.directory {
+            ret()
+        }
+        if directory != "@all" && directory != "@favorites" && directory != "@engine" {
+            match self.find(directory) {
+                Some(asset) => {
+                    if asset.kind != "folder" {
+                        ret()
+                    }
+                }
+                None => {
+                    ret()
+                }
+            }
+        }
+        self.clear_selection()
+        self.directory = directory self.query = TextEditor::new("") self.query_focused = false self.popup = ""
+        if record {
+            let mut history = Vec[str]::new() for i in 0..(self.history_index + 1) {
+                history.push(self.history.get(i).unwrap_or("@all"))
+            }
+            history.push(directory) self.history = history self.history_index = history.len() - 1
+        }
+        self.rebuild() self.save_settings()
+    }
+    pub fn go_history(self: mut Self, forward: bool) ->() {
+        if forward && self.history_index + 1 < self.history.len() {
+            self.history_index += 1
+        } elif !forward && self.history_index > 0 {
+            self.history_index -= 1
+        } else {
+            ret()
+        }
+        self.navigate(self.history.get(self.history_index).unwrap_or("@all"), false)
+    }
+    pub fn select(self: mut Self, path: str, control: bool, shift: bool) ->() {
+        if shift && self.anchor != "" {
+            let mut a = 0_usize let mut b = 0_usize let mut have_a = false let mut have_b = false
+            for i in 0..self.visible.len() {
+                let entry = self.visible.get(i).unwrap_or(ContentAsset::new("", "", "", 0))
+                if entry.path == self.anchor {
+                    a = i have_a = true
+                }
+                if entry.path == path {
+                    b = i have_b = true
+                }
+            }
+            if have_a && have_b {
+                if !control {
+                    self.selection.clear()
+                }
+                for i in 0..self.visible.len() {
+                    if (i >= a && i <= b) ||(i >= b && i <= a) {
+                        let key = self.visible.get(i).unwrap_or(ContentAsset::new("", "", "", 0)).path if !content_contains(self.selection, key) {
+                            self.selection.push(key)
+                        }
+                    }
+                }
+            }
+        } elif control {
+            self.selection = content_toggled(self.selection, path) self.anchor = path
+        } else {
+            self.selection = vec![path] self.anchor = path
+        }
+        self.primary = if content_contains(self.selection, path) {
+            path
+        } else {
+            self.selection.get(0).unwrap_or("")
+        }
+        self.dirty = true
+    }
+    pub fn take_request(self: mut Self) -> str {
+        let request = self.request self.request = "" ret request
+    }
+    pub fn take_dirty(self: mut Self) -> bool {
+        let dirty = self.dirty self.dirty = false ret dirty
+    }
+    pub fn emit(self: mut Self, request: str, path: str) ->() {
+        if request == "rescan" {
+            self.mesh_refresh = true
+        } else {
+            self.request = request self.requested_path = path
+        }
+    }
+    pub fn clear_selection(self: mut Self) ->() {
+        if self.selection.len() > 0 || self.primary != "" {
+            self.selection.clear() self.primary = "" self.anchor = "" self.drag_request = false self.emit("select", "")
+        }
+    }
+    pub fn toggle_favorite(self: mut Self) ->() {
+        let paths = if self.selection.len() > 0 {
+            self.selection
+        } else {
+            vec![self.directory]
+        }
+        for path in paths {
+            if path != "@all" && path != "@favorites" {
+                self.favorites = content_toggled(self.favorites, path)
+            }
+        }
+        self.save_settings() self.rebuild()
+    }
+    pub fn save_search(self: mut Self) ->() {
+        if self.query.value() == "" {
+            ret()
+        }
+        for item in self.searches {
+            if item.query == self.query.value() {
+                self.message = "Search is already saved" self.dirty = true ret()
+            }
+        }
+        if self.searches.len() >= 16 {
+            self.message = "Up to 16 saved searches" self.dirty = true ret()
+        }
+        self.searches.push(SavedSearch { self.query.value(), self.query.value() }) self.save_settings() self.dirty = true
+    }
+    pub fn load_settings(self: mut Self) ->() {
+        match parse(read_file(self.project + "/.graphene/content-browser.json")) {
+            Ok(data) => {
+                match data.get("favorites").unwrap_or(Json::Null).as_array() {
+                    Some(items) => {
+                        for value in items {
+                            match value.as_str() {
+                                Some(path) => {
+                                    if self.favorites.len() < 256 {
+                                        self.favorites.push(path)
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+                match data.get("searches").unwrap_or(Json::Null).as_array() {
+                    Some(items) => {
+                        for value in items {
+                            match value.as_str() {
+                                Some(query) => {
+                                    if self.searches.len() < 16 {
+                                        self.searches.push(SavedSearch {
+                                                query, query
+                                            }
+                                            ,
+                                        )
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+                let mode = data.get("view").unwrap_or(Json::Null).as_str().unwrap_or("grid") self.view = if mode == "list" {
+                    "list"
+                } else {
+                    "grid"
+                }
+                let size = data.get("size").unwrap_or(Json::Null).as_str().unwrap_or("96") self.size = if size == "72" {
+                    72
+                } elif size == "128" {
+                    128
+                } elif size == "160" {
+                    160
+                } else {
+                    96
+                }
+            }
+            Err(_) => {
+            }
+        }
+    }
+    pub fn save_settings(self: Self) ->() {
+        if self.project == "" {
+            ret()
+        }
+        let mut favorites = Vec[Json]::new() for path in self.favorites {
+            favorites.push(Json::String(path))
+        }
+        let mut searches = Vec[Json]::new() for item in self.searches {
+            searches.push(Json::String(item.query))
+        }
+        let value = Json::Object(vec![field("version", Json::Number("1")), field("favorites", Json::Array(favorites)), field("searches", Json::Array(searches)), field("view", Json::String(self.view)), field("size", Json::String(self.size.fmt()))])
+        if mkdir_all(self.project + "/.graphene") == 0 {
+            let _saved = write_file_atomic(self.project + "/.graphene/content-browser.json", stringify(value) + "\n")
+        }
+    }
+    pub fn destroy(self: mut Self) ->() {
+        match self.scan {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        match self.thumbnail {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        match self.import_worker {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        self.import_worker = Option[JoinHandle[TextureLoad]]::None
+        self.scan = Option[JoinHandle[ContentScan]]::None self.thumbnail = Option[JoinHandle[ContentThumb]]::None
+    }
+}

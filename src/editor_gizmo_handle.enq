@@ -1,0 +1,215 @@
+//! Stable gizmo handle identities and matching draw/pick geometry.
+import core::vec::Vec
+import linalg::Vec3
+import mod::scene::primitive::MeshData
+
+// Keep the existing single-axis IDs; additional IDs are pairs and XYZ.
+pub fn gizmo_handle_mask(handle: u32) -> u32 {
+    if handle == 1 {
+        ret 1_u32
+    }
+    if handle == 2 {
+        ret 2_u32
+    }
+    if handle == 3 {
+        ret 4_u32
+    }
+    if handle == 4 {
+        ret 3_u32
+    }
+    if handle == 5 {
+        ret 5_u32
+    }
+    if handle == 6 {
+        ret 6_u32
+    }
+    if handle == 7 {
+        ret 7_u32
+    }
+    ret 0_u32
+}
+pub fn gizmo_handle_contains(handle: u32, axis: u32) -> bool {
+    let bit = match axis {
+        1 => 1_u32
+        2 => 2_u32
+        3 => 4_u32
+        _ => 0_u32
+    }
+    ret bit != 0 &&(gizmo_handle_mask(handle) & bit) != 0
+}
+pub fn gizmo_handle_vector(handle: u32) -> Vec3 {
+    ret Vec3::new(if gizmo_handle_contains(handle, 1) {
+            1_f32
+        } else {
+            0_f32
+        }
+        ,
+        if gizmo_handle_contains(handle, 2) {
+            1_f32
+        } else {
+            0_f32
+        }
+        ,
+        if gizmo_handle_contains(handle, 3) {
+            1_f32
+        } else {
+            0_f32
+        }
+        ,)
+}
+pub fn gizmo_handle_label(handle: u32) -> str {
+    ret match handle {
+        1 => "X" 2 => "Y" 3 => "Z" 4 => "XY" 5 => "XZ" 6 => "YZ" 7 => "XYZ" _ => ""
+    }
+}
+pub fn gizmo_handle_normal(handle: u32) -> Vec3 {
+    ret match handle {
+        4 => Vec3::new(0, 0, 1) 5 => Vec3::new(0, 1, 0) 6 => Vec3::new(1, 0, 0) _ => Vec3::zero()
+    }
+}
+pub fn gizmo_handle_components(value: Vec3, handle: u32) -> Vec3 {
+    ret Vec3::new(if gizmo_handle_contains(handle, 1) {
+            value.x()
+        } else {
+            0
+        }
+        ,
+        if gizmo_handle_contains(handle, 2) {
+            value.y()
+        } else {
+            0
+        }
+        ,
+        if gizmo_handle_contains(handle, 3) {
+            value.z()
+        } else {
+            0
+        }
+        ,)
+}
+pub fn gizmo_handle_scale(value: Vec3, handle: u32, factor: f32) -> Vec3 {
+    ret value.add(gizmo_handle_components(value, handle).scale(factor - 1))
+}
+fn plane_position(handle: u32, a: f32, b: f32) -> Vec3 {
+    ret match handle {
+        4 => Vec3::new(a, b, 0) 5 => Vec3::new(a, 0, b) _ => Vec3::new(0, a, b)
+    }
+}
+fn plane_inset() -> f32 {
+    ret 0.10_f32
+}
+fn plane_extent(triangle: bool) -> f32 {
+    ret plane_inset() + if triangle {
+        0.62_f32
+    } else {
+        0.44_f32
+    }
+}
+/// Unit-size meshes use the exact coordinates tested by gizmo_extra_hit.
+pub fn gizmo_plane_handle_mesh(handle: u32, triangle: bool) -> MeshData {
+    let mut vertices = Vec[f32]::new()
+    let mut indices = vec![0_u32, 1_u32, 2_u32]
+    let normal = gizmo_handle_normal(handle)
+    let inner = plane_inset()
+    let outer = plane_extent(triangle)
+    let points = if triangle {
+        vec![Vec3::new(inner, inner, 0), Vec3::new(outer, inner, 0), Vec3::new(inner, outer, 0)]
+    } else {
+        vec![Vec3::new(inner, inner, 0), Vec3::new(outer, inner, 0), Vec3::new(outer, outer, 0), Vec3::new(inner, outer, 0)]
+    }
+    for point in points {
+        let position = plane_position(handle, point.x(), point.y())
+        for value in vec![position.x(), position.y(), position.z(), normal.x(), normal.y(), normal.z(), 1_f32, 1_f32, 1_f32, 0_f32, 0_f32] {
+            vertices.push(value)
+        }
+    }
+    if !triangle {
+        indices.push(0) indices.push(2) indices.push(3)
+    }
+    ret MeshData::new(vertices, indices, 44)
+}
+/// Center first, then nearest visible plane. Nearly edge-on planes are not
+/// selectable; a thin projection must not steal an axis drag.
+pub fn gizmo_extra_hit(origin: Vec3, direction: Vec3, pivot: Vec3, size: f32, mode: u32) -> u32 {
+    if size <= 0 ||(mode != 1 && mode != 3) {
+        ret 0
+    }
+    let relative = origin.sub(pivot).scale(1 / size)
+    let ray = direction.scale(1 / size)
+    let mut near = 0_f32
+    let mut far = 1000000_f32
+    for axis in 1..4 {
+        let p = if axis == 1 {
+            relative.x()
+        } elif axis == 2 {
+            relative.y()
+        } else {
+            relative.z()
+        }
+        let d = if axis == 1 {
+            ray.x()
+        } elif axis == 2 {
+            ray.y()
+        } else {
+            ray.z()
+        }
+        if d > - 0.000001 && d < 0.000001 {
+            if p < - 0.12 || p > 0.12 {
+                far = - 1
+            }
+        } else {
+            let a =( - 0.12 - p) / d let b =(0.12 - p) / d
+            let low = if a < b {
+                a
+            } else {
+                b
+            }
+            let high = if a > b {
+                a
+            } else {
+                b
+            }
+            if low > near {
+                near = low
+            }
+            if high < far {
+                far = high
+            }
+        }
+    }
+    if far >= near {
+        ret 7
+    }
+    let mut best = 0_u32 let mut distance = 1000000_f32
+    for handle in 4..7 {
+        let normal = gizmo_handle_normal(handle as u32)
+        let denominator = direction.dot(normal)
+        if denominator > - 0.12 && denominator < 0.12 {
+            continue
+        }
+        let t = pivot.sub(origin).dot(normal) / denominator
+        if t <= 0 || t >= distance {
+            continue
+        }
+        let local = origin.add(direction.scale(t)).sub(pivot).scale(1 / size)
+        let a = if handle == 6 {
+            local.y()
+        } else {
+            local.x()
+        }
+        let b = if handle == 4 {
+            local.y()
+        } else {
+            local.z()
+        }
+        let inside = a >= plane_inset() && b >= plane_inset() && if mode == 3 {
+            a + b <= plane_inset() + plane_extent(true)
+        } else {
+            a <= plane_extent(false) && b <= plane_extent(false)
+        }
+        if inside {
+            best = handle as u32 distance = t
+        }
+    }
+    ret best
+}

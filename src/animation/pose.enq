@@ -1,0 +1,109 @@
+//! SoA local pose and exact affine model-space hierarchy. Reuse allocated poses.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{LocalTransform, PoseVector, PoseRotation, PoseMatrix}
+import mod::model::{Skeleton, SkeletalMesh}
+
+pub struct AnimationPose {
+    skeleton: str
+    translations: Vec[PoseVector]
+    rotations: Vec[PoseRotation]
+    scales: Vec[PoseVector]
+    morphs: Vec[f32]
+}
+
+impl for AnimationPose {
+    pub fn rest(skeleton: Skeleton, morph_count: usize) -> Self {
+        let count = skeleton.bones.len()
+        let mut pose = Self {
+            skeleton.identity, Vec[PoseVector]::with_capacity(count), Vec[PoseRotation]::with_capacity(count), Vec[PoseVector]::with_capacity(count), Vec[f32]::with_capacity(morph_count)
+        }
+        for bone in skeleton.bones {
+            pose.translations.push(bone.rest.translation) pose.rotations.push(bone.rest.rotation) pose.scales.push(bone.rest.scale)
+        }
+        for _i in 0_usize..morph_count {
+            pose.morphs.push(0_f32)
+        }
+        ret pose
+    }
+    pub fn compatible(self: Self, skeleton: Skeleton) -> bool {
+        ret self.skeleton == skeleton.identity && self.translations.len() == skeleton.bones.len() && self.rotations.len() == self.translations.len() && self.scales.len() == self.translations.len()
+    }
+    pub fn local(self: Self, bone: usize) -> LocalTransform {
+        ret LocalTransform {
+            self.translations.get_unchecked_borrowed(bone), self.rotations.get_unchecked_borrowed(bone), self.scales.get_unchecked_borrowed(bone)
+        }
+    }
+    pub fn set_local(self: mut Self, bone: usize, value: LocalTransform) ->() {
+        self.translations.set(bone, value.translation) self.rotations.set(bone, value.rotation) self.scales.set(bone, value.scale)
+    }
+    pub fn reset(self: mut Self, skeleton: Skeleton, mesh: SkeletalMesh) -> Result[bool, str] {
+        if !self.compatible(skeleton) || self.morphs.len() != mesh.morphs.len() {
+            ret Result::Err("Pose layout mismatch")
+        }
+        for i in 0_usize..skeleton.bones.len() {
+            self.set_local(i, skeleton.bones.get_unchecked_borrowed(i).rest)
+        }
+        for i in 0_usize..self.morphs.len() {
+            self.morphs.set(i, mesh.morphs.get_unchecked_borrowed(i).default_weight)
+        }
+        ret Result::Ok(true)
+    }
+}
+pub fn model_pose(skeleton: Skeleton, pose: AnimationPose, output: mut Vec[PoseMatrix]) -> Result[Vec[PoseMatrix], str] {
+    if !pose.compatible(skeleton) {
+        ret Result::Err("Pose skeleton mismatch")
+    }
+    let mut out = output
+    if out.len() != skeleton.bones.len() {
+        out = Vec[PoseMatrix]::with_capacity(skeleton.bones.len()) for _i in 0_usize..skeleton.bones.len() {
+            out.push(PoseMatrix::identity())
+        }
+    }
+    for i in 0_usize..skeleton.bones.len() {
+        let bone = skeleton.bones.get_unchecked_borrowed(i) let local = pose.local(i)
+        if bone.parent < - 1_i32 || bone.parent >= i as i32 || !local.valid() {
+            ret Result::Err("Invalid pose or skeleton hierarchy")
+        }
+        let matrix = PoseMatrix::from_local(local)
+        out.set(i, if bone.parent < 0_i32 {
+                matrix
+            } else {
+                out.get_unchecked_borrowed(bone.parent as usize).mul(matrix)
+            }
+            ,
+        )
+    }
+    ret Result::Ok(out)
+}
+pub fn skin_palette(model: Vec[PoseMatrix], mesh: SkeletalMesh, output: mut Vec[PoseMatrix]) -> Result[Vec[PoseMatrix], str] {
+    if model.len() != mesh.inverse_bind.len() {
+        ret Result::Err("Skin palette layout mismatch")
+    }
+    let mut out = output
+    if out.len() != model.len() {
+        out = Vec[PoseMatrix]::with_capacity(model.len()) for _i in 0_usize..model.len() {
+            out.push(PoseMatrix::identity())
+        }
+    }
+    for i in 0_usize..model.len() {
+        out.set(i, model.get_unchecked_borrowed(i).mul(mesh.inverse_bind.get_unchecked_borrowed(i)))
+    }
+    ret Result::Ok(out)
+}
+
+impl for AnimationPose {
+    /// Copy values into independent, reusable storage; assigning a Vec aliases it.
+    pub fn copy_from(self: mut Self, source: AnimationPose) -> Result[bool, str] {
+        if self.translations.len() != self.rotations.len() || self.translations.len() != self.scales.len() || source.translations.len() != source.rotations.len() || source.translations.len() != source.scales.len() || self.skeleton != source.skeleton || self.translations.len() != source.translations.len() || self.rotations.len() != source.rotations.len() || self.scales.len() != source.scales.len() || self.morphs.len() != source.morphs.len() {
+            ret Result::Err("Pose copy layout mismatch")
+        }
+        for i in 0_usize..self.translations.len() {
+            self.translations.set(i, source.translations.get_unchecked_borrowed(i)) self.rotations.set(i, source.rotations.get_unchecked_borrowed(i)) self.scales.set(i, source.scales.get_unchecked_borrowed(i))
+        }
+        for i in 0_usize..self.morphs.len() {
+            self.morphs.set(i, source.morphs.get_unchecked_borrowed(i))
+        }
+        ret Result::Ok(true)
+    }
+}

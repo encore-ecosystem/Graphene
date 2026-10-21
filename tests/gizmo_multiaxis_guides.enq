@@ -1,0 +1,47 @@
+//! Compound handles show vector/factor telemetry instead of a false Z readout.
+import core::option::Option
+import graphene::editor_guides::{gizmo_guides, GizmoGuideStyle}
+import graphene::{GizmoGesture, GizmoProjection, GizmoSnap}
+import linalg::Vec3
+import luma::{DisplayCommand, Rect, StyleSheet}
+import std::os::read_file
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let style = GizmoGuideStyle::from_sheet(sheet)
+    let projection = GizmoProjection::new(Vec3::from_spherical(0.65, 0.4).scale(8), 0.65, 0.4, 1.0471976, 800, 600)
+    let screen = projection.project(Vec3::zero()).unwrap_or(Vec3::zero())
+    for tool in vec!["move", "scale"] {
+        for handle in 4..8 {
+            let mut gesture = GizmoGesture::begin(tool, handle as u32, projection, Vec3::zero(), screen.x(), screen.y(), GizmoSnap::new())
+            let _changed = gesture.update(screen.x() + 40, screen.y() - 40)
+            let paint = gizmo_guides(gesture, 1, Rect::new(10, 20, 800, 600), Option[f32]::None, style)
+            let mut telemetry = false let mut escape = false
+            for command in paint.commands() {
+                match command {
+                    DisplayCommand::StyledText(text) => {
+                        if text.value().contains("unavailable") {
+                            ret 1
+                        }
+                        if text.value().contains(if tool == "move" {
+                                "Δ XYZ:"
+                            } else {
+                                "Factor:"
+                            }
+                        ) {
+                            telemetry = true
+                        }
+                        if text.value().contains("Esc cancels") {
+                            escape = true
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            if !telemetry || !escape {
+                ret 2
+            }
+        }
+    }
+    ret 0
+}

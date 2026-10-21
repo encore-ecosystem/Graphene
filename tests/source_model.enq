@@ -1,0 +1,110 @@
+//! Original source formats go directly to independently loadable engine assets.
+import core::result::Result
+import graphene::content_browser::files::{scan_content, content_move}
+import graphene::{decode_source_model, import_mesh_asset, import_mesh_asset_as, load_obj_asset, load_native_mesh, native_mesh_valid, asset_source_stamp}
+import std::os::{write_file, file_exists, read_file, copy_file, mkdir_all}
+import std::time::perf_counter_ns
+
+fn main() -> u32 {
+    let root = "/tmp/graphene-direct-model-" + perf_counter_ns().fmt()
+    let fish_source = "Assets/Models/Fish/Fish.glb"
+    let fish = match import_mesh_asset(root, fish_source) {
+        Ok(value) => value Err(_) => {
+            ret 1
+        }
+    }
+    if fish.name() != "Fish.gmesh" || fish.mesh().index_count() != 1287 || fish.texture_width() != 512 || fish.texture_height() != 256 {
+        ret 2
+    }
+    if !native_mesh_valid(fish.mesh(), fish.geometry()) {
+        ret 3
+    }
+    if file_exists(root + "/Content/Meshes/Fish.obj") || file_exists(root + "/Content/Meshes/Fish.glb") || !file_exists(root + "/Content/Meshes/Fish.gtexture") {
+        ret 4
+    }
+    if import_mesh_asset(root, fish_source).is_err() {
+        ret 5
+    }
+    let stamp = asset_source_stamp(fish.native_path())
+    if load_obj_asset(fish.native_path()).is_err() || stamp != asset_source_stamp(fish.native_path()) {
+        ret 6
+    }
+    let tree = match import_mesh_asset(root, "Assets/Models/Tree/Tree.fbx") {
+        Ok(value) => value Err(_) => {
+            ret 7
+        }
+    }
+    if tree.name() != "Tree.gmesh" || tree.mesh().index_count() != 4887 || tree.texture_width() != 256 || tree.texture_height() != 256 {
+        ret 8
+    }
+    let rock = match import_mesh_asset_as(root, "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049.fbx", "Rock") {
+        Ok(value) => value Err(_) => {
+            ret 9
+        }
+    }
+    if rock.name() != "Rock.gmesh" || rock.mesh().index_count() != 151089 || rock.texture_width() != 4096 || rock.texture_height() != 4096 {
+        ret 10
+    }
+    if !native_mesh_valid(rock.mesh(), rock.geometry()) {
+        ret 11
+    }
+    if !content_move(root, "Content/Meshes/Fish.gmesh", "Content/Meshes/Renamed.gmesh") || !file_exists(root + "/Content/Meshes/Renamed.gtexture") {
+        ret 12
+    }
+    if load_obj_asset(root + "/Content/Meshes/Renamed.gmesh").is_err() {
+        ret 13
+    }
+    let scan = scan_content(root)
+    let mut meshes = 0_usize
+    for asset in scan.entries {
+        if asset.kind == "mesh" {
+            meshes += 1
+        }
+        if asset.kind == "texture" {
+            ret 14
+        }
+    }
+    if meshes != 6 {
+        ret 15
+    }
+    if decode_source_model(root + "/missing.fbx").is_ok() {
+        ret 16
+    }
+    if mkdir_all(root + "/external") != 0 {
+        ret 17
+    }
+    let obj = root + "/external/Triangle.obj"
+    if write_file(obj, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n") != 0 {
+        ret 18
+    }
+    match import_mesh_asset(root, obj) {
+        Ok(value) => {
+            if value.name() != "Triangle.gmesh" || value.mesh().index_count() != 3 {
+                ret 19
+            }
+        }
+        Err(_) => {
+            ret 20
+        }
+    }
+    if file_exists(obj + ".gmesh") || file_exists(root + "/Content/Meshes/Triangle.obj") {
+        ret 21
+    }
+    if write_file(root + "/external/broken.glb", "broken") != 0 {
+        ret 22
+    }
+    if import_mesh_asset(root, root + "/external/broken.glb").is_ok() || file_exists(root + "/Content/Meshes/broken.gmesh") {
+        ret 23
+    }
+    if copy_file(fish_source, root + "/external/Fish.glb") != 0 {
+        ret 24
+    }
+    if import_mesh_asset_as(root, root + "/external/Fish.glb", "Tree").is_ok() {
+        ret 25
+    }
+    // Detached native data must not try to read the original FBX/GLB file.
+    if copy_file(tree.native_path(), root + "/Detached.gmesh") != 0 || load_native_mesh(root + "/Detached.gmesh", "").is_err() {
+        ret 26
+    }
+    ret 0
+}

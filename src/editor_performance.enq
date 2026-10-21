@@ -1,0 +1,645 @@
+//! Session-only frame profiler controls and retained charts. Native fixed-size
+//! history keeps measurement allocation out of the editor's frame loop.
+import core::vec::Vec
+import luma::{Widget, WidgetLayout, PreparedFrame, DisplayList, Color, Rect, Style, StyleSheet, Event, UiTimings, horizontal, vertical, event_pointer_down, event_key_down, key_left, key_right}
+import mod::performance::performance_counter_ns
+extern fn graphene_profiler_enable(device: usize, enabled: bool) ->()
+extern fn graphene_profiler_begin() ->()
+extern fn graphene_profiler_phase(phase: u32) ->()
+extern fn graphene_profiler_finish(presented: bool) ->()
+extern fn graphene_profiler_event_wait(ns: u64) ->()
+extern fn graphene_profiler_ui(acquire: u64, present: u64, prepare: u64, bytes: u64) ->()
+extern fn graphene_profiler_clear() ->()
+extern fn graphene_profiler_select(index: u32) ->()
+extern fn graphene_profiler_live() ->()
+extern fn graphene_profiler_step(step: i32) ->()
+extern fn graphene_profiler_value(index: u32, field: u32) -> u64
+extern fn graphene_profiler_event(gpu: u32, index: u32, field: u32) -> u64
+extern fn graphene_profiler_stat(field: u32) -> u64
+extern fn graphene_profiler_bottleneck() -> u32
+
+pub fn profile_event_wait(ns: u64) ->() {
+    unsafe {
+        graphene_profiler_event_wait(ns)
+    }
+}
+pub fn profile_ui(timings: UiTimings) ->() {
+    unsafe {
+        graphene_profiler_ui(timings.acquire_ns(), timings.present_ns(), timings.gpu_preparation_ns(), timings.geometry_upload_bytes())
+    }
+}
+pub fn profile_begin() ->() {
+    unsafe {
+        graphene_profiler_begin()
+    }
+}
+pub fn profile_phase(phase: u32) ->() {
+    unsafe {
+        graphene_profiler_phase(phase)
+    }
+}
+pub fn profile_finish(presented: bool) ->() {
+    unsafe {
+        graphene_profiler_finish(presented)
+    }
+}
+fn value(index: usize, field: u32) -> u64 {
+    unsafe {
+        ret graphene_profiler_value(index as u32, field)
+    }
+}
+fn selected(field: u32) -> u64 {
+    ret value(4294967295_usize, field)
+}
+fn event_value(gpu: usize, index: usize, field: u32) -> u64 {
+    unsafe {
+        ret graphene_profiler_event(gpu as u32, index as u32, field)
+    }
+}
+fn milliseconds(ns: u64) -> str {
+    let hundredths =(ns + 5000_u64) / 10000_u64
+    let remainder = hundredths % 100_u64
+    ret(hundredths / 100_u64).fmt() + "." + if remainder < 10 {
+        "0" + remainder.fmt()
+    } else {
+        remainder.fmt()
+    }
+}
+fn duration(ns: u64) -> str {
+    ret milliseconds(ns) + " ms"
+}
+fn gpu_state(state: u64) -> str {
+    ret if state == 0 {
+        "Pending"
+    } elif state == 1 {
+        duration(selected(5_u32))
+    } elif state == 2 {
+        "Incomplete"
+    } else {
+        "Unavailable"
+    }
+}
+fn cpu_name(label: u64) -> str {
+    ret if label == 0 {
+        "Events / commands"
+    } elif label == 1 {
+        "Simulation / Blueprint"
+    } elif label == 2 {
+        "Scene synchronization"
+    } elif label == 3 {
+        "UI preparation / layout"
+    } elif label == 4 {
+        "Render preparation / record"
+    } elif label == 5 {
+        "UI composition / submit"
+    } elif label >= 20_u64 && label < 24_u64 {
+        "Record worker " +(label - 19_u64).fmt()
+    } elif label == 24_u64 {
+        "Render queue owner"
+    } else {
+        "Deferred work / event wait"
+    }
+}
+fn gpu_name(label: u64) -> str {
+    ret if label == 0 {
+        "Scene"
+    } elif label == 1 {
+        "Dynamic GI"
+    } elif label == 2 {
+        "AutoLOD main culling"
+    } elif label == 3 {
+        "AutoLOD post culling"
+    } elif label == 4 {
+        "Traditional geometry"
+    } elif label == 5 {
+        "Virtual geometry"
+    } elif label == 6 {
+        "Anti-aliasing"
+    } elif label == 7 {
+        "Selection outline"
+    } elif label == 8 {
+        "Editor UI composition"
+    } elif label == 9 {
+        "Gizmo / overlays"
+    } elif label == 10 {
+        "Camera preview"
+    } elif label == 11 {
+        "Atmosphere"
+    } elif label == 12 {
+        "Clouds"
+    } elif label == 13 {
+        "Height fog"
+    } elif label == 14 {
+        "Precipitation"
+    } elif label == 17 {
+        "VFX simulation"
+    } elif label == 18 {
+        "VFX rendering"
+    } elif label == 19 {
+        "Fluid simulation"
+    } elif label == 20 {
+        "Fluid rendering"
+    } elif label == 21 {
+        "FSR / DLSS / DLAA"
+    } elif label == 22 {
+        "Frame generation"
+    } elif label == 16 {
+        "Weather shelter map"
+    } else {
+        "Sky light update"
+    }
+}
+fn color(sheet: StyleSheet, name: str) -> Color {
+    ret sheet.style(Widget::label("").with_classes("g-perf-" + name), false, false, false).foreground()
+}
+fn control(id: str, text: str, active: bool, disabled: bool) -> Widget {
+    ret Widget::button(id, text).with_classes("g-perf-button" + if active {
+            " is-active"
+        } else {
+            ""
+        }
+    ).with_disabled(disabled).with_attribute("aria-pressed", if active {
+            "true"
+        } else {
+            "false"
+        }
+        ,
+    )
+}
+
+pub struct PerformancePanel {
+    opened: bool
+    running: bool
+    focused: bool
+    collapsed: bool
+    budget: u32
+    refreshed: u64
+    changed: bool
+    history_bounds: Rect
+    timeline_bounds: Rect
+    history: DisplayList
+    timeline: DisplayList
+    summary_bounds: Rect
+    table_bounds: Rect
+    table_clip: Rect
+    footer_bounds: Rect
+    summary: DisplayList
+    table: DisplayList
+    footer: DisplayList
+    row_count: usize
+    had_frames: bool
+    reconstruction_summary: str
+    reconstruction_sample: u64
+    reconstruction_counts:(u64, u64, u64)
+}
+
+impl for PerformancePanel {
+    pub fn new() -> Self {
+        ret Self {
+            false, false, false, false, 60_u32, 0_u64, true, Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), DisplayList::new(), 0_usize, false, "", 0_u64,(0_u64, 0_u64, 0_u64)
+        }
+    }
+    pub fn sync(self: mut Self, device: usize, opened: bool, drawable: bool) ->() {
+        let running = opened && drawable
+        if self.running != running || self.opened != opened {
+            unsafe {
+                graphene_profiler_enable(device, running)
+            }
+            self.running = running self.opened = opened self.changed = true
+        }
+    }
+    pub fn reconstruction(self: mut Self, counts:(u64, u64, u64), input_width: u32, input_height: u32, output_width: u32, output_height: u32, tracked_bytes: u64) ->() {
+        if !self.opened {
+            ret()
+        }
+        let now = performance_counter_ns()
+        if self.reconstruction_sample > 0_u64 && now - self.reconstruction_sample < 500000000_u64 {
+            ret()
+        }
+        if self.reconstruction_sample > 0_u64 && now > self.reconstruction_sample && counts.0 >= self.reconstruction_counts.0 && counts.1 >= self.reconstruction_counts.1 && counts.2 >= self.reconstruction_counts.2 {
+            let elapsed = now - self.reconstruction_sample
+            self.reconstruction_summary = "Render " +((counts.0 - self.reconstruction_counts.0) * 1000000000_u64 / elapsed).fmt() + " FPS  ·  Generated " +((counts.1 - self.reconstruction_counts.1) * 1000000000_u64 / elapsed).fmt() + "/s  ·  Submitted " +((counts.2 - self.reconstruction_counts.2) * 1000000000_u64 / elapsed).fmt() + "/s  ·  " + input_width.fmt() + "×" + input_height.fmt() + " → " + output_width.fmt() + "×" + output_height.fmt() + "  ·  AA targets " +(tracked_bytes / 1048576_u64).fmt() + " MiB"
+        }
+        self.reconstruction_sample = now self.reconstruction_counts = counts
+    }
+    pub fn running(self: Self) -> bool {
+        ret self.running
+    }
+    pub fn handle(self: mut Self, event: Event, target: str, focused: str) -> bool {
+        if !self.opened {
+            ret false
+        }
+        if event.kind() == event_pointer_down() {
+            self.focused = target == "perf-history"
+            if self.focused && self.history_bounds.width() > 48 && value(0_usize, 0_u32) > 0 {
+                let count = value(0_usize, 0_u32)
+                let fraction =(event.x() - self.history_bounds.x() - 42) /(self.history_bounds.width() - 52)
+                let position = if fraction <= 0 {
+                    0_u64
+                } elif fraction >= 1 {
+                    count - 1
+                } else {
+                    (((count - 1) as f32) * fraction) as u64
+                }
+                unsafe {
+                    graphene_profiler_select(position as u32)
+                }
+                self.changed = true ret true
+            }
+        }
+        if event.kind() == event_key_down() && focused == "perf-history" {
+            if event.key() == key_left() || event.key() == key_right() {
+                unsafe {
+                    graphene_profiler_step(if event.key() == key_left() {
+                            - 1_i32
+                        } else {
+                            1_i32
+                        }
+                    )
+                }
+                self.changed = true ret true
+            }
+        }
+        ret false
+    }
+    pub fn action(self: mut Self, target: str) -> bool {
+        if target == "perf-live" {
+            unsafe {
+                graphene_profiler_live()
+            }
+        } elif target == "perf-clear" {
+            unsafe {
+                graphene_profiler_clear()
+            }
+        } elif target == "perf-hierarchy" {
+            self.collapsed = !self.collapsed
+        } elif target == "perf-budget-30" {
+            self.budget = 30_u32
+        } elif target == "perf-budget-60" {
+            self.budget = 60_u32
+        } elif target == "perf-budget-120" {
+            self.budget = 120_u32
+        } elif target == "perf-budget-144" {
+            self.budget = 144_u32
+        } else {
+            ret false
+        }
+        self.changed = true ret true
+    }
+    pub fn tick(self: mut Self, sheet: StyleSheet) -> bool {
+        if !self.opened {
+            ret false
+        }
+        let now = performance_counter_ns()
+        if !self.changed && now - self.refreshed < 100000000_u64 {
+            ret false
+        }
+        let rows = self.table_rows().len()
+        let has_frames = value(0_usize, 0_u32) > 0
+        // Variable deferred/worker samples must not continuously relayout the
+        // dock. Keep sufficient table capacity until an explicit control change.
+        let rows = if has_frames && self.had_frames && !self.changed && rows < self.row_count {
+            self.row_count
+        } else {
+            rows
+        }
+        let controls_changed = self.changed || rows != self.row_count || has_frames != self.had_frames
+        self.row_count = rows self.had_frames = has_frames
+        self.refreshed = now self.changed = false
+        self.history = self.history_display(sheet)
+        self.timeline = self.timeline_display(sheet)
+        self.summary = self.summary_display(sheet)
+        self.table = self.table_display(sheet)
+        self.footer = self.footer_display(sheet)
+        ret controls_changed
+    }
+    pub fn layout(self: mut Self, layout: WidgetLayout) ->() {
+        let history = layout.find_bounds("perf-history").unwrap_or(Rect::new(0, 0, 0, 0))
+        let timeline = layout.find_bounds("perf-timeline").unwrap_or(Rect::new(0, 0, 0, 0))
+        self.summary_bounds = layout.find_bounds("perf-summary").unwrap_or(Rect::new(0, 0, 0, 0))
+        self.table_bounds = layout.find_bounds("perf-table-values").unwrap_or(Rect::new(0, 0, 0, 0))
+        self.table_clip = layout.find_bounds("perf-table").unwrap_or(Rect::new(0, 0, 0, 0))
+        self.footer_bounds = layout.find_bounds("perf-footer").unwrap_or(Rect::new(0, 0, 0, 0))
+        if history.x() != self.history_bounds.x() || history.y() != self.history_bounds.y() || history.width() != self.history_bounds.width() || history.height() != self.history_bounds.height() || timeline.y() != self.timeline_bounds.y() || timeline.width() != self.timeline_bounds.width() || timeline.height() != self.timeline_bounds.height() {
+            self.history_bounds = history self.timeline_bounds = timeline self.changed = true
+        }
+    }
+    pub fn widget(self: Self) -> Widget {
+        let count = value(0_usize, 0_u32)
+        let mut root = Widget::panel("performance-panel").with_classes("g-perf-panel").with_direction(vertical())
+        let mut toolbar = Widget::panel("perf-toolbar").with_classes("g-perf-toolbar").with_direction(horizontal())
+        toolbar.push(control("perf-live", "Live", value(0_usize, 1_u32) != 0, false).with_attribute("title", "Follow the newest frame; click the graph to inspect a frame"))
+        toolbar.push(control("perf-clear", "Clear", false, count == 0).with_attribute("title", "Clear frame history"))
+        toolbar.push(Widget::label("Budget").with_classes("g-perf-muted"))
+        for budget in vec![30_u32, 60_u32, 120_u32, 144_u32] {
+            toolbar.push(control("perf-budget-" + budget.fmt(), budget.fmt(), self.budget == budget, false).with_attribute("title", "Frame-time reference only; does not limit FPS"))
+        }
+        toolbar.push(Widget::label("Frame").with_classes("g-perf-frame"))
+        toolbar.push(Widget::label("CPU").with_classes("g-perf-cpu"))
+        toolbar.push(Widget::label("GPU").with_classes("g-perf-gpu"))
+        root.push(toolbar)
+        root.push(Widget::canvas("perf-summary").with_classes("g-perf-summary"))
+        let mut body = Widget::panel("perf-body").with_classes("g-perf-body").with_direction(horizontal())
+        let mut charts = Widget::panel("perf-charts").with_classes("g-perf-charts").with_direction(vertical())
+        charts.push(Widget::canvas("perf-history").with_classes("g-perf-history").with_focus(self.focused).with_attribute("tabindex", "0").with_attribute("data-luma-focusable", "true").with_attribute("role", "group").with_attribute("aria-label", "Frame history. Click to select; left and right arrows step through frames"))
+        charts.push(Widget::canvas("perf-timeline").with_classes("g-perf-timeline"))
+        body.push(charts)
+        let mut table = Widget::panel("perf-table").with_classes("g-perf-table").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        table.push(control("perf-hierarchy", if self.collapsed {
+                    "+ GPU details"
+                } else {
+                    "− GPU details"
+                }
+                , !self.collapsed, false,))
+        table.push(Widget::canvas("perf-table-values").with_classes("g-perf-table-values").with_computed_style(Style::default().with_height((self.table_rows().len() as f32) * 18 + 8)))
+        body.push(table) root.push(body)
+        root.push(Widget::canvas("perf-footer").with_classes("g-perf-footer"))
+        ret root
+    }
+    fn table_rows(self: Self) -> Vec[str] {
+        let mut rows = Vec[str]::new()
+        rows.push("CPU stages · work / wait")
+        for index in 0_usize..selected(8_u32) as usize {
+            let elapsed = event_value(0_usize, index, 2_u32)
+            let wait = event_value(0_usize, index, 4_u32)
+            let work = if elapsed > wait {
+                elapsed - wait
+            } else {
+                0_u64
+            }
+            let share = if selected(4_u32) > 0 {
+                work * 100 / selected(4_u32)
+            } else {
+                0_u64
+            }
+            rows.push(cpu_name(event_value(0_usize, index, 0_u32)) + "   " + duration(work) + " " + share.fmt() + "%" + if wait > 0 {
+                    " / " + duration(wait)
+                } else {
+                    ""
+                }
+            )
+        }
+        rows.push("UI upload / record " + duration(selected(14_u32)) + " · " +(selected(15_u32) / 1024_u64).fmt() + " KiB")
+        rows.push("GPU stages · inclusive")
+        if selected(7_u32) == 1 {
+            for index in 0_usize..selected(9_u32) as usize {
+                let depth = event_value(1_usize, index, 3_u32)
+                if !self.collapsed || depth == 0 {
+                    let share = if selected(5_u32) > 0 {
+                        event_value(1_usize, index, 2_u32) * 100 / selected(5_u32)
+                    } else {
+                        0_u64
+                    }
+                    rows.push(if depth > 0 {
+                            "  · "
+                        } else {
+                            ""
+                        }
+                        + gpu_name(event_value(1_usize, index, 0_u32)) + "   " + duration(event_value(1_usize, index, 2_u32)) + "  " + share.fmt() + "%")
+                }
+            }
+            for label in vec![1_u64, 2_u64, 3_u64, 4_u64, 5_u64, 6_u64, 7_u64, 8_u64, 9_u64, 10_u64] {
+                let mut found = false
+                for index in 0_usize..selected(9_u32) as usize {
+                    if event_value(1_usize, index, 0_u32) == label {
+                        found = true
+                    }
+                }
+                if !found {
+                    rows.push(gpu_name(label) + " · Skipped")
+                }
+            }
+        } else {
+            rows.push(gpu_state(selected(7_u32)))
+        }
+        ret rows
+    }
+    fn table_display(self: Self, sheet: StyleSheet) -> DisplayList {
+        let mut list = DisplayList::new()
+        let text = color(sheet, "text") let muted = color(sheet, "muted")
+        let rows = self.table_rows()
+        for index in 0_usize..rows.len() {
+            let y = self.table_bounds.y() + 4 +(index as f32) * 18
+            if y + 18 > self.table_clip.y() && y < self.table_clip.bottom() {
+                list.text(self.table_bounds.x() + 4, y, rows.get_unchecked_borrowed(index), if index == 0 {
+                        text
+                    } else {
+                        muted
+                    }
+                    ,
+                )
+            }
+        }
+        ret list
+    }
+    fn summary_display(self: Self, sheet: StyleSheet) -> DisplayList {
+        let mut list = DisplayList::new()
+        let x = self.summary_bounds.x() let y = self.summary_bounds.y() + 4
+        let count = value(0_usize, 0_u32)
+        let mean = unsafe {
+            graphene_profiler_stat(0_u32)
+        }
+        let p95 = unsafe {
+            graphene_profiler_stat(1_u32)
+        }
+        list.text(x, y, if count == 0 {
+                "Waiting for frames"
+            } else {
+                "Frame #" + selected(2_u32).fmt() + "  " + duration(selected(3_u32)) + "  ·  CPU " + duration(selected(4_u32)) + "  ·  GPU " + gpu_state(selected(7_u32)) + "  ·  Wait " + duration(selected(6_u32))
+            }
+            , color(sheet, "text"),)
+        list.text(x, y + 18, self.reconstruction_summary, color(sheet, "muted"))
+        if self.summary_bounds.width() > 1050 {
+            list.text(self.summary_bounds.right() - 210, y, "Mean " + duration(mean) + "  P95 " + duration(p95), color(sheet, "muted"))
+        }
+        ret list
+    }
+    fn footer_display(self: Self, sheet: StyleSheet) -> DisplayList {
+        let mut list = DisplayList::new()
+        let bottleneck = unsafe {
+            graphene_profiler_bottleneck()
+        }
+        let message = if selected(11_u32) != 0 {
+            "Marker capacity exceeded · incomplete sample"
+        } elif value(0_usize, 10_u32) == 0 {
+            "GPU timestamps unavailable · CPU stages remain available"
+        } elif bottleneck == 1 {
+            "Likely CPU limited · inspect CPU stages"
+        } elif bottleneck == 2 {
+            "Likely GPU limited · inspect GPU stages"
+        } elif bottleneck == 3 {
+            "Wait / Present dominates · includes driver and presentation pacing"
+        } elif bottleneck == 4 {
+            "Mixed CPU / GPU workload"
+        } else {
+            "Collecting 60 complete CPU/GPU frames for analysis"
+        }
+        list.text(self.footer_bounds.x() + 3, self.footer_bounds.y() + 2, message, color(sheet, "muted"))
+        ret list
+    }
+    fn history_display(self: Self, sheet: StyleSheet) -> DisplayList {
+        let frame_color = color(sheet, "frame") let cpu_color = color(sheet, "cpu") let gpu_color = color(sheet, "gpu")
+        let grid_color = color(sheet, "grid") let budget_color = color(sheet, "budget") let muted_color = color(sheet, "muted") let text_color = color(sheet, "text")
+        let mut list = DisplayList::new() let bounds = self.history_bounds
+        if bounds.width() < 60 || bounds.height() < 40 {
+            ret list
+        }
+        let surface = sheet.style(Widget::panel("").with_classes("g-perf-history"), false, false, false)
+        list.fill_rect(bounds, surface.background())
+        let x = bounds.x() + 42 let y = bounds.y() + 12 let width = bounds.width() - 52 let height = bounds.height() - 29
+        let budget = 1000000000_u64 / self.budget as u64
+        let count = value(0_usize, 0_u32)
+        let mut maximum = budget * 2
+        for index in 0_usize..count as usize {
+            let ns = value(index, 3_u32)
+            if ns > maximum {
+                maximum = ns
+            }
+        }
+        for index in 0_usize..4_usize {
+            let ratio = index as f32 / 3
+            let line_y = y + height * ratio
+            list.line(x, line_y, x + width, line_y, 1, grid_color)
+        }
+        list.text(bounds.x() + 3, y, milliseconds(maximum), muted_color)
+        list.text(bounds.x() + 3, y + height - 12, "0 ms", muted_color)
+        let budget_y = y + height *(1 - budget as f32 / maximum as f32)
+        list.line(x, budget_y, x + width, budget_y, 1, budget_color)
+        list.text(x + 4, budget_y - 13, duration(budget), budget_color)
+        for series in 0_usize..3_usize {
+            let mut last_x = x let mut last_y = y + height let mut previous_valid = false
+            for index in 0_usize..count as usize {
+                let valid = series != 2 || value(index, 7_u32) == 1
+                let ns = value(index, if series == 0 {
+                        3_u32
+                    } elif series == 1 {
+                        4_u32
+                    } else {
+                        5_u32
+                    }
+                    ,
+                )
+                let px = x + if count > 1 {
+                    width *(index as f32) /((count - 1) as f32)
+                } else {
+                    0_f32
+                }
+                let fraction = ns as f32 / maximum as f32
+                let py = y + height *(1 - if fraction > 1 {
+                        1_f32
+                    } else {
+                        fraction
+                    }
+                )
+                if index > 0 && valid && previous_valid {
+                    list.line(last_x, last_y, px, py, 1.5_f32, if series == 0 {
+                            frame_color
+                        } elif series == 1 {
+                            cpu_color
+                        } else {
+                            gpu_color
+                        }
+                        ,
+                    )
+                }
+                if value(index, 2_u32) == selected(2_u32) && series == 0 {
+                    list.line(px, y, px, y + height, 1, text_color)
+                }
+                last_x = px last_y = py previous_valid = valid
+            }
+        }
+        list.text(x, y + height + 3, "Last " + count.fmt() + " frames · click to inspect", muted_color)
+        ret list
+    }
+    fn timeline_display(self: Self, sheet: StyleSheet) -> DisplayList {
+        let cpu_color = color(sheet, "cpu") let gpu_color = color(sheet, "gpu") let child_color = color(sheet, "gpu-child") let muted_color = color(sheet, "muted")
+        let mut list = DisplayList::new() let bounds = self.timeline_bounds
+        if bounds.width() < 60 || bounds.height() < 60 {
+            ret list
+        }
+        let x = bounds.x() + 42 let width = bounds.width() - 52
+        list.text(bounds.x() + 3, bounds.y() + 8, "CPU", cpu_color)
+        list.text(bounds.x() + 3, bounds.y() + 50, "GPU", gpu_color)
+        for gpu in 0_usize..2_usize {
+            let count = selected(if gpu == 0 {
+                    8_u32
+                } else {
+                    9_u32
+                }
+            ) as usize
+            let mut maximum = 1_u64
+            for index in 0_usize..count {
+                let end = event_value(gpu, index, 1_u32) + event_value(gpu, index, 2_u32)
+                if end > maximum {
+                    maximum = end
+                }
+            }
+            for index in 0_usize..count {
+                if gpu == 0 || selected(7_u32) == 1 {
+                    let start = event_value(gpu, index, 1_u32) as f32 / maximum as f32
+                    let duration = event_value(gpu, index, 2_u32) as f32 / maximum as f32
+                    let depth = event_value(gpu, index, 3_u32) as f32
+                    let y = bounds.y() + 8 +(gpu as f32) * 42 + depth * 15
+                    let bar_width = if width * duration < 1 {
+                        1_f32
+                    } else {
+                        width * duration
+                    }
+                    list.fill_rect(Rect::new(x + width * start, y, bar_width, 12), if gpu == 0 {
+                            cpu_color
+                        } elif depth > 0 {
+                            child_color
+                        } else {
+                            gpu_color
+                        }
+                        ,
+                    )
+                }
+            }
+        }
+        list.text(x, bounds.bottom() - 15, "Separate CPU / GPU origins · nested GPU bars are inclusive", muted_color)
+        ret list
+    }
+    pub fn compose(self: Self, frame: PreparedFrame, _layout: WidgetLayout, sheet: StyleSheet) -> PreparedFrame {
+        if !self.opened {
+            ret frame
+        }
+        let mut composed = frame
+        if self.history_bounds.width() > 0 {
+            composed = composed.with_display_overlay(self.history, self.history_bounds)
+        }
+        if self.timeline_bounds.width() > 0 {
+            composed = composed.with_display_overlay(self.timeline, self.timeline_bounds)
+        }
+        if self.summary_bounds.width() > 0 {
+            composed = composed.with_display_overlay(self.summary, self.summary_bounds)
+        }
+        if self.table_clip.width() > 0 {
+            composed = composed.with_display_overlay(self.table, self.table_clip)
+        }
+        if self.footer_bounds.width() > 0 {
+            composed = composed.with_display_overlay(self.footer, self.footer_bounds)
+        }
+        match frame.surface("viewport-surface") {
+            Some(slot) => {
+                let bounds = slot.logical_bounds()
+                let mut overlay = DisplayList::new() let x = bounds.x() + 10 let y = bounds.y() + 10
+                overlay.fill_rect(Rect::new(x, y, 250, 84), sheet.style(Widget::panel("").with_classes("g-perf-hud"), false, false, false).background())
+                let frame_ns = selected(3_u32)
+                let fps = if frame_ns > 0 {
+                    1000000000_u64 / frame_ns
+                } else {
+                    0_u64
+                }
+                overlay.text(x + 8, y + 6, fps.fmt() + " FPS · Frame " + duration(frame_ns), color(sheet, "frame"))
+                overlay.text(x + 8, y + 24, "CPU work " + duration(selected(4_u32)), color(sheet, "cpu"))
+                overlay.text(x + 8, y + 42, "GPU " + gpu_state(selected(7_u32)), color(sheet, "gpu"))
+                overlay.text(x + 8, y + 60, "Wait / Present " + duration(selected(6_u32)), color(sheet, "muted"))
+                composed = composed.with_display_overlay(overlay, bounds)
+            }
+            None => {
+            }
+        }
+        ret composed
+    }
+}

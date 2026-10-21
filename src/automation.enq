@@ -49,6 +49,16 @@ impl for AutomationServer {
         ret(self.state, self.approvals)
     }
 
+    /// Value-style session update for containers with read-only match payloads.
+    /// Carries the token, scopes and approval state into the returned session.
+    pub fn updated(self: Self, source: str) ->(Self, str) {
+        let mut session = Self {
+            self.state, self.token, self.scopes, self.approvals
+        }
+        let response = session.handle(source)
+        ret(session, response)
+    }
+
     /// Handles one JSON request. Framing and transport ownership remain with
     /// Unix-socket, named-pipe, or test adapters.
     pub fn handle(self: mut Self, source: str) -> str {
@@ -146,6 +156,8 @@ impl for AutomationServer {
             actor.push(field("name", Json::String(entity.name())))
             actor.push(field("asset", Json::String(self.state.asset_name(entity.id()))))
             actor.push(field("visible", Json::Bool(entity.visible())))
+            actor.push(field("componentKind", Json::String(entity.component().kind())))
+            actor.push(field("component", entity.component().to_json()))
             match entity.parent() {
                 Option::Some(parent) => {
                     actor.push(field("parent", Json::Number(parent.fmt())))

@@ -1,0 +1,132 @@
+//! Pixel-level AA regression and end-to-end offscreen frame timings.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import graphene::{ViewportRenderer, AntiAliasingMethod, anti_aliasing_methods}
+import std::os::write_file
+import std::time::perf_counter_ms
+extern fn graphene_content_pixels(address: usize, count: usize) -> str
+extern fn encore_vk_target_readback(target: usize, attachment: u32, destination: usize, capacity: usize) -> usize
+fn read_pixels(renderer: ViewportRenderer&) -> str {
+    let count =(renderer.width() * renderer.height()) as usize
+    let mut offset = 0_usize let mut result = ""
+    while offset < count {
+        let remaining = count - offset
+        let chunk = if remaining > 65536_usize {
+            65536_usize
+        } else {
+            remaining
+        }
+        unsafe {
+            result += graphene_content_pixels(renderer.pixels() + offset * 4_usize, chunk)
+        }
+        offset += chunk
+    }
+    ret result
+}
+fn main() -> u32 {
+    let mut renderer = match ViewportRenderer::create(256, 192) {
+        Some(value) => value None => {
+            ret 1
+        }
+    }
+    renderer.sync_cubes(1)
+    renderer.set_grid_visible(false) renderer.set_gizmo_mode(0) renderer.set_skybox(0) renderer.set_shading_mode(1)
+    let mut reference = ""
+    let mut report = "["
+    let mut method_index = 0_usize
+    for method in anti_aliasing_methods() {
+        renderer.set_anti_aliasing(method)
+        for frame in 0..12 {
+            if !renderer.render_camera(0.64_f32, 0.42_f32, 5.7_f32) || !renderer.wait_readback() {
+                ret 2
+            }
+        }
+        let pixels = read_pixels(renderer)
+        if pixels.byte_len() != 256_usize * 192_usize * 4_usize {
+            ret 6
+        }
+        write_file("target/aa/headless-" + method.key() + ".bgra", pixels)
+        if method.temporal() {
+            let target = renderer.aa.target()
+            let mut words = Vec[u32]::new()
+            for i in 0..256_usize * 192_usize * 2_usize {
+                words.push(0_u32)
+            }
+            let copied = unsafe {
+                encore_vk_target_readback(target.handle(), 1, words.as_ptr() as usize, words.len() * 4_usize)
+            }
+            if copied == 0 {
+                ret 9
+            }
+            let mut data = "" let mut offset = 0_usize
+            while offset < words.len() {
+                let length = if words.len() - offset > 65536_usize {
+                    65536_usize
+                } else {
+                    words.len() - offset
+                }
+                unsafe {
+                    data += graphene_content_pixels(words.as_ptr() as usize + offset * 4_usize, length)
+                }
+                offset += length
+            }
+            write_file("target/aa/motion.rgba16f", data)
+        }
+        let mut differences = 0_usize
+        if method.key() == "off" {
+            reference = pixels
+        } else {
+            for i in 0..pixels.byte_len() {
+                if pixels.byte_at(i) != reference.byte_at(i) {
+                    differences += 1
+                }
+            }
+            if differences == 0 {
+                ret 3
+            }
+        }
+        if method.temporal() && renderer.anti_aliasing_pending() {
+            ret 4
+        }
+        let started = perf_counter_ms()
+        for frame in 0..24 {
+            if !renderer.render_camera(0.64_f32, 0.42_f32, 5.7_f32) || !renderer.wait_readback() {
+                ret 5
+            }
+        }
+        let elapsed = perf_counter_ms() - started
+        if method_index > 0 {
+            report += ","
+        }
+        report += "{\"method\":\"" + method.key() + "\",\"changed_pixels\":" + Debug::fmt(differences) + ",\"frame_ms\":" + Debug::fmt(elapsed as f32 / 24.0_f32) + ",\"attachment_bytes\":" + Debug::fmt(renderer.anti_aliasing_attachment_bytes()) + "}"
+        method_index += 1
+    }
+    report += "]\n" write_file("target/aa/gpu-comparison.json", report)
+    // Growth retires the old composition image; shrink reuses its capacity.
+    // Both must remain safe while AA still references the previous target.
+    for width in vec![320_u32, 192_u32, 384_u32, 256_u32] {
+        if !renderer.resize_shared(width, width * 3_u32 / 4_u32) {
+            ret 10
+        }
+        for frame in 0..10 {
+            if !renderer.render_camera(0.64_f32, 0.42_f32, 5.7_f32) || !renderer.wait_readback() {
+                ret 11
+            }
+            renderer.commit_composition()
+        }
+    }
+    renderer.destroy()
+    let mut supersampled = match ViewportRenderer::create(1024, 768) {
+        Some(view) => view None => {
+            ret 7
+        }
+    }
+    supersampled.sync_cubes(1) supersampled.set_grid_visible(false) supersampled.set_gizmo_mode(0)
+    supersampled.set_skybox(0) supersampled.set_shading_mode(1) supersampled.set_anti_aliasing(AntiAliasingMethod::Off)
+    if !supersampled.render_camera(0.64_f32, 0.42_f32, 5.7_f32) || !supersampled.wait_readback() {
+        ret 8
+    }
+    write_file("target/aa/reference-4x.bgra", read_pixels(supersampled))
+    supersampled.destroy() ret 0
+}

@@ -1,0 +1,247 @@
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import graphene::{DeviceFeatures, GpuVirtualGeometry, LodInterpolation, GraphicsInstance, VirtualGeometryInstance, buffer_storage, build_virtual_geometry_lods, sphere_mesh, LodGroup, LodBudget, gpu_virtual_geometry_target_ratio, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_record_debug}
+import linalg::{Mat4, Vec3}
+import std::io::println
+import std::os::{mkdir_all, write_file}
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let requested = DeviceFeatures::from_mask(
+                DeviceFeatures::mesh_shader().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, DeviceFeatures::none(), requested,)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            if !device.enabled_features().contains(requested) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+            let data = sphere_mesh(1_f32, 32_u32, 48_u32)
+            let parts = data.parts()
+            let stride =(parts.2 / 4_u32) as usize
+            let mut positions = Vec[Vec3]::new()
+            let mut vertex = 0_usize
+            while vertex < parts.0.len() {
+                positions.push(Vec3::new(parts.0.get_unchecked_borrowed(vertex), parts.0.get_unchecked_borrowed(vertex + 1), parts.0.get_unchecked_borrowed(vertex + 2)))
+                vertex += stride
+            }
+            let geometry = build_virtual_geometry_lods(positions, parts.1, 64_usize, 126_usize)
+            if !geometry.valid() {
+                ret 5_u32
+            }
+            let budget = LodBudget::build(geometry)
+            let target = device.create_offscreen_target(64_u32, 64_u32)
+            let gi_scene = device.create_buffer(32_u64, buffer_storage(), true)
+            let gi_surfaces = device.create_buffer(48_u64, buffer_storage(), true)
+            let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
+            gi_scene.write_f32(0_u64, 0.0_f32)
+            gi_history.write_f32(12_u64, 0.0_f32)
+            let virtual_scene = GpuVirtualGeometry::create_from_mesh_textured_prepared(
+                device, target, data, geometry, 4_usize,
+                gi_scene, gi_surfaces, gi_history, vec![4294967295_u32], 1_u32, 1_u32,)
+            let target_ready = target.available()
+            let geometry_ready = gpu_virtual_geometry_available(virtual_scene)
+            let mut rendered = target_ready && geometry_ready
+            virtual_scene.set_lod_group(LodGroup::defaults())
+            let values = data.vertices()
+            let mut low = Vec3::new(1000000, 1000000, 1000000)
+            let mut high = Vec3::new( - 1000000, - 1000000, - 1000000)
+            let mut offset = 0_usize
+            while offset < values.len() {
+                let p = Vec3::new(values.get(offset).unwrap_or(0), values.get(offset + 1).unwrap_or(0), values.get(offset + 2).unwrap_or(0))
+                low = Vec3::new(if p.x() < low.x() {
+                        p.x()
+                    } else {
+                        low.x()
+                    }
+                    , if p.y() < low.y() {
+                        p.y()
+                    } else {
+                        low.y()
+                    }
+                    , if p.z() < low.z() {
+                        p.z()
+                    } else {
+                        low.z()
+                    }
+                    ,
+                )
+                high = Vec3::new(if p.x() > high.x() {
+                        p.x()
+                    } else {
+                        high.x()
+                    }
+                    , if p.y() > high.y() {
+                        p.y()
+                    } else {
+                        high.y()
+                    }
+                    , if p.z() > high.z() {
+                        p.z()
+                    } else {
+                        high.z()
+                    }
+                    ,
+                )
+                offset += stride
+            }
+            let center = low.add(high).scale(0.5_f32)
+            let radius = high.sub(low).length() * 0.5_f32
+            let source = data.indices().len() / 3_usize
+            let mut baseline = 0_usize
+            let mut report = "["
+            for probe in 0_usize..23_usize {
+                let distance = if probe >= 19_usize {
+                    if probe == 19_usize {
+                        20.0_f32
+                    } elif probe == 20_usize {
+                        60.0_f32
+                    } elif probe == 21_usize {
+                        200.0_f32
+                    } else {
+                        30.0_f32
+                    }
+                } elif probe == 0_usize {
+                    30.0_f32
+                } elif probe == 2_usize || probe == 14_usize {
+                    300.0_f32
+                } elif probe == 7_usize || probe == 9_usize || probe == 13_usize || probe == 15_usize {
+                    10.0_f32
+                } else {
+                    100.0_f32
+                }
+                let scale = if probe == 3_usize {
+                    4.0_f32
+                } else {
+                    2.0_f32
+                }
+                let projection = Mat4::perspective(if probe == 4_usize {
+                        0.6_f32
+                    } else {
+                        1.0_f32
+                    }
+                    , 1.0_f32, 0.1_f32, 10000.0_f32,)
+                let raw_focal = projection.values().get(5).unwrap_or(1.0_f32)
+                virtual_scene.set_lod_projection(raw_focal, 0.1_f32)
+                let projection = if probe == 8_usize {
+                    Mat4::translation(Vec3::new(0.01_f32, - 0.01_f32, 0)).mul(projection)
+                } else {
+                    projection
+                }
+                let mut profile = LodGroup::defaults()
+                if probe >= 19_usize {
+                    profile.interpolation = LodInterpolation::Smooth
+                }
+                virtual_scene.set_lod_group(profile)
+                virtual_scene.set_autolod_enabled(probe != 6_usize)
+                let ratio = if probe == 9_usize {
+                    0.0001_f32
+                } elif probe == 10_usize {
+                    0.25_f32
+                } elif probe == 11_usize {
+                    0.75_f32
+                } elif probe == 12_usize {
+                    1.0_f32
+                } else {
+                    0.1_f32
+                }
+                if probe >= 9_usize && probe <= 14_usize {
+                    virtual_scene.set_lod_group(LodGroup::constant("constant", "Constant", ratio))
+                }
+                let camera = if probe == 18_usize {
+                    Vec3::new(40, 0, 0)
+                } else {
+                    Vec3::zero()
+                }
+                let position = if probe == 16_usize {
+                    Vec3::new(60, 0, - 80)
+                } elif probe == 18_usize {
+                    Vec3::new(40, 0, - 100)
+                } else {
+                    Vec3::new(0, 0, - distance)
+                }
+                let mut instances = vec![VirtualGeometryInstance::new(Mat4::trs(position.sub(center.scale(scale)), Vec3::zero(), Vec3::new(scale, scale, scale)), Vec3::new(1, 1, 1), 0, 0.5_f32, false)]
+                if probe == 5_usize {
+                    instances.push(instances.get_unchecked_borrowed(0))
+                }
+                if probe == 15_usize {
+                    instances.push(VirtualGeometryInstance::new(Mat4::trs(Vec3::new(0, 0, - 100).sub(center.scale(scale)), Vec3::zero(), Vec3::new(scale, scale, scale)), Vec3::new(1, 1, 1), 0, 0.5_f32, false))
+                }
+                let frame = target.acquire_frame()
+                let culled = gpu_virtual_geometry_record_debug(virtual_scene, frame, projection, camera, instances, 0.0_f32, Vec3::new(0, - 1, 0), Vec3::new(1, 1, 1), 1.0_f32, Vec3::new(0.2_f32, 0.2_f32, 0.2_f32), if probe == 17_usize {
+                        2160.0_f32
+                    } else {
+                        1080.0_f32
+                    }
+                    , 2_u32, 0_u32,)
+                let pass = frame.begin_render_pass(gpu_virtual_geometry_pipeline(virtual_scene), 0, 0, 0, 1)
+                let completed = culled && pass.available() && gpu_virtual_geometry_draw(virtual_scene, pass) && pass.end() && frame.present() && target.wait_readback()
+                rendered = completed && rendered frame.destroy()
+                let triangles = gpu_virtual_geometry_selected_triangle_count(virtual_scene)
+                let expected_ratio = if probe >= 9_usize && probe <= 14_usize {
+                    ratio
+                } elif probe == 6_usize {
+                    1.0_f32
+                } else {
+                    profile.evaluate(distance)
+                }
+                let expected = if probe == 15_usize {
+                    source + budget.selected_triangles(geometry, 0.1_f32)
+                } else {
+                    budget.selected_triangles(geometry, expected_ratio) *(if probe == 5_usize {
+                            2_usize
+                        } else {
+                            1_usize
+                        }
+                    )
+                }
+                let target_ratio = gpu_virtual_geometry_target_ratio(virtual_scene)
+                let average = if probe == 15_usize {
+                    0.55_f32
+                } else {
+                    expected_ratio
+                }
+                rendered = rendered && triangles == expected && target_ratio >= average - 0.0001_f32 && target_ratio <= average + 0.0001_f32
+                if probe == 1_usize {
+                    baseline = triangles
+                }
+                if probe == 3_usize || probe == 4_usize || probe == 8_usize ||(probe >= 16_usize && probe <= 18_usize) {
+                    rendered = rendered && triangles == baseline
+                }
+                println("LOD distance probe " + probe.fmt() + " distance=" + distance.fmt() + " target=" + target_ratio.fmt() + " triangles=" + triangles.fmt() + " expected=" + expected.fmt())
+                if report != "[" {
+                    report += ","
+                }
+                report += "{\"probe\":" + probe.fmt() + ",\"distance\":" + Debug::fmt(distance) + ",\"target\":" + Debug::fmt(target_ratio) + ",\"triangles\":" + Debug::fmt(triangles) + "}"
+            }
+            mkdir_all("target/lod-curve")
+            write_file("target/lod-curve/gpu-probe.json", report + "]")
+            gpu_virtual_geometry_destroy(virtual_scene)
+            gi_history.destroy()
+            gi_surfaces.destroy()
+            gi_scene.destroy()
+            target.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if rendered {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

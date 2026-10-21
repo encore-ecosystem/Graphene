@@ -1,0 +1,506 @@
+//! Captured transform gestures: projection, delta snapping and angle unwrapping.
+import mod::editor_gizmo_handle::{gizmo_handle_components, gizmo_handle_vector, gizmo_handle_normal}
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import std::math::tan
+
+// Reduce by binary multiples of one turn: no native math library and no
+// float-to-integer conversion of an unbounded accumulated rotation. At most
+// 125 halvings for a finite f32; ordinary gestures need only a few.
+fn principal_angle(angle: f32) -> f32 {
+    if angle >= - 3.1415927 && angle <= 3.1415927 {
+        ret angle
+    }
+    let mut value = if angle < 0 {
+        - angle
+    } else {
+        angle
+    }
+    if !(value - value == 0) {
+        ret angle - angle
+    }
+    let mut period = 6.2831855_f32
+    while period <= value * 0.5 {
+        period *= 2
+    }
+    while period >= 6.2831855 {
+        if value >= period {
+            value -= period
+        }
+        period *= 0.5
+    }
+    if value > 3.1415927 {
+        value -= 6.2831855
+    }
+    ret if angle < 0 {
+        - value
+    } else {
+        value
+    }
+}
+
+/// Bounded-angle sine used by the projected ruler geometry.
+pub fn gizmo_sin(angle: f32) -> f32 {
+    let mut x = principal_angle(angle)
+    if x > 1.5707964 {
+        x = 3.1415927 - x
+    }
+    if x < - 1.5707964 {
+        x = - 3.1415927 - x
+    }
+    let square = x * x
+    // On [-pi/2, pi/2], the omitted term is below 7e-10.
+    ret x *(1 + square *( - 0.1666666667_f32 + square *(0.008333333333_f32 +
+                square *( - 0.0001984126984_f32 + square *(0.000002755731922_f32 +
+                        square *( - 0.00000002505210839_f32 + square * 0.0000000001605904384_f32))))))
+}
+
+/// Bounded-angle cosine used by the projected ruler geometry.
+pub fn gizmo_cos(angle: f32) -> f32 {
+    let mut x = principal_angle(angle)
+    let mut sign = 1.0_f32
+    if x > 1.5707964 {
+        x = 3.1415927 - x
+        sign = - 1.0_f32
+    }
+    if x < - 1.5707964 {
+        x = - 3.1415927 - x
+        sign = - 1.0_f32
+    }
+    let square = x * x
+    // On [-pi/2, pi/2], the omitted term is below 7e-9.
+    ret sign *(1 + square *( - 0.5_f32 + square *(0.04166666667_f32 +
+                square *( - 0.001388888889_f32 + square *(0.00002480158730_f32 +
+                        square *( - 0.0000002755731922_f32 + square * 0.000000002087675699_f32))))))
+}
+
+/// Quadrant-aware angle for gesture tracking and world-orientation readouts.
+pub fn gizmo_angle(y: f32, x: f32) -> f32 {
+    let ax = if x < 0 {
+        - x
+    } else {
+        x
+    }
+    let ay = if y < 0 {
+        - y
+    } else {
+        y
+    }
+    if ax == 0 && ay == 0 {
+        ret 0
+    }
+    let mut ratio = if ay > ax {
+        ax / ay
+    } else {
+        ay / ax
+    }
+    let mut offset = 0.0_f32
+    if ratio > 0.41421356 {
+        ratio =(ratio - 1) /(ratio + 1)
+        offset = 0.78539816_f32
+    }
+    let square = ratio * ratio
+    // Octant reduction keeps |ratio| <= tan(pi/8). The omitted term in
+    // atan's alternating series is below 3e-9, smaller than f32 rounding.
+    let mut angle = offset + ratio *(1 + square *( - 0.3333333333_f32 +
+            square *(0.2_f32 + square *( - 0.1428571429_f32 + square *
+                    (0.1111111111_f32 + square *( - 0.09090909091_f32 + square *
+                            (0.07692307692_f32 + square *( - 0.06666666667_f32 + square * 0.05882352941_f32))))))))
+    if ay > ax {
+        angle = 1.5707964 - angle
+    }
+    if x < 0 {
+        angle = 3.1415927 - angle
+    }
+    ret if y < 0 {
+        - angle
+    } else {
+        angle
+    }
+}
+
+pub fn gesture_axis(axis: u32) -> Vec3 {
+    ret match axis {
+        1 => Vec3::new(1, 0, 0)
+        2 => Vec3::new(0, 1, 0)
+        3 => Vec3::new(0, 0, 1)
+        _ => Vec3::zero()
+    }
+}
+pub fn gesture_axis_value(value: Vec3, axis: u32) -> f32 {
+    ret value.dot(gesture_axis(axis))
+}
+pub fn gesture_axis_add(value: Vec3, axis: u32, delta: f32) -> Vec3 {
+    ret value.add(gesture_axis(axis).scale(delta))
+}
+
+/// Transform selected roots only: descendants inherit the gesture once.
+/// Actor and parent indices are one-based; zero means no parent.
+pub fn gesture_roots(selection: Vec[u32], parents: Vec[u32]) -> Vec[u32] {
+    let mut roots = Vec[u32]::new()
+    for actor in selection {
+        if actor == 0 ||(actor as usize) > parents.len() {
+            continue
+        }
+        let mut parent = parents.get((actor - 1) as usize).unwrap_or(0)
+        let mut covered = false
+        let mut depth = 0_usize
+        while parent > 0 && depth < parents.len() {
+            for selected in selection {
+                if selected == parent {
+                    covered = true
+                }
+            }
+            if covered {
+                break
+            }
+            parent = parents.get((parent - 1) as usize).unwrap_or(0)
+            depth += 1
+        }
+        if !covered {
+            roots.push(actor)
+        }
+    }
+    ret roots
+}
+pub fn snap_delta(value: f32, step: f32, enabled: bool) -> f32 {
+    if !enabled || step <= 0 {
+        ret value
+    }
+    let scaled = value / step
+    let rounded = if scaled >= 0 {
+        (scaled + 0.5) as i64
+    } else {
+        (scaled - 0.5) as i64
+    }
+    ret(rounded as f32) * step
+}
+pub fn unwrap_angle(previous: f32, current: f32) -> f32 {
+    let mut delta = current - previous
+    if delta > 3.1415927 {
+        delta -= 6.2831855
+    }
+    if delta < - 3.1415927 {
+        delta += 6.2831855
+    }
+    ret delta
+}
+
+/// Independent, session-local snap preferences for each transform tool.
+pub struct GizmoSnap {
+    move_enabled: bool
+    rotate_enabled: bool
+    scale_enabled: bool
+    move_step: f32
+    rotate_step: f32
+    scale_step: f32
+}
+
+impl for GizmoSnap {
+    pub fn new() -> Self {
+        ret Self { true, true, true, 10, 10, 0.1 }
+    }
+    pub fn enabled(self: Self, tool: str) -> bool {
+        ret match tool {
+            "rotate" => self.rotate_enabled "scale" => self.scale_enabled _ => self.move_enabled
+        }
+    }
+    pub fn step(self: Self, tool: str) -> f32 {
+        ret match tool {
+            "rotate" => self.rotate_step "scale" => self.scale_step _ => self.move_step
+        }
+    }
+    pub fn toggle(self: mut Self, tool: str) ->() {
+        match tool {
+            "rotate" => {
+                self.rotate_enabled = !self.rotate_enabled
+            }
+            "scale" => {
+                self.scale_enabled = !self.scale_enabled
+            }
+            _ => {
+                self.move_enabled = !self.move_enabled
+            }
+        }
+    }
+    pub fn set_step(self: mut Self, tool: str, step: f32) ->() {
+        if step <= 0 {
+            ret()
+        }
+        match tool {
+            "rotate" => {
+                self.rotate_step = step
+            }
+            "scale" => {
+                self.scale_step = step
+            }
+            _ => {
+                self.move_step = step
+            }
+        }
+    }
+}
+
+/// All coordinates are logical viewport-local pixels. Capture once on press;
+/// do not mix camera/layout generations during a gesture.
+pub struct GizmoProjection {
+    position: Vec3
+    forward: Vec3
+    right: Vec3
+    up: Vec3
+    width: f32
+    height: f32
+    half_height: f32
+}
+
+impl for GizmoProjection {
+    pub fn new(position: Vec3, yaw: f32, pitch: f32, fov: f32, width: f32, height: f32) -> Self {
+        let forward = Vec3::zero().sub(Vec3::from_spherical(yaw, pitch)).normalized()
+        let right = forward.cross(Vec3::new(0, 1, 0)).normalized()
+        ret Self {
+            position, forward, right, right.cross(forward).normalized(), width, height, tan(fov * 0.5)
+        }
+    }
+    pub fn project(self: Self, world: Vec3) -> Option[Vec3] {
+        let relative = world.sub(self.position)
+        let depth = relative.dot(self.forward)
+        if depth <= 0.01 || self.height <= 0 || self.width <= 0 {
+            ret Option[Vec3]::None
+        }
+        let extent = depth * self.half_height
+        ret Option[Vec3]::Some(Vec3::new(self.width * 0.5 + relative.dot(self.right) * self.height /(2 * extent),
+                self.height * 0.5 - relative.dot(self.up) * self.height /(2 * extent), depth,))
+    }
+    pub fn plane_point(self: Self, x: f32, y: f32, pivot: Vec3, normal: Vec3) -> Option[Vec3] {
+        if self.height <= 0 || self.width <= 0 {
+            ret Option[Vec3]::None
+        }
+        let direction = self.forward.add(self.right.scale((2 * x - self.width) / self.height * self.half_height))
+        .add(self.up.scale((self.height - 2 * y) / self.height * self.half_height)).normalized()
+        let denominator = direction.dot(normal)
+        if denominator > - 0.0001 && denominator < 0.0001 {
+            ret Option[Vec3]::None
+        }
+        let distance = pivot.sub(self.position).dot(normal) / denominator
+        if distance <= 0 {
+            ret Option[Vec3]::None
+        }
+        ret Option[Vec3]::Some(self.position.add(direction.scale(distance)))
+    }
+    pub fn axis_plane_normal(self: Self, axis: u32) -> Vec3 {
+        let vector = gesture_axis(axis)
+        ret self.forward.sub(vector.scale(self.forward.dot(vector))).normalized()
+    }
+}
+
+pub fn ring_basis(axis: u32) ->(Vec3, Vec3) {
+    ret match axis {
+        1 =>(Vec3::new(0, 1, 0), Vec3::new(0, 0, 1))
+        2 =>(Vec3::new(0, 0, 1), Vec3::new(1, 0, 0))
+        _ =>(Vec3::new(1, 0, 0), Vec3::new(0, 1, 0))
+    }
+}
+
+pub struct GizmoGesture {
+    tool: str
+    axis: u32
+    projection: GizmoProjection
+    pivot: Vec3
+    start_point: Vec3
+    start_x: f32
+    start_y: f32
+    screen_axis: Vec3
+    plane_normal: Vec3
+    start_angle: f32
+    last_angle: f32
+    step: f32
+    snapping: bool
+    raw: f32
+    applied: f32
+    active: bool
+    translation: Vec3
+    depth_offset: f32
+}
+
+impl for GizmoGesture {
+    pub fn idle() -> Self {
+        ret Self {
+            "", 0, GizmoProjection::new(Vec3::new(0, 0, 5), 0, 0, 1.0471976, 1, 1),
+            Vec3::zero(), Vec3::zero(), 0, 0, Vec3::zero(), Vec3::zero(), 0, 0, 0, false, 0, 0, false, Vec3::zero(), 0
+        }
+    }
+    pub fn begin(tool: str, axis: u32, projection: GizmoProjection, pivot: Vec3,
+        x: f32, y: f32, settings: GizmoSnap,) -> Self {
+        let mut next = Self::idle()
+        if axis == 0 || axis > 7 || (tool == "rotate" && axis > 3) { ret next }
+        next.tool = tool
+        next.axis = axis
+        next.projection = projection
+        next.pivot = pivot
+        next.start_x = x
+        next.start_y = y
+        next.step = settings.step(tool) * if tool == "rotate" {
+            0.0174532925
+        } else {
+            1.0
+        }
+        next.snapping = settings.enabled(tool)
+        next.plane_normal = if tool == "rotate" {
+            gesture_axis(axis)
+        } elif axis == 7 {
+            projection.forward
+        } elif axis > 3 {
+            gizmo_handle_normal(axis)
+        } else {
+            projection.axis_plane_normal(axis)
+        }
+        match projection.project(pivot) {
+            Option::Some(origin) => {
+                match projection.project(pivot.add(gizmo_handle_vector(axis))) {
+                    Option::Some(end) => {
+                        let vector = Vec3::new(end.x() - origin.x(), end.y() - origin.y(), 0)
+                        if vector.length() > 0.01 {
+                            next.screen_axis = vector.normalized()
+                        }
+                    }
+                    Option::None => {
+                    }
+                }
+            }
+            Option::None => {
+            }
+        }
+        if axis == 7 || (tool == "scale" && next.screen_axis.length() < 0.01) {
+            next.screen_axis = Vec3::new(0.70710678, -0.70710678, 0)
+        }
+        match projection.plane_point(x, y, pivot, next.plane_normal) {
+            Option::Some(point) => {
+                next.start_point = point
+                let basis = ring_basis(axis)
+                let radial = point.sub(pivot)
+                next.start_angle = gizmo_angle(radial.dot(basis.1), radial.dot(basis.0))
+                next.last_angle = next.start_angle
+                next.active = axis > 0 &&(tool == "rotate" || next.screen_axis.length() > 0.01) &&
+                (tool != "rotate" || radial.length() > 0.0001)
+            }
+            Option::None => {
+            }
+        }
+        ret next
+    }
+    /// Invalid/edge-on samples retain the last valid value; they never reset
+    /// the drag or send a singular ray intersection into the scene.
+    pub fn update(self: mut Self, x: f32, y: f32) -> bool {
+        if !self.active {
+            ret false
+        }
+        if self.tool == "scale" {
+            self.raw =((x - self.start_x) * self.screen_axis.x() +(y - self.start_y) * self.screen_axis.y()) * 0.01
+        } elif self.tool == "rotate" {
+            match self.projection.plane_point(x, y, self.pivot, self.plane_normal) {
+                Option::Some(point) => {
+                    if self.tool == "rotate" {
+                        let radial = point.sub(self.pivot)
+                        if radial.length() <= 0.0001 {
+                            ret false
+                        }
+                        let basis = ring_basis(self.axis)
+                        let angle = gizmo_angle(radial.dot(basis.1), radial.dot(basis.0))
+                        self.raw += unwrap_angle(self.last_angle, angle)
+                        self.last_angle = angle
+                    } else {
+                        self.raw = point.sub(self.start_point).dot(gesture_axis(self.axis))
+                    }
+                }
+                Option::None => {
+                    ret false
+                }
+            }
+        }
+        if self.tool == "move" {
+            match self.projection.plane_point(x, y, self.pivot, self.plane_normal) {
+                Some(point) => {
+                    let delta = gizmo_handle_components(point.sub(self.start_point), self.axis)
+                        .add(if self.axis == 7 { self.projection.forward.scale(self.depth_offset) } else { Vec3::zero() })
+                    let next = Vec3::new(snap_delta(delta.x(), self.step, self.snapping),
+                        snap_delta(delta.y(), self.step, self.snapping), snap_delta(delta.z(), self.step, self.snapping))
+                    let changed = next.x() != self.translation.x() || next.y() != self.translation.y() || next.z() != self.translation.z()
+                    self.translation = next
+                    self.raw = if self.axis > 3 { delta.length() } else { delta.dot(gesture_axis(self.axis)) }
+                    self.applied = if self.axis > 3 { next.length() } else { next.dot(gesture_axis(self.axis)) }
+                    ret changed
+                }
+                None => { ret false }
+            }
+        }
+        let value = snap_delta(self.raw, self.step, self.snapping)
+        let changed = value != self.applied
+        self.applied = value
+        ret changed
+    }
+    /// Limit one shared delta, preserving the offsets of every selected scale.
+    pub fn limit_scale(self: mut Self, smallest_start: f32) ->() {
+        if self.axis > 3 {
+            let lower = if smallest_start > 0.1_f32 { 0.1_f32 / smallest_start - 1_f32 } else { 0_f32 }
+            if self.applied < lower {
+                self.applied = if self.snapping { ((lower / self.step) as i64 as f32) * self.step } else { lower }
+            }
+            ret()
+        }
+        let minimum = if smallest_start < 0.1 {
+            smallest_start
+        } else {
+            0.1_f32
+        }
+        let lower = minimum - smallest_start
+        if self.applied < lower {
+            self.applied = if self.snapping {
+                // Round the negative limit towards zero, staying on the grid.
+                ((lower / self.step) as i64 as f32) * self.step
+            } else {
+                lower
+            }
+        }
+    }
+    pub fn active(self: Self) -> bool {
+        ret self.active
+    }
+    pub fn tool(self: Self) -> str {
+        ret self.tool
+    }
+    pub fn axis(self: Self) -> u32 {
+        ret self.axis
+    }
+    pub fn translation(self: Self) -> Vec3 { ret self.translation }
+    /// The center move handle keeps its captured screen plane; the wheel adds depth.
+    pub fn adjust_depth(self: mut Self, wheel: f32) ->() {
+        if self.axis == 7 && self.tool == "move" {
+            let distance = self.pivot.sub(self.projection.position).dot(self.projection.forward)
+            self.depth_offset -= wheel * distance * 0.04
+            if self.depth_offset < 0.05 - distance { self.depth_offset = 0.05 - distance }
+        }
+        ret()
+    }
+    pub fn raw(self: Self) -> f32 {
+        ret self.raw
+    }
+    pub fn applied(self: Self) -> f32 {
+        ret self.applied
+    }
+    pub fn step(self: Self) -> f32 {
+        ret self.step
+    }
+    pub fn snapping(self: Self) -> bool {
+        ret self.snapping
+    }
+    pub fn pivot(self: Self) -> Vec3 {
+        ret self.pivot
+    }
+    pub fn projection(self: Self) -> GizmoProjection {
+        ret self.projection
+    }
+    pub fn start_angle(self: Self) -> f32 {
+        ret self.start_angle
+    }
+}

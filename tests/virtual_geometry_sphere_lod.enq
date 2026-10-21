@@ -8,7 +8,7 @@ fn main() -> u32 {
     let values = source.0
     let indices = source.1
     let mut positions = Vec[Vec3]::new()
-    let stride = (source.2 / 4_u32) as usize
+    let stride =(source.2 / 4_u32) as usize
     let mut offset = 0_usize
     while offset + 2_usize < values.len() {
         let x = match values.get(offset) {
@@ -30,39 +30,77 @@ fn main() -> u32 {
     let coarse_indices = simplify_virtual_geometry_indices(positions, indices, 16_u32)
     let mut coarse_triangle = 0_usize
     while coarse_triangle + 2_usize < coarse_indices.len() {
-        let ia = match coarse_indices.get(coarse_triangle) { Option::Some(value) => value Option::None => { ret 102_u32 } }
-        let ib = match coarse_indices.get(coarse_triangle + 1_usize) { Option::Some(value) => value Option::None => { ret 102_u32 } }
-        let ic = match coarse_indices.get(coarse_triangle + 2_usize) { Option::Some(value) => value Option::None => { ret 102_u32 } }
-        let a = match positions.get(ia as usize) { Option::Some(value) => value Option::None => { ret 103_u32 } }
-        let b = match positions.get(ib as usize) { Option::Some(value) => value Option::None => { ret 103_u32 } }
-        let c = match positions.get(ic as usize) { Option::Some(value) => value Option::None => { ret 103_u32 } }
+        let ia = match coarse_indices.get(coarse_triangle) {
+            Option::Some(value) => value Option::None => {
+                ret 102_u32
+            }
+        }
+        let ib = match coarse_indices.get(coarse_triangle + 1_usize) {
+            Option::Some(value) => value Option::None => {
+                ret 102_u32
+            }
+        }
+        let ic = match coarse_indices.get(coarse_triangle + 2_usize) {
+            Option::Some(value) => value Option::None => {
+                ret 102_u32
+            }
+        }
+        let a = match positions.get(ia as usize) {
+            Option::Some(value) => value Option::None => {
+                ret 103_u32
+            }
+        }
+        let b = match positions.get(ib as usize) {
+            Option::Some(value) => value Option::None => {
+                ret 103_u32
+            }
+        }
+        let c = match positions.get(ic as usize) {
+            Option::Some(value) => value Option::None => {
+                ret 103_u32
+            }
+        }
         // A one-pass disjoint contraction may span adjacent source edges, but
         // must never create the long radial strips caused by collapse chains.
         if a.sub(b).length() > 0.35_f32 || b.sub(c).length() > 0.35_f32 ||
-            c.sub(a).length() > 0.35_f32 { ret 104_u32 }
-        if b.sub(a).cross(c.sub(a)).length() < 0.00001_f32 { ret 105_u32 }
+        c.sub(a).length() > 0.35_f32 {
+            ret 104_u32
+        }
+        if b.sub(a).cross(c.sub(a)).length() < 0.00001_f32 {
+            ret 105_u32
+        }
         coarse_triangle += 3_usize
     }
     let lods = geometry.lods()
-    if lods.len() < 3_usize { ret lods.len() as u32 }
+    if lods.len() < 3_usize {
+        ret lods.len() as u32
+    }
     let mut base = 0_usize
     let mut coarse = 0_usize
     let mut coarse_minimum_y = 1000.0_f32
-    let mut coarse_maximum_y = -1000.0_f32
+    let mut coarse_maximum_y = - 1000.0_f32
     let clusters = geometry.clusters()
     let first = match lods.get(0_usize) {
         Option::Some(value) => value
-        Option::None => { ret 2_u32 }
+        Option::None => {
+            ret 2_u32
+        }
     }
     let last = match lods.get(lods.len() - 1_usize) {
         Option::Some(value) => value
-        Option::None => { ret 3_u32 }
+        Option::None => {
+            ret 3_u32
+        }
     }
     let mut index = first.first_cluster()
     while index < first.first_cluster() + first.cluster_count() {
         match clusters.get(index) {
-            Option::Some(cluster) => { base += cluster.triangle_count() }
-            Option::None => { ret 4_u32 }
+            Option::Some(cluster) => {
+                base += cluster.triangle_count()
+            }
+            Option::None => {
+                ret 4_u32
+            }
         }
         index += 1_usize
     }
@@ -80,14 +118,18 @@ fn main() -> u32 {
                     coarse_maximum_y = maximum_y
                 }
             }
-            Option::None => { ret 5_u32 }
+            Option::None => {
+                ret 5_u32
+            }
         }
         index += 1_usize
     }
-    if coarse >= base { ret 100_u32 }
+    if coarse >= base {
+        ret 100_u32
+    }
     // Every LOD must conservatively cover both hemispheres. This catches
     // index-order-biased simplification even when the triangle count falls.
-    if coarse_minimum_y > -0.45_f32 || coarse_maximum_y < 0.45_f32 {
+    if coarse_minimum_y > - 0.45_f32 || coarse_maximum_y < 0.45_f32 {
         ret 101_u32
     }
     // A parent must never advertise less error than either finer child. The
@@ -98,7 +140,7 @@ fn main() -> u32 {
         match hierarchy.get(node_index) {
             Option::Some(node) => {
                 if node.geometric_error() < 0.0_f32 ||
-                node.geometric_error() > 1.2_f32 {
+                !(node.geometric_error() <= 340282346638528859811704183484516925440.0_f32) {
                     ret 106_u32
                 }
                 if !node.leaf() {
@@ -108,7 +150,9 @@ fn main() -> u32 {
                                 ret 107_u32
                             }
                         }
-                        Option::None => { ret 108_u32 }
+                        Option::None => {
+                            ret 108_u32
+                        }
                     }
                     if node.right_child() != 4294967295_u32 {
                         match hierarchy.get(node.right_child() as usize) {
@@ -117,14 +161,43 @@ fn main() -> u32 {
                                     ret 109_u32
                                 }
                             }
-                            Option::None => { ret 110_u32 }
+                            Option::None => {
+                                ret 110_u32
+                            }
                         }
                     }
                 }
             }
-            Option::None => { ret 111_u32 }
+            Option::None => {
+                ret 111_u32
+            }
         }
         node_index += 1_usize
+    }
+    // The screen-error budget must cover inward deviation, not just average
+    // plane residual. A coarse polar cone must refine before it is visible.
+    for lod in lods {
+        let lod_start = lod.first_cluster()
+        let lod_end = lod_start + lod.cluster_count()
+        for cluster_index in lod_start..lod_end {
+            let cluster = match clusters.get(cluster_index) {
+                Option::Some(value) => value Option::None => {
+                    ret 112_u32
+                }
+            }
+            for triangle in 0..cluster.triangle_count() {
+                let mut center = Vec3::zero()
+                for corner in 0..3_usize {
+                    let local = geometry.triangle_indices().get(cluster.triangle_offset() + triangle * 3_usize + corner).unwrap_or(0) as usize
+                    let vertex = geometry.vertex_indices().get(cluster.vertex_offset() + local).unwrap_or(0) as usize
+                    center = center.add(positions.get(vertex).unwrap_or(Vec3::zero()))
+                }
+                let inward = 0.6_f32 - center.scale(1.0_f32 / 3.0_f32).length()
+                if inward > lod.geometric_error() + 0.01_f32 {
+                    ret 113_u32
+                }
+            }
+        }
     }
     ret 0_u32
 }

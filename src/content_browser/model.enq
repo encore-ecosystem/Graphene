@@ -1,0 +1,263 @@
+import core::option::Option
+import core::vec::Vec
+import luma::{TextEditor, Rect}
+import mod::path::{content_parent, content_kind_name, lower}
+import refrain::texture_asset::TextureLoad
+import std::thread::JoinHandle
+
+pub struct ContentAsset {
+    path: str
+    name: str
+    kind: str
+    bytes: u64
+    name_key: str
+    path_key: str
+    type_key: str
+}
+pub struct ContentScan {
+    project: str
+    entries: Vec[ContentAsset]
+}
+pub struct ContentMove {
+    from: str
+    to: str
+}
+pub struct ContentEdit {
+    moves: Vec[ContentMove]
+    label: str
+}
+pub struct ContentThumb {
+    generation: u64
+    project: str
+    path: str
+    payload: str
+}
+pub struct SavedSearch {
+    name: str
+    query: str
+}
+
+impl for ContentAsset {
+    pub fn new(path: str, name: str, kind: str, bytes: u64) -> Self {
+        ret Self {
+            path, name, kind, bytes, lower(name), lower(path), kind + "/" + lower(name)
+        }
+    }
+    pub fn builtin(self: Self) -> bool {
+        ret self.path.byte_len() > 8 && self.path.slice_bytes(0, 8) == "@engine/"
+    }
+    pub fn parent(self: Self) -> str {
+        ret content_parent(self.path)
+    }
+    pub fn mutable(self: Self) -> bool {
+        ret self.path.byte_len() > 8 && self.path.slice_bytes(0, 8) == "Content/"
+    }
+}
+/// AND terms, quoted phrases, exclusions, and explicit type/path terms.
+pub fn content_query_terms(query: str) -> Vec[str] {
+    let mut terms = Vec[str]::new() let mut word = "" let mut quote = false
+    for index in 0..query.char_len() {
+        let c = query.slice(index, 1)
+        if c == "\"" {
+            quote = !quote
+        } elif (c == " " || c == "\t") && !quote {
+            if word != "" {
+                terms.push(lower(word)) word = ""
+            }
+        } else {
+            word = word + c
+        }
+    }
+    if word != "" {
+        terms.push(lower(word))
+    }
+    ret terms
+}
+fn type_term(kind: str, value: str) -> bool {
+    ret kind == value ||(value == "material" && kind == "material-graph") ||
+    (value == "obj" && kind == "mesh") ||(value == "png" && kind == "texture") ||
+    (value == "bp" && kind == "blueprint") ||(value == "enq" && kind == "script") ||
+    (match kind {
+            "mesh" => "static mesh" "material-graph" => "material graph" "script" => "encore script" _ => kind
+        }
+    ).contains(value)
+}
+pub fn content_query_matches(asset: ContentAsset, terms: Vec[str]) -> bool {
+    for token in terms {
+        let negative = token.byte_len() > 1 && token.slice_bytes(0, 1) == "-"
+        let term = if negative {
+            token.slice_bytes(1, token.byte_len() - 1)
+        } else {
+            token
+        }
+        let mut matches = false
+        if term.byte_len() > 2 && term.slice_bytes(0, 2) == "t:" {
+            matches = type_term(asset.kind, term.slice_bytes(2, term.byte_len() - 2))
+        } elif term.byte_len() > 5 && term.slice_bytes(0, 5) == "type:" {
+            matches = type_term(asset.kind, term.slice_bytes(5, term.byte_len() - 5))
+        } elif term.byte_len() > 5 && term.slice_bytes(0, 5) == "path:" {
+            matches = asset.path_key.contains(term.slice_bytes(5, term.byte_len() - 5))
+        } else {
+            matches = asset.name_key.contains(term) || asset.path_key.contains(term) || type_term(asset.kind, term)
+        }
+        if matches == negative {
+            ret false
+        }
+    }
+    ret true
+}
+pub fn content_contains(values: Vec[str], value: str) -> bool {
+    for item in values {
+        if item == value {
+            ret true
+        }
+    }
+    ret false
+}
+pub fn content_toggled(values: Vec[str], value: str) -> Vec[str] {
+    let mut result = Vec[str]::new() let exists = content_contains(values, value)
+    for item in values {
+        if item != value {
+            result.push(item)
+        }
+    }
+    if !exists {
+        result.push(value)
+    }
+    ret result
+}
+/// A stable merge sort keeps scanning and filtering usable for large folders.
+fn before(a: ContentAsset, b: ContentAsset, mode: str, descending: bool) -> bool {
+    if a.kind == "folder" && b.kind != "folder" {
+        ret true
+    }
+    if a.kind != "folder" && b.kind == "folder" {
+        ret false
+    }
+    let aa = if mode == "type" {
+        a.type_key
+    } else {
+        a.name_key
+    }
+    let bb = if mode == "type" {
+        b.type_key
+    } else {
+        b.name_key
+    }
+    let less = if mode == "size" && a.bytes != b.bytes {
+        a.bytes < b.bytes
+    } else {
+        content_less(aa, bb) ||(aa == bb && content_less(a.path_key, b.path_key))
+    }
+    ret if descending {
+        !less
+    } else {
+        less
+    }
+}
+pub fn content_sorted(items: Vec[ContentAsset], mode: str, descending: bool) -> Vec[ContentAsset] {
+    if items.len() < 2 {
+        ret items
+    }
+    let mut left = Vec[ContentAsset]::new() let mut right = Vec[ContentAsset]::new()
+    for i in 0..items.len() {
+        let asset = items.get(i).unwrap_or(ContentAsset::new("", "", "", 0))
+        if i < items.len() / 2 {
+            left.push(asset)
+        } else {
+            right.push(asset)
+        }
+    }
+    left = content_sorted(left, mode, descending) right = content_sorted(right, mode, descending)
+    let mut result = Vec[ContentAsset]::new() let mut a = 0_usize let mut b = 0_usize
+    while a < left.len() || b < right.len() {
+        if b >= right.len() ||(a < left.len() && before(left.get(a).unwrap_or(ContentAsset::new("", "", "", 0)), right.get(b).unwrap_or(ContentAsset::new("", "", "", 0)), mode, descending)) {
+            result.push(left.get(a).unwrap_or(ContentAsset::new("", "", "", 0))) a += 1
+        } else {
+            result.push(right.get(b).unwrap_or(ContentAsset::new("", "", "", 0))) b += 1
+        }
+    }
+    ret result
+}
+
+pub struct ContentBrowser {
+    import_worker: Option[JoinHandle[TextureLoad]]
+    import_project: str
+    import_result: Option[TextureLoad]
+    mesh_refresh: bool
+    generation: u64
+    editable: bool
+    project: str
+    entries: Vec[ContentAsset]
+    visible: Vec[ContentAsset]
+    directory: str
+    history: Vec[str]
+    history_index: usize
+    selection: Vec[str]
+    primary: str
+    anchor: str
+    expanded: Vec[str]
+    favorites: Vec[str]
+    searches: Vec[SavedSearch]
+    types: Vec[str]
+    query: TextEditor
+    query_focused: bool
+    focused: bool
+    recursive: bool
+    view: str
+    size: u32
+    sort: str
+    descending: bool
+    sources: bool
+    inspector: bool
+    bounds: Rect
+    scroll: f32
+    reset_scroll: bool
+    focus_id: str
+    scroll_drag: bool
+    scroll_y: f32
+    scroll_start: f32
+    popup: str
+    popup_x: f32
+    popup_y: f32
+    popup_focus: usize
+    name: TextEditor
+    error: str
+    message: str
+    preview: str
+    request: str
+    requested_path: str
+    drag_request: bool
+    pressed_path: str
+    press_x: f32
+    press_y: f32
+    pending_open: bool
+    last_click: str
+    last_click_time: u64
+    undo: Vec[ContentEdit]
+    redo: Vec[ContentEdit]
+    scan: Option[JoinHandle[ContentScan]]
+    rescan: bool
+    thumbnails: Vec[ContentThumb]
+    thumbnail: Option[JoinHandle[ContentThumb]]
+    thumbnail_pending: usize
+    thumbnail_published: u64
+    dirty: bool
+}
+
+pub fn content_less(a: str, b: str) -> bool {
+    let count = if a.byte_len() < b.byte_len() {
+        a.byte_len()
+    } else {
+        b.byte_len()
+    }
+    for i in 0..count {
+        if a.byte_at(i) < b.byte_at(i) {
+            ret true
+        }
+        if a.byte_at(i) > b.byte_at(i) {
+            ret false
+        }
+    }
+    ret a.byte_len() < b.byte_len()
+}

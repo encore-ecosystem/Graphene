@@ -1,0 +1,278 @@
+//! Versioned project-local docking state. No OS handles or live NodeIds are stored.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, stringify, parse as parse_json}
+import luma::{DockLayout, DockLayoutNode, DockLayoutWindow, DockLayoutHome, DockWorkspace, PanelId, WindowId}
+import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
+import std::path::Path
+
+fn optional_index(value: Option[usize]) -> Json {
+    ret match value {
+        Some(index) => Json::Number(Debug::fmt(index)) None => Json::Null
+    }
+}
+pub fn encode_editor_layout(layout: DockLayout) -> str {
+    let mut nodes = Vec[Json]::new()
+    for node in layout.nodes {
+        if node.first.is_some() {
+            // Millionths retain subpixel precision even on an 8K display,
+            // without locale-dependent floating-point parsing in a settings file.
+            let ratio =(node.fraction * 1000000 + 0.5) as u32
+            nodes.push(Json::Object(vec![field("axis", Json::String(if node.horizontal {
+                                    "horizontal"
+                                } else {
+                                    "vertical"
+                                }
+                            )),
+                        field("ratio", Json::Number(Debug::fmt(ratio))), field("first", optional_index(node.first)),
+                        field("second", optional_index(node.second))],))
+        } else {
+            let mut tabs = Vec[Json]::new()
+            for tab in node.tabs {
+                tabs.push(Json::String(tab.key()))
+            }
+            nodes.push(Json::Object(vec![field("tabs", Json::Array(tabs)), field("active", Json::String(node.active.key()))]))
+        }
+    }
+    let mut windows = Vec[Json]::new()
+    for window in layout.windows {
+        windows.push(Json::Object(vec![field("id", Json::Number(Debug::fmt(window.window.key()))), field("root", optional_index(window.root))]))
+    }
+    let mut homes = Vec[Json]::new()
+    for home in layout.homes {
+        homes.push(Json::Object(vec![field("panel", Json::String(home.panel.key())), field("group", Json::Number(Debug::fmt(home.group)))]))
+    }
+    ret stringify(Json::Object(vec![field("schema", Json::Number("1")), field("nodes", Json::Array(nodes)),
+                field("windows", Json::Array(windows)), field("homes", Json::Array(homes))],)) + "\n"
+}
+// Layout IDs are unsigned decimal integers, not arbitrary JSON numbers.
+fn unsigned(value: Json) -> Option[u64] {
+    let number = match value.as_number() {
+        Some(number) => number None => {
+            ret Option[u64]::None
+        }
+    }
+    if number.byte_len() == 0 {
+        ret Option[u64]::None
+    }
+    let mut result = 0_u64
+    let mut position = 0_usize
+    while position < number.byte_len() {
+        let byte = number.get_byte(position).unwrap_or(255)
+        if byte < 48 || byte > 57 {
+            ret Option[u64]::None
+        }
+        let digit =(byte - 48) as u64
+        if result > 1844674407370955161_u64 ||
+        (result == 1844674407370955161_u64 && digit > 5) {
+            ret Option[u64]::None
+        }
+        result = result * 10 + digit
+        position += 1
+    }
+    ret Option[u64]::Some(result)
+}
+fn index(value: Json) -> Option[usize] {
+    let parsed = match unsigned(value) {
+        Some(parsed_index) => parsed_index None => {
+            ret Option[usize]::None
+        }
+    }
+    let narrowed = parsed as usize
+    if narrowed as u64 != parsed {
+        ret Option[usize]::None
+    }
+    ret Option[usize]::Some(narrowed)
+}
+fn window_id(value: Json) -> Option[WindowId] {
+    ret match unsigned(value) {
+        Some(value) => Option[WindowId]::Some(WindowId::new(value)) None => Option[WindowId]::None
+    }
+}
+fn decode_node(value: Json) -> Option[DockLayoutNode] {
+    if value.get("tabs").is_some() {
+        if value.get("first").is_some() || value.get("second").is_some() || value.get("axis").is_some() {
+            ret Option[DockLayoutNode]::None
+        }
+        let items = match value.get("tabs").unwrap_or(Json::Null).as_array() {
+            Some(items) => items None => {
+                ret Option[DockLayoutNode]::None
+            }
+        }
+        if items.len() == 0 || items.len() > 4 {
+            ret Option[DockLayoutNode]::None
+        }
+        let mut tabs = Vec[PanelId]::new()
+        for item in items {
+            match item.as_str() {
+                Some(key) => {
+                    tabs.push(PanelId::new(key))
+                }
+                None => {
+                    ret Option[DockLayoutNode]::None
+                }
+            }
+        }
+        let active = match value.get("active").unwrap_or(Json::Null).as_str() {
+            Some(key) => PanelId::new(key) None => {
+                ret Option[DockLayoutNode]::None
+            }
+        }
+        ret Option[DockLayoutNode]::Some(DockLayoutNode {
+                tabs, active, Option[usize]::None, Option[usize]::None, false, 0.5
+            }
+            ,
+        )
+    }
+    let axis = value.get("axis").unwrap_or(Json::Null).as_str().unwrap_or("")
+    if axis != "horizontal" && axis != "vertical" {
+        ret Option[DockLayoutNode]::None
+    }
+    let first = match index(value.get("first").unwrap_or(Json::Null)) {
+        Some(parsed_index) => parsed_index None => {
+            ret Option[DockLayoutNode]::None
+        }
+    }
+    let second = match index(value.get("second").unwrap_or(Json::Null)) {
+        Some(parsed_index) => parsed_index None => {
+            ret Option[DockLayoutNode]::None
+        }
+    }
+    let ratio = match index(value.get("ratio").unwrap_or(Json::Null)) {
+        Some(parsed_index) => parsed_index None => {
+            ret Option[DockLayoutNode]::None
+        }
+    }
+    if ratio > 1000000 {
+        ret Option[DockLayoutNode]::None
+    }
+    ret Option[DockLayoutNode]::Some(DockLayoutNode {
+            Vec[PanelId]::new(), PanelId::new(""),
+            Option[usize]::Some(first), Option[usize]::Some(second), axis == "horizontal",(ratio as f32) / 1000000
+        }
+        ,)
+}
+pub fn decode_editor_layout(source: str) -> Option[DockLayout] {
+    if source.byte_len() == 0 || source.byte_len() > 65536 {
+        ret Option[DockLayout]::None
+    }
+    let document = match parse_json(source) {
+        Result::Ok(value) => value Result::Err(_) => {
+            ret Option[DockLayout]::None
+        }
+    }
+    if index(document.get("schema").unwrap_or(Json::Null)).unwrap_or(0) != 1 {
+        ret Option[DockLayout]::None
+    }
+    let entries = match document.get("nodes").unwrap_or(Json::Null).as_array() {
+        Some(items) => items None => {
+            ret Option[DockLayout]::None
+        }
+    }
+    let hosts = match document.get("windows").unwrap_or(Json::Null).as_array() {
+        Some(items) => items None => {
+            ret Option[DockLayout]::None
+        }
+    }
+    let history = match document.get("homes").unwrap_or(Json::Null).as_array() {
+        Some(items) => items None => {
+            ret Option[DockLayout]::None
+        }
+    }
+    if entries.len() > 7 || hosts.len() == 0 || hosts.len() > 5 || history.len() > 4 {
+        ret Option[DockLayout]::None
+    }
+    let mut nodes = Vec[DockLayoutNode]::new()
+    for entry in entries {
+        match decode_node(entry) {
+            Some(node) => {
+                nodes.push(node)
+            }
+            None => {
+                ret Option[DockLayout]::None
+            }
+        }
+    }
+    let mut windows = Vec[DockLayoutWindow]::new()
+    for host in hosts {
+        let id = match window_id(host.get("id").unwrap_or(Json::Null)) {
+            Some(value) => value None => {
+                ret Option[DockLayout]::None
+            }
+        }
+        let root_value = match host.get("root") {
+            Some(value) => value None => {
+                ret Option[DockLayout]::None
+            }
+        }
+        let root = if root_value.is_null() {
+            Option[usize]::None
+        } else {
+            match index(root_value) {
+                Some(value) => Option[usize]::Some(value) None => {
+                    ret Option[DockLayout]::None
+                }
+            }
+        }
+        windows.push(DockLayoutWindow { id, root })
+    }
+    let mut homes = Vec[DockLayoutHome]::new()
+    for entry in history {
+        let panel = match entry.get("panel").unwrap_or(Json::Null).as_str() {
+            Some(value) => PanelId::new(value) None => {
+                ret Option[DockLayout]::None
+            }
+        }
+        let group = match index(entry.get("group").unwrap_or(Json::Null)) {
+            Some(value) => value None => {
+                ret Option[DockLayout]::None
+            }
+        }
+        homes.push(DockLayoutHome { panel, group })
+    }
+    ret Option[DockLayout]::Some(DockLayout { nodes, windows, homes })
+}
+
+fn layout_path(project: str) -> Path {
+    ret Path::new(project).resolve().join(".graphene/editor-layout.json")
+}
+pub fn load_editor_layout(workspace: mut DockWorkspace&, project: str) -> bool {
+    if project == "" {
+        ret false
+    }
+    let path = layout_path(project)
+    if !file_exists(path.as_str()) {
+        ret false
+    }
+    let layout = match decode_editor_layout(read_file(path.as_str())) {
+        Some(value) => value None => {
+            ret false
+        }
+    }
+    // The current editor hosts one native window. Satellite roots must be
+    // prepared by its future multi-window coordinator before admitting them.
+    if layout.windows.len() != 1 || !layout.windows.get(0).unwrap_or(DockLayoutWindow {
+            WindowId::new(0), Option[usize]::None
+        }
+        ,).window.same(workspace.main_window()) {
+        ret false
+    }
+    ret workspace.restore(layout)
+}
+pub fn save_editor_layout(workspace: DockWorkspace&, project: str) -> bool {
+    if project == "" {
+        ret false
+    }
+    let path = layout_path(project)
+    let contents = encode_editor_layout(workspace.snapshot())
+    if file_exists(path.as_str()) && read_file(path.as_str()) == contents {
+        ret true
+    }
+    let directory = Path::new(project).resolve().join(".graphene")
+    if mkdir_all(directory.as_str()) != 0 {
+        ret false
+    }
+    ret write_file_atomic(path.as_str(), contents) == 0
+}

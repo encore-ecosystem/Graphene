@@ -1,0 +1,83 @@
+//! Project-local atomic layout persistence and safe rejection of corrupt input.
+import core::fmt::Debug
+import graphene::editor_layout::{decode_editor_layout, encode_editor_layout, load_editor_layout, save_editor_layout}
+import luma::{DockNodeId, DockPanel, DockPlacement, DockWorkspace, PanelId, Size, WindowId}
+import std::os::{cwd, file_exists, read_file, write_file, remove_dir_all}
+import std::time::perf_counter_ns
+
+fn workspace() -> DockWorkspace<H> {
+    let mut model = DockWorkspace::new(WindowId::new(1))
+    for key in vec!["viewport", "outliner", "details", "content"] {
+        let _registered = model.register(DockPanel::new(key, key, Size::new(100, 100)))
+        let _shown = model.show(PanelId::new(key), WindowId::new(1))
+    }
+    ret model
+}
+fn exercise(root: str) -> u32 {
+    let mut source = workspace()
+    let mut target = workspace()
+    let default = target.snapshot()
+    let viewport = PanelId::new("viewport") let details = PanelId::new("details")
+    let group = source.location(viewport).unwrap_or(DockNodeId::empty())
+    let _split = source.dock(details, group, DockPlacement::Right, 0)
+    let _hidden = source.hide(PanelId::new("content"))
+    let encoded = encode_editor_layout(source.snapshot())
+    let decoded = match decode_editor_layout(encoded) {
+        Some(value) => value None => {
+            ret 1
+        }
+    }
+    if !target.restore(decoded) || encode_editor_layout(target.snapshot()) != encoded {
+        ret 2
+    }
+    for broken in vec!["", "{", "{}", "{\"schema\":2,\"nodes\":[],\"windows\":[],\"homes\":[]}"] {
+        if decode_editor_layout(broken).is_some() {
+            ret 3
+        }
+    }
+    for number in vec!["-1", "1.5", "1e0", "18446744073709551616", "184467440737095516159"] {
+        let broken = "{\"schema\":1,\"nodes\":[],\"windows\":[{\"id\":" + number + ",\"root\":null}],\"homes\":[]}"
+        if decode_editor_layout(broken).is_some() {
+            ret 11
+        }
+    }
+    let first = root + "/project a" let second = root + "/project b"
+    if !save_editor_layout(source, first) || !save_editor_layout(source, first) {
+        ret 4
+    }
+    let filename = first + "/.graphene/editor-layout.json"
+    if read_file(filename) != encoded || !load_editor_layout(target, first) {
+        ret 5
+    }
+    let before = target.revision()
+    if write_file(filename, "{\"schema\":999}") != 0 || load_editor_layout(target, first) || target.revision() != before {
+        ret 6
+    }
+    if !save_editor_layout(source, first) {
+        ret 7
+    }
+    let _default = target.restore(default)
+    if !save_editor_layout(target, second) || !load_editor_layout(target, first) ||
+    target.location(PanelId::new("content")).is_some() || !load_editor_layout(target, second) ||
+    target.location(PanelId::new("content")).is_none() {
+        ret 8
+    }
+    // A syntactically valid file can still contain a cycle. The model must
+    // reject it without partially replacing the currently displayed layout.
+    let malicious = "{\"schema\":1,\"nodes\":[{\"axis\":\"horizontal\",\"ratio\":500000,\"first\":0,\"second\":1}," +
+    "{\"tabs\":[\"viewport\"],\"active\":\"viewport\"}],\"windows\":[{\"id\":1,\"root\":0}],\"homes\":[]}"
+    let before_invalid = target.revision()
+    if write_file(filename, malicious) != 0 || load_editor_layout(target, first) || target.revision() != before_invalid {
+        ret 9
+    }
+    ret 0
+}
+fn main() -> u32 {
+    let root = cwd() + "/target/tests/editor-layout-" + Debug::fmt(perf_counter_ns())
+    if file_exists(root) {
+        ret 10
+    }
+    let result = exercise(root)
+    let _removed = remove_dir_all(root)
+    ret result
+}

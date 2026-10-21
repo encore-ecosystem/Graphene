@@ -1,0 +1,1771 @@
+import core::option::Option
+import core::vec::Vec
+import graphene::animation::blend::{BoneMask, blend_poses, additive_poses}
+import graphene::animation::blend_space::{BlendSpace, BlendAxis, BlendSample, CookedBlendSpace, BlendWeights, BlendSpaceCursor, BlendSpaceWorkspace, BlendSpaceClock, BlendSpacePlayback, cook_blend_space}
+import graphene::animation::controller::{AnimationController, ControllerEvent, ControllerFrame}
+import graphene::animation::deform::{deform_vertex, prepare_deformable_cluster, deformable_cluster_bounds}
+import graphene::animation::graph::{AnimationGraph, AnimationNode, PoseOperation, AnimationParameter, AnimationWorkspace, BlendSpaceNode, NodeSampleTime, compile_animation_graph}
+import graphene::animation::ik::{solve_two_bone, solve_fabrik, solve_look_at}
+import graphene::animation::math::{PoseVector, PoseRotation, PoseMatrix, LocalTransform, animation_abs}
+import graphene::animation::model::{SkeletalMesh, SkinVertex, SkinInfluence, SkinSection, MorphTarget, MorphDelta}
+import graphene::animation::model::{Skeleton, SkeletonBone, SkeletonSocket, AnimationValue, AnimationKey, AnimationTrack, AnimationClip, AnimationNotify, TrackPath, KeyInterpolation}
+import graphene::animation::motion_matching::{PoseFeature, PoseCandidate, PoseSearchDatabase, PoseSearchWorkspace, cook_pose_search, MotionMatch}
+import graphene::animation::player::{ClipPlayer, AnimationEvent}
+import graphene::animation::pose::{AnimationPose, model_pose}
+import graphene::animation::root_motion::{extract_root_motion, RootMotionDelta}
+import graphene::animation::runtime::{AnimationWorld, AnimationInstanceId, AnimationLibraryId}
+import graphene::animation::sample::{sample_track, sample_clip}
+import graphene::animation::state_machine::{AnimationStateMachine, AnimationState, AnimationTransition, TransitionComparison, StateMachinePlayer}
+fn near(a: f32, b: f32) -> bool {
+    ret animation_abs(a - b) < 0.0001_f32
+}
+fn value(x: f32, y: f32, z: f32, w: f32) -> AnimationValue {
+    ret AnimationValue { x, y, z, w }
+}
+fn key(time: f32, v: AnimationValue) -> AnimationKey {
+    ret AnimationKey {
+        time, v, AnimationValue::zero(), AnimationValue::zero()
+    }
+}
+fn skeleton() -> Skeleton {
+    let mut child = LocalTransform::identity() child.translation = PoseVector {
+        0_f32, 1_f32, 0_f32
+    }
+    ret Skeleton {
+        1_u32, "rig-test", "Rig", vec![SkeletonBone { "root", - 1_i32, LocalTransform::identity() }, SkeletonBone {
+                "child", 0_i32, child
+            }
+        ], Vec[SkeletonSocket]::new()
+    }
+}
+fn main() -> u32 {
+    if !additive_notify_case(false) || !additive_notify_case(true) {
+        ret 249_u32
+    }
+    let reverse_result = world_reverse_graph_checks() if reverse_result != 0_u32 {
+        ret reverse_result + 180_u32
+    }
+    let queue_result = world_budget_checks() if queue_result != 0_u32 {
+        ret queue_result + 150_u32
+    }
+    if controller_checks() != 0_u32 {
+        ret 253_u32
+    }
+    if !child_graph_root_motion() {
+        ret 254_u32
+    }
+    let morph_result = graph_morph_checks() if morph_result != 0_u32 {
+        ret morph_result + 200_u32
+    }
+    let graph_result = world_graph_checks() if graph_result != 0_u32 {
+        ret graph_result + 100_u32
+    }
+    if blend_space_checks() != 0_u32 {
+        ret 250_u32
+    }
+    if !child_root_motion() {
+        ret 240_u32
+    }
+    let mut rig = skeleton()
+    if rig.validate().is_err() {
+        ret 1_u32
+    }
+    let q = PoseRotation { 0_f32, 0_f32, 1_f32, 0_f32 }
+    let halfway = PoseRotation::identity().slerp(q, 0.5_f32).rotate(PoseVector {
+            1_f32, 0_f32, 0_f32
+        }
+        ,
+    )
+    if !near(halfway.x, 0_f32) || !near(halfway.y, 1_f32) {
+        ret 2_u32
+    }
+    let same = q.slerp(q.scaled( - 1_f32), 0.5_f32)
+    if !near(animation_abs(same.dot(q)), 1_f32) {
+        ret 3_u32
+    }
+    let mut local = LocalTransform::identity() local.translation = PoseVector {
+        2_f32, 3_f32, 4_f32
+    }
+    local.scale = PoseVector {
+        2_f32, 3_f32, 4_f32
+    }
+    local.rotation = q
+    let matrix = PoseMatrix::from_local(local)
+    let inverse = match matrix.inverse() {
+        Some(m) => m None => {
+            ret 4_u32
+        }
+    }
+    let point = inverse.point(matrix.point(PoseVector { 3_f32, 2_f32, 1_f32 }))
+    if !near(point.x, 3_f32) || !near(point.y, 2_f32) || !near(point.z, 1_f32) {
+        ret 5_u32
+    }
+    let mut pose = AnimationPose::rest(rig, 0_usize)
+    let mut models_buffer = Vec[PoseMatrix]::new()
+    let models = match model_pose(rig, pose, models_buffer) {
+        Ok(m) => m Err(_) => {
+            ret 6_u32
+        }
+    }
+    if !near(models.get_unchecked_borrowed(1_usize).translation().y, 1_f32) {
+        ret 7_u32
+    }
+    let mut track = AnimationTrack {
+        0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, value(0_f32, 0_f32, 0_f32, 0_f32)), key(2_f32, value(4_f32, 0_f32, 0_f32, 0_f32))]
+    }
+    if !near(sample_track(track, 1_f32).x, 2_f32) {
+        ret 8_u32
+    }
+    let mut cubic = AnimationTrack {
+        0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, value(0_f32, 0_f32, 0_f32, 0_f32)), key(2_f32, value(4_f32, 0_f32, 0_f32, 0_f32))]
+    }
+    cubic.interpolation = KeyInterpolation::CubicSpline
+    let mut start = cubic.keys.get_unchecked_borrowed(0_usize) start.outgoing = value(4_f32, 0_f32, 0_f32, 0_f32) cubic.keys.set(0_usize, start)
+    // Keys are two seconds apart; tangent must be multiplied by that duration.
+    if !near(sample_track(cubic, 1_f32).x, 3_f32) {
+        ret 9_u32
+    }
+    let mut step = track step.interpolation = KeyInterpolation::Step
+    if !near(sample_track(step, 1.999_f32).x, 0_f32) || !near(sample_track(step, 2_f32).x, 4_f32) {
+        ret 10_u32
+    }
+    let clip = AnimationClip {
+        1_u32, "clip-test", rig.identity, "Move", 2_f32, vec![track], vec![AnimationNotify {
+                0_f32, "start", ""
+            }
+            , AnimationNotify {
+                1_f32, "middle", ""
+            }
+            , AnimationNotify {
+                2_f32, "end", ""
+            }
+        ]
+    }
+    if clip.validate(rig, 0_usize).is_err() {
+        ret 11_u32
+    }
+    let mut sample_buffer = AnimationPose::rest(rig, 0_usize)
+    let sampled = match sample_clip(clip, 1_f32, sample_buffer) {
+        Ok(p) => p Err(_) => {
+            ret 12_u32
+        }
+    }
+    if !near(sampled.translations.get_unchecked_borrowed(0_usize).x, 2_f32) || !near(sampled.translations.get_unchecked_borrowed(1_usize).y, 1_f32) {
+        ret 13_u32
+    }
+    let mask = match BoneMask::branch(rig, 0_u32, 1_f32) {
+        Ok(m) => m Err(_) => {
+            ret 14_u32
+        }
+    }
+    let mut blend_buffer = AnimationPose::rest(rig, 0_usize)
+    let mixed = match blend_poses(pose, sampled, 0.25_f32, mask, blend_buffer) {
+        Ok(p) => p Err(_) => {
+            ret 15_u32
+        }
+    }
+    if !near(mixed.translations.get_unchecked_borrowed(0_usize).x, 0.5_f32) {
+        ret 16_u32
+    }
+    let mut additive_buffer = AnimationPose::rest(rig, 0_usize)
+    let added = match additive_poses(sampled, sampled, pose, 0.5_f32, mask, additive_buffer) {
+        Ok(p) => p Err(_) => {
+            ret 17_u32
+        }
+    }
+    if !near(added.translations.get_unchecked_borrowed(0_usize).x, 3_f32) {
+        ret 18_u32
+    }
+    let mut player = ClipPlayer::new()
+    let frame = match player.advance(clip, 2_f64, 16_usize) {
+        Ok(f) => f Err(_) => {
+            ret 19_u32
+        }
+    }
+    if frame.events.len() != 3_usize || frame.cycle != 1_i64 || frame.sample_time != 0_f32 {
+        ret 20_u32
+    }
+    let frame = match player.advance(clip, 0_f64, 16_usize) {
+        Ok(f) => f Err(_) => {
+            ret 21_u32
+        }
+    }
+    if frame.events.len() != 0_usize {
+        ret 22_u32
+    }
+    player.speed = - 1_f32
+    let frame = match player.advance(clip, 2_f64, 16_usize) {
+        Ok(f) => f Err(_) => {
+            ret 23_u32
+        }
+    }
+    if frame.events.len() != 3_usize || !frame.events.get_unchecked_borrowed(0_usize).reverse || frame.current != 0_f64 {
+        ret 24_u32
+    }
+    if player.advance(clip, 100_f64, 1_usize).is_ok() || player.time != 0_f64 {
+        ret 25_u32
+    }
+    if player.seek( - 0.5_f64, clip.duration).is_err() {
+        ret 26_u32
+    }
+    let frame = match player.advance(clip, 0_f64, 16_usize) {
+        Ok(f) => f Err(_) => {
+            ret 27_u32
+        }
+    }
+    if frame.cycle != - 1_i64 || !near(frame.sample_time, 1.5_f32) || frame.events.len() != 0_usize {
+        ret 28_u32
+    }
+    let motion = match extract_root_motion(clip, rig, 0_u32, 1.5_f64, 4.5_f64, true) {
+        Ok(m) => m Err(_) => {
+            ret 30_u32
+        }
+    }
+    if !near(motion.translation.x, 6_f32) {
+        ret 31_u32
+    }
+    let reverse = match extract_root_motion(clip, rig, 0_u32, 4.5_f64, - 0.5_f64, true) {
+        Ok(m) => m Err(_) => {
+            ret 32_u32
+        }
+    }
+    if !near(reverse.translation.x, - 10_f32) {
+        ret 33_u32
+    }
+    let v = SkinVertex {
+        PoseVector { 0_f32, 0_f32, 0_f32 }, PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 0.5_f32
+            }
+            , SkinInfluence {
+                1_u32, 0.5_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "mesh-test", rig.identity, "Triangle", vec![v], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], vec![MorphTarget {
+                "Smile", - 1_f32, 2_f32, 0_f32, vec![MorphDelta {
+                        0_u32, PoseVector {
+                            0_f32, 0_f32, 2_f32
+                        }
+                        , PoseVector::zero(), PoseVector::zero()
+                    }
+                ]
+            }
+        ]
+    }
+    if mesh.validate(rig).is_err() {
+        ret 34_u32
+    }
+    if !blend_pose_checks(rig, mesh, clip) {
+        ret 251_u32
+    }
+    let bound = match prepare_deformable_cluster(mesh, vec![0_u32]) {
+        Ok(c) => c Err(_) => {
+            ret 35_u32
+        }
+    }
+    let box = match deformable_cluster_bounds(bound, models) {
+        Ok(b) => b Err(_) => {
+            ret 36_u32
+        }
+    }
+    let deformed = match deform_vertex(mesh, 0_usize, models, vec![2_f32]) {
+        Ok(v) => v Err(_) => {
+            ret 37_u32
+        }
+    }
+    if !near(deformed.position.y, 0.5_f32) || !near(deformed.position.z, 4_f32) || !box.contains(deformed.position, 0.0001_f32) {
+        ret 38_u32
+    }
+    let mut world = AnimationWorld::new()
+    let id = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(id) => id Err(_) => {
+            ret 39_u32
+        }
+    }
+    if world.root_motion(id, core::option::Option::Some(0_u32)).is_err() {
+        ret 40_u32
+    }
+    if world.animation_lod(id, 4_u32).is_err() {
+        ret 41_u32
+    }
+    if world.advance(1_u64, 0.5_f64).is_err() || world.advance(1_u64, 50_f64).is_err() {
+        ret 42_u32
+    }
+    let token = match world.snapshot(id) {
+        Ok(t) => t Err(_) => {
+            ret 43_u32
+        }
+    }
+    let delta = match world.take_root_motion(id) {
+        Ok(d) => d Err(_) => {
+            ret 44_u32
+        }
+    }
+    if !near(delta.translation.x, 1_f32) {
+        ret 45_u32
+    }
+    let stats = match world.advance(2_u64, 0.5_f64) {
+        Ok(s) => s Err(_) => {
+            ret 46_u32
+        }
+    }
+    if stats.throttled != 1_u32 || stats.sampled != 0_u32 || world.palette(token).is_ok() {
+        ret 47_u32
+    }
+    let events = match world.take_events(id) {
+        Ok(e) => e Err(_) => {
+            ret 48_u32
+        }
+    }
+    if events.len() != 1_usize {
+        ret 49_u32
+    }
+    if !world.remove(id) || world.contains(id) {
+        ret 50_u32
+    }
+    let replacement = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(id) => id Err(_) => {
+            ret 51_u32
+        }
+    }
+    if replacement.slot != id.slot || replacement.generation == id.generation || world.snapshot(id).is_ok() {
+        ret 52_u32
+    }
+    let ik = match solve_two_bone(PoseVector::zero(), PoseVector { 1_f32, 0_f32, 0_f32 }, PoseVector {
+            2_f32, 0_f32, 0_f32
+        }
+        , PoseVector {
+            1_f32, 1_f32, 0_f32
+        }
+        , PoseVector {
+            0_f32, 0_f32, 1_f32
+        }
+        ,
+    ) {
+        Ok(v) => v Err(_) => {
+            ret 53_u32
+        }
+    }
+    if !ik.reached || !near(ik.middle.length(), 1_f32) || !near(ik.tip.sub(ik.middle).length(), 1_f32) {
+        ret 54_u32
+    }
+    let fabrik = match solve_fabrik(vec![PoseVector::zero(), PoseVector { 1_f32, 0_f32, 0_f32 }, PoseVector {
+                2_f32, 0_f32, 0_f32
+            }
+        ], PoseVector {
+            1_f32, 1_f32, 0_f32
+        }
+        , 0.0001_f32, 32_u32,) {
+        Ok(v) => v Err(_) => {
+            ret 55_u32
+        }
+    }
+    if !fabrik.reached || !near(fabrik.points.get_unchecked_borrowed(1_usize).length(), 1_f32) {
+        ret 56_u32
+    }
+    let look = match solve_look_at(PoseVector::zero(), PoseVector { 1_f32, 0_f32, 0_f32 }, PoseVector {
+            0_f32, 1_f32, 0_f32
+        }
+        , 0.5_f32, 1_f32,) {
+        Ok(v) => v Err(_) => {
+            ret 57_u32
+        }
+    }
+    if !near(look.rotate(PoseVector { 1_f32, 0_f32, 0_f32 }).x, 0.5_f32) {
+        ret 58_u32
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, vec![AnimationParameter {
+                "Weight", 0.5_f32, 0_f32, 1_f32
+            }
+        ], vec![mask], vec![AnimationNode {
+                3_u64, PoseOperation::Blend, vec![1_u64, 2_u64], 0_u32, 0.5_f32, Option[u32]::Some(0_u32), 0_u32
+            }
+            , AnimationNode {
+                1_u64, PoseOperation::Rest, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                2_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 3_u64
+    }
+    let program = match compile_animation_graph(graph, rig, vec![clip], 1_usize) {
+        Ok(p) => p Err(_) => {
+            ret 59_u32
+        }
+    }
+    let mut workspace = match AnimationWorkspace::new(program, rig, mesh) {
+        Ok(w) => w Err(_) => {
+            ret 60_u32
+        }
+    }
+    let result = match workspace.evaluate(program, rig, mesh, vec![clip], vec![1_f32], vec![0.5_f32]) {
+        Ok(p) => p Err(_) => {
+            ret 61_u32
+        }
+    }
+    if !near(result.translations.get_unchecked_borrowed(0_usize).x, 1_f32) {
+        ret 62_u32
+    }
+    // Reusing one clip asset does not force two graph nodes to share a clock.
+    let independent_graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), vec![mask], vec![AnimationNode {
+                1_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                2_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                3_u64, PoseOperation::Blend, vec![1_u64, 2_u64], 0_u32, 0.25_f32, Option[u32]::None, 0_u32
+            }
+        ], 3_u64
+    }
+    let independent_program = match compile_animation_graph(independent_graph, rig, vec![clip], 1_usize) {
+        Ok(v) => v Err(_) => {
+            ret 252_u32
+        }
+    }
+    let mut independent_workspace = match AnimationWorkspace::new(independent_program, rig, mesh) {
+        Ok(v) => v Err(_) => {
+            ret 253_u32
+        }
+    }
+    let independent_pose = match independent_workspace.evaluate_nodes(independent_program, rig, mesh, vec![NodeSampleTime {
+                0.5_f32, 0_f32
+            }
+            , NodeSampleTime {
+                1.5_f32, 0_f32
+            }
+            , NodeSampleTime {
+                0_f32, 0_f32
+            }
+        ], Vec[f32]::new(),) {
+        Ok(v) => v Err(_) => {
+            ret 254_u32
+        }
+    }
+    if !near(independent_pose.translations.get_unchecked_borrowed(0_usize).x, 1.5_f32) {
+        ret 255_u32
+    }
+    let machine = AnimationStateMachine {
+        1_u32, vec![AnimationState { "Idle", 0_u32, 2_f32, 1_f32, true }, AnimationState {
+                "Run", 0_u32, 2_f32, 1_f32, true
+            }
+        ], vec![AnimationTransition {
+                1_u64, 0_u32, 1_u32, 0_u32, TransitionComparison::Greater, 0.5_f32, 0.25_f32, - 1_f32, 0_u32, true
+            }
+        ], 0_u32
+    }
+    if machine.validate(1_usize, 1_usize).is_err() {
+        ret 63_u32
+    }
+    let mut state = StateMachinePlayer::new(machine)
+    let state_step = match state.advance(machine, vec![1_f32], 0.5_f64) {
+        Ok(s) => s Err(_) => {
+            ret 64_u32
+        }
+    }
+    if state_step.from != 0_u32 || state_step.to != 1_u32 || state_step.to_time != 0.5_f64 || state_step.weight != 0_f32 {
+        ret 65_u32
+    }
+    let state_step = match state.advance(machine, vec![1_f32], 0.125_f64) {
+        Ok(s) => s Err(_) => {
+            ret 66_u32
+        }
+    }
+    if !near(state_step.weight, 0.5_f32) {
+        ret 67_u32
+    }
+    let long_motion = match extract_root_motion(clip, rig, 0_u32, 1000000000_f64, 1000000000.5_f64, true) {
+        Ok(m) => m Err(_) => {
+            ret 68_u32
+        }
+    }
+    if !near(long_motion.translation.x, 1_f32) {
+        ret 69_u32
+    }
+    let mut features = Vec[f32]::new() let mut candidates = Vec[PoseCandidate]::new()
+    for i in 0_usize..1024_usize {
+        features.push(((i * 17_usize) % 101_usize) as f32) features.push(((i * 31_usize) % 97_usize) as f32) features.push((i % 3_usize) as f32) candidates.push(PoseCandidate {
+                0_u32,(i as f32) / 30_f32,((i + 1_usize) % 1024_usize) as u32
+            }
+            ,
+        )
+    }
+    let database = match cook_pose_search(vec![PoseFeature { "position", 1_f32 }, PoseFeature {
+                "velocity", 2_f32
+            }
+            , PoseFeature {
+                "trajectory", 0.5_f32
+            }
+        ], features, candidates,) {
+        Ok(d) => d Err(_) => {
+            ret 70_u32
+        }
+    }
+    let mut search = match PoseSearchWorkspace::new(database) {
+        Ok(s) => s Err(_) => {
+            ret 71_u32
+        }
+    }
+    for i in 0_usize..100_usize {
+        let query = vec![((i * 5_usize) % 109_usize) as f32,((i * 13_usize) % 103_usize) as f32,(i % 5_usize) as f32]
+        let nearest = match search.nearest(database, query, Option[u32]::Some(i as u32), 0.1_f32) {
+            Ok(m) => m Err(_) => {
+                ret 72_u32
+            }
+        }
+        let reference = match search.reference(database, query, Option[u32]::Some(i as u32), 0.1_f32) {
+            Ok(m) => m Err(_) => {
+                ret 73_u32
+            }
+        }
+        if nearest.frame != reference.frame || !near(nearest.cost, reference.cost) {
+            ret 74_u32
+        }
+    }
+    let library = match world.register_library(rig, mesh, vec![clip]) {
+        Ok(id) => id Err(_) => {
+            ret 75_u32
+        }
+    }
+    let shared = match world.instantiate_registered(library, 0_u32) {
+        Ok(id) => id Err(_) => {
+            ret 76_u32
+        }
+    }
+    if !world.unregister_library(library) || world.contains_library(library) || world.instantiate_registered(library, 0_u32).is_ok() {
+        ret 77_u32
+    }
+    if world.advance(3_u64, 0.5_f64).is_err() || !world.contains(shared) {
+        ret 78_u32
+    }
+    if world.set_morph(shared, "Smile", 1_f32).is_err() || world.advance(4_u64, 0_f64).is_err() {
+        ret 79_u32
+    }
+    let token = match world.snapshot(shared) {
+        Ok(t) => t Err(_) => {
+            ret 80_u32
+        }
+    }
+    let weights = match world.morphs(token) {
+        Ok(w) => w Err(_) => {
+            ret 81_u32
+        }
+    }
+    if weights.get_unchecked_borrowed(0_usize) != 1_f32 {
+        ret 82_u32
+    }
+    if world.playback(shared, 0_f32, false).is_err() || world.playback(replacement, 0_f32, false).is_err() {
+        ret 83_u32
+    }
+    let stationary = match world.advance(5_u64, 1_f64) {
+        Ok(v) => v Err(_) => {
+            ret 84_u32
+        }
+    }
+    if stationary.sampled != 0_u32 || stationary.throttled != 2_u32 {
+        ret 85_u32
+    }
+    if world.set_morphs(shared, vec!["Smile", "Missing"], vec![0_f32, 1_f32]).is_ok() {
+        ret 86_u32
+    }
+    let unchanged = match world.advance(6_u64, 0_f64) {
+        Ok(v) => v Err(_) => {
+            ret 87_u32
+        }
+    }
+    if unchanged.sampled != 0_u32 {
+        ret 88_u32
+    }
+    let unchanged_token = match world.snapshot(shared) {
+        Ok(v) => v Err(_) => {
+            ret 89_u32
+        }
+    }
+    let unchanged_weights = match world.morphs(unchanged_token) {
+        Ok(v) => v Err(_) => {
+            ret 90_u32
+        }
+    }
+    if unchanged_weights.get_unchecked_borrowed(0_usize) != 1_f32 {
+        ret 91_u32
+    }
+    if world.set_morphs(shared, Vec[str]::new(), Vec[f32]::new()).is_err() {
+        ret 92_u32
+    }
+    let reset = match world.advance(7_u64, 0_f64) {
+        Ok(v) => v Err(_) => {
+            ret 93_u32
+        }
+    }
+    if reset.sampled != 1_u32 {
+        ret 94_u32
+    }
+    let mut bad = rig let mut b = bad.bones.get_unchecked_borrowed(1_usize) b.parent = 1_i32 bad.bones.set(1_usize, b)
+    if bad.validate().is_ok() {
+        ret 29_u32
+    }
+    ret 0_u32
+}
+
+fn child_root_motion() -> bool {
+    let parent = LocalTransform {
+        PoseVector { 3_f32, 4_f32, 5_f32 }, PoseRotation {
+            0_f32, 0_f32, 0.70710678118_f32, 0.70710678118_f32
+        }
+        , PoseVector {
+            2_f32, 2_f32, 2_f32
+        }
+    }
+    let rig = Skeleton {
+        1_u32, "child-root", "Child root", vec![SkeletonBone { "Armature", - 1_i32, parent }, SkeletonBone {
+                "Hips", 0_i32, LocalTransform::identity()
+            }
+        ], Vec[SkeletonSocket]::new()
+    }
+    let parent_track = AnimationTrack {
+        0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, value(3_f32, 4_f32, 5_f32, 0_f32)), key(2_f32, value(5_f32, 4_f32, 5_f32, 0_f32))]
+    }
+    let child_track = AnimationTrack {
+        1_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(2_f32, 0_f32, 0_f32, 0_f32))]
+    }
+    let clip = AnimationClip {
+        1_u32, "child-motion", rig.identity, "Move", 2_f32, vec![parent_track, child_track], Vec[AnimationNotify]::new()
+    }
+    let motion = match extract_root_motion(clip, rig, 1_u32, 0_f64, 1_f64, false) {
+        Ok(m) => m Err(_) => {
+            ret false
+        }
+    }
+    if !near(motion.translation.x, 1_f32) || !near(motion.translation.y, 2_f32) {
+        ret false
+    }
+    let v = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                1_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "child-mesh", rig.identity, "One", vec![v], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let mut world = AnimationWorld::new()
+    let instance = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(i) => i Err(_) => {
+            ret false
+        }
+    }
+    if world.root_motion(instance, Option::Some(1_u32)).is_err() || world.advance(1_u64, 1_f64).is_err() {
+        ret false
+    }
+    let snapshot = match world.snapshot(instance) {
+        Ok(s) => s Err(_) => {
+            ret false
+        }
+    }
+    let model = match world.model(snapshot) {
+        Ok(m) => m Err(_) => {
+            ret false
+        }
+    }
+    let position = model.get_unchecked_borrowed(1_usize).translation()
+    ret near(position.x, 3_f32) && near(position.y, 4_f32) && near(position.z, 5_f32)
+}
+
+fn blend_near(a: f32, b: f32) -> bool {
+    ret animation_abs(a - b) < 0.0001_f32
+}
+fn blend_space_checks() -> u32 {
+    let mut space = BlendSpace {
+        1_u32, "test", 1_u32, BlendAxis { "Speed", 0_f32, 10_f32 }, BlendAxis {
+            "Direction", 0_f32, 1_f32
+        }
+        , vec![BlendSample {
+                0_f32, 0_f32, 0_u32, 1_f32
+            }
+            , BlendSample {
+                10_f32, 0_f32, 1_u32, 1_f32
+            }
+        ]
+    }
+    let cooked = match cook_blend_space(space, 2_usize) {
+        Ok(c) => c Err(_) => {
+            ret 1_u32
+        }
+    }
+    let mut cursor = BlendSpaceCursor::new()
+    let w = match cursor.weights(cooked, 2.5_f32, 0_f32) {
+        Ok(w) => w Err(_) => {
+            ret 2_u32
+        }
+    }
+    if !blend_near(w.wa, 0.75_f32) || !blend_near(w.wb, 0.25_f32) {
+        ret 3_u32
+    }
+    space.dimensions = 2_u32
+    space.samples = vec![BlendSample { 0_f32, 0_f32, 0_u32, 1_f32 }, BlendSample {
+            10_f32, 0_f32, 1_u32, 1_f32
+        }
+        , BlendSample {
+            0_f32, 1_f32, 2_u32, 1_f32
+        }
+        , BlendSample {
+            10_f32, 1_f32, 3_u32, 1_f32
+        }
+    ]
+    let cooked = match cook_blend_space(space, 4_usize) {
+        Ok(c) => c Err(_) => {
+            ret 4_u32
+        }
+    }
+    if cooked.triangles.len() != 2_usize {
+        ret 5_u32
+    }
+    for x in 0_usize..21_usize {
+        for y in 0_usize..21_usize {
+            let x =(x as f32) * 0.5_f32 let y =(y as f32) * 0.05_f32
+            let w = match cursor.weights(cooked, x, y) {
+                Ok(w) => w Err(_) => {
+                    ret 6_u32
+                }
+            }
+            let a = space.samples.get_unchecked_borrowed(w.a as usize) let b = space.samples.get_unchecked_borrowed(w.b as usize) let c = space.samples.get_unchecked_borrowed(w.c as usize)
+            if w.wa < 0_f32 || w.wb < 0_f32 || w.wc < 0_f32 || !blend_near(w.wa + w.wb + w.wc, 1_f32) || !blend_near(a.x * w.wa + b.x * w.wb + c.x * w.wc, x) || !blend_near(a.y * w.wa + b.y * w.wb + c.y * w.wc, y) {
+                ret 7_u32
+            }
+        }
+    }
+    if !blend_properties() {
+        ret 8_u32
+    }
+    ret 0_u32
+}
+
+fn blend_properties() -> bool {
+    let axis = BlendAxis { "Axis", 0_f32, 1_f32 }
+    let mut space = BlendSpace {
+        1_u32, "test", 2_u32, axis, axis, vec![BlendSample { 0_f32, 0_f32, 0_u32, 1_f32 }, BlendSample {
+                0.5_f32, 0.5_f32, 1_u32, 1_f32
+            }
+            , BlendSample {
+                1_f32, 1_f32, 2_u32, 1_f32
+            }
+        ]
+    }
+    let line = match cook_blend_space(space, 3_usize) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if line.triangles.len() != 0_usize || line.line.len() != 3_usize {
+        ret false
+    }
+    let mut cursor = BlendSpaceCursor::new()
+    let w = match cursor.weights(line, 0.25_f32, 0.25_f32) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !blend_near(w.wa, 0.5_f32) || !blend_near(w.wb, 0.5_f32) {
+        ret false
+    }
+    let mut seed = 713_u64
+    for dataset in 0_usize..12_usize {
+        let mut samples = Vec[BlendSample]::new()
+        for i in 0_usize..64_usize {
+            seed =(seed * 1664525_u64 + 1013904223_u64) % 4294967296_u64 let x =((seed % 1000000_u64) as f32) / 1000000_f32
+            seed =(seed * 1664525_u64 + 1013904223_u64) % 4294967296_u64 let y =((seed % 1000000_u64) as f32) / 1000000_f32
+            samples.push(BlendSample { x, y, i as u32, 1_f32 })
+        }
+        space.samples = samples
+        let cooked = match cook_blend_space(space, 64_usize) {
+            Ok(v) => v Err(_) => {
+                ret false
+            }
+        }
+        if cooked.triangles.len() < 1_usize {
+            ret false
+        }
+        for i in 0_usize..64_usize {
+            let p = samples.get_unchecked_borrowed(i)
+            let q = samples.get_unchecked_borrowed((i + 17_usize) % 64_usize)
+            for fraction in vec![0_f32, 0.25_f32, 0.5_f32, 0.75_f32, 1_f32] {
+                let x = p.x *(1_f32 - fraction) + q.x * fraction let y = p.y *(1_f32 - fraction) + q.y * fraction
+                let w = match cursor.weights(cooked, x, y) {
+                    Ok(v) => v Err(_) => {
+                        ret false
+                    }
+                }
+                let a = samples.get_unchecked_borrowed(w.a as usize) let b = samples.get_unchecked_borrowed(w.b as usize) let c = samples.get_unchecked_borrowed(w.c as usize)
+                if !blend_near(a.x * w.wa + b.x * w.wb + c.x * w.wc, x) || !blend_near(a.y * w.wa + b.y * w.wb + c.y * w.wc, y) || !blend_near(w.wa + w.wb + w.wc, 1_f32) {
+                    ret false
+                }
+            }
+        }
+    }
+    ret true
+}
+
+fn blend_pose_checks(rig: Skeleton, mesh: SkeletalMesh, clip: AnimationClip) -> bool {
+    let rest = AnimationClip {
+        1_u32, "rest", rig.identity, "Rest", 4_f32, Vec[AnimationTrack]::new(), Vec[AnimationNotify]::new()
+    }
+    let clips = vec![clip, rest]
+    let source = BlendSpace {
+        1_u32, rig.identity, 1_u32, BlendAxis { "Speed", 0_f32, 10_f32 }, BlendAxis {
+            "Unused", 0_f32, 1_f32
+        }
+        , vec![BlendSample {
+                0_f32, 0_f32, 0_u32, 1_f32
+            }
+            , BlendSample {
+                10_f32, 0_f32, 1_u32, 1_f32
+            }
+        ]
+    }
+    let cooked = match cook_blend_space(source, 2_usize) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, vec![AnimationParameter { "Speed", 5_f32, 0_f32, 10_f32 }], Vec[BoneMask]::new(), vec![AnimationNode {
+                1_u64, PoseOperation::BlendSpace(BlendSpaceNode {
+                        cooked, 0_u32, Option[u32]::None
+                    }
+                    ,
+                ), Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 1_u64
+    }
+    let program = match compile_animation_graph(graph, rig, clips, mesh.morphs.len()) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let mut graph_workspace = match AnimationWorkspace::new(program, rig, mesh) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let graph_pose = match graph_workspace.evaluate_nodes(program, rig, mesh, vec![NodeSampleTime {
+                0_f32, 0.5_f32
+            }
+        ], vec![5_f32],) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(graph_pose.translations.get_unchecked_borrowed(0_usize).x, 1_f32) {
+        ret false
+    }
+    let mut workspace = match BlendSpaceWorkspace::new(cooked, rig, mesh, clips) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let pose = match workspace.evaluate(cooked, rig, mesh, clips, 5_f32, 0_f32, 0.5_f32) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(pose.translations.get_unchecked_borrowed(0_usize).x, 1_f32) {
+        ret false
+    }
+    let mut cursor = BlendSpaceCursor::new()
+    let weights = match cursor.weights(cooked, 5_f32, 0_f32) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let mut clock = BlendSpaceClock::new()
+    let step = match clock.advance(cooked, clips, weights, 0.75_f64) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(step.phase, 0.25_f32) {
+        ret false
+    }
+    let other = match cursor.weights(cooked, 10_f32, 0_f32) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let stable = match clock.advance(cooked, clips, other, 0_f64) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(stable.phase, 0.25_f32) {
+        ret false
+    }
+    let next = match clock.advance(cooked, clips, other, 1_f64) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(next.phase, 0.5_f32) {
+        ret false
+    }
+    if clock.playback( - 1_f32, true).is_err() {
+        ret false
+    }
+    let reversed = match clock.advance(cooked, clips, other, 3_f64) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(reversed.phase, 0.75_f32) {
+        ret false
+    }
+    let full = match workspace.evaluate(cooked, rig, mesh, clips, 0_f32, 0_f32, 1_f32) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if !near(full.translations.get_unchecked_borrowed(0_usize).x, 4_f32) {
+        ret false
+    }
+    ret true
+}
+
+fn controller_checks() -> u32 {
+    let rig = skeleton()
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, AnimationValue {
+            1_f32, 0_f32, 0_f32, 1_f32
+        }
+        , AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "controller-mesh", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let clip = AnimationClip {
+        1_u32, "controller-move", rig.identity, "Move", 2_f32, vec![AnimationTrack {
+                0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, value(0_f32, 0_f32, 0_f32, 0_f32)), key(2_f32, value(4_f32, 0_f32, 0_f32, 0_f32))]
+            }
+        ], vec![AnimationNotify {
+                1_f32, "middle", ""
+            }
+        ]
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), Vec[BoneMask]::new(), vec![AnimationNode {
+                1_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 1_u64
+    }
+    let program = match compile_animation_graph(graph, rig, vec![clip], 0_usize) {
+        Ok(v) => v Err(_) => {
+            ret 1_u32
+        }
+    }
+    let mut controller = match AnimationController::new(program, rig, mesh) {
+        Ok(v) => v Err(_) => {
+            ret 2_u32
+        }
+    }
+    if controller.root_motion(Option[u32]::Some(0_u32)).is_err() {
+        ret 3_u32
+    }
+    if controller.prepare(1_u64, 0.5_f64, true, 16_usize).is_err() {
+        ret 4_u32
+    }
+    let pose = match controller.pending_pose() {
+        Ok(v) => v Err(_) => {
+            ret 5_u32
+        }
+    }
+    if !near(pose.translations.get_unchecked_borrowed(0_usize).x, 1_f32) || !near(controller.pose().translations.get_unchecked_borrowed(0_usize).x, 0_f32) || !near(controller.pending_root().unwrap_or(RootMotionDelta::identity()).translation.x, 1_f32) {
+        ret 6_u32
+    }
+    controller.discard()
+    if controller.frame().time != 0_f64 || controller.prepare(1_u64, 0.5_f64, true, 16_usize).is_err() || controller.commit().is_err() {
+        ret 7_u32
+    }
+    if controller.frame().time != 0.5_f64 || !near(controller.pose().translations.get_unchecked_borrowed(0_usize).x, 1_f32) {
+        ret 8_u32
+    }
+    if controller.prepare(2_u64, 0.5_f64, true, 0_usize).is_ok() {
+        ret 9_u32
+    }
+    if controller.frame().time != 0.5_f64 || !near(controller.pose().translations.get_unchecked_borrowed(0_usize).x, 1_f32) {
+        ret 10_u32
+    }
+    if controller.prepare(2_u64, 0.5_f64, true, 16_usize).is_err() || controller.commit().is_err() {
+        ret 11_u32
+    }
+    if controller.events().len() != 1_usize || controller.events().get_unchecked_borrowed(0_usize).node != 1_u64 || controller.events().get_unchecked_borrowed(0_usize).event.name != "middle" {
+        ret 12_u32
+    }
+    match controller.prepare(2_u64, 1_f64, true, 16_usize) {
+        Ok(fresh) => {
+            if fresh {
+                ret 13_u32
+            }
+        }
+        Err(_) => {
+            ret 14_u32
+        }
+    }
+    if controller.frame().time != 1_f64 {
+        ret 15_u32
+    }
+    if controller.playback(0_f32, false).is_err() || controller.prepare(3_u64, 2_f64, true, 16_usize).is_err() {
+        ret 16_u32
+    }
+    let step = match controller.commit() {
+        Ok(v) => v Err(_) => {
+            ret 17_u32
+        }
+    }
+    if step.sampled || step.time != 1_f64 || controller.events().len() != 0_usize {
+        ret 18_u32
+    }
+    if controller.configure_clock(1_u64, 1_f32, 0.25_f64, true, true).is_err() || controller.prepare(4_u64, 0_f64, true, 16_usize).is_err() || controller.commit().is_err() {
+        ret 19_u32
+    }
+    if !near(controller.pose().translations.get_unchecked_borrowed(0_usize).x, 2.5_f32) {
+        ret 20_u32
+    }
+    if controller.seek(0_f64).is_err() || controller.events().len() != 0_usize || controller.prepare(5_u64, 0_f64, true, 16_usize).is_err() || controller.commit().is_err() {
+        ret 21_u32
+    }
+    if !near(controller.pose().translations.get_unchecked_borrowed(0_usize).x, 0.5_f32) {
+        ret 22_u32
+    }
+    if controller.seek(1000000000000_f64).is_ok() || controller.frame().time != 0_f64 {
+        ret 23_u32
+    }
+    if !controller.pending_root().is_err() || !controller.pending_events().is_err() {
+        ret 24_u32
+    }
+    if !controller_blend_space(rig, mesh, clip) {
+        ret 25_u32
+    }
+    let many = AnimationClip {
+        1_u32, "many", rig.identity, "Many", 2_f32, clip.tracks, vec![AnimationNotify {
+                0.25_f32, "e0", ""
+            }
+            , AnimationNotify {
+                0.5_f32, "e1", ""
+            }
+            , AnimationNotify {
+                0.75_f32, "e2", ""
+            }
+        ]
+    }
+    let many_program = match compile_animation_graph(graph, rig, vec![many], 0_usize) {
+        Ok(v) => v Err(_) => {
+            ret 26_u32
+        }
+    }
+    let mut many_controller = match AnimationController::new(many_program, rig, mesh) {
+        Ok(v) => v Err(_) => {
+            ret 27_u32
+        }
+    }
+    if many_controller.prepare(1_u64, 0.8_f64, true, 2_usize).is_ok() || many_controller.frame().time != 0_f64 {
+        ret 28_u32
+    }
+    if many_controller.prepare(1_u64, 0.8_f64, true, 3_usize).is_err() || many_controller.commit().is_err() {
+        ret 29_u32
+    }
+    let emitted = many_controller.events() if emitted.len() != 3_usize {
+        ret 30_u32
+    }
+    for i in 0_usize..3_usize {
+        let e = emitted.get_unchecked_borrowed(i) if e.node != 1_u64 || e.event.name != "e" + i.fmt() {
+            ret 31_u32
+        }
+    }
+
+    ret 0_u32
+}
+
+fn controller_blend_space(rig: Skeleton, mesh: SkeletalMesh, clip: AnimationClip) -> bool {
+    let rest = AnimationClip {
+        1_u32, "controller-rest", rig.identity, "Rest", 4_f32, Vec[AnimationTrack]::new(), Vec[AnimationNotify]::new()
+    }
+    let source = BlendSpace {
+        1_u32, rig.identity, 1_u32, BlendAxis { "Speed", 0_f32, 10_f32 }, BlendAxis {
+            "Unused", 0_f32, 1_f32
+        }
+        , vec![BlendSample {
+                0_f32, 0_f32, 0_u32, 1_f32
+            }
+            , BlendSample {
+                10_f32, 0_f32, 1_u32, 1_f32
+            }
+        ]
+    }
+    let cooked = match cook_blend_space(source, 2_usize) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, vec![AnimationParameter { "Speed", 5_f32, 0_f32, 10_f32 }], Vec[BoneMask]::new(), vec![AnimationNode {
+                1_u64, PoseOperation::BlendSpace(BlendSpaceNode {
+                        cooked, 0_u32, Option[u32]::None
+                    }
+                    ,
+                ), Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 1_u64
+    }
+    let program = match compile_animation_graph(graph, rig, vec![clip, rest], 0_usize) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    let mut controller = match AnimationController::new(program, rig, mesh) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if controller.root_motion(Option[u32]::Some(0_u32)).is_err() || controller.prepare(1_u64, 0.75_f64, true, 16_usize).is_err() {
+        ret false
+    }
+    if !near(controller.pending_pose().unwrap_or(controller.pose()).translations.get_unchecked_borrowed(0_usize).x, 0.5_f32) || !near(controller.pending_root().unwrap_or(RootMotionDelta::identity()).translation.x, 0.5_f32) {
+        ret false
+    }
+    if controller.commit().is_err() || controller.parameter("Speed", 10_f32).is_err() || controller.prepare(2_u64, 0_f64, true, 16_usize).is_err() {
+        ret false
+    }
+    if !near(controller.pending_root().unwrap_or(RootMotionDelta::identity()).translation.x, 0_f32) || !near(controller.pending_pose().unwrap_or(controller.pose()).translations.get_unchecked_borrowed(0_usize).x, 0_f32) {
+        ret false
+    }
+    if controller.commit().is_err() || controller.seek(1_f64).is_err() || controller.prepare(3_u64, 0_f64, true, 16_usize).is_err() || controller.commit().is_err() {
+        ret false
+    }
+    ret controller.events().len() == 0_usize
+}
+
+fn world_graph_checks() -> u32 {
+    let mut rig = skeleton()
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "world-graph", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let clip = AnimationClip {
+        1_u32, "move", rig.identity, "Move", 2_f32, vec![AnimationTrack {
+                0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(4_f32, 0_f32, 0_f32, 0_f32))]
+            }
+        ], vec![AnimationNotify {
+                0.25_f32, "step", "payload"
+            }
+        ]
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, vec![AnimationParameter {
+                "Weight", 0.5_f32, 0_f32, 1_f32
+            }
+        ], vec![BoneMask {
+                rig.identity, vec![1_f32, 0.5_f32]
+            }
+        ], vec![AnimationNode {
+                11_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                12_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                13_u64, PoseOperation::Blend, vec![11_u64, 12_u64], 0_u32, 0_f32, Option[u32]::Some(0_u32), 0_u32
+            }
+        ], 13_u64
+    }
+    let mut world = AnimationWorld::new()
+    let owner = match world.register_library(rig, mesh, vec![clip]) {
+        Ok(v) => v Err(_) => {
+            ret 1_u32
+        }
+    }
+    let compiled = match world.register_graph(owner, graph) {
+        Ok(v) => v Err(_) => {
+            ret 2_u32
+        }
+    }
+    let a = match world.instantiate_registered(owner, 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret 3_u32
+        }
+    }
+    let b = match world.instantiate_registered(owner, 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret 4_u32
+        }
+    }
+    if world.bind_registered_graph(a, compiled).is_err() || world.bind_registered_graph(b, compiled).is_err() {
+        ret 5_u32
+    }
+    if world.node_clock(a, 12_u64, 1_f32, 0.5_f64, true, false).is_err() || world.playback(b, 0_f32, false).is_err() || world.root_motion(a, Option[u32]::Some(0_u32)).is_err() {
+        ret 6_u32
+    }
+    if world.animation_lod(a, 4_u32).is_err() || world.advance(1_u64, 0.125_f64).is_err() {
+        ret 7_u32
+    }
+    let first = match world.snapshot(a) {
+        Ok(v) => v Err(_) => {
+            ret 8_u32
+        }
+    }
+    let positions = match world.model(first) {
+        Ok(v) => v Err(_) => {
+            ret 9_u32
+        }
+    }
+    // Fixed initial graph reference is zero; clocks with a local offset do not
+    // relocate it. Root extraction removes the sampled model translation.
+    if !near(positions.get_unchecked_borrowed(0_usize).translation().x, 0_f32) {
+        ret 10_u32
+    }
+    if !near(world.take_root_motion(a).unwrap_or(RootMotionDelta::identity()).translation.x, 0.25_f32) {
+        ret 11_u32
+    }
+    let stats = match world.advance(2_u64, 0.125_f64) {
+        Ok(v) => v Err(_) => {
+            ret 12_u32
+        }
+    }
+    if stats.sampled != 0_u32 || stats.failed != 0_u32 || world.time(a).unwrap_or( - 1_f64) != 0.25_f64 || world.time(b).unwrap_or( - 1_f64) != 0_f64 {
+        ret 13_u32
+    }
+    let events = match world.take_events(a) {
+        Ok(v) => v Err(_) => {
+            ret 14_u32
+        }
+    }
+    if events.len() != 1_usize || events.get_unchecked_borrowed(0_usize).node.unwrap_or(0_u64) != 11_u64 || events.get_unchecked_borrowed(0_usize).payload != "payload" {
+        ret 15_u32
+    }
+    if !near(world.take_root_motion(a).unwrap_or(RootMotionDelta::identity()).translation.x, 0.25_f32) {
+        ret 16_u32
+    }
+    world.advance(2_u64, 1_f64)
+    if world.time(a).unwrap_or( - 1_f64) != 0.25_f64 || world.take_events(a).unwrap_or(Vec[AnimationEvent]::new()).len() != 0_usize {
+        ret 17_u32
+    }
+    if world.parameter(a, "Weight", 1_f32).is_err() || world.root_motion(a, Option[u32]::None).is_err() || world.advance(3_u64, 0_f64).is_err() {
+        ret 18_u32
+    }
+    let changed = match world.snapshot(a) {
+        Ok(v) => v Err(_) => {
+            ret 19_u32
+        }
+    }
+    let positions = match world.model(changed) {
+        Ok(v) => v Err(_) => {
+            ret 20_u32
+        }
+    }
+    if !near(positions.get_unchecked_borrowed(0_usize).translation().x, 1.5_f32) {
+        ret 21_u32
+    }
+    if world.seek(a, 0.75_f64).is_err() || world.advance(4_u64, 0_f64).is_err() || world.take_events(a).unwrap_or(Vec[AnimationEvent]::new()).len() != 0_usize {
+        ret 22_u32
+    }
+    if world.parameter(a, "Weight", 0.75_f32).is_err() {
+        ret 41_u32
+    }
+    // Fail FK after the controller prepared clocks, notifications and its pose.
+    let mut bone = rig.bones.get_unchecked_borrowed(1_usize) let parent = bone.parent bone.parent = 99_i32 rig.bones.set(1_usize, bone)
+    let failed = match world.advance(5_u64, 0.25_f64) {
+        Ok(v) => v Err(_) => {
+            ret 23_u32
+        }
+    }
+    bone.parent = parent rig.bones.set(1_usize, bone)
+    if failed.failed != 1_u32 || world.time(a).unwrap_or( - 1_f64) != 0.75_f64 || world.time(b).unwrap_or( - 1_f64) != 0_f64 {
+        ret 24_u32
+    }
+    let retained = match world.snapshot(a) {
+        Ok(v) => v Err(_) => {
+            ret 25_u32
+        }
+    }
+    let positions = match world.model(retained) {
+        Ok(v) => v Err(_) => {
+            ret 26_u32
+        }
+    }
+    if !near(positions.get_unchecked_borrowed(0_usize).translation().x, 2.5_f32) {
+        ret 27_u32
+    }
+    let recovered = match world.advance(6_u64, 0.25_f64) {
+        Ok(v) => v Err(_) => {
+            ret 28_u32
+        }
+    }
+    if recovered.failed != 0_u32 || world.time(a).unwrap_or( - 1_f64) != 1_f64 {
+        ret 29_u32
+    }
+    // Removing ownership invalidates new bindings, existing controllers retain data.
+    if !world.unregister_library(owner) || world.contains_graph(compiled) || world.bind_registered_graph(b, compiled).is_ok() || world.advance(7_u64, 0.25_f64).is_err() {
+        ret 30_u32
+    }
+    if world.time(a).unwrap_or( - 1_f64) != 1.25_f64 {
+        ret 31_u32
+    }
+    let other = match world.register_library(rig, mesh, vec![clip]) {
+        Ok(v) => v Err(_) => {
+            ret 32_u32
+        }
+    }
+    let other_graph = match world.register_graph(other, graph) {
+        Ok(v) => v Err(_) => {
+            ret 33_u32
+        }
+    }
+    if world.bind_registered_graph(a, other_graph).is_ok() {
+        ret 34_u32
+    }
+    if world.play(a, 0_u32, true).is_err() || world.parameter(a, "Weight", 0_f32).is_ok() || world.advance(8_u64, 0.25_f64).is_err() {
+        ret 35_u32
+    }
+    let plain = world.take_events(a).unwrap_or(Vec[AnimationEvent]::new())
+    if plain.len() != 1_usize || plain.get_unchecked_borrowed(0_usize).node.is_some() {
+        ret 36_u32
+    }
+    let standalone = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret 37_u32
+        }
+    }
+    if world.bind_graph(standalone, graph).is_err() {
+        ret 38_u32
+    }
+    // Reject an authored weight range that would differ between the VM and roots.
+    let invalid = AnimationGraph {
+        graph.version, graph.skeleton, vec![AnimationParameter {
+                "Weight", 0.5_f32, - 1_f32, 2_f32
+            }
+        ], graph.masks, graph.nodes, graph.output
+    }
+    if world.bind_graph(standalone, invalid).is_ok() || world.parameter(standalone, "Weight", 0.25_f32).is_err() {
+        ret 39_u32
+    }
+    if world.node_clock(standalone, 11_u64, 10_f32, 0_f64, true, true).is_err() || world.playback(standalone, 20_f32, true).is_ok() || world.playback(standalone, 2_f32, true).is_err() || world.node_clock(standalone, 12_u64, 100_f32, 0_f64, true, true).is_ok() {
+        ret 40_u32
+    }
+    ret 0_u32
+}
+
+fn graph_morph_checks() -> u32 {
+    let rig = skeleton()
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "graph-morph", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], vec![MorphTarget {
+                "Face", 0_f32, 1_f32, 0_f32, Vec[MorphDelta]::new()
+            }
+        ]
+    }
+    let base = AnimationClip {
+        1_u32, "base", rig.identity, "Base", 2_f32, Vec[AnimationTrack]::new(), vec![AnimationNotify {
+                0.25_f32, "base", ""
+            }
+        ]
+    }
+    let morph = AnimationClip {
+        1_u32, "morph", rig.identity, "Morph", 2_f32, vec![AnimationTrack {
+                0_u32, TrackPath::Morph, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(1_f32, 0_f32, 0_f32, 0_f32))]
+            }
+        ], vec![AnimationNotify {
+                0.25_f32, "face", ""
+            }
+        ]
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), vec![BoneMask {
+                rig.identity, vec![0_f32, 0_f32]
+            }
+        ], vec![AnimationNode {
+                21_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                22_u64, PoseOperation::Clip, Vec[u64]::new(), 1_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                23_u64, PoseOperation::Blend, vec![21_u64, 22_u64], 0_u32, 1_f32, Option[u32]::None, 0_u32
+            }
+        ], 23_u64
+    }
+    let mut world = AnimationWorld::new()
+    let id = match world.instantiate(rig, mesh, vec![base, morph], 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret 1_u32
+        }
+    }
+    if world.bind_graph(id, graph).is_err() || world.advance(1_u64, 0.5_f64).is_err() {
+        ret 2_u32
+    }
+    let events = world.take_events(id).unwrap_or(Vec[AnimationEvent]::new())
+    if events.len() != 2_usize || events.get_unchecked_borrowed(0_usize).node.unwrap_or(0_u64) != 21_u64 || events.get_unchecked_borrowed(1_usize).node.unwrap_or(0_u64) != 22_u64 {
+        ret 3_u32
+    }
+    if world.playback(id, 0_f32, false).is_err() || world.set_morph(id, "Face", 0.8_f32).is_err() {
+        ret 4_u32
+    }
+    let updated = match world.advance(2_u64, 0.5_f64) {
+        Ok(v) => v Err(_) => {
+            ret 5_u32
+        }
+    }
+    let snapshot = match world.snapshot(id) {
+        Ok(v) => v Err(_) => {
+            ret 6_u32
+        }
+    }
+    let weights = world.morphs(snapshot).unwrap_or(Vec[f32]::new())
+    if updated.sampled != 1_u32 || world.time(id).unwrap_or( - 1_f64) != 0.5_f64 || weights.len() != 1_usize || !near(weights.get_unchecked_borrowed(0_usize), 0.8_f32) {
+        ret 7_u32
+    }
+    if world.clear_morphs(id).is_err() || world.advance(3_u64, 0.5_f64).is_err() {
+        ret 8_u32
+    }
+    let snapshot = match world.snapshot(id) {
+        Ok(v) => v Err(_) => {
+            ret 9_u32
+        }
+    }
+    let weights = world.morphs(snapshot).unwrap_or(Vec[f32]::new())
+    if weights.len() != 1_usize || !near(weights.get_unchecked_borrowed(0_usize), 0.25_f32) {
+        ret 10_u32
+    }
+    ret 0_u32
+}
+
+fn child_graph_root_motion() -> bool {
+    let parent = LocalTransform {
+        PoseVector { 3_f32, 4_f32, 5_f32 }, PoseRotation {
+            0_f32, 0_f32, 0.70710678118_f32, 0.70710678118_f32
+        }
+        , PoseVector {
+            2_f32, 2_f32, 2_f32
+        }
+    }
+    let rig = Skeleton {
+        1_u32, "child-root", "Child root", vec![SkeletonBone { "Armature", - 1_i32, parent }, SkeletonBone {
+                "Hips", 0_i32, LocalTransform::identity()
+            }
+        ], Vec[SkeletonSocket]::new()
+    }
+    let parent_track = AnimationTrack {
+        0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, value(3_f32, 4_f32, 5_f32, 0_f32)), key(2_f32, value(5_f32, 4_f32, 5_f32, 0_f32))]
+    }
+    let child_track = AnimationTrack {
+        1_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(2_f32, 0_f32, 0_f32, 0_f32))]
+    }
+    let clip = AnimationClip {
+        1_u32, "child-motion", rig.identity, "Move", 2_f32, vec![parent_track, child_track], Vec[AnimationNotify]::new()
+    }
+    let motion = match extract_root_motion(clip, rig, 1_u32, 0_f64, 1_f64, false) {
+        Ok(m) => m Err(_) => {
+            ret false
+        }
+    }
+    if !near(motion.translation.x, 1_f32) || !near(motion.translation.y, 2_f32) {
+        ret false
+    }
+    let v = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                1_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "child-mesh", rig.identity, "One", vec![v], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let mut world = AnimationWorld::new()
+    let instance = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(i) => i Err(_) => {
+            ret false
+        }
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), Vec[BoneMask]::new(), vec![AnimationNode {
+                91_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 91_u64
+    }
+    if world.bind_graph(instance, graph).is_err() {
+        ret false
+    }
+    if world.root_motion(instance, Option::Some(1_u32)).is_err() || world.advance(1_u64, 1_f64).is_err() {
+        ret false
+    }
+    let snapshot = match world.snapshot(instance) {
+        Ok(s) => s Err(_) => {
+            ret false
+        }
+    }
+    let model = match world.model(snapshot) {
+        Ok(m) => m Err(_) => {
+            ret false
+        }
+    }
+    let position = model.get_unchecked_borrowed(1_usize).translation()
+    ret near(position.x, 3_f32) && near(position.y, 4_f32) && near(position.z, 5_f32)
+}
+
+fn world_budget_checks() -> u32 {
+    let rig = skeleton()
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "world-budget", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let clip = AnimationClip {
+        1_u32, "budget", rig.identity, "Budget", 1_f32, Vec[AnimationTrack]::new(), vec![AnimationNotify {
+                0.25_f32, "step", "payload"
+            }
+        ]
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), Vec[BoneMask]::new(), vec![AnimationNode {
+                73_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 73_u64
+    }
+    let mut world = AnimationWorld::new()
+    let id = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret 1_u32
+        }
+    }
+    if world.bind_graph(id, graph).is_err() {
+        ret 2_u32
+    }
+    let fill = match world.advance(1_u64, 65536_f64) {
+        Ok(v) => v Err(_) => {
+            ret 3_u32
+        }
+    }
+    if fill.failed != 0_u32 || fill.events != 65536_u64 || world.time(id).unwrap_or( - 1_f64) != 65536_f64 {
+        ret 4_u32
+    }
+    let failed = match world.advance(2_u64, 1_f64) {
+        Ok(v) => v Err(_) => {
+            ret 5_u32
+        }
+    }
+    if failed.failed != 1_u32 || failed.events != 0_u64 || world.time(id).unwrap_or( - 1_f64) != 65536_f64 {
+        ret 6_u32
+    }
+    let queue = world.take_events(id).unwrap_or(Vec[AnimationEvent]::new())
+    if queue.len() != 65536_usize || queue.get_unchecked_borrowed(65535_usize).node.unwrap_or(0_u64) != 73_u64 || queue.get_unchecked_borrowed(65535_usize).time != 65535.25_f64 {
+        ret 7_u32
+    }
+    let retry = match world.advance(3_u64, 1_f64) {
+        Ok(v) => v Err(_) => {
+            ret 8_u32
+        }
+    }
+    let events = world.take_events(id).unwrap_or(Vec[AnimationEvent]::new())
+    if retry.failed != 0_u32 || retry.events != 1_u64 || world.time(id).unwrap_or( - 1_f64) != 65537_f64 || events.len() != 1_usize || events.get_unchecked_borrowed(0_usize).time != 65536.25_f64 {
+        ret 9_u32
+    }
+    ret 0_u32
+}
+
+fn world_reverse_graph_checks() -> u32 {
+    let rig = skeleton()
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "reverse", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let clip = AnimationClip {
+        1_u32, "reverse", rig.identity, "Reverse", 2_f32, vec![AnimationTrack {
+                0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(4_f32, 0_f32, 0_f32, 0_f32))]
+            }
+        ], vec![AnimationNotify {
+                0.25_f32, "early", ""
+            }
+            , AnimationNotify {
+                0.75_f32, "late", ""
+            }
+        ]
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), Vec[BoneMask]::new(), vec![AnimationNode {
+                7_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 7_u64
+    }
+    let mut world = AnimationWorld::new()
+    let id = match world.instantiate(rig, mesh, vec![clip], 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret 1_u32
+        }
+    }
+    if world.bind_graph(id, graph).is_err() || world.root_motion(id, Option[u32]::Some(0_u32)).is_err() || world.seek(id, 1_f64).is_err() || world.playback(id, - 1_f32, true).is_err() || world.advance(1_u64, 0.5_f64).is_err() {
+        ret 2_u32
+    }
+    let events = world.take_events(id).unwrap_or(Vec[AnimationEvent]::new())
+    if world.time(id).unwrap_or( - 1_f64) != 0.5_f64 || events.len() != 1_usize || events.get_unchecked_borrowed(0_usize).name != "late" || !events.get_unchecked_borrowed(0_usize).reverse || events.get_unchecked_borrowed(0_usize).node.unwrap_or(0_u64) != 7_u64 || !near(world.take_root_motion(id).unwrap_or(RootMotionDelta::identity()).translation.x, - 1_f32) {
+        ret 3_u32
+    }
+    if world.playback(id, - 1_f32, false).is_err() {
+        ret 4_u32
+    }
+    let paused = match world.advance(2_u64, 0.5_f64) {
+        Ok(v) => v Err(_) => {
+            ret 5_u32
+        }
+    }
+    if paused.sampled != 0_u32 || world.time(id).unwrap_or( - 1_f64) != 0.5_f64 || world.take_events(id).unwrap_or(Vec[AnimationEvent]::new()).len() != 0_usize || !near(world.take_root_motion(id).unwrap_or(RootMotionDelta::identity()).translation.x, 0_f32) {
+        ret 6_u32
+    }
+    if world.playback(id, - 1_f32, true).is_err() || world.advance(3_u64, 0.75_f64).is_err() {
+        ret 7_u32
+    }
+    let events = world.take_events(id).unwrap_or(Vec[AnimationEvent]::new())
+    if world.time(id).unwrap_or( - 1_f64) != - 0.25_f64 || events.len() != 1_usize || events.get_unchecked_borrowed(0_usize).name != "early" || !events.get_unchecked_borrowed(0_usize).reverse || !near(world.take_root_motion(id).unwrap_or(RootMotionDelta::identity()).translation.x, - 1.5_f32) {
+        ret 8_u32
+    }
+    ret 0_u32
+}
+
+fn additive_notify_case(has_morph: bool) -> bool {
+    let rig = skeleton()
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mut morphs = Vec[MorphTarget]::new() let mut tracks = Vec[AnimationTrack]::new()
+    if has_morph {
+        morphs.push(MorphTarget { "Face", 0_f32, 1_f32, 0_f32, Vec[MorphDelta]::new() }) tracks.push(AnimationTrack {
+                0_u32, TrackPath::Morph, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(1_f32, 0_f32, 0_f32, 0_f32))]
+            }
+            ,
+        )
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "additive-notify", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], vec![PoseMatrix::identity(), PoseMatrix::identity()], vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], morphs
+    }
+    let base = AnimationClip {
+        1_u32, "base", rig.identity, "Base", 2_f32, Vec[AnimationTrack]::new(), vec![AnimationNotify {
+                0.25_f32, "base", ""
+            }
+        ]
+    }
+    let layer = AnimationClip {
+        1_u32, "layer", rig.identity, "Layer", 2_f32, tracks, vec![AnimationNotify {
+                0.25_f32, "layer", ""
+            }
+        ]
+    }
+    let reference = AnimationClip {
+        1_u32, "reference", rig.identity, "Reference", 2_f32, Vec[AnimationTrack]::new(), vec![AnimationNotify {
+                0.25_f32, "reference", ""
+            }
+        ]
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, Vec[AnimationParameter]::new(), vec![BoneMask {
+                rig.identity, vec![0_f32, 0_f32]
+            }
+        ], vec![AnimationNode {
+                1_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                2_u64, PoseOperation::Clip, Vec[u64]::new(), 1_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                3_u64, PoseOperation::Clip, Vec[u64]::new(), 2_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                4_u64, PoseOperation::Additive, vec![1_u64, 2_u64, 3_u64], 0_u32, 1_f32, Option[u32]::None, 0_u32
+            }
+        ], 4_u64
+    }
+    let mut world = AnimationWorld::new()
+    let id = match world.instantiate(rig, mesh, vec![base, layer, reference], 0_u32) {
+        Ok(v) => v Err(_) => {
+            ret false
+        }
+    }
+    if world.bind_graph(id, graph).is_err() || world.advance(1_u64, 0.5_f64).is_err() {
+        ret false
+    }
+    let events = world.take_events(id).unwrap_or(Vec[AnimationEvent]::new())
+    if events.len() != if has_morph {
+        2_usize
+    } else {
+        1_usize
+    }
+    {
+        ret false
+    }
+    if events.get_unchecked_borrowed(0_usize).node.unwrap_or(0_u64) != 1_u64 {
+        ret false
+    }
+    if has_morph {
+        if events.get_unchecked_borrowed(1_usize).node.unwrap_or(0_u64) != 2_u64 {
+            ret false
+        }
+        let snapshot = match world.snapshot(id) {
+            Ok(v) => v Err(_) => {
+                ret false
+            }
+        }
+        let morphs = world.morphs(snapshot).unwrap_or(Vec[f32]::new()) if morphs.len() != 1_usize || !near(morphs.get_unchecked_borrowed(0_usize), 0.25_f32) {
+            ret false
+        }
+    }
+    ret true
+}

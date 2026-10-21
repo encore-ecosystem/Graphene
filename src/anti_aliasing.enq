@@ -1,0 +1,871 @@
+//! Per-view anti-aliasing. Scene/history stay on the GPU; UI never enters a filter.
+import core::option::Option
+import core::vec::Vec
+import linalg::{Mat4, Vec3}
+import mod::performance::performance_counter_ns
+import mod::render_settings::{AntiAliasingMethod, RenderSettings, effective_reconstruction, effective_frame_generation}
+import mod::rhi::*
+import mod::scene::camera::PerspectiveCamera
+import mod::scene::renderable::RenderItem
+import mod::shaders::aa_copy::aa_copy
+import mod::shaders::aa_encode::aa_encode
+import mod::shaders::aa_fullscreen::aa_fullscreen
+import mod::shaders::aa_fxaa::aa_fxaa
+import mod::shaders::aa_linear_fragment::aa_linear_fragment
+import mod::shaders::aa_linear_vertex::aa_linear_vertex
+import mod::shaders::aa_reactive::aa_reactive
+import mod::shaders::aa_smaa_blend::aa_smaa_blend
+import mod::shaders::aa_smaa_edge::aa_smaa_edge
+import mod::shaders::aa_smaa_weights::aa_smaa_weights
+import mod::shaders::aa_taa::aa_taa
+import mod::shaders::aa_temporal_fragment::aa_temporal_fragment
+import mod::shaders::aa_temporal_vertex::aa_temporal_vertex
+import mod::temporal_view::{TemporalView, temporal_jitter_phases}
+import mod::texture_gpu::TextureUpload
+import mod::texture_image::TextureImage
+import vulkan::{native_reconstruction_capabilities, native_reconstruction_resolution, native_reconstruction_create, native_reconstruction_available, native_reconstruction_error, native_reconstruction_destroy, native_reconstruction_record_images, PresentationSchedule}
+extern fn graphene_smaa_texel(table: u32, index: u32) -> u32
+
+struct AaBinding {
+    slot: u32
+    source: usize
+    secondary: usize
+    history: usize
+    group: BindGroup
+    textures: Vec[GpuTexture]
+}
+struct AaStage {
+    target: Swapchain
+    owned: bool
+    pipeline: RenderPipeline
+    shader: ShaderModule
+    uniforms: Vec[GpuBuffer]
+    bindings: Vec[AaBinding]
+}
+fn aa_vertex_layout() -> VertexBufferLayout {
+    ret VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0), VertexAttribute::new(1, vertex_format_float32x3(), 12), VertexAttribute::new(2, vertex_format_float32x3(), 24), VertexAttribute::new(3, vertex_format_float32x2(), 36)])
+}
+fn stage_create(device: GraphicsDevice, target: Swapchain, owned: bool, layout: BindGroupLayout, vertex: ShaderModule, shader: Vec[u32]) -> AaStage<H> {
+    let fragment = device.create_shader_module(shader, shader_stage_fragment())
+    let pipeline = device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::empty(), layout, RenderPipelineOptions::opaque().with_depth_attachment(true))
+    let mut uniforms = Vec[GpuBuffer]::new()
+    for slot in 0..(target.frames_in_flight() as usize) {
+        uniforms.push(device.create_buffer(32, buffer_uniform(), true))
+    }
+    ret AaStage<H>{ target, owned, pipeline, fragment, uniforms, Vec[AaBinding]::new() }
+}
+fn stage_destroy(stage: AaStage<H>) ->() {
+    // Completion of the final consumer protects every input view and descriptor.
+    for binding in stage.bindings {
+        binding.group.destroy() for texture in binding.textures {
+            texture.destroy()
+        }
+    }
+    for buffer in stage.uniforms {
+        buffer.destroy()
+    }
+    if stage.owned {
+        stage.target.destroy()
+    }
+    stage.pipeline.destroy() stage.shader.destroy()
+}
+fn table_texture(device: GraphicsDevice, table: u32) -> GpuTexture {
+    let width = if table == 0 {
+        160_u32
+    } else {
+        64_u32
+    }
+    let height = if table == 0 {
+        560_u32
+    } else {
+        16_u32
+    }
+    let mut pixels = Vec[u32]::with_capacity((width * height) as usize)
+    for i in 0..((width * height) as usize) {
+        unsafe {
+            pixels.push(graphene_smaa_texel(table, i as u32))
+        }
+    }
+    match TextureUpload::begin_linear(device, TextureImage { width, height, pixels }) {
+        Some(upload) => {
+            upload.wait() ret upload.finish()
+        }
+        None => {
+            ret GpuTexture::unavailable()
+        }
+    }
+}
+pub struct AntiAliasingView {
+    temporal_view: TemporalView<H>
+    device: GraphicsDevice
+    composition: Swapchain
+    layout: BindGroupLayout
+    scene_layout: BindGroupLayout
+    raw: Swapchain
+    stages: Vec[AaStage<H>]
+    final_stage: Vec[AaStage<H>]
+    vertex: ShaderModule
+    sampler: GpuSampler
+    quad: GpuMesh
+    area: GpuTexture
+    search: GpuTexture
+    scene_vertex: ShaderModule
+    scene_fragment: ShaderModule
+    solid: RenderPipeline
+    double_sided: RenderPipeline
+    width: u32
+    height: u32
+    method: AntiAliasingMethod
+    requested: AntiAliasingMethod
+    history_valid: bool
+    frame_index: u32
+    remaining: u32
+    graph_key: str
+    configured_graph: str
+    graph_linear: Vec[u32]
+    graph_temporal: Vec[u32]
+    configured: bool
+    previous_camera: Mat4
+    committed_camera: Mat4
+    camera_view: Mat4
+    previous_projection: Mat4
+    previous_position: Vec3
+    previous_direction: Vec3
+    settings: RenderSettings
+    capabilities: u32
+    reconstruction: usize
+    reconstructed: GpuTexture
+    reconstruction_commands: Swapchain
+    mask_stages: Vec[AaStage<H>]
+    mask_views: Vec[GpuTexture]
+    render_width: u32
+    render_height: u32
+    configured_quality: u32
+    reconstruction_error: str
+    last_tick: u64
+    delta_ms: f32
+    camera_near: f32
+    camera_far: f32
+    camera_fov: f32
+    playing: bool
+    direct_present: bool
+    presentation_source: usize
+    fg_context: usize
+    fg_provider: u32
+    fg_multiplier: u32
+    fg_inputs: Vec[GpuTexture]
+    fg_outputs: Vec[GpuTexture]
+    fg_stages: Vec[AaStage<H>]
+    fg_ready: bool
+    schedule: PresentationSchedule<H>
+    real_frames: u64
+    generated_frames: u64
+    submitted_frames: u64
+}
+
+impl for AntiAliasingView {
+    pub fn create(device: GraphicsDevice, composition: Swapchain, scene_layout: BindGroupLayout) -> AntiAliasingView<H> {
+        let mut entries = vec![BindGroupLayoutEntry::uniform(0, shader_stage_fragment())]
+        for binding in 1..6 {
+            entries.push(BindGroupLayoutEntry::texture_sampler(binding as u32, shader_stage_fragment()))
+        }
+        let layout = device.create_bind_group_layout(entries)
+        let vertex = device.create_shader_module(aa_fullscreen(), shader_stage_vertex())
+        let mut vertices = Vec[f32]::new()
+        for i in 0..33 {
+            vertices.push(0.0_f32)
+        }
+        let quad = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32])
+        ret AntiAliasingView<H> {
+            TemporalView::new(), device, composition, layout, scene_layout, Swapchain::borrow(0), Vec[AaStage<H>]::new(), Vec[AaStage<H>]::new(), vertex, device.create_sampler(), quad,
+            GpuTexture::unavailable(), GpuTexture::unavailable(), ShaderModule::unavailable(), ShaderModule::unavailable(), RenderPipeline::unavailable(), RenderPipeline::unavailable(),
+            0, 0, AntiAliasingMethod::Smaa, AntiAliasingMethod::Smaa, false, 0, 0, "", "", Vec[u32]::new(), Vec[u32]::new(), false, Mat4::identity(), Mat4::identity(), Mat4::identity(), Mat4::identity(), Vec3::zero(), Vec3::new(0, 0, - 1), RenderSettings::defaults(), native_reconstruction_capabilities(device.timing_handle()), 0_usize, GpuTexture::unavailable(), Swapchain::borrow(0), Vec[AaStage<H>]::new(), Vec[GpuTexture]::new(), 0_u32, 0_u32, 1_u32, "", 0_u64, 16.667_f32, 0.1_f32, 10000_f32, 1.047_f32, false, false, 0_usize, 0_usize, 0_u32, 2_u32, Vec[GpuTexture]::new(), Vec[GpuTexture]::new(), Vec[AaStage<H>]::new(), false, PresentationSchedule::new(), 0_u64, 0_u64, 0_u64
+        }
+    }
+    pub fn set_settings(self: mut Self&, settings: RenderSettings) ->() {
+        if self.settings.quality().key() != settings.quality().key() || self.settings.sharpness() != settings.sharpness() {
+            self.invalidate()
+        }
+        self.settings = settings
+    }
+    pub fn set_direct_present(self: mut Self&, enabled: bool) ->() {
+        self.direct_present = enabled
+    }
+    pub fn set_playing(self: mut Self&, playing: bool) ->() {
+        if self.playing != playing {
+            self.playing = playing self.invalidate()
+        }
+    }
+    pub fn presentation_pending(self: Self&) -> bool {
+        ret self.schedule.pending()
+    }
+    pub fn presentation_due(self: Self&, now: u64) -> bool {
+        ret self.schedule.due(now)
+    }
+    pub fn presentation_expired(self: Self&, now: u64) -> bool {
+        ret self.schedule.expired(now)
+    }
+    pub fn cancel_presentations(self: mut Self&) ->() {
+        self.schedule.cancel()
+    }
+    pub fn presentation_image(self: Self&) -> usize {
+        if !self.schedule.pending() {
+            ret 0_usize
+        }
+        match self.fg_stages.get(self.schedule.index() as usize) {
+            Some(stage) => {
+                ret stage.target.external_image()
+            }
+            None => {
+                ret 0_usize
+            }
+        }
+    }
+    pub fn presentation_submitted(self: mut Self&, now: u64) ->() {
+        if self.schedule.pending() {
+            if self.schedule.index() <(self.fg_stages.len() as u32) {
+                self.generated_frames += 1
+            }
+            self.schedule.submitted(now)
+        }
+        self.submitted_frames += 1
+    }
+    pub fn begin_presentations(self: mut Self&, work_ns: u64, now: u64) ->() {
+        self.real_frames += 1
+        if self.fg_ready {
+            self.schedule.begin(self.fg_multiplier, work_ns /(self.fg_multiplier as u64), now)
+        }
+    }
+    pub fn frame_counts(self: Self&) ->(u64, u64, u64) {
+        ret(self.real_frames, self.generated_frames, self.submitted_frames)
+    }
+    pub fn capabilities(self: Self&) -> u32 {
+        ret self.capabilities
+    }
+    pub fn render_width(self: Self&) -> u32 {
+        ret self.render_width
+    }
+    pub fn render_height(self: Self&) -> u32 {
+        ret self.render_height
+    }
+    pub fn reconstruction_error(self: Self&) -> str {
+        ret self.reconstruction_error
+    }
+    pub fn set_graph_shader(self: mut Self&, key: str, linear: Vec[u32], temporal: Vec[u32]) ->() {
+        if self.graph_key == key {
+            ret()
+        }
+        self.graph_key = key self.graph_linear = linear self.graph_temporal = temporal self.invalidate()
+    }
+    pub fn attachment_memory_bytes(self: Self&) -> u64 {
+        let mut total = self.raw.attachment_memory_bytes()
+        for stage in self.stages {
+            total += stage.target.attachment_memory_bytes()
+        }
+        total += self.reconstruction_commands.attachment_memory_bytes()
+        for masks in self.mask_stages {
+            total += masks.target.attachment_memory_bytes()
+        }
+        for stage in self.fg_stages {
+            total += stage.target.attachment_memory_bytes()
+        }
+        total +=(self.width as u64) *(self.height as u64) * 8_u64 *((self.fg_outputs.len() as u64) + if self.reconstructed.available() {
+                1_u64
+            } else {
+                0_u64
+            }
+        )
+        ret total
+    }
+    pub fn supported_samples(self: Self&) -> u32 {
+        ret self.device.render_target_sample_counts(format_rgba16_float())
+    }
+    pub fn method(self: Self&) -> AntiAliasingMethod {
+        ret self.method
+    }
+    pub fn target(self: Self&) -> Swapchain {
+        ret self.raw
+    }
+    pub fn solid_pipeline(self: Self&) -> RenderPipeline {
+        ret self.solid
+    }
+    pub fn double_sided_pipeline(self: Self&) -> RenderPipeline {
+        ret self.double_sided
+    }
+    pub fn temporal(self: Self&) -> TemporalView<H> {
+        ret self.temporal_view
+    }
+    pub fn needs_frames(self: Self&) -> bool {
+        ret self.configured && self.method.temporal() && self.remaining > 0
+    }
+    pub fn invalidate(self: mut Self&) ->() {
+        self.history_valid = false self.frame_index = 0 self.remaining = self.accumulation_frames() self.temporal_view.reset() self.fg_ready = false self.schedule.cancel()
+    }
+    pub fn changed(self: mut Self&) ->() {
+        self.remaining = self.accumulation_frames()
+    }
+    fn accumulation_frames(self: Self&) -> u32 {
+        let phases = if self.method.reconstruction() && self.render_width > 0 {
+            (8_u64 *(self.width as u64) *(self.width as u64) /((self.render_width as u64) *(self.render_width as u64))) as u32
+        } else {
+            8_u32
+        }
+        ret phases
+    }
+    fn jitter(self: Self&, index: u32) ->(f32, f32) {
+        ret temporal_jitter_phases(index, self.render_width, self.render_height, self.accumulation_frames())
+    }
+    pub fn camera(self: Self&, camera: PerspectiveCamera) -> PerspectiveCamera {
+        if !self.method.temporal() {
+            ret camera
+        }
+        let jitter = self.jitter(self.frame_index)
+        ret camera.with_jitter(jitter.0, jitter.1).with_aspect_ratio(self.width as f32 / self.height as f32)
+    }
+    pub fn retire_generated_images(self: Self&, requested: AntiAliasingMethod, width: u32, height: u32, composition: Swapchain) -> bool {
+        if self.fg_stages.len() == 0 {
+            ret false
+        }
+        ret !self.configured || self.width != width || self.height != height || self.requested.key() != requested.key() || self.configured_quality != self.settings.quality().value() || self.configured_graph != self.graph_key || self.composition.handle() != composition.handle() || self.fg_provider != effective_frame_generation(self.settings, self.capabilities, self.playing).provider() || self.fg_multiplier != self.settings.multiplier() ||(self.reconstruction != 0_usize && !native_reconstruction_available(self.reconstruction)) ||(self.fg_context != 0_usize && !native_reconstruction_available(self.fg_context))
+    }
+    pub fn configure(self: mut Self&, requested: AntiAliasingMethod, width: u32, height: u32, composition: Swapchain) -> bool {
+        if width == 0 || height == 0 {
+            ret false
+        }
+        if self.reconstruction != 0_usize && !native_reconstruction_available(self.reconstruction) {
+            self.reconstruction_error = native_reconstruction_error(self.reconstruction)
+            let flag = if self.method.provider() == 1 {
+                1_u32
+            } elif self.method.provider() == 2 {
+                2_u32
+            } else {
+                4_u32
+            }
+            self.capabilities = self.capabilities &(127_u32 - flag)
+        }
+        if self.fg_context != 0_usize && !native_reconstruction_available(self.fg_context) {
+            self.reconstruction_error = native_reconstruction_error(self.fg_context)
+            self.capabilities = self.capabilities & if self.fg_provider == 4 {
+                119_u32
+            } else {
+                15_u32
+            }
+        }
+        let mut method = effective_reconstruction(requested, self.supported_samples(), self.capabilities)
+        self.requested = requested
+        let quality = self.settings.quality().value()
+        let fg = effective_frame_generation(self.settings, self.capabilities, self.playing).provider()
+        if self.configured && self.width == width && self.height == height && self.method.key() == method.key() && self.configured_quality == quality && self.fg_provider == fg && self.fg_multiplier == self.settings.multiplier() && self.configured_graph == self.graph_key && self.composition.handle() == composition.handle() {
+            ret true
+        }
+        if self.configured && !self.composition.last_frame_complete() {
+            ret false
+        }
+        self.release()
+        self.composition = composition self.width = width self.height = height self.method = method self.requested = requested self.configured_graph = self.graph_key
+        self.configured_quality = quality self.render_width = width self.render_height = height
+        let attempted_provider = method.provider()
+        if method.reconstruction() {
+            let dimensions = native_reconstruction_resolution(self.device.timing_handle(), method.provider(), width, height, quality)
+            if dimensions == 0_u64 {
+                self.reconstruction_error = "Unable to determine SDK input resolution" method = AntiAliasingMethod::Taa
+            } else {
+                self.render_width =(dimensions >> 32) as u32 self.render_height = dimensions as u32
+                self.reconstruction = native_reconstruction_create(self.device.timing_handle(), method.provider(), self.render_width, self.render_height, width, height, quality)
+                if !native_reconstruction_available(self.reconstruction) {
+                    self.reconstruction_error = native_reconstruction_error(self.reconstruction)
+                    native_reconstruction_destroy(self.reconstruction) self.reconstruction = 0_usize
+                    self.render_width = width self.render_height = height method = AntiAliasingMethod::Taa
+                } else {
+                    self.reconstructed = self.device.create_texture_2d(width, height, 1, format_rgba16_float(), texture_sampled() | texture_storage() | texture_transfer_source() | texture_transfer_destination())
+                    if !self.reconstructed.available() {
+                        self.reconstruction_error = "Unable to allocate reconstruction output; using TAA"
+                        native_reconstruction_destroy(self.reconstruction) self.reconstruction = 0_usize method = AntiAliasingMethod::Taa self.render_width = width self.render_height = height
+                    }
+                }
+            }
+        }
+        if attempted_provider > 0 && !method.reconstruction() {
+            let flag = if attempted_provider == 1 {
+                1_u32
+            } elif attempted_provider == 2 {
+                2_u32
+            } else {
+                4_u32
+            }
+            self.capabilities = self.capabilities &(127_u32 - flag)
+        }
+        self.method = method
+        let descriptor = RenderTargetDescriptor::new(self.render_width, self.render_height, format_rgba16_float()).with_samples(method.samples()).with_auxiliary(if method.temporal() {
+                format_rgba16_float()
+            } else {
+                0_u32
+            }
+        )
+        self.raw = self.device.create_render_target(if method.reconstruction() || fg != 0 {
+                descriptor.with_sampled_depth()
+            } else {
+                descriptor
+            }
+        )
+        if !self.raw.available() {
+            ret false
+        }
+        self.fg_provider = fg self.fg_multiplier = self.settings.multiplier()
+        if fg != 0 {
+            self.fg_context = native_reconstruction_create(self.device.timing_handle(), fg, self.render_width, self.render_height, width, height, quality)
+            if native_reconstruction_available(self.fg_context) {
+                for index in 1_usize..(self.fg_multiplier as usize) {
+                    self.fg_outputs.push(self.device.create_texture_2d(width, height, 1, format_rgba16_float(), texture_sampled() | texture_storage() | texture_transfer_source() | texture_transfer_destination()))
+                    let target = self.device.create_shared_offscreen_target(if self.direct_present {
+                            1_u32
+                        } else {
+                            composition.width()
+                        }
+                        , if self.direct_present {
+                            1_u32
+                        } else {
+                            composition.height()
+                        }
+                        ,
+                    )
+                    self.fg_stages.push(stage_create(self.device, target, true, self.layout, self.vertex, aa_copy()))
+                }
+            } else {
+                self.reconstruction_error = native_reconstruction_error(self.fg_context) native_reconstruction_destroy(self.fg_context) self.fg_context = 0_usize
+            }
+        }
+        let mut fg_available = self.fg_context != 0_usize
+        for output in self.fg_outputs {
+            fg_available = fg_available && output.available()
+        }
+        for stage in self.fg_stages {
+            fg_available = fg_available && stage.target.available() && stage.pipeline.available()
+        }
+        if fg != 0 && !fg_available {
+            if self.reconstruction_error == "" {
+                self.reconstruction_error = "Frame generation allocation failed; using real frames"
+            }
+            if self.fg_context != 0_usize {
+                native_reconstruction_destroy(self.fg_context) self.fg_context = 0_usize
+            }
+            for stage in self.fg_stages {
+                stage_destroy(stage)
+            }
+            self.fg_stages.clear()
+            for output in self.fg_outputs {
+                output.destroy()
+            }
+            self.fg_outputs.clear()
+            self.capabilities = self.capabilities & if fg == 4 {
+                119_u32
+            } else {
+                15_u32
+            }
+            self.fg_provider = 0_u32
+        }
+        if method.reconstruction() {
+            let masks = self.device.create_render_target(RenderTargetDescriptor::new(self.render_width, self.render_height, format_r8_unorm()))
+            self.mask_stages.push(stage_create(self.device, masks, true, self.layout, self.vertex, aa_reactive()))
+            if self.fg_context != 0_usize {
+                self.reconstruction_commands = self.device.create_shared_offscreen_target(1, 1)
+            }
+        }
+        self.scene_vertex = self.device.create_shader_module(if method.temporal() {
+                aa_temporal_vertex()
+            } else {
+                aa_linear_vertex()
+            }
+            , shader_stage_vertex(),)
+        self.scene_fragment = self.device.create_shader_module(if method.temporal() && self.graph_temporal.len() > 0 {
+                self.graph_temporal
+            } elif !method.temporal() && self.graph_linear.len() > 0 {
+                self.graph_linear
+            } elif method.temporal() {
+                aa_temporal_fragment()
+            } else {
+                aa_linear_fragment()
+            }
+            , shader_stage_fragment(),)
+        self.solid = self.device.create_render_pipeline_with_options(self.raw, self.scene_vertex, self.scene_fragment, aa_vertex_layout(), self.scene_layout, RenderPipelineOptions::depth().with_backface_culling())
+        self.double_sided = self.device.create_render_pipeline_with_options(self.raw, self.scene_vertex, self.scene_fragment, aa_vertex_layout(), self.scene_layout, RenderPipelineOptions::depth())
+        if method.key() == "smaa" {
+            if !self.area.available() {
+                self.area = table_texture(self.device, 0) self.search = table_texture(self.device, 1)
+            }
+            for shader in vec![aa_encode(), aa_smaa_edge(), aa_smaa_weights()] {
+                let target = self.device.create_render_target(RenderTargetDescriptor::new(width, height, format_rgba8_unorm()))
+                self.stages.push(stage_create(self.device, target, true, self.layout, self.vertex, shader))
+            }
+        } elif method.key() == "fxaa" {
+            let target = self.device.create_render_target(RenderTargetDescriptor::new(width, height, format_rgba8_unorm()))
+            self.stages.push(stage_create(self.device, target, true, self.layout, self.vertex, aa_encode()))
+        } elif method.key() == "taa" {
+            let target = self.device.create_render_target(RenderTargetDescriptor::new(width, height, format_rgba16_float()))
+            self.stages.push(stage_create(self.device, target, true, self.layout, self.vertex, aa_taa()))
+        }
+        let final_shader = if method.key() == "fxaa" {
+            aa_fxaa()
+        } elif method.key() == "smaa" {
+            aa_smaa_blend()
+        } else {
+            aa_copy()
+        }
+        self.final_stage.push(stage_create(self.device, composition, false, self.layout, self.vertex, final_shader))
+        self.configured = self.solid.available() && self.double_sided.available()
+        for stage in self.stages {
+            self.configured = self.configured && stage.target.available() && stage.pipeline.available()
+        }
+        for stage in self.final_stage {
+            self.configured = self.configured && stage.pipeline.available()
+        }
+        for masks in self.mask_stages {
+            self.configured = self.configured && masks.target.available() && masks.pipeline.available()
+        }
+        if method.reconstruction() && self.fg_context != 0_usize {
+            self.configured = self.configured && self.reconstruction_commands.available()
+        }
+        self.invalidate() ret self.configured
+    }
+    fn bind_stage(self: mut Self&, stage: mut AaStage&, frame: RenderFrame, source: usize, second: usize, history: usize, encoded_source: bool) -> bool {
+        let slot = frame.slot()
+        let uniform = stage.uniforms.get(slot as usize).unwrap_or(GpuBuffer::unavailable())
+        let current_jitter = self.jitter(self.frame_index)
+        let previous_jitter = self.jitter(if self.frame_index > 0 {
+                self.frame_index - 1
+            } else {
+                0
+            }
+        )
+        let jitter_x =(current_jitter.0 - previous_jitter.0) * 0.5_f32
+        let jitter_y =(current_jitter.1 - previous_jitter.1) * 0.5_f32
+        let values = vec![1.0_f32 / self.width as f32, 1.0_f32 / self.height as f32, self.width as f32, self.height as f32, if self.history_valid {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+            , self.frame_index as f32, jitter_x, jitter_y]
+        if !uniform.write_f32s(0, values) {
+            ret false
+        }
+        for entry in stage.bindings {
+            if entry.slot == slot && entry.source == source && entry.secondary == second && entry.history == history {
+                ret frame.continue_render_pass(stage.pipeline).bind_group(entry.group)
+            }
+        }
+        let mut textures = Vec[GpuTexture]::new()
+        for i in 0..3 {
+            let handle = if i == 0 {
+                source
+            } elif i == 1 {
+                second
+            } else {
+                history
+            }
+            let selected = if handle != 0 {
+                handle
+            } else {
+                source
+            }
+            let format = if encoded_source ||(i == 1 && second != 0_usize && self.method.key() == "smaa") {
+                format_rgba8_unorm()
+            } else {
+                format_rgba16_float()
+            }
+            textures.push(self.device.borrow_sampled_texture(selected, self.width, self.height, format, texture_layout_shader_read()))
+        }
+        let area = if self.area.available() {
+            self.area
+        } else {
+            textures.get(0).unwrap_or(GpuTexture::unavailable())
+        }
+        let search = if self.search.available() {
+            self.search
+        } else {
+            textures.get(0).unwrap_or(GpuTexture::unavailable())
+        }
+        let group = self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![uniform], vec![0_u64], vec![32_u64], vec![1_u32, 2_u32, 3_u32, 4_u32, 5_u32],
+            vec![textures.get(0).unwrap_or(GpuTexture::unavailable()), textures.get(1).unwrap_or(GpuTexture::unavailable()), textures.get(2).unwrap_or(GpuTexture::unavailable()), area, search], vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler],)
+        if !group.available() {
+            for texture in textures {
+                texture.destroy()
+            }
+            group.destroy() ret false
+        }
+        stage.bindings.push(AaBinding { slot, source, second, history, group, textures })
+        ret frame.continue_render_pass(stage.pipeline).bind_group(group)
+    }
+    pub fn composite(self: mut Self&, frame: RenderFrame, x: u32, y: u32) -> bool {
+        let mut source = self.raw.external_image()
+        if self.method.reconstruction() {
+            let mut masks = self.mask_stages.get_unchecked_borrowed(0)
+            let mask_frame = masks.target.try_acquire_frame()
+            if !mask_frame.available() {
+                mask_frame.destroy() ret false
+            }
+            let mask_pass = mask_frame.begin_render_pass(masks.pipeline, 1, 0, 0, 1)
+            let mask_recorded = self.bind_stage(masks, mask_frame, self.raw.attachment_image(1), 0_usize, 0_usize, false) && mask_pass.draw_mesh(self.quad) && mask_pass.end()
+            let mask_submitted = mask_recorded && mask_frame.present() mask_frame.destroy()
+            if !mask_submitted {
+                ret false
+            }
+            let mut mask = GpuTexture::unavailable()
+            for view in self.mask_views {
+                if view.image() == masks.target.external_image() {
+                    mask = view break
+                }
+            }
+            if !mask.available() {
+                mask = self.device.borrow_sampled_texture(masks.target.external_image(), self.render_width, self.render_height, format_r8_unorm(), texture_layout_shader_read())
+                self.mask_views.push(mask)
+            }
+            let jitter = self.jitter(self.frame_index)
+            let previous = self.jitter(if self.frame_index > 0 {
+                    self.frame_index - 1
+                } else {
+                    0
+                }
+            )
+            let values = vec![jitter.0 *(self.render_width as f32) * 0.5_f32, jitter.1 *(self.render_height as f32) * 0.5_f32,
+                previous.0 *(self.render_width as f32) * 0.5_f32, previous.1 *(self.render_height as f32) * 0.5_f32,
+                self.delta_ms, self.camera_near, self.camera_far, self.camera_fov, self.settings.sharpness(), 1_f32, if self.history_valid {
+                    0_f32
+                } else {
+                    1_f32
+                }
+                , self.frame_index as f32, 2_f32, 1_f32, 0_f32, 0_f32]
+            // FG submits its own images before the final composition. Its SR
+            // input must therefore be submitted first, never left in that final
+            // composition's still-recording command buffer.
+            let reconstruction_frame = if self.fg_context != 0_usize {
+                self.reconstruction_commands.try_acquire_frame()
+            } else {
+                frame
+            }
+            if !reconstruction_frame.available() {
+                if self.fg_context != 0_usize {
+                    reconstruction_frame.destroy()
+                }
+                ret false
+            }
+            reconstruction_frame.timing_mark(21_u32, true)
+            let mut recorded = native_reconstruction_record_images(self.reconstruction, reconstruction_frame.handle(), self.raw.handle(), self.reconstructed.native_handle(), 0_usize, mask.native_handle(), mask.native_handle(), values)
+            reconstruction_frame.timing_mark(21_u32, false)
+            if self.fg_context != 0_usize {
+                // Establish the proxy attachment's layout before its normal
+                // present transition. SDK work itself writes a separate image.
+                let pipeline = self.fg_stages.get_unchecked_borrowed(0).pipeline
+                recorded = recorded && reconstruction_frame.begin_render_pass(pipeline, 0, 0, 0, 0).end() && reconstruction_frame.present()
+                reconstruction_frame.destroy()
+            }
+            if !recorded {
+                self.reconstruction_error = native_reconstruction_error(self.reconstruction) ret false
+            }
+            source = self.reconstructed.image()
+        }
+        let mut second = 0_usize
+        let mut history = 0_usize
+        for index in 0..self.stages.len() {
+            let mut stage = self.stages.get_unchecked_borrowed(index)
+            if self.method.temporal() {
+                second = self.raw.attachment_image(1)
+                history = if self.history_valid {
+                    stage.target.external_image()
+                } else {
+                    source
+                }
+            }
+            let stage_frame = stage.target.try_acquire_frame()
+            if !stage_frame.available() {
+                stage_frame.destroy() ret false
+            }
+            stage_frame.timing_mark(6_u32, true)
+            let pass = stage_frame.begin_render_pass(stage.pipeline, 0, 0, 0, 0)
+            let bound = self.bind_stage(stage, stage_frame, source, second, history, self.method.key() == "smaa" && index > 0)
+            let stage_recorded = bound && pass.draw_mesh(self.quad) && pass.end()
+            stage_frame.timing_mark(6_u32, false)
+            let drawn = stage_recorded && stage_frame.present()
+            stage_frame.destroy()
+            if !drawn {
+                ret false
+            }
+            source = stage.target.external_image()
+        }
+        if self.method.key() == "smaa" {
+            second = source source = self.raw.external_image()
+        }
+        self.fg_ready = false
+        if self.fg_context != 0_usize {
+            let mut input = GpuTexture::unavailable()
+            for texture in self.fg_inputs {
+                if texture.image() == source {
+                    input = texture break
+                }
+            }
+            if !input.available() {
+                input = self.device.borrow_sampled_texture(source, self.width, self.height, format_rgba16_float(), texture_layout_shader_read()) self.fg_inputs.push(input)
+            }
+            let jitter = self.jitter(self.frame_index)
+            let mut values = vec![jitter.0 *(self.render_width as f32) * 0.5_f32, jitter.1 *(self.render_height as f32) * 0.5_f32, 0_f32, 0_f32,
+                self.delta_ms, self.camera_near, self.camera_far, self.camera_fov, 0_f32, 1_f32, if self.history_valid {
+                    0_f32
+                } else {
+                    1_f32
+                }
+                , self.frame_index as f32, self.fg_multiplier as f32, 1_f32, 0_f32, 0_f32]
+            for value in Mat4::identity().values() {
+                values.push(value)
+            }
+            for value in Mat4::identity().values() {
+                values.push(value)
+            }
+            for matrix in vec![self.previous_camera, if self.history_valid {
+                    self.committed_camera
+                } else {
+                    self.previous_camera
+                }
+                , self.previous_projection, self.camera_view] {
+                for value in matrix.values() {
+                    values.push(value)
+                }
+            }
+            let mut recorded = true
+            for index in 0_usize..self.fg_stages.len() {
+                let output = self.fg_outputs.get(index).unwrap_or(GpuTexture::unavailable())
+                let mut stage = self.fg_stages.get_unchecked_borrowed(index)
+                let generated = stage.target.try_acquire_frame()
+                if !generated.available() {
+                    generated.destroy() ret false
+                }
+                values.set(13,(index + 1) as f32)
+                generated.timing_mark(22_u32, true)
+                let dispatched = native_reconstruction_record_images(self.fg_context, generated.handle(), self.raw.handle(), output.native_handle(), input.native_handle(), 0_usize, 0_usize, values)
+                generated.timing_mark(22_u32, false)
+                let drawn = if self.direct_present {
+                    dispatched && generated.begin_render_pass(stage.pipeline, 0, 0, 0, 0).end()
+                } else {
+                    let pass = generated.begin_render_pass(stage.pipeline, 0.028_f32, 0.034_f32, 0.043_f32, 1_f32)
+                    dispatched && generated.set_viewport(x, y, self.width, self.height) && self.bind_stage(stage, generated, output.image(), 0_usize, 0_usize, false) && pass.draw_mesh(self.quad) && pass.end()
+                }
+                recorded = drawn && generated.present() && recorded generated.destroy()
+            }
+            if !recorded {
+                self.reconstruction_error = native_reconstruction_error(self.fg_context) ret false
+            }
+            self.fg_ready = self.history_valid
+        }
+        self.presentation_source = source
+        if self.direct_present && self.fg_ready {
+            source = self.fg_outputs.get(0).unwrap_or(GpuTexture::unavailable()).image()
+        }
+        let mut stage = self.final_stage.get_unchecked_borrowed(0)
+        frame.timing_mark(6_u32, true)
+        let pass = frame.begin_render_pass(stage.pipeline, 0.028_f32, 0.034_f32, 0.043_f32, 1)
+        // The final pass can target a viewport subregion; sampling is still 0..1.
+        let composed = frame.set_viewport(x, y, self.width, self.height) && self.bind_stage(stage, frame, source, second, 0, self.method.key() == "fxaa") && pass.draw_mesh(self.quad)
+        frame.timing_mark(6_u32, false)
+        ret composed
+    }
+    /// Standalone presentation: draw the next generated HDR image or the real
+    /// endpoint. The caller presents it and advances the schedule only on success.
+    pub fn end_composite(self: Self&, frame: RenderFrame) -> bool {
+        ret frame.continue_render_pass(self.final_stage.get_unchecked_borrowed(0).pipeline).end()
+    }
+    pub fn composite_presentation(self: mut Self&, frame: RenderFrame) -> bool {
+        if !self.direct_present || !self.schedule.pending() {
+            ret false
+        }
+        let source = if self.schedule.index() < self.fg_outputs.len() as u32 {
+            self.fg_outputs.get(self.schedule.index() as usize).unwrap_or(GpuTexture::unavailable()).image()
+        } else {
+            self.presentation_source
+        }
+        let mut stage = self.final_stage.get_unchecked_borrowed(0)
+        let pass = frame.begin_render_pass(stage.pipeline, 0.028_f32, 0.034_f32, 0.043_f32, 1_f32)
+        ret self.bind_stage(stage, frame, source, 0_usize, 0_usize, false) && pass.draw_mesh(self.quad) && pass.end()
+    }
+    pub fn observe_camera(self: mut Self&, camera: PerspectiveCamera) ->() {
+        let now = performance_counter_ns()
+        if self.last_tick > 0_u64 && now > self.last_tick {
+            self.delta_ms =(now - self.last_tick) as f32 / 1000000_f32
+        }
+        if self.delta_ms < 0.1_f32 {
+            self.delta_ms = 0.1_f32
+        }
+        if self.delta_ms > 250_f32 {
+            self.delta_ms = 250_f32
+        }
+        self.last_tick = now self.camera_near = camera.near_clip() self.camera_far = camera.far_clip() self.camera_fov = camera.vertical_fov()
+        let projection = camera.projection(self.width as f32 / self.height as f32)
+        let direction = camera.target().sub(camera.position()).normalized()
+        let current = camera.view_projection(self.width as f32 / self.height as f32)
+        if self.history_valid {
+            let before = self.previous_projection.values() let after = projection.values()
+            let delta = camera.position().sub(self.previous_position)
+            if before.get(0).unwrap_or(0) != after.get(0).unwrap_or(0) || before.get(5).unwrap_or(0) != after.get(5).unwrap_or(0) || before.get(10).unwrap_or(0) != after.get(10).unwrap_or(0) || before.get(14).unwrap_or(0) != after.get(14).unwrap_or(0) || delta.dot(delta) > 25.0_f32 || direction.dot(self.previous_direction) < 0.5_f32 {
+                self.invalidate()
+            }
+        }
+        let before = self.previous_camera.values() let after = current.values()
+        for i in 0..16 {
+            if before.get(i).unwrap_or(0) != after.get(i).unwrap_or(0) {
+                self.remaining = self.accumulation_frames() break
+            }
+        }
+        self.camera_view = camera.view() self.previous_camera = current self.previous_projection = projection self.previous_position = camera.position() self.previous_direction = direction
+    }
+    pub fn commit(self: mut Self&, items: Vec[RenderItem], camera: PerspectiveCamera) ->() {
+        if self.method.temporal() {
+            self.temporal_view.commit(items, camera.view_projection(self.width as f32 / self.height as f32))
+            self.committed_camera = self.previous_camera self.history_valid = true self.frame_index += 1
+            if self.remaining > 0 {
+                self.remaining -= 1
+            }
+        }
+    }
+    fn release(self: mut Self&) ->() {
+        self.schedule.cancel() self.fg_ready = false
+        if self.fg_context != 0_usize {
+            native_reconstruction_destroy(self.fg_context) self.fg_context = 0_usize
+        }
+        for stage in self.fg_stages {
+            stage_destroy(stage)
+        }
+        self.fg_stages.clear()
+        for output in self.fg_outputs {
+            output.destroy()
+        }
+        self.fg_outputs.clear()
+        for input in self.fg_inputs {
+            input.destroy()
+        }
+        self.fg_inputs.clear()
+        if self.reconstruction != 0_usize {
+            native_reconstruction_destroy(self.reconstruction) self.reconstruction = 0_usize
+        }
+        self.reconstruction_commands.destroy() self.reconstruction_commands = Swapchain::borrow(0)
+        for view in self.mask_views {
+            view.destroy()
+        }
+        self.mask_views.clear()
+        for masks in self.mask_stages {
+            stage_destroy(masks)
+        }
+        self.mask_stages.clear()
+        self.reconstructed.destroy() self.reconstructed = GpuTexture::unavailable()
+        for stage in self.final_stage {
+            stage_destroy(stage)
+        }
+        self.final_stage.clear()
+        for stage in self.stages {
+            stage_destroy(stage)
+        }
+        self.stages.clear()
+        self.raw.destroy() self.solid.destroy() self.double_sided.destroy() self.scene_vertex.destroy() self.scene_fragment.destroy()
+        self.raw = Swapchain::borrow(0) self.configured = false
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        self.composition.wait_readback()
+        self.release() self.quad.destroy() self.area.destroy() self.search.destroy() self.vertex.destroy() self.sampler.destroy() self.layout.destroy()
+    }
+}

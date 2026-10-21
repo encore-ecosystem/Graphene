@@ -1,0 +1,157 @@
+//! Explicit Compile jobs use immutable snapshots and ordinary Encore builds.
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, stringify, parse}
+import mod::codec::blueprint_semantic_source
+import mod::codegen::{BlueprintGenerated, BlueprintSourceRange, generate_blueprints}
+import mod::model::BlueprintAsset
+import std::os::{cwd, env, file_exists, file_sha256, mkdir_all, read_file, write_file, write_file_atomic}
+import std::path::Path
+import std::process::run_args_capture
+import std::string::String
+
+extern fn graphene_bp_stage(parent: str) -> str
+extern fn graphene_bp_target() -> str
+pub struct BlueprintBuild {
+    key: str
+    semantic: str
+    compiler: str
+    directory: str
+    library: str
+    receipt: str
+    cached: bool
+    ranges: Vec[BlueprintSourceRange]
+}
+pub fn blueprint_compiler_path() -> str {
+    let configured = env("ENCORE_COMPILER").unwrap_or("")
+    if configured != "" {
+        ret Path::new(configured).resolve().as_str()
+    }
+    // Resolve once before launching the job; hash the exact selected executable.
+    for directory in String::from_str(env("PATH").unwrap_or("")).split_char(if env("OS").unwrap_or("") == "Windows_NT" {
+            ";"
+        } else {
+            ":"
+        }
+    ) {
+        let candidate = Path::new(directory.as_str()).join(if env("OS").unwrap_or("") == "Windows_NT" {
+                "encore.exe"
+            } else {
+                "encore"
+            }
+        )
+        if file_exists(candidate.as_str()) {
+            ret candidate.resolve().as_str()
+        }
+    }
+    ret ""
+}
+fn write(path: Path, value: str) -> Result[(), str] {
+    if write_file(path.as_str(), value) != 0 {
+        ret Result[(), str]::Err("unable to write Blueprint build input: " + path.as_str())
+    }
+    ret Result[(), str]::Ok(())
+}
+/// Must be called on the editor thread before spawn: all graph vectors are
+/// consumed into strings and ranges, so the worker never observes live edits.
+#attr(safe)
+pub fn prepare_blueprint_build(project: str, support: str, compiler: str, assets: Vec[BlueprintAsset]) -> Result[BlueprintBuild, str] {
+    let generated = generate_blueprints(assets)?
+    let compiler = Path::new(compiler).resolve().as_str()
+    let compiler_hash = file_sha256(compiler)
+    if compiler_hash.byte_len() != 64 {
+        ret Result[BlueprintBuild, str]::Err("cannot fingerprint the selected Encore executable")
+    }
+    let base = Path::new(project).resolve().join("target/blueprints")
+    if mkdir_all(base.as_str()) != 0 {
+        ret Result[BlueprintBuild, str]::Err("unable to create Blueprint build cache")
+    }
+    let stage = graphene_bp_stage(base.as_str())
+    if stage == "" {
+        ret Result[BlueprintBuild, str]::Err("unable to reserve Blueprint build directory")
+    }
+    let root = Path::new(stage)
+    let templates = Path::new(support).resolve()
+    let abi_path = templates.join("abi.h") let runtime_path = templates.join("runtime.c")
+    let abi_hash = file_sha256(abi_path.as_str()) let runtime_hash = file_sha256(runtime_path.as_str())
+    if abi_hash.byte_len() != 64 || runtime_hash.byte_len() != 64 {
+        ret Result[BlueprintBuild, str]::Err("Blueprint compiler support files are missing")
+    }
+    let mut semantic = ""
+    for asset in assets {
+        semantic += blueprint_semantic_source(asset) + "\n"
+    }
+    let identity = semantic + "\nabi-v1\n" + graphene_bp_target() + "\nrelease\n" + compiler_hash + "\n" + abi_hash + "\n" + runtime_hash + "\n" + generated.source + "\n" + generated.registry
+    write(root.join("identity"), identity)?
+    let key = file_sha256(root.join("identity").as_str())
+    if key.byte_len() != 64 {
+        ret Result[BlueprintBuild, str]::Err("unable to fingerprint Blueprint build inputs")
+    }
+    let receipt = base.join(key + ".json")
+    if file_exists(receipt.as_str()) {
+        match parse(read_file(receipt.as_str())) {
+            Ok(record) => {
+                let path = record.get("library").unwrap_or(Json::Null).as_str().unwrap_or("")
+                let checksum = record.get("sha256").unwrap_or(Json::Null).as_str().unwrap_or("")
+                if record.get("key").unwrap_or(Json::Null).as_str().unwrap_or("") == key && checksum.byte_len() == 64 && file_sha256(path) == checksum {
+                    ret Result[BlueprintBuild, str]::Ok(BlueprintBuild {
+                            key, semantic, compiler, stage, path, receipt.as_str(), true, generated.ranges
+                        }
+                        ,
+                    )
+                }
+            }
+            Err(_) => {
+            }
+        }
+    }
+    if mkdir_all(root.join("src").as_str()) != 0 {
+        ret Result[BlueprintBuild, str]::Err("unable to create generated source directory")
+    }
+    write(root.join("encore.toml"), "[project]\nname = \"graphene_blueprint_program\"\nversion = \"0.0.0\"\ntarget = \"shared_lib\"\ndependencies = []\n")?
+    write(root.join("src/lib.enq"), generated.source)?
+    write(root.join("registry.h"), generated.registry)?
+    write(root.join("abi.h"), read_file(abi_path.as_str()))?
+    write(root.join("runtime.c"), read_file(runtime_path.as_str()))?
+    let target = graphene_bp_target()
+    let name = if target.contains("windows") {
+        "graphene_blueprint_program.dll"
+    } elif target.contains("darwin") {
+        "libgraphene_blueprint_program.dylib"
+    } else {
+        "libgraphene_blueprint_program.so"
+    }
+    ret Result[BlueprintBuild, str]::Ok(BlueprintBuild {
+            key, semantic, compiler, stage, root.join("target/release").join(name).as_str(), receipt.as_str(), false, generated.ranges
+        }
+        ,
+    )
+}
+/// Thread entry accepts only strings; completion is atomically published last.
+pub fn run_blueprint_build(compiler: str, directory: str, library: str, receipt: str, key: str) -> i32 {
+    let root = Path::new(directory)
+    let result = run_args_capture(compiler, vec!["build", "--profile", "release", "--manifest-path", root.join("encore.toml").as_str()], root.join("build.log").as_str())
+    let mut success = result == 0
+    let hash = if success {
+        file_sha256(library)
+    } else {
+        ""
+    }
+    success = success && hash.byte_len() == 64
+    if success {
+        success = write_file_atomic(receipt, stringify(Json::Object(vec![field("schema", Json::Number("1")), field("key", Json::String(key)), field("library", Json::String(library)), field("sha256", Json::String(hash))]))) == 0
+    }
+    let status = if success {
+        "0"
+    } else {
+        "1"
+    }
+    if write_file_atomic(root.join("complete").as_str(), status) != 0 {
+        ret 2
+    }
+    ret if success {
+        0
+    } else {
+        1
+    }
+}

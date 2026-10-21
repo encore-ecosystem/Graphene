@@ -1,0 +1,369 @@
+import mod::blend_space::{CookedBlendSpace, BlendSpaceWorkspace}
+//! Pose graphs compile to a typed topological program, never native code.
+//! Authoring IDs remain stable; runtime instructions address pose registers.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::blend::{BoneMask, blend_poses, additive_poses}
+import mod::math::{animation_finite, animation_clamp}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip}
+import mod::pose::AnimationPose
+import mod::sample::sample_clip
+
+pub enum PoseOperation {
+    Rest
+    Clip
+    Blend
+    Additive
+    BlendSpace(BlendSpaceNode)
+}
+/// A compiled blend asset plus scalar parameter bindings. `clip` on the graph
+/// node is the legacy phase-reference clip; node clocks may supply phase directly.
+pub struct BlendSpaceNode {
+    asset: CookedBlendSpace
+    x_parameter: u32
+    y_parameter: Option[u32]
+}
+pub struct NodeSampleTime {
+    seconds: f32
+    phase: f32
+}
+struct GraphBlendWorkspace {
+    value: Option[BlendSpaceWorkspace<H>]
+}
+pub struct AnimationParameter {
+    name: str
+    default_value: f32
+    minimum: f32
+    maximum: f32
+}
+pub struct AnimationNode {
+    id: u64
+    operation: PoseOperation
+    inputs: Vec[u64]
+    clip: u32
+    weight: f32
+    parameter: Option[u32]
+    mask: u32
+}
+pub struct AnimationGraph {
+    version: u32
+    skeleton: str
+    parameters: Vec[AnimationParameter]
+    masks: Vec[BoneMask]
+    nodes: Vec[AnimationNode]
+    output: u64
+}
+pub struct PoseInstruction {
+    id: u64
+    operation: PoseOperation
+    inputs: Vec[u32]
+    clip: u32
+    weight: f32
+    parameter: Option[u32]
+    mask: u32
+}
+pub struct AnimationProgram {
+    skeleton: str
+    parameters: Vec[AnimationParameter]
+    masks: Vec[BoneMask]
+    instructions: Vec[PoseInstruction]
+    output: u32
+    clip_count: u32
+    clips: Vec[AnimationClip]
+}
+pub struct AnimationWorkspace {
+    skeleton: str
+    poses: Vec[AnimationPose]
+    spaces: Vec[GraphBlendWorkspace]
+    legacy_times: Vec[NodeSampleTime]
+}
+fn operation_inputs(operation: PoseOperation) -> usize {
+    ret match operation {
+        PoseOperation::Rest => 0_usize PoseOperation::Clip => 0_usize PoseOperation::Blend => 2_usize PoseOperation::Additive => 3_usize PoseOperation::BlendSpace(_) => 0_usize
+    }
+}
+pub fn compile_animation_graph(graph: AnimationGraph, skeleton: Skeleton, clips: Vec[AnimationClip], morph_count: usize) -> Result[AnimationProgram, str] {
+    skeleton.validate()?
+    if graph.version != 1_u32 || graph.skeleton != skeleton.identity || graph.nodes.len() == 0_usize || graph.nodes.len() > 4096_usize || graph.parameters.len() > 1024_usize {
+        ret Result::Err("Invalid animation graph header")
+    }
+    for clip in clips {
+        clip.validate(skeleton, morph_count)?
+    }
+    for i in 0_usize..graph.parameters.len() {
+        let p = graph.parameters.get_unchecked_borrowed(i) if p.name == "" || !animation_finite(p.default_value) || !animation_finite(p.minimum) || !animation_finite(p.maximum) || p.minimum > p.default_value || p.maximum < p.default_value {
+            ret Result::Err("Invalid animation parameter")
+        }
+        for j in 0_usize..i {
+            if graph.parameters.get_unchecked_borrowed(j).name == p.name {
+                ret Result::Err("Duplicate animation parameter")
+            }
+        }
+    }
+    for mask in graph.masks {
+        if mask.skeleton != skeleton.identity || mask.weights.len() != skeleton.bones.len() {
+            ret Result::Err("Incompatible graph mask")
+        }
+        for weight in mask.weights {
+            if !(weight >= 0_f32 && weight <= 1_f32) {
+                ret Result::Err("Invalid graph mask weight")
+            }
+        }
+    }
+    for i in 0_usize..graph.nodes.len() {
+        let node = graph.nodes.get_unchecked_borrowed(i)
+        if node.id == 0_u64 || node.inputs.len() != operation_inputs(node.operation) || !(node.weight >= 0_f32 && node.weight <= 1_f32) {
+            ret Result::Err("Invalid animation node")
+        }
+        for j in 0_usize..i {
+            if graph.nodes.get_unchecked_borrowed(j).id == node.id {
+                ret Result::Err("Duplicate animation node ID")
+            }
+        }
+        match node.parameter {
+            Some(parameter) => {
+                if parameter as usize >= graph.parameters.len() {
+                    ret Result::Err("Unknown graph parameter")
+                }
+                match node.operation {
+                    PoseOperation::Blend => {
+                        let p = graph.parameters.get_unchecked_borrowed(parameter as usize) if p.minimum < 0_f32 || p.maximum > 1_f32 {
+                            ret Result::Err("Blend parameter range must be within zero and one")
+                        }
+                    }
+                    PoseOperation::Additive => {
+                        let p = graph.parameters.get_unchecked_borrowed(parameter as usize) if p.minimum < 0_f32 || p.maximum > 1_f32 {
+                            ret Result::Err("Additive parameter range must be within zero and one")
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match node.operation {
+            PoseOperation::Clip => {
+                if node.clip as usize >= clips.len() {
+                    ret Result::Err("Unknown graph clip")
+                }
+            }
+            PoseOperation::BlendSpace(binding) => {
+                binding.asset.validate(clips.len())?
+                if binding.asset.source.skeleton != skeleton.identity || node.clip as usize >= clips.len() || binding.x_parameter as usize >= graph.parameters.len() {
+                    ret Result::Err("Invalid blend space graph binding")
+                }
+                match binding.y_parameter {
+                    Some(index) => {
+                        if index as usize >= graph.parameters.len() {
+                            ret Result::Err("Unknown blend space Y parameter")
+                        }
+                    }
+                    None => {
+                        if binding.asset.source.dimensions == 2_u32 {
+                            ret Result::Err("Two-dimensional blend space requires a Y parameter")
+                        }
+                    }
+                }
+            }
+            PoseOperation::Blend => {
+                if node.mask as usize >= graph.masks.len() {
+                    ret Result::Err("Unknown graph blend mask")
+                }
+            }
+            PoseOperation::Additive => {
+                if node.mask as usize >= graph.masks.len() {
+                    ret Result::Err("Unknown graph additive mask")
+                }
+            }
+            _ => {
+            }
+        }
+        for id in node.inputs {
+            let mut found = false for candidate in graph.nodes {
+                if candidate.id == id {
+                    found = true
+                }
+            }
+            if !found {
+                ret Result::Err("Animation edge references a missing node")
+            }
+        }
+    }
+    let mut instructions = Vec[PoseInstruction]::with_capacity(graph.nodes.len())
+    let mut assigned = Vec[bool]::with_capacity(graph.nodes.len()) for _i in 0_usize..graph.nodes.len() {
+        assigned.push(false)
+    }
+    while instructions.len() < graph.nodes.len() {
+        let previous = instructions.len()
+        for index in 0_usize..graph.nodes.len() {
+            if assigned.get_unchecked_borrowed(index) {
+                continue
+            }
+            let node = graph.nodes.get_unchecked_borrowed(index) let mut inputs = Vec[u32]::with_capacity(node.inputs.len())
+            for input in node.inputs {
+                for i in 0_usize..instructions.len() {
+                    if instructions.get_unchecked_borrowed(i).id == input {
+                        inputs.push(i as u32)
+                    }
+                }
+            }
+            if inputs.len() == node.inputs.len() {
+                instructions.push(PoseInstruction {
+                        node.id, node.operation, inputs, node.clip, node.weight, node.parameter, node.mask
+                    }
+                    ,
+                ) assigned.set(index, true)
+            }
+        }
+        if previous == instructions.len() {
+            ret Result::Err("Animation graph contains a pose cycle")
+        }
+    }
+    let mut output = Option[u32]::None
+    for i in 0_usize..instructions.len() {
+        if instructions.get_unchecked_borrowed(i).id == graph.output {
+            output = Option[u32]::Some(i as u32)
+        }
+    }
+    let result = match output {
+        Some(output) => output None => {
+            ret Result::Err("Animation output node is missing")
+        }
+    }
+    ret Result::Ok(AnimationProgram {
+            graph.skeleton, graph.parameters, graph.masks, instructions, result, clips.len() as u32, clips
+        }
+        ,
+    )
+}
+
+impl for AnimationWorkspace {
+    pub fn new(program: AnimationProgram, skeleton: Skeleton, mesh: SkeletalMesh) -> Result[Self, str] {
+        if program.skeleton != skeleton.identity || mesh.skeleton != skeleton.identity {
+            ret Result::Err("Animation workspace skeleton mismatch")
+        }
+        let mut poses = Vec[AnimationPose]::with_capacity(program.instructions.len())
+        for _i in 0_usize..program.instructions.len() {
+            poses.push(AnimationPose::rest(skeleton, mesh.morphs.len()))
+        }
+        let mut spaces = Vec[GraphBlendWorkspace]::with_capacity(program.instructions.len())
+        let mut times = Vec[NodeSampleTime]::with_capacity(program.instructions.len())
+        for instruction in program.instructions {
+            let mut workspace = Option[BlendSpaceWorkspace<H>]::None
+            match instruction.operation {
+                PoseOperation::BlendSpace(binding) => {
+                    workspace = Option[BlendSpaceWorkspace<H>]::Some(BlendSpaceWorkspace::new(binding.asset, skeleton, mesh, program.clips)?)
+                }
+                _ => {
+                }
+            }
+            spaces.push(GraphBlendWorkspace { workspace }) times.push(NodeSampleTime {
+                    0_f32, 0_f32
+                }
+                ,
+            )
+        }
+        ret Result::Ok(Self { program.skeleton, poses, spaces, times })
+    }
+    /// Pure pose evaluation: clocks, notifies and root motion are managed by
+    /// the scene animation scheduler, including frames on which sampling skips.
+    pub fn evaluate(self: mut Self, program: AnimationProgram, skeleton: Skeleton, mesh: SkeletalMesh, clips: Vec[AnimationClip], times: Vec[f32], parameters: Vec[f32]) -> Result[AnimationPose, str] {
+        if times.len() != program.clips.len() || clips.len() != program.clips.len() {
+            ret Result::Err("Animation legacy clock binding mismatch")
+        }
+        for i in 0_usize..clips.len() {
+            if clips.get_unchecked_borrowed(i).identity != program.clips.get_unchecked_borrowed(i).identity || !animation_finite(times.get_unchecked_borrowed(i)) {
+                ret Result::Err("Animation clip binding or clock changed")
+            }
+        }
+        self.legacy_times.clear()
+        for instruction in program.instructions {
+            let mut time = NodeSampleTime { 0_f32, 0_f32 }
+            match instruction.operation {
+                PoseOperation::Clip => {
+                    time.seconds = times.get_unchecked_borrowed(instruction.clip as usize)
+                }
+                PoseOperation::BlendSpace(_) => {
+                    let clip = program.clips.get_unchecked_borrowed(instruction.clip as usize) if clip.duration > 0_f32 {
+                        time.phase = animation_clamp(times.get_unchecked_borrowed(instruction.clip as usize) / clip.duration, 0_f32, 1_f32)
+                    }
+                }
+                _ => {
+                }
+            }
+            self.legacy_times.push(time)
+        }
+        ret self.evaluate_nodes(program, skeleton, mesh, self.legacy_times, parameters)
+    }
+    /// Each instruction owns a clock register. Two nodes referencing the same
+    /// clip can sample different times; BlendSpace registers carry normalized phase.
+    pub fn evaluate_nodes(self: mut Self, program: AnimationProgram, skeleton: Skeleton, mesh: SkeletalMesh, times: Vec[NodeSampleTime], parameters: Vec[f32]) -> Result[AnimationPose, str] {
+        let clips = program.clips
+        if self.skeleton != program.skeleton || skeleton.identity != program.skeleton || self.poses.len() != program.instructions.len() || times.len() != program.instructions.len() || self.spaces.len() != program.instructions.len() || parameters.len() != program.parameters.len() || program.output as usize >= self.poses.len() {
+            ret Result::Err("Animation program binding mismatch")
+        }
+        for value in parameters {
+            if !animation_finite(value) {
+                ret Result::Err("Non-finite animation parameter")
+            }
+        }
+        for time in times {
+            if !animation_finite(time.seconds) || !(time.phase >= 0_f32 && time.phase <= 1_f32) {
+                ret Result::Err("Invalid animation node clock")
+            }
+        }
+        for i in 0_usize..program.instructions.len() {
+            let instruction = program.instructions.get_unchecked_borrowed(i)
+            let mut output = self.poses.get_unchecked_borrowed(i)
+            output.reset(skeleton, mesh)?
+            let mut weight = instruction.weight
+            match instruction.parameter {
+                Some(index) => {
+                    let p = program.parameters.get_unchecked_borrowed(index as usize) let v = parameters.get_unchecked_borrowed(index as usize) if !animation_finite(v) {
+                        ret Result::Err("Non-finite animation parameter")
+                    }
+                    weight = animation_clamp(v, p.minimum, p.maximum)
+                }
+                None => {
+                }
+            }
+            match instruction.operation {
+                PoseOperation::Rest => {
+                }
+                PoseOperation::Clip => {
+                    output = sample_clip(clips.get_unchecked_borrowed(instruction.clip as usize), times.get_unchecked_borrowed(i).seconds, output)?
+                }
+                PoseOperation::BlendSpace(binding) => {
+                    let mut workspace = match self.spaces.get_unchecked_borrowed(i).value {
+                        Some(workspace) => workspace None => {
+                            ret Result::Err("Missing blend space workspace")
+                        }
+                    }
+                    let p = program.parameters.get_unchecked_borrowed(binding.x_parameter as usize)
+                    let x = animation_clamp(parameters.get_unchecked_borrowed(binding.x_parameter as usize), p.minimum, p.maximum)
+                    let mut y = binding.asset.source.y.minimum
+                    match binding.y_parameter {
+                        Some(index) => {
+                            let p = program.parameters.get_unchecked_borrowed(index as usize) y = animation_clamp(parameters.get_unchecked_borrowed(index as usize), p.minimum, p.maximum)
+                        }
+                        None => {
+                        }
+                    }
+                    let pose = workspace.evaluate(binding.asset, skeleton, mesh, clips, x, y, times.get_unchecked_borrowed(i).phase)?
+                    output.copy_from(pose)?
+                }
+                PoseOperation::Blend => {
+                    output = blend_poses(self.poses.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(0_usize) as usize), self.poses.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(1_usize) as usize), weight, program.masks.get_unchecked_borrowed(instruction.mask as usize), output)?
+                }
+                PoseOperation::Additive => {
+                    output = additive_poses(self.poses.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(0_usize) as usize), self.poses.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(1_usize) as usize), self.poses.get_unchecked_borrowed(instruction.inputs.get_unchecked_borrowed(2_usize) as usize), weight, program.masks.get_unchecked_borrowed(instruction.mask as usize), output)?
+                }
+            }
+            self.poses.set(i, output)
+        }
+        ret Result::Ok(self.poses.get_unchecked_borrowed(program.output as usize))
+    }
+}

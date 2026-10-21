@@ -1,7 +1,35 @@
 target/
 **/target/
+**/.encore_cache/
+# Editor caches, import backups and local workspace state.
+**/.graphene/
 artifacts/
 bundles/
+
+# Python/tool caches and native build products. OBJ meshes are source assets.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.o
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+
+# Rebuildable import sidecars. Keep native assets and AutoLOD settings in general.
+*.obj.gmesh
+*.graphene-material.json.gmaterial
+*.graphene-weather.json.gweather
+/tests/fixtures/obj_texture/Plane.gtexture
+**/Config/LODGroups.before-distance*.json
+
+# Optional local high-resolution source packs and their large demo derivatives.
+# See README.md. Files remain available locally.
+/Assets/Materials/Flat Grass/
+/Assets/Models/Rocks/
 
 .DS_Store
 Thumbs.db
@@ -15,4 +43,4 @@ Thumbs.db
 .env.*
 *.log
 core
-core.*
+core.[0-9]*

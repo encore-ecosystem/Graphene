@@ -1,0 +1,150 @@
+import std::io::println
+//! Native import, source-independent playback ranges, scene history and migration.
+import core::option::Option
+import graphene::AudioPanel
+import graphene::audio::asset::{import_sound, load_sound, waveform}
+import graphene::native_asset::{native_sound_header, NativeSound}
+import graphene::{Scene, SceneActor, SceneAsset, Transform, SceneComponent, AudioSource, AudioSettings, EditorState, GrapheneCommand, ActorComponentCommand}
+import linalg::Vec3
+import std::os::{mkdir_all, copy_file, remove_file, read_file, write_file}
+
+fn main() -> u32 {
+    let project = "target/audio-fixture"
+    mkdir_all(project + "/Content/Audio") mkdir_all(project + "/Config")
+    let source = project + "/pulse.wav"
+    if copy_file("Assets/Audio/Preview_Pulse.wav", source) != 0 {
+        ret 1
+    }
+    // A previous test run can retain the asset, which must reimport in place.
+    let imported = import_sound(project, source)
+    if imported.error != "" {
+        println(imported.error) ret 2
+    }
+    let first = match load_sound(project, imported.path) {
+        Ok(value) => value Err(_) => {
+            ret 3
+        }
+    }
+    let second_import = import_sound(project, source)
+    let second = match load_sound(project, second_import.path) {
+        Ok(value) => value Err(_) => {
+            ret 4
+        }
+    }
+    if first.identity != second.identity || first.bytes == 0 || first.offset < 8 {
+        ret 5
+    }
+    let peaks = waveform(project, imported.path)
+    if peaks.len() == 0 || peaks.len() > 512 {
+        ret 6
+    }
+    remove_file(source)
+    if native_sound_header(project + "/" + imported.path, true).is_err() {
+        ret 7
+    }
+    let mut c = AudioSource::defaults() c.asset = imported.path c.gain = 0.4_f32 c.looped = true
+    let mut scene = Scene::new()
+    let parent = scene.create_entity("Moving parent", Transform::identity().with_position(Vec3::new(3, 0, 0)))
+    let id = scene.create_entity("Sound", Transform::identity())
+    scene.set_parent(id, Option[u64]::Some(parent)) scene.set_component(id, SceneComponent::Audio(c))
+    if scene.world_position(id).unwrap_or(Vec3::zero()).x() != 3 {
+        ret 8
+    }
+    let mut state = EditorState::new(scene)
+    let mut quieter = c quieter.gain = 0.2_f32
+    if !state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                id, SceneComponent::Audio(quieter)
+            }
+            ,
+        )).success() {
+        ret 20
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 21
+    }
+    match state.scene().get(id) {
+        Some(actor) => {
+            match actor.component() {
+                Audio(value) => {
+                    if value.gain != c.gain {
+                        ret 22
+                    }
+                }
+                _ => {
+                    ret 23
+                }
+            }
+        }
+        None => {
+            ret 24
+        }
+    }
+    // Component undo is exercised through the same command path as Details.
+    let mut asset = SceneAsset::new()
+    asset.add(SceneActor::new("Sound", "audio-source", Transform::identity()).with_identity(id).with_component(SceneComponent::Audio(c)))
+    let decoded = match SceneAsset::parse(asset.stringify()) {
+        Some(value) => value None => {
+            ret 9
+        }
+    }
+    if decoded.version() != 6 || decoded.source_version() != 6 {
+        ret 10
+    }
+    match decoded.actor_by_id(id) {
+        Some(actor) => {
+            match actor.component() {
+                Audio(sound) => {
+                    if sound.asset != c.asset || !sound.looped || sound.gain != 0.4_f32 {
+                        ret 11
+                    }
+                }
+                _ => {
+                    ret 12
+                }
+            }
+        }
+        None => {
+            ret 13
+        }
+    }
+    let mut invalid = c invalid.maximum = invalid.minimum
+    if invalid.valid() {
+        ret 14
+    }
+    let settings = AudioSettings::defaults()
+    if !settings.save(project) {
+        ret 15
+    }
+    let restored = AudioSettings::load(project)
+    if !restored.headphones || restored.max_voices != 64 {
+        ret 16
+    }
+    let mut panel = AudioPanel::new() panel.configure(project)
+    if !panel.action("audio-mute-0") || !panel.runtime.settings.mutes.get(0_usize).unwrap_or(false) {
+        ret 25
+    }
+    panel.history_step(false)
+    if panel.runtime.settings.mutes.get(0_usize).unwrap_or(true) {
+        ret 26
+    }
+    panel.history_step(true)
+    if !panel.runtime.settings.mutes.get(0_usize).unwrap_or(false) {
+        ret 27
+    }
+    // The checksum must reject a payload change, even without a source file.
+    let file = project + "/" + imported.path
+    let contents = read_file(file)
+    if write_file(file, contents.slice_bytes(0, contents.byte_len() - 1) + "x") != 0 {
+        ret 17
+    }
+    if native_sound_header(file, true).is_ok() {
+        ret 18
+    }
+    // Leave a valid fixture for the next invocation.
+    copy_file("Assets/Audio/Preview_Pulse.wav", source)
+    let repaired = import_sound(project, source)
+    if repaired.error != "" {
+        ret 19
+    }
+    ret 0
+}

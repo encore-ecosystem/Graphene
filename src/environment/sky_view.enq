@@ -1,0 +1,541 @@
+//! Per-camera atmosphere LUTs and reduced-resolution temporal clouds; slot-owned GPU data.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import mod::frame::*
+import mod::hdr::{HdrImage, HdrUpload, load_hdr}
+import mod::system::EnvironmentFrame
+import refrain::material_graph::runtime::{RuntimeMaterial, material_path_valid}
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::shaders::aa_fullscreen::aa_fullscreen
+import refrain::texture_gpu::TextureUpload
+import refrain::texture_image::{TextureImage, texture_path_valid}
+import std::thread::JoinHandle
+extern fn graphene_environment_shader_length(shader: u32) -> u32
+extern fn graphene_environment_shader_word(shader: u32, index: u32) -> u32
+pub fn environment_spirv(shader: u32) -> Vec[u32] {
+    let mut words = Vec[u32]::new()
+    unsafe {
+        let count = graphene_environment_shader_length(shader)
+        for index in 0..(count as usize) {
+            words.push(graphene_environment_shader_word(shader, index as u32))
+        }
+    }
+    ret words
+}
+struct EnvironmentBinding {
+    slot: u32,
+    key: u64,
+    group: BindGroup
+}
+struct EnvironmentStage {
+    target: Swapchain
+    textures: Vec[GpuTexture]
+    depths: Vec[GpuTexture]
+    active_slot: usize
+    pipeline: RenderPipeline
+    shader: ShaderModule
+    uniforms: Vec[GpuBuffer]
+    groups: Vec[EnvironmentBinding]
+}
+struct SkyPipeline {
+    target: usize
+    signature: u64
+    generation: u64
+    shader_key: str
+    cloud: bool
+    texture_key: u64
+    shader: ShaderModule
+    pipeline: RenderPipeline
+    uniforms: Vec[GpuBuffer]
+    groups: Vec[BindGroup]
+}
+pub struct EnvironmentView {
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    vertex: ShaderModule
+    quad: GpuMesh
+    pipelines: Vec[SkyPipeline]
+    stages: Vec[EnvironmentStage<H>]
+    sky_material: RuntimeMaterial<H>
+    cloud_material: RuntimeMaterial<H>
+    sky_path: str
+    volume_path: str
+    project: str
+    requested: str
+    loaded_path: str
+    worker_path: str
+    worker: Option[JoinHandle[Result[HdrImage, str]]]
+    upload: Option[HdrUpload]
+    panorama: GpuTexture
+    sampler: GpuSampler
+    generation: u64
+    hdr_ready: bool
+    graph_key: str
+    graph_code: Vec[u32]
+    cloud_key: str
+    cloud_code: Vec[u32]
+    stage_key: str
+    turbidity: f32
+    history: usize
+    history_valid: bool
+    previous: Vec[f32]
+    error: str
+}
+fn release_stage(stage: EnvironmentStage<H>) ->() {
+    for group in stage.groups {
+        group.group.destroy()
+    }
+    for uniform in stage.uniforms {
+        uniform.destroy()
+    }
+    stage.pipeline.destroy() stage.shader.destroy()
+    for texture in stage.textures {
+        texture.destroy()
+    }
+    for depth in stage.depths {
+        depth.destroy()
+    }
+    stage.target.destroy()
+}
+fn create_stage(device: GraphicsDevice, layout: BindGroupLayout, vertex: ShaderModule, width: u32, height: u32, code: Vec[u32], cloud: bool) -> EnvironmentStage<H> {
+    let desc = RenderTargetDescriptor::new(width, height, format_rgba16_float())
+    let target = device.create_render_target(if cloud {
+            desc.with_auxiliary(format_rgba16_float())
+        } else {
+            desc
+        }
+    )
+    let shader = device.create_shader_module(code, shader_stage_fragment())
+    let pipeline = device.create_render_pipeline_with_options(target, vertex, shader, VertexBufferLayout::empty(), layout, RenderPipelineOptions::opaque().with_depth_attachment(true))
+    let mut uniforms = Vec[GpuBuffer]::new()
+    for slot in 0..(target.frames_in_flight() as usize) {
+        uniforms.push(device.create_buffer(576, buffer_uniform(), true))
+    }
+    // An offscreen target has two images. Retain one sampled view per image,
+    // and publish the slot actually submitted, rather than the startup image.
+    let mut textures = Vec[GpuTexture]::new() let mut depths = Vec[GpuTexture]::new()
+    for i in 0..(target.frames_in_flight() as usize) {
+        let frame = target.try_acquire_frame()
+        if frame.available() && frame.sampled_color_barrier() {
+            let pass = frame.begin_render_pass(pipeline, 0, 0, 0, 0)
+            let _initialized = pass.end() && frame.present()
+        }
+        frame.destroy()
+        textures.push(device.borrow_sampled_texture(target.attachment_image(0), width, height, format_rgba16_float(), texture_layout_shader_read()))
+        if cloud {
+            depths.push(device.borrow_sampled_texture(target.attachment_image(1), width, height, format_rgba16_float(), texture_layout_shader_read()))
+        }
+    }
+    ret EnvironmentStage<H> {
+        target, textures, depths, 1, pipeline, shader, uniforms, Vec[EnvironmentBinding]::new()
+    }
+}
+
+fn view_values(camera: PerspectiveCamera, aspect: f32, state: EnvironmentFrame) -> Vec[f32] {
+    let projection = camera.projection(aspect).values()
+    let forward = camera.target().sub(camera.position()).normalized()
+    let right = forward.cross(Vec3::new(0, 1, 0)).normalized().scale(1 / projection.get(0).unwrap_or(1))
+    let up = right.normalized().cross(forward).normalized().scale( - 1 / projection.get(5).unwrap_or( - 1))
+    let mut data = state.values()
+    for v in vec![camera.position(), forward, right, up] {
+        data.push(v.x()) data.push(v.y()) data.push(v.z()) data.push(0)
+    }
+    ret data
+}
+
+impl for EnvironmentView {
+    pub fn create(device: GraphicsDevice) -> EnvironmentView<H> {
+        ret EnvironmentView<H> {
+            device,
+            device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(1, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(2, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(3, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(4, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(5, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(6, shader_stage_fragment())]),
+            device.create_shader_module(aa_fullscreen(), shader_stage_vertex()),
+            device.create_mesh(vec![0.0_f32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], vec![0_u32, 1, 2]),
+            Vec[SkyPipeline]::new(), Vec[EnvironmentStage<H>]::new(), RuntimeMaterial::new(), RuntimeMaterial::new(), "", "", "", "", "", "", Option::None, Option::None, white_panorama(device), device.create_sampler(), 0, false,
+            "", Vec[u32]::new(), "", Vec[u32]::new(), "", - 1, 0, false, Vec[f32]::new(), ""
+        }
+    }
+    pub fn set_project(self: mut Self&, project: str) -> bool {
+        let changed = self.project != project self.project = project ret changed
+    }
+    pub fn set_graph(self: mut Self&, domain: str, key: str, code: Vec[u32]) ->() {
+        if domain == "volume" {
+            self.cloud_key = key self.cloud_code = code
+        } else {
+            self.graph_key = key self.graph_code = code
+        }
+    }
+    fn release_pipelines(self: mut Self&) ->() {
+        for entry in self.pipelines {
+            for group in entry.groups {
+                group.destroy()
+            }
+            for buffer in entry.uniforms {
+                buffer.destroy()
+            }
+            entry.pipeline.destroy() entry.shader.destroy()
+        }
+        self.pipelines.clear()
+    }
+    fn release_stages(self: mut Self&) ->() {
+        for i in 0..self.stages.len() {
+            release_stage(self.stages.get_unchecked_borrowed(i))
+        }
+        self.stages.clear() self.history_valid = false self.turbidity = - 1
+    }
+    fn stage_texture(self: Self&, index: usize, depth: bool) -> GpuTexture {
+        let stage = self.stages.get_unchecked_borrowed(index)
+        ret if depth {
+            stage.depths.get(stage.active_slot).unwrap_or(GpuTexture::unavailable())
+        } else {
+            stage.textures.get(stage.active_slot).unwrap_or(GpuTexture::unavailable())
+        }
+    }
+    fn texture_key(self: Self&, history: usize) -> u64 {
+        if self.stages.len() != 5 {
+            ret self.generation * 32
+        }
+        let cloud = self.stages.get_unchecked_borrowed(3 + history).active_slot as u64
+        let transmittance = self.stages.get_unchecked_borrowed(0).active_slot as u64
+        let multiple = self.stages.get_unchecked_borrowed(1).active_slot as u64
+        let sky = self.stages.get_unchecked_borrowed(2).active_slot as u64
+        ret self.generation * 32 +(history as u64) + cloud * 2 + transmittance * 4 + multiple * 8 + sky * 16
+    }
+    fn textures(self: Self&, history: usize) -> Vec[GpuTexture] {
+        if self.stages.len() != 5 {
+            ret vec![self.panorama, self.panorama, self.panorama, self.panorama, self.panorama, self.panorama]
+        }
+        ret vec![self.panorama, self.stage_texture(3 + history, false), self.stage_texture(0, false), self.stage_texture(1, false), self.stage_texture(2, false), self.stage_texture(3 + history, true)]
+    }
+    fn record_stage(self: mut Self&, index: usize, values: Vec[f32], history: usize, label: u32) -> bool {
+        let textures = self.textures(history)
+        let mut stage = self.stages.get_unchecked_borrowed(index)
+        let frame = stage.target.try_acquire_frame()
+        if !frame.available() {
+            frame.destroy() ret false
+        }
+        let key = self.texture_key(history)
+        let mut selected = stage.groups.len()
+        for i in 0..stage.groups.len() {
+            let entry = stage.groups.get_unchecked_borrowed(i) if entry.slot == frame.slot() && entry.key == key {
+                selected = i break
+            }
+        }
+        let buffer = stage.uniforms.get(frame.slot() as usize).unwrap_or(GpuBuffer::unavailable())
+        if selected == stage.groups.len() {
+            stage.groups.push(EnvironmentBinding {
+                    frame.slot(), key, self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![576_u64], vec![1_u32, 2, 3, 4, 5, 6], textures, vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler, self.sampler])
+                }
+                ,
+            )
+        }
+        if !buffer.write_f32s(0, values) || !frame.sampled_color_barrier() {
+            frame.destroy() ret false
+        }
+        frame.timing_mark(label, true)
+        let pass = frame.begin_render_pass(stage.pipeline, 0, 0, 0, 0)
+        let recorded = pass.bind_group(stage.groups.get_unchecked_borrowed(selected).group) && pass.draw_mesh(self.quad) && pass.end()
+        frame.timing_mark(label, false)
+        let slot = frame.slot() as usize
+        let submitted = recorded && frame.present() frame.destroy()
+        if submitted {
+            stage.active_slot = slot
+        }
+        self.stages.set(index, stage)
+        ret submitted
+    }
+    pub fn prepare(self: mut Self&, target: Swapchain, camera: PerspectiveCamera, state: EnvironmentFrame) ->() {
+        if !state.enabled {
+            self.history_valid = false ret()
+        }
+        if self.pipelines.len() > 24 && target.last_frame_complete() {
+            self.release_pipelines()
+        }
+        let sky_path = if material_path_valid(state.atmosphere.material) && state.atmosphere.material != "" {
+            self.project + "/" + state.atmosphere.material
+        } else {
+            ""
+        }
+        let volume_path = if material_path_valid(state.clouds.material) && state.clouds.material != "" {
+            self.project + "/" + state.clouds.material
+        } else {
+            ""
+        }
+        if self.sky_path != sky_path {
+            self.sky_path = sky_path self.sky_material.request(sky_path) if sky_path == "" {
+                self.graph_key = "" self.graph_code.clear()
+            }
+        }
+        if self.volume_path != volume_path {
+            self.volume_path = volume_path self.cloud_material.request(volume_path) if volume_path == "" {
+                self.cloud_key = "" self.cloud_code.clear()
+            }
+        }
+        match self.sky_material.tick() {
+            Some(asset) => {
+                if asset.domain == "sky" {
+                    match asset.shaders() {
+                        Ok(code) => {
+                            self.set_graph("sky", asset.semantic, code.get(0).unwrap_or(Vec[u32]::new()))
+                        }
+                        Err(error) => {
+                            self.error = error
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match self.cloud_material.tick() {
+            Some(asset) => {
+                if asset.domain == "volume" {
+                    match asset.shaders() {
+                        Ok(code) => {
+                            self.set_graph("volume", asset.semantic, code.get(0).unwrap_or(Vec[u32]::new()))
+                        }
+                        Err(error) => {
+                            self.error = error
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        let desired = if texture_path_valid(state.atmosphere.panorama) && state.atmosphere.panorama != "" {
+            self.project + "/" + state.atmosphere.panorama
+        } else {
+            ""
+        }
+        self.requested = desired
+        let ready = match self.worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if ready {
+            match self.worker {
+                Some(worker) => {
+                    let result = worker.join() if self.worker_path == desired {
+                        match result {
+                            Ok(image) => {
+                                self.upload = HdrUpload::begin(self.device, image)
+                            }
+                            Err(error) => {
+                                self.error = error
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            self.worker = Option[JoinHandle[Result[HdrImage, str]]]::None
+        }
+        let completed = match self.upload {
+            Some(upload) => upload.complete() None => false
+        }
+        if completed && target.last_frame_complete() {
+            match self.upload {
+                Some(upload) => {
+                    self.release_pipelines()
+                    for i in 0..self.stages.len() {
+                        let mut stage = self.stages.get_unchecked_borrowed(i) for group in stage.groups {
+                            group.group.destroy()
+                        }
+                        stage.groups.clear() self.stages.set(i, stage)
+                    }
+                    let texture = upload.finish()
+                    if self.worker_path == desired {
+                        self.panorama.destroy() self.panorama = texture self.loaded_path = desired self.generation += 1
+                    } else {
+                        texture.destroy()
+                    }
+                }
+                None => {
+                }
+            }
+            self.upload = Option[HdrUpload]::None
+        }
+        if self.worker.is_none() && self.upload.is_none() && desired != "" && self.worker_path != desired {
+            self.worker_path = desired self.worker = Option[JoinHandle[Result[HdrImage, str]]]::Some(spawn load_hdr(desired))
+        }
+        self.hdr_ready = desired != "" && self.loaded_path == desired
+        let divisor = if state.atmosphere.quality == 0 {
+            4_u32
+        } else {
+            2_u32
+        }
+        let width =(target.width() + divisor - 1) / divisor let height =(target.height() + divisor - 1) / divisor
+        let resize = self.stages.len() != 5 || self.stage_key != self.cloud_key || self.stages.get_unchecked_borrowed(3).target.width() != width || self.stages.get_unchecked_borrowed(3).target.height() != height
+        if resize {
+            if !target.last_frame_complete() {
+                ret()
+            }
+            self.release_pipelines() self.release_stages() self.generation += 1
+            self.stages.push(create_stage(self.device, self.layout, self.vertex, 256, 64, environment_spirv(6), false))
+            self.stages.push(create_stage(self.device, self.layout, self.vertex, 32, 32, environment_spirv(7), false))
+            self.stages.push(create_stage(self.device, self.layout, self.vertex, 192, 108, environment_spirv(8), false))
+            for i in 0..2 {
+                self.stages.push(create_stage(self.device, self.layout, self.vertex, width, height, if self.cloud_code.len() > 0 {
+                            self.cloud_code
+                        } else {
+                            environment_spirv(5)
+                        }
+                        , true,))
+            }
+            self.stage_key = self.cloud_key self.history = 0
+        }
+        let mut data = view_values(camera, target.width() as f32 / target.height() as f32, state)
+        let physical = state.atmosphere.style == "realistic"
+        if physical {
+            if self.turbidity != state.atmosphere.turbidity {
+                if !self.record_stage(0, data, self.history, 11) || !self.record_stage(1, data, self.history, 15) {
+                    ret()
+                }
+                self.turbidity = state.atmosphere.turbidity
+            }
+            if !self.record_stage(2, data, self.history, 11) {
+                ret()
+            }
+        }
+        if self.history_valid && self.previous.len() == 144 {
+            let old_position = Vec3::new(self.previous.get(128).unwrap_or(0), self.previous.get(129).unwrap_or(0), self.previous.get(130).unwrap_or(0))
+            let old_forward = Vec3::new(self.previous.get(132).unwrap_or(0), self.previous.get(133).unwrap_or(0), self.previous.get(134).unwrap_or(0))
+            let forward = camera.target().sub(camera.position()).normalized()
+            let dt = state.elapsed - self.previous.get(3).unwrap_or(0)
+            let old_cloudiness = self.previous.get(4).unwrap_or(0)
+            let old_style = self.previous.get(1).unwrap_or(0)
+            let mut stable_settings = true
+            for i in vec![1_usize, 15, 19, 20, 21, 22, 23, 24, 25, 26, 27, 33, 34] {
+                stable_settings = stable_settings && self.previous.get(i).unwrap_or(0) == data.get(i).unwrap_or(0)
+            }
+            let time_delta = state.time_hours - self.previous.get(2).unwrap_or(0)
+            if camera.position().sub(old_position).length() < 0.0001_f32 && forward.sub(old_forward).length() < 0.00001_f32 && dt >= 0 && dt < 0.1_f32 && time_delta > - 0.02_f32 && time_delta < 0.02_f32 && stable_settings && old_cloudiness - data.get(4).unwrap_or(0) < 0.02_f32 && old_cloudiness - data.get(4).unwrap_or(0) > - 0.02_f32 && old_style == data.get(1).unwrap_or(0) {
+                for i in 0..16 {
+                    data.set(40 + i, self.previous.get(128 + i).unwrap_or(0))
+                }
+                data.set(43, 1) data.set(59, dt)
+            }
+        }
+        let next = 1 - self.history
+        if !self.record_stage(3 + next, data, self.history, 12) {
+            ret()
+        }
+        self.previous = view_values(camera, target.width() as f32 / target.height() as f32, state)
+        self.history = next self.history_valid = true
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame, target: Swapchain, camera: PerspectiveCamera, state: EnvironmentFrame) -> bool {
+        if !state.enabled {
+            ret true
+        }
+        if !self.record_layer(frame, target, camera, state, false) {
+            ret false
+        }
+        ret self.record_layer(frame, target, camera, state, true)
+    }
+    fn record_layer(self: mut Self&, frame: RenderFrame, target: Swapchain, camera: PerspectiveCamera, state: EnvironmentFrame, cloud: bool) -> bool {
+        if self.stages.len() != 5 {
+            ret false
+        }
+        let key = if cloud {
+            self.cloud_key
+        } else {
+            self.graph_key
+        }
+        let mut selected = self.pipelines.len()
+        for index in 0..self.pipelines.len() {
+            let entry = self.pipelines.get_unchecked_borrowed(index)
+            if entry.target == target.handle() && entry.signature == target.render_signature() && entry.generation == self.generation && entry.shader_key == key && entry.cloud == cloud && entry.texture_key == self.texture_key(self.history) {
+                selected = index break
+            }
+        }
+        if selected == self.pipelines.len() {
+            let shader = self.device.create_shader_module(if cloud {
+                    environment_spirv(9)
+                } elif self.graph_code.len() > 0 {
+                    self.graph_code
+                } else {
+                    environment_spirv(0)
+                }
+                , shader_stage_fragment(),)
+            let pipeline = self.device.create_render_pipeline_with_options(target, self.vertex, shader, VertexBufferLayout::empty(), self.layout, if cloud {
+                    RenderPipelineOptions::opaque().with_depth_attachment(true).with_alpha_blending()
+                } else {
+                    RenderPipelineOptions::opaque().with_depth_attachment(true)
+                }
+                ,
+            )
+            let mut uniforms = Vec[GpuBuffer]::new() let mut groups = Vec[BindGroup]::new()
+            for slot in 0..(target.frames_in_flight() as usize) {
+                let buffer = self.device.create_buffer(576, buffer_uniform(), true)
+                groups.push(self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![576_u64], vec![1_u32, 2, 3, 4, 5, 6], self.textures(self.history), vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler, self.sampler])) uniforms.push(buffer)
+            }
+            self.pipelines.push(SkyPipeline {
+                    target.handle(), target.render_signature(), self.generation, key, cloud, self.texture_key(self.history), shader, pipeline, uniforms, groups
+                }
+                ,
+            )
+        }
+        let entry = self.pipelines.get_unchecked_borrowed(selected)
+        let mut data = view_values(camera, target.width() as f32 / target.height() as f32, state)
+        data.set(23, 0) data.set(32, if self.hdr_ready {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+            ,
+        )
+        if !entry.uniforms.get(frame.slot() as usize).unwrap_or(GpuBuffer::unavailable()).write_f32s(0, data) {
+            ret false
+        }
+        frame.timing_mark(if cloud {
+                12_u32
+            } else {
+                11_u32
+            }
+            , true,)
+        let pass = if cloud {
+            frame.continue_render_pass(entry.pipeline)
+        } else {
+            frame.begin_render_pass(entry.pipeline, 0, 0, 0, 1)
+        }
+        let recorded = pass.bind_group(entry.groups.get(frame.slot() as usize).unwrap_or(BindGroup::unavailable())) && pass.draw_mesh(self.quad)
+        frame.timing_mark(if cloud {
+                12_u32
+            } else {
+                11_u32
+            }
+            , false,)
+        ret recorded
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        match self.worker {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        match self.upload {
+            Some(upload) => {
+                upload.wait() upload.finish().destroy()
+            }
+            None => {
+            }
+        }
+        self.sky_material.destroy() self.cloud_material.destroy()
+        self.release_pipelines() self.release_stages() self.panorama.destroy() self.sampler.destroy() self.quad.destroy() self.vertex.destroy() self.layout.destroy()
+    }
+}
+fn white_panorama(device: GraphicsDevice) -> GpuTexture {
+    match TextureUpload::begin_linear(device, TextureImage { 1, 1, vec![4294967295_u32] }) {
+        Some(upload) => {
+            upload.wait() ret upload.finish()
+        }
+        None => {
+            ret GpuTexture::unavailable()
+        }
+    }
+}

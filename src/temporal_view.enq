@@ -1,0 +1,81 @@
+//! Previous transforms belong to a successfully submitted view, not UI frames.
+import core::option::Option
+import core::vec::Vec
+import linalg::Mat4
+import mod::scene::renderable::RenderItem
+pub struct TemporalView {
+    entities: Vec[u64]
+    models: Vec[Mat4]
+    meshes: Vec[u64]
+    materials: Vec[u64]
+    previous_view_projection: Mat4
+    valid: bool
+}
+
+impl for TemporalView {
+    pub fn new() -> TemporalView<H> {
+        ret TemporalView<H> {
+            Vec[u64]::new(), Vec[Mat4]::new(), Vec[u64]::new(), Vec[u64]::new(), Mat4::identity(), false
+        }
+    }
+    /// Copy into existing storage: Encore currently rejects rebinding an explicit
+    /// heap-node field (see PROBLEMS.md). Keep capacity and avoid sharing a writer.
+    pub fn copy_from(self: mut Self&, source: TemporalView&) ->() {
+        self.entities.clear() self.models.clear() self.meshes.clear() self.materials.clear()
+        for value in source.entities {
+            self.entities.push(value)
+        }
+        for value in source.models {
+            self.models.push(value)
+        }
+        for value in source.meshes {
+            self.meshes.push(value)
+        }
+        for value in source.materials {
+            self.materials.push(value)
+        }
+        self.previous_view_projection = source.previous_view_projection self.valid = source.valid
+    }
+    pub fn reset(self: mut Self&) ->() {
+        self.valid = false
+    }
+    pub fn view_projection(self: Self&) -> Mat4 {
+        ret self.previous_view_projection
+    }
+    pub fn previous(self: Self&, item: RenderItem) ->(Mat4, bool) {
+        if self.valid {
+            for i in 0..self.entities.len() {
+                if self.entities.get(i).unwrap_or(0) == item.entity() && self.meshes.get(i).unwrap_or(0) == item.mesh().value() && self.materials.get(i).unwrap_or(0) == item.material().value() {
+                    ret(self.models.get(i).unwrap_or(item.world()), true)
+                }
+            }
+        }
+        ret(item.world(), false)
+    }
+    pub fn commit(self: mut Self&, items: Vec[RenderItem], view_projection: Mat4) ->() {
+        self.entities.clear() self.models.clear() self.meshes.clear() self.materials.clear()
+        for item in items {
+            self.entities.push(item.entity()) self.models.push(item.world()) self.meshes.push(item.mesh().value()) self.materials.push(item.material().value())
+        }
+        self.previous_view_projection = view_projection self.valid = true
+    }
+}
+pub fn temporal_jitter(index: u32, width: u32, height: u32) ->(f32, f32) {
+    ret temporal_jitter_phases(index, width, height, 8)
+}
+pub fn temporal_jitter_phases(index: u32, width: u32, height: u32, phases: u32) ->(f32, f32) {
+    if width == 0 || height == 0 || phases == 0 {
+        ret(0.0_f32, 0.0_f32)
+    }
+    let sample = index % phases + 1
+    let mut x = 0.0_f32 let mut y = 0.0_f32
+    let mut factor = 0.5_f32 let mut value = sample
+    while value > 0 {
+        x += factor *(value % 2) as f32 value /= 2 factor *= 0.5_f32
+    }
+    factor = 1.0_f32 / 3.0_f32 value = sample
+    while value > 0 {
+        y += factor *(value % 3) as f32 value /= 3 factor /= 3.0_f32
+    }
+    ret((x - 0.5_f32) * 2.0_f32 / width as f32,(y - 0.5_f32) * 2.0_f32 / height as f32)
+}

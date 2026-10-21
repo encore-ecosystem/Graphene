@@ -1,0 +1,210 @@
+//! Absolute double-precision playback time makes loop boundaries explicit.
+//! Editor seeking never emits gameplay notifies.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::math::animation_finite
+import mod::model::AnimationClip
+
+pub struct AnimationEvent {
+    name: str
+    payload: str
+    time: f64
+    cycle: i64
+    reverse: bool
+    /// Stable graph node identity; absent for standalone clip playback.
+    node: Option[u64]
+}
+pub struct PlaybackStep {
+    previous: f64
+    current: f64
+    sample_time: f32
+    cycle: i64
+    events: Vec[AnimationEvent]
+}
+pub struct ClipPlayer {
+    time: f64
+    speed: f32
+    looping: bool
+    playing: bool
+}
+
+impl for ClipPlayer {
+    pub fn new() -> Self {
+        ret Self { 0_f64, 1_f32, true, true }
+    }
+    pub fn seek(self: mut Self, time: f64, duration: f32) -> Result[bool, str] {
+        if !playback_time_valid(time, duration) {
+            ret Result::Err("Invalid animation seek")
+        }
+        self.time = if self.looping {
+            time
+        } else {
+            playback_clamp(time, 0_f64, duration as f64)
+        }
+        ret Result::Ok(true)
+    }
+    pub fn advance(self: mut Self, clip: AnimationClip, delta: f64, maximum_events: usize) -> Result[PlaybackStep, str] {
+        let mut events = Vec[AnimationEvent]::new()
+        ret self.advance_into(clip, delta, maximum_events, events)
+    }
+    /// Runtime hot path reuses caller-owned event storage.
+    pub fn advance_into(self: mut Self, clip: AnimationClip, delta: f64, maximum_events: usize, storage: mut Vec[AnimationEvent]) -> Result[PlaybackStep, str] {
+        if !animation_finite(self.speed) || !(delta >= 0_f64 && delta <= 86400_f64) || !playback_time_valid(self.time, clip.duration) {
+            ret Result::Err("Invalid animation clock")
+        }
+        let previous = self.time
+        let proposed = if self.playing {
+            previous + delta *(self.speed as f64)
+        } else {
+            previous
+        }
+        let current = if self.looping {
+            proposed
+        } else {
+            playback_clamp(proposed, 0_f64, clip.duration as f64)
+        }
+        if !playback_time_valid(current, clip.duration) {
+            ret Result::Err("Animation clock range exceeded")
+        }
+        let duration = clip.duration as f64
+        let cycle = if self.looping && duration > 0_f64 {
+            playback_floor(current / duration)
+        } else {
+            0_i64
+        }
+        let sample_time = if self.looping && duration > 0_f64 {
+            (current -(cycle as f64) * duration) as f32
+        } else {
+            current as f32
+        }
+        let mut events = storage events.clear()
+        if duration > 0_f64 && previous != current && clip.notifies.len() > 0_usize {
+            let lo = if current > previous {
+                previous
+            } else {
+                current
+            }
+            let hi = if current > previous {
+                current
+            } else {
+                previous
+            }
+            let first = if self.looping {
+                playback_floor(lo / duration) - 1_i64
+            } else {
+                0_i64
+            }
+            let last = if self.looping {
+                playback_floor(hi / duration)
+            } else {
+                0_i64
+            }
+            // Count before allocating/emitting. On overflow the clock is unchanged;
+            // callers may subdivide the step instead of silently dropping events.
+            let mut count = 0_usize
+            for notify in clip.notifies {
+                if notify.time < 0_f32 || notify.time > clip.duration || !animation_finite(notify.time) {
+                    ret Result::Err("Invalid notify time")
+                }
+                let start = if current > previous {
+                    playback_floor((previous - notify.time as f64) / duration) + 1_i64
+                } else {
+                    playback_ceil((current - notify.time as f64) / duration)
+                }
+                let end = if current > previous {
+                    playback_floor((current - notify.time as f64) / duration)
+                } else {
+                    playback_ceil((previous - notify.time as f64) / duration) - 1_i64
+                }
+                let a = if self.looping {
+                    start
+                } else {
+                    if start > 0_i64 {
+                        start
+                    } else {
+                        0_i64
+                    }
+                }
+                let b = if self.looping {
+                    end
+                } else {
+                    if end < 0_i64 {
+                        end
+                    } else {
+                        0_i64
+                    }
+                }
+                if b >= a {
+                    let amount =(b - a + 1_i64) as usize
+                    if amount > maximum_events - count {
+                        ret Result::Err("Animation notify budget exceeded")
+                    }
+                    count += amount
+                }
+            }
+            events.reserve(count)
+            if count > 0_usize {
+                let mut c = if current > previous {
+                    first
+                } else {
+                    last
+                }
+                while c >= first && c <= last {
+                    if current > previous {
+                        for notify in clip.notifies {
+                            let t =(c as f64) * duration + notify.time as f64
+                            if t > previous && t <= current {
+                                events.push(AnimationEvent {
+                                        notify.name, notify.payload, t, c, false, Option[u64]::None
+                                    }
+                                    ,
+                                )
+                            }
+                        }
+                    } else {
+                        let mut i = clip.notifies.len()
+                        while i > 0_usize {
+                            i -= 1_usize let notify = clip.notifies.get_unchecked_borrowed(i) let t =(c as f64) * duration + notify.time as f64 if t >= current && t < previous {
+                                events.push(AnimationEvent {
+                                        notify.name, notify.payload, t, c, true, Option[u64]::None
+                                    }
+                                    ,
+                                )
+                            }
+                        }
+                    }
+                    if current > previous {
+                        c += 1_i64
+                    } else {
+                        c -= 1_i64
+                    }
+                }
+            }
+        }
+        self.time = current
+        ret Result::Ok(PlaybackStep { previous, current, sample_time, cycle, events })
+    }
+}
+pub fn playback_floor(x: f64) -> i64 {
+    let n = x as i64 ret if x < n as f64 {
+        n - 1_i64
+    } else {
+        n
+    }
+}
+pub fn playback_ceil(x: f64) -> i64 {
+    ret - playback_floor( - x)
+}
+fn playback_clamp(x: f64, a: f64, b: f64) -> f64 {
+    ret if x < a {
+        a
+    } elif x > b {
+        b
+    } else {
+        x
+    }
+}
+pub fn playback_time_valid(time: f64, duration: f32) -> bool {
+    ret animation_finite(duration) && duration >= 0_f32 && duration <= 86400_f32 && time >= - 1000000000000_f64 && time <= 1000000000000_f64 &&(duration == 0_f32 ||(time /(duration as f64) >= - 1000000000_f64 && time /(duration as f64) <= 1000000000_f64))
+}

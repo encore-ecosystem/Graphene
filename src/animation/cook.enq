@@ -1,0 +1,220 @@
+//! Offline skin-aware Virtual Geometry preparation. Every LOD retains source
+//! vertices and their exact influences/morph deltas; sections never merge.
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import mod::deform::{PoseBounds, ClusterBoneBounds, DeformableCluster}
+import mod::math::{PoseMatrix, PoseVector}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip, AnimationValue, SkinVertex}
+import mod::pose::{AnimationPose, model_pose, skin_palette}
+import mod::sample::sample_clip
+import refrain::native_asset::native_mesh_valid
+import refrain::scene::primitive::MeshData
+import refrain::virtual_geometry::{VirtualGeometry, GeometryCluster, ClusterHierarchyNode, build_virtual_geometry_lods_with_deformation}
+
+pub struct SkinGeometrySection {
+    geometry: VirtualGeometry
+    clusters: Vec[DeformableCluster]
+    hierarchy: Vec[DeformableCluster]
+}
+pub struct CookedSkeletalMesh {
+    version: u32
+    mesh: SkeletalMesh
+    sections: Vec[SkinGeometrySection]
+    deformation_samples: u32
+}
+fn merge_bone_bound(bones: mut Vec[ClusterBoneBounds], entry: ClusterBoneBounds) ->() {
+    for i in 0_usize..bones.len() {
+        let old = bones.get_unchecked_borrowed(i) if old.bone == entry.bone {
+            bones.set(i, ClusterBoneBounds {
+                    old.bone, old.bounds.union(entry.bounds)
+                }
+                ,
+            ) ret()
+        }
+    }
+    bones.push(entry)
+}
+fn vector_attribute(values: mut Vec[f32], offset: usize, v: PoseVector) ->() {
+    values.set(offset, v.x) values.set(offset + 1_usize, v.y) values.set(offset + 2_usize, v.z)
+}
+fn four_attribute(values: mut Vec[f32], offset: usize, v: AnimationValue) ->() {
+    values.set(offset, v.x) values.set(offset + 1_usize, v.y) values.set(offset + 2_usize, v.z) values.set(offset + 3_usize, v.w)
+}
+/// Render-only bind data is used for structural VG validation, never for skinning.
+pub fn skeletal_bind_mesh(mesh: SkeletalMesh) -> MeshData {
+    let mut values = Vec[f32]::with_capacity(mesh.vertices.len() * 11_usize)
+    for v in mesh.vertices {
+        values.push(v.position.x) values.push(v.position.y) values.push(v.position.z) values.push(v.normal.x) values.push(v.normal.y) values.push(v.normal.z) values.push(1_f32) values.push(1_f32) values.push(1_f32) values.push(v.uv.x) values.push(v.uv.y)
+    }
+    ret MeshData::new(values, mesh.indices, 44_u32)
+}
+fn skin_bind_position(vertex: SkinVertex, palette: Vec[PoseMatrix]) -> PoseVector {
+    let mut result = PoseVector::zero()
+    for influence in vertex.influences {
+        result = result.add(palette.get_unchecked_borrowed(influence.bone as usize).point(vertex.position).scaled(influence.weight))
+    }
+    ret result
+}
+fn cluster_bones(mesh: SkeletalMesh, vertices: Vec[u32], bounds: Vec[PoseBounds]) -> DeformableCluster {
+    let mut bones = Vec[ClusterBoneBounds]::new()
+    for index in vertices {
+        let v = mesh.vertices.get_unchecked_borrowed(index as usize)
+        for influence in v.influences {
+            merge_bone_bound(bones, ClusterBoneBounds {
+                    influence.bone, bounds.get_unchecked_borrowed(index as usize).transformed(mesh.inverse_bind.get_unchecked_borrowed(influence.bone as usize))
+                }
+                ,
+            )
+        }
+    }
+    ret DeformableCluster { bones }
+}
+pub fn prepare_skeletal_geometry(mesh: SkeletalMesh, skeleton: Skeleton, clips: Vec[AnimationClip]) -> Result[CookedSkeletalMesh, str] {
+    skeleton.validate()? mesh.validate(skeleton)?
+    for clip in clips {
+        clip.validate(skeleton, mesh.morphs.len())?
+    }
+    let clip_count = if clips.len() < 8_usize {
+        clips.len()
+    } else {
+        8_usize
+    }
+    let samples = clip_count * 3_usize
+    let deformation_start = 28_usize + mesh.morphs.len() * 9_usize
+    let stride = deformation_start + samples * 3_usize + mesh.morphs.len() * 6_usize
+    if stride > 33554432_usize / mesh.vertices.len() {
+        ret Result::Err("Skin-aware LOD attributes exceed the 128 MiB cook budget; split the source mesh")
+    }
+    let mut attributes = Vec[f32]::with_capacity(mesh.vertices.len() * stride)
+    for _i in 0_usize..mesh.vertices.len() * stride {
+        attributes.push(0_f32)
+    }
+    let mut positions = Vec[Vec3]::with_capacity(mesh.vertices.len())
+    let mut bounds = Vec[PoseBounds]::with_capacity(mesh.vertices.len())
+    for i in 0_usize..mesh.vertices.len() {
+        let v = mesh.vertices.get_unchecked_borrowed(i) let at = i * stride
+        positions.push(Vec3::new(v.position.x, v.position.y, v.position.z)) bounds.push(PoseBounds::point(v.position))
+        vector_attribute(attributes, at, v.position) vector_attribute(attributes, at + 3_usize, v.normal) four_attribute(attributes, at + 6_usize, v.tangent)
+        attributes.set(at + 10_usize, v.uv.x) attributes.set(at + 11_usize, v.uv.y)
+        for k in 0_usize..v.influences.len() {
+            let influence = v.influences.get_unchecked_borrowed(k) attributes.set(at + 12_usize + k * 2_usize, influence.bone as f32) attributes.set(at + 13_usize + k * 2_usize, influence.weight)
+        }
+    }
+    for m in 0_usize..mesh.morphs.len() {
+        let morph = mesh.morphs.get_unchecked_borrowed(m)
+        for delta in morph.deltas {
+            let i = delta.vertex as usize let at = i * stride
+            vector_attribute(attributes, at + 28_usize + m * 9_usize, delta.position) vector_attribute(attributes, at + 31_usize + m * 9_usize, delta.normal) vector_attribute(attributes, at + 34_usize + m * 9_usize, delta.tangent)
+            vector_attribute(attributes, at + deformation_start + samples * 3_usize + m * 6_usize, delta.position.scaled(morph.minimum))
+            vector_attribute(attributes, at + deformation_start + samples * 3_usize + m * 6_usize + 3_usize, delta.position.scaled(morph.maximum))
+            let range = PoseBounds::point(delta.position.scaled(morph.minimum)).include(delta.position.scaled(morph.maximum))
+            let old = bounds.get_unchecked_borrowed(i) bounds.set(i, PoseBounds {
+                    old.minimum.add(range.minimum), old.maximum.add(range.maximum)
+                }
+                ,
+            )
+        }
+    }
+    let mut pose = AnimationPose::rest(skeleton, mesh.morphs.len()) let mut model = Vec[PoseMatrix]::new() let mut palette = Vec[PoseMatrix]::new()
+    for c in 0_usize..clip_count {
+        let clip = clips.get_unchecked_borrowed(c)
+        for frame in 0_usize..3_usize {
+            pose.reset(skeleton, mesh)? pose = sample_clip(clip, clip.duration *((frame + 1_usize) as f32) * 0.25_f32, pose)?
+            model = model_pose(skeleton, pose, model)? palette = skin_palette(model, mesh, palette)?
+            for i in 0_usize..mesh.vertices.len() {
+                let vertex = mesh.vertices.get_unchecked_borrowed(i) let position = skin_bind_position(vertex, palette) vector_attribute(attributes, i * stride + deformation_start +(c * 3_usize + frame) * 3_usize, position.sub(vertex.position))
+            }
+        }
+    }
+    let mut sections = Vec[SkinGeometrySection]::with_capacity(mesh.sections.len())
+    for section in mesh.sections {
+        let mut indices = Vec[u32]::with_capacity(section.index_count as usize)
+        for i in 0_usize..section.index_count as usize {
+            indices.push(mesh.indices.get_unchecked_borrowed(section.first_index as usize + i))
+        }
+        let geometry = build_virtual_geometry_lods_with_deformation(positions, indices, attributes, stride, deformation_start, 64_usize, 126_usize)
+        if !geometry.valid() {
+            ret Result::Err(geometry.error())
+        }
+        let packed = geometry.vertex_indices() let mut clusters = Vec[DeformableCluster]::with_capacity(geometry.clusters().len())
+        for cluster in geometry.clusters() {
+            let mut vertices = Vec[u32]::with_capacity(cluster.vertex_count())
+            for i in 0_usize..cluster.vertex_count() {
+                vertices.push(packed.get_unchecked_borrowed(cluster.vertex_offset() + i))
+            }
+            clusters.push(cluster_bones(mesh, vertices, bounds))
+        }
+        let mut hierarchy = Vec[DeformableCluster]::with_capacity(geometry.hierarchy().len())
+        for node in geometry.hierarchy() {
+            let mut bones = Vec[ClusterBoneBounds]::new()
+            for i in 0_usize..node.cluster_count() {
+                for bound in clusters.get_unchecked_borrowed(node.first_cluster() + i).bones {
+                    merge_bone_bound(bones, bound)
+                }
+            }
+            if !node.leaf() {
+                for bound in hierarchy.get_unchecked_borrowed(node.left_child() as usize).bones {
+                    merge_bone_bound(bones, bound)
+                }
+                if node.right_child() != 4294967295_u32 {
+                    for bound in hierarchy.get_unchecked_borrowed(node.right_child() as usize).bones {
+                        merge_bone_bound(bones, bound)
+                    }
+                }
+            }
+            hierarchy.push(DeformableCluster { bones })
+        }
+        sections.push(SkinGeometrySection { geometry, clusters, hierarchy })
+    }
+    ret Result::Ok(CookedSkeletalMesh { 1_u32, mesh, sections, samples as u32 })
+}
+
+impl for CookedSkeletalMesh {
+    pub fn validate(self: Self, skeleton: Skeleton) -> Result[bool, str] {
+        skeleton.validate()? self.mesh.validate(skeleton)?
+        if self.version != 1_u32 || self.sections.len() != self.mesh.sections.len() {
+            ret Result::Err("Invalid cooked skeletal mesh")
+        }
+        let data = skeletal_bind_mesh(self.mesh)
+        for section in self.sections {
+            if !native_mesh_valid(data, section.geometry) || section.clusters.len() != section.geometry.clusters().len() || section.hierarchy.len() != section.geometry.hierarchy().len() {
+                ret Result::Err("Invalid skinned Virtual Geometry layout")
+            }
+            for cluster in section.clusters {
+                validate_cluster(cluster, skeleton.bones.len())?
+            }
+            for node in section.hierarchy {
+                validate_cluster(node, skeleton.bones.len())?
+            }
+        }
+        ret Result::Ok(true)
+    }
+}
+fn validate_cluster(cluster: DeformableCluster, count: usize) -> Result[bool, str] {
+    if cluster.bones.len() == 0_usize || cluster.bones.len() > count {
+        ret Result::Err("Invalid deformable bone palette")
+    }
+    for i in 0_usize..cluster.bones.len() {
+        let b = cluster.bones.get_unchecked_borrowed(i) if b.bone as usize >= count || !b.bounds.minimum.finite() || !b.bounds.maximum.finite() || !b.bounds.contains(b.bounds.minimum, 0_f32) || !b.bounds.contains(b.bounds.maximum, 0_f32) {
+            ret Result::Err("Invalid deformable bone bound")
+        }
+        for j in 0_usize..i {
+            if cluster.bones.get_unchecked_borrowed(j).bone == b.bone {
+                ret Result::Err("Duplicate deformable bone palette entry")
+            }
+        }
+    }
+    ret Result::Ok(true)
+}
+
+/// Physical VG pages retain a source vertex ID in color.x for the skin cache.
+/// Only the skinned mesh shader consumes this representation; static color data
+/// and authoring/validation bind geometry keep their normal vertex colors.
+pub fn skeletal_gpu_bind_mesh(mesh: SkeletalMesh) -> MeshData {
+    let mut values = Vec[f32]::with_capacity(mesh.vertices.len() * 11_usize)
+    for i in 0_usize..mesh.vertices.len() {
+        let v = mesh.vertices.get_unchecked_borrowed(i) values.push(v.position.x) values.push(v.position.y) values.push(v.position.z) values.push(v.normal.x) values.push(v.normal.y) values.push(v.normal.z) values.push(i as f32) values.push(1_f32) values.push(1_f32) values.push(v.uv.x) values.push(v.uv.y)
+    }
+    ret MeshData::new(values, mesh.indices, 44_u32)
+}

@@ -1,0 +1,207 @@
+//! Persistent scene policy; playback clocks and GPU resources stay outside history.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import json::{Json, field}
+import mod::math::animation_finite
+import refrain::scene::json_value::parse_number
+
+pub struct CharacterMorphControl {
+    name: str
+    weight: f32
+}
+pub struct CharacterMorphChoice {
+    name: str
+    minimum: f32
+    maximum: f32
+    default_weight: f32
+}
+pub fn morph_controls_equal(a: Vec[CharacterMorphControl], b: Vec[CharacterMorphControl]) -> bool {
+    if a.len() != b.len() {
+        ret false
+    }
+    for i in 0_usize..a.len() {
+        let x = a.get_unchecked_borrowed(i) let y = b.get_unchecked_borrowed(i) if x.name != y.name || x.weight != y.weight {
+            ret false
+        }
+    }
+    ret true
+}
+pub struct SkeletalMeshComponent {
+    asset: str
+    clip: str
+    speed: f32
+    start_time: f32
+    looping: bool
+    autoplay: bool
+    preview: bool
+    root_motion_bone: str
+    morphs: Vec[CharacterMorphControl]
+}
+
+impl for SkeletalMeshComponent {
+    pub fn defaults() -> Self {
+        ret Self { "", "", 1_f32, 0_f32, true, true, true, "", Vec[CharacterMorphControl]::new() }
+    }
+    pub fn valid(self: Self) -> bool {
+        if self.morphs.len() > 1024_usize {
+            ret false
+        }
+        for i in 0_usize..self.morphs.len() {
+            let control = self.morphs.get_unchecked_borrowed(i)
+            if control.name == "" || control.name.byte_len() > 256_usize || !animation_finite(control.weight) || control.weight < - 1000000_f32 || control.weight > 1000000_f32 {
+                ret false
+            }
+            for j in 0_usize..i {
+                if self.morphs.get_unchecked_borrowed(j).name == control.name {
+                    ret false
+                }
+            }
+        }
+        ret character_path_valid(self.asset) && animation_finite(self.speed) && self.speed >= - 16_f32 && self.speed <= 16_f32 && animation_finite(self.start_time) && self.start_time >= 0_f32 && self.start_time <= 86400_f32 && self.clip.byte_len() <= 1024_usize && self.root_motion_bone.byte_len() <= 256_usize
+    }
+}
+pub fn character_path_valid(path: str) -> bool {
+    if path == "" {
+        ret true
+    }
+    if path.byte_len() <= 19_usize || path.slice_bytes(0_usize, 8_usize) != "Content/" || path.slice_bytes(path.byte_len() - 11_usize, 11_usize) != ".gcharacter" || path.contains("\\") || path.contains(":") || path.contains("//") {
+        ret false
+    }
+    if path.contains("/./") || path.contains("/../") {
+        ret false
+    }
+    for i in 0_usize..path.byte_len() {
+        if path.byte_at(i) < 32_u8 {
+            ret false
+        }
+    }
+    ret true
+}
+pub fn skeletal_component_json(c: SkeletalMeshComponent) -> Json {
+    let mut morphs = Vec[Json]::with_capacity(c.morphs.len())
+    for control in c.morphs {
+        morphs.push(Json::Object(vec![field("name", Json::String(control.name)), field("weight", Json::Number(Debug::fmt(control.weight)))]))
+    }
+    ret Json::Object(vec![field("asset", Json::String(c.asset)), field("clip", Json::String(c.clip)), field("speed", Json::Number(Debug::fmt(c.speed))), field("startTime", Json::Number(Debug::fmt(c.start_time))), field("loop", Json::Bool(c.looping)), field("autoplay", Json::Bool(c.autoplay)), field("preview", Json::Bool(c.preview)), field("rootMotionBone", Json::String(c.root_motion_bone)), field("morphs", Json::Array(morphs))])
+}
+pub fn skeletal_component_parse(root: Json) -> Option[SkeletalMeshComponent] {
+    match root {
+        Object(_) => {
+        }
+        _ => {
+            ret Option::None
+        }
+    }
+    let mut c = SkeletalMeshComponent::defaults()
+    for name in vec!["asset", "clip", "rootMotionBone"] {
+        match root.get(name) {
+            Some(value) => {
+                let text = match value.as_str() {
+                    Some(text) => text None => {
+                        ret Option::None
+                    }
+                }
+                if name == "asset" {
+                    c.asset = text
+                } elif name == "clip" {
+                    c.clip = text
+                } else {
+                    c.root_motion_bone = text
+                }
+            }
+            None => {
+            }
+        }
+    }
+    for name in vec!["speed", "startTime"] {
+        match root.get(name) {
+            Some(value) => {
+                let text = match value.as_number() {
+                    Some(text) => text None => {
+                        ret Option::None
+                    }
+                }
+                let number = match parse_number(text) {
+                    Some(number) => number None => {
+                        ret Option::None
+                    }
+                }
+                if name == "speed" {
+                    c.speed = number
+                } else {
+                    c.start_time = number
+                }
+            }
+            None => {
+            }
+        }
+    }
+    for name in vec!["loop", "autoplay", "preview"] {
+        match root.get(name) {
+            Some(value) => {
+                let enabled = match value.as_bool() {
+                    Some(enabled) => enabled None => {
+                        ret Option::None
+                    }
+                }
+                if name == "loop" {
+                    c.looping = enabled
+                } elif name == "autoplay" {
+                    c.autoplay = enabled
+                } else {
+                    c.preview = enabled
+                }
+            }
+            None => {
+            }
+        }
+    }
+    match root.get("morphs") {
+        Some(value) => {
+            let rows = match value.as_array() {
+                Some(rows) => rows None => {
+                    ret Option::None
+                }
+            }
+            if rows.len() > 1024_usize {
+                ret Option::None
+            }
+            for row in rows {
+                let name = match row.get("name") {
+                    Some(v) => match v.as_str() {
+                        Some(n) => n None => {
+                            ret Option::None
+                        }
+                    }
+                    None => {
+                        ret Option::None
+                    }
+                }
+                let text = match row.get("weight") {
+                    Some(v) => match v.as_number() {
+                        Some(n) => n None => {
+                            ret Option::None
+                        }
+                    }
+                    None => {
+                        ret Option::None
+                    }
+                }
+                let weight = match parse_number(text) {
+                    Some(v) => v None => {
+                        ret Option::None
+                    }
+                }
+                c.morphs.push(CharacterMorphControl { name, weight })
+            }
+        }
+        None => {
+        }
+    }
+    ret if c.valid() {
+        Option::Some(c)
+    } else {
+        Option::None
+    }
+}

@@ -11,7 +11,7 @@ fn main() -> u32 {
         Option::None => {}
     }
     if !migrated_ok { ret 1_u32 }
-    if migrated.version() != 2_u32 || migrated.len() != 2_usize { ret 2_u32 }
+    if migrated.version() != 6_u32 || migrated.len() != 2_usize { ret 2_u32 }
     match migrated.actor(0_usize) { Option::Some(actor) => { if actor.id() != 1_u64 { ret 3_u32 } } Option::None => { ret 4_u32 } }
 
     let mut asset = SceneAsset::new()

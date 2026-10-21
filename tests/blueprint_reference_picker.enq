@@ -1,0 +1,88 @@
+import graphene::blueprint::*
+import graphene::blueprint::editor::BlueprintEditor
+import graphene::{EditorState, GrapheneCommand, Scene}
+import luma::{Event, Rect, StyleSheet, Widget, layout_widget, event_pointer_down}
+import std::os::read_file
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let mut asset = BlueprintAsset::new("references", "References")
+    asset.properties.push(BlueprintProperty { 1, "Owner", BlueprintValue::Actor(0) })
+    asset.properties.push(BlueprintProperty { 2, "MeshRef", BlueprintValue::Component(0) })
+    let mut state = EditorState::new(Scene::new())
+    let _opened = state.execute(GrapheneCommand::OpenBlueprint(asset))
+    let mut editor = BlueprintEditor::new() editor.refresh(asset, sheet)
+    let bounds = Rect::new(200, 34, 600, 600)
+    let click = Event { event_pointer_down(), 0, 0, 0, 0, 1, 0, 0, 0, 0, "", 0 }
+    let _select = editor.input(state, click, "bp-property-1", bounds, sheet)
+    if editor.widget(state, false).find("bp-value-reference-open").is_none() || editor.widget(state, false).find("bp-value-reference-0").is_some() {
+        ret 1
+    }
+    let _picker = editor.input(state, click, "bp-value-reference-open", bounds, sheet)
+    if !editor.popup_open() {
+        ret 2
+    }
+    let layout = layout_widget(sheet.apply(editor.widget(state, false), "", "", ""), Rect::new(0, 0, 1200, 700))
+    let _search = editor.input(state, Event::text_input("missing"), "", bounds, sheet)
+    if editor.popup(1200, 700, state, layout).find("bp-value-reference-0").is_some() {
+        ret 3
+    }
+    let _cancel = editor.input(state, Event::key_down(27, 0), "", bounds, sheet)
+    if editor.popup_open() {
+        ret 4
+    }
+    let _again = editor.input(state, click, "bp-value-reference-open", bounds, sheet)
+    let _choose = editor.input(state, Event::key_down(13, 0), "", bounds, sheet)
+    if editor.popup_open() {
+        ret 5
+    }
+    let _outside_open = editor.input(state, click, "bp-value-reference-open", bounds, sheet)
+    let _outside = editor.input(state, click, "blueprint-canvas", bounds, sheet)
+    if editor.popup_open() {
+        ret 6
+    }
+    let _component = editor.input(state, click, "bp-property-2", bounds, sheet)
+    let _component_open = editor.input(state, click, "bp-value-reference-open", bounds, sheet)
+    let _next = editor.input(state, Event::key_down(1073741905, 0), "", bounds, sheet)
+    let _root = editor.input(state, Event::key_down(13, 0), "", bounds, sheet)
+    match state.blueprint_asset().properties.get(1) {
+        Some(property) => {
+            match property.default_value {
+                Component(id) => {
+                    if id != 1 {
+                        ret 7
+                    }
+                }
+                _ => {
+                    ret 8
+                }
+            }
+        }
+        None => {
+            ret 9
+        }
+    }
+    let _undo = editor.input(state, Event::key_down(122, 192), "", bounds, sheet)
+    match state.blueprint_asset().properties.get(1) {
+        Some(property) => {
+            match property.default_value {
+                Component(id) => {
+                    if id != 0 {
+                        ret 10
+                    }
+                }
+                _ => {
+                    ret 11
+                }
+            }
+        }
+        None => {
+            ret 12
+        }
+    }
+    let _hidden_open = editor.input(state, click, "bp-value-reference-open", bounds, sheet)
+    let _hidden = editor.input(state, Event::none(), "", Rect::new(0, 0, 0, 0), sheet)
+    if editor.popup_open() {
+        ret 13
+    }
+    ret 0
+}

@@ -1,0 +1,116 @@
+//! World-space transform telemetry, sampled only when a captured gesture changes.
+import core::option::Option
+import linalg::{Mat4, Vec3}
+import mod::editor_gesture::{gesture_axis_value, gizmo_angle, gizmo_sin, gizmo_cos}
+import mod::scene::world::Scene
+
+// Same Y-X-Z convention as Transform::matrix, without extracting rotation
+// from a scaled/sheared basis. Parent scaling must not change Euler channels.
+fn readout_rotation_matrix(rotation: Vec3) -> Mat4 {
+    let sx = gizmo_sin(rotation.x())
+    let cx = gizmo_cos(rotation.x())
+    let sy = gizmo_sin(rotation.y())
+    let cy = gizmo_cos(rotation.y())
+    let sz = gizmo_sin(rotation.z())
+    let cz = gizmo_cos(rotation.z())
+    ret Mat4 {
+        cy * cz + sy * sx * sz, - cy * sz + sy * sx * cz, sy * cx, 0,
+        cx * sz, cx * cz, - sx, 0,
+        - sy * cz + cy * sx * sz, sy * sz + cy * sx * cz, cy * cx, 0,
+        0, 0, 0, 1
+    }
+}
+
+// Normalizing the inputs first avoids loss of accuracy in linalg's small
+// magnitude square roots (notably at Euler singularities and tiny scales).
+fn readout_length(value: Vec3) -> f32 {
+    let mut largest = 0.0_f32
+    for component in vec![value.x(), value.y(), value.z()] {
+        let magnitude = if component < 0 {
+            - component
+        } else {
+            component
+        }
+        if magnitude > largest {
+            largest = magnitude
+        }
+    }
+    if largest == 0 {
+        ret 0
+    }
+    ret value.scale(1 / largest).length() * largest
+}
+
+fn readout_world_rotation(scene: Scene, actor: u64) -> Option[Vec3] {
+    let mut orientation = Mat4::identity()
+    let mut cursor = Option[u64]::Some(actor)
+    let mut depth = 0_usize
+    while cursor.is_some() && depth < scene.len() {
+        match scene.get(cursor.unwrap_or(0)) {
+            Option::Some(entity) => {
+                // Preserve unwrapped root angles, including multiple turns.
+                if depth == 0 && entity.parent().is_none() {
+                    ret Option[Vec3]::Some(entity.transform().rotation())
+                }
+                orientation = readout_rotation_matrix(entity.transform().rotation()).mul(orientation)
+                cursor = entity.parent()
+            }
+            Option::None => {
+                ret Option[Vec3]::None
+            }
+        }
+        depth += 1
+    }
+    if cursor.is_some() {
+        ret Option[Vec3]::None
+    }
+    let elements = orientation.values()
+    let x = Vec3::new(elements.get(0).unwrap_or(0), elements.get(1).unwrap_or(0), elements.get(2).unwrap_or(0))
+    let y = Vec3::new(elements.get(4).unwrap_or(0), elements.get(5).unwrap_or(0), elements.get(6).unwrap_or(0))
+    let z = Vec3::new(elements.get(8).unwrap_or(0), elements.get(9).unwrap_or(0), elements.get(10).unwrap_or(0))
+    let horizontal = readout_length(Vec3::new(z.x(), z.z(), 0))
+    let pitch = gizmo_angle( - z.y(), horizontal)
+    let yaw = if horizontal > 0.000001 {
+        gizmo_angle(z.x(), z.z())
+    } else {
+        gizmo_angle( - x.z(), x.x())
+    }
+    let roll = if horizontal > 0.000001 {
+        gizmo_angle(x.y(), y.y())
+    } else {
+        0.0_f32
+    }
+    ret Option[Vec3]::Some(Vec3::new(pitch, yaw, roll))
+}
+
+/// Absolute active-axis value: world position, composed orientation, or
+/// world-basis scale magnitude. Never substitutes a local value on failure.
+pub fn gizmo_world_value(scene: Scene, actor: u64, tool: str, axis: u32) -> Option[f32] {
+    if axis == 0 || axis > 3 ||(tool != "move" && tool != "rotate" && tool != "scale") {
+        ret Option[f32]::None
+    }
+    if tool == "rotate" {
+        match readout_world_rotation(scene, actor) {
+            Option::Some(rotation) => {
+                ret Option[f32]::Some(gesture_axis_value(rotation, axis))
+            }
+            Option::None => {
+                ret Option[f32]::None
+            }
+        }
+    }
+    match scene.world_matrix(actor) {
+        Option::Some(matrix) => {
+            if tool == "move" {
+                ret Option[f32]::Some(gesture_axis_value(matrix.transform_point(Vec3::zero()), axis))
+            }
+            let elements = matrix.values()
+            let offset =((axis - 1) * 4) as usize
+            ret Option[f32]::Some(readout_length(Vec3::new(elements.get(offset).unwrap_or(0),
+                        elements.get(offset + 1).unwrap_or(0), elements.get(offset + 2).unwrap_or(0),)))
+        }
+        Option::None => {
+            ret Option[f32]::None
+        }
+    }
+}

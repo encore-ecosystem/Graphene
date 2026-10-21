@@ -1,0 +1,64 @@
+import mod::scene::json_value::parse_number
+//! Per-mesh rendering policy, independent of cooked geometry.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import std::os::{file_exists, read_file, write_file_atomic}
+
+pub struct AutoLodSettings {
+    enabled: bool
+    group_id: str
+}
+
+impl for AutoLodSettings {
+    pub fn defaults() -> Self {
+        ret Self { true, "default" }
+    }
+    pub fn bounded_error(value: f32) -> f32 {
+        ret if value >= 0.25_f32 && value <= 16.0_f32 {
+            value
+        } else {
+            1.0_f32
+        }
+    }
+    pub fn decode(text: str) -> Self {
+        match parse(text) {
+            Ok(root) => {
+                let old_error = Self::bounded_error(parse_number(root.get("target_error").unwrap_or(Json::Number("1")).as_number().unwrap_or("1")).unwrap_or(1.0_f32))
+                ret Self {
+                    root.get("enabled").unwrap_or(Json::Bool(true)).as_bool().unwrap_or(true), root.get("group_id").unwrap_or(Json::String(if old_error == 1 {
+                                "default"
+                            } else {
+                                "legacy-" + old_error.fmt()
+                            }
+                        )).as_str().unwrap_or("default")
+                }
+            }
+            Err(_) => {
+                ret Self { !text.contains("enabled=false"), "default" }
+            }
+        }
+    }
+    pub fn load(mesh_path: str) -> Self {
+        let path = mesh_path + ".autolod"
+        ret if file_exists(path) {
+            Self::decode(read_file(path))
+        } else {
+            Self::defaults()
+        }
+    }
+    pub fn save(self: Self, mesh_path: str) -> bool {
+        let mut fields = Vec[(str, Json)]::new()
+        fields.push(field("enabled", Json::Bool(self.enabled)))
+        fields.push(field("group_id", Json::String(self.group_id)))
+        ret write_file_atomic(mesh_path + ".autolod", stringify(Json::Object(fields)) + "\n") == 0
+    }
+}
+#attr(test)
+fn autolod_settings_legacy_and_quality() -> bool {
+    let legacy = AutoLodSettings::decode("enabled=false\n")
+    let setting = AutoLodSettings::decode("{\"enabled\":true,\"target_error\":4}")
+    let invalid = AutoLodSettings::decode("{\"target_error\":-8}")
+    ret !legacy.enabled && legacy.group_id == "default" && setting.enabled && setting.group_id == "legacy-4" && invalid.group_id == "default"
+}

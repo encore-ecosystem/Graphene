@@ -1,26 +1,111 @@
 import core::option::Option
+import core::vec::Vec
 import graphene::{cube_mesh, plane_mesh, sphere_mesh}
+import linalg::Vec3
 
 fn main() -> u32 {
     let cube = cube_mesh(1.0_f32)
-    if cube.vertex_count() != 24_usize || cube.index_count() != 36_usize { ret 1_u32 }
+    if cube.vertex_count() != 24_usize || cube.index_count() != 36_usize {
+        ret 1_u32
+    }
     let cube_indices = cube.indices()
     match cube_indices.get(0_usize) {
-        Option::Some(a) => { if a != 0_u32 { ret 5_u32 } }
-        Option::None => { ret 5_u32 }
+        Option::Some(a) => {
+            if a != 0_u32 {
+                ret 5_u32
+            }
+        }
+        Option::None => {
+            ret 5_u32
+        }
     }
     match cube_indices.get(1_usize) {
-        Option::Some(b) => { if b != 1_u32 { ret 6_u32 } }
-        Option::None => { ret 6_u32 }
+        Option::Some(b) => {
+            if b != 1_u32 {
+                ret 6_u32
+            }
+        }
+        Option::None => {
+            ret 6_u32
+        }
     }
     match cube_indices.get(2_usize) {
-        Option::Some(c) => { if c != 2_u32 { ret 7_u32 } }
-        Option::None => { ret 7_u32 }
+        Option::Some(c) => {
+            if c != 2_u32 {
+                ret 7_u32
+            }
+        }
+        Option::None => {
+            ret 7_u32
+        }
     }
     let plane = plane_mesh(2.0_f32)
-    if plane.vertex_count() != 4_usize || plane.index_count() != 12_usize { ret 2_u32 }
+    if plane.vertex_count() != 4_usize || plane.index_count() != 12_usize {
+        ret 2_u32
+    }
     let sphere = sphere_mesh(1.0_f32, 8_u32, 12_u32)
-    if sphere.vertex_count() != 117_usize { ret 3_u32 }
-    if sphere.index_count() != 504_usize { ret 4_u32 }
+    if sphere.vertex_count() != 117_usize {
+        ret 3_u32
+    }
+    if sphere.index_count() != 504_usize {
+        ret 4_u32
+    }
+    if cube.stride() != 44 || plane.stride() != 44 {
+        ret 8
+    }
+    for vertex in 0..cube.vertex_count() {
+        let corner = vertex % 4
+        let u = cube.vertices().get(vertex * 11 + 9).unwrap_or( - 1.0)
+        let v = cube.vertices().get(vertex * 11 + 10).unwrap_or( - 1.0)
+        if u !=(if corner == 1 || corner == 2 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        ) ||
+        v !=(if corner < 2 {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        ) {
+            ret 9
+        }
+    }
+    // Outward winding must agree with authored normals on every sphere face.
+    let vertices = sphere.vertices()
+    let indices = sphere.indices()
+    let stride =(sphere.stride() / 4_u32) as usize
+    // Both hemispheres must stay on the same sphere, including the pole and
+    // the duplicated seam. Loose polynomial trig near pi used to bulge the
+    // lower hemisphere and leave a tiny open pole.
+    for vertex in 0..sphere.vertex_count() {
+        let p = point(vertices, vertex, stride)
+        let error = p.dot(p) - 1.0_f32
+        if error < - 0.00001_f32 || error > 0.00001_f32 {
+            ret 11_u32
+        }
+    }
+    for ring in 0..9_usize {
+        let first = point(vertices, ring * 13_usize, stride)
+        let last = point(vertices, ring * 13_usize + 12_usize, stride)
+        if first.sub(last).length() > 0.000001_f32 {
+            ret 12_u32
+        }
+    }
+    let mut triangle = 0_usize
+    while triangle < indices.len() {
+        let a = point(vertices, indices.get(triangle).unwrap_or(0_u32) as usize, stride)
+        let b = point(vertices, indices.get(triangle + 1_usize).unwrap_or(0_u32) as usize, stride)
+        let c = point(vertices, indices.get(triangle + 2_usize).unwrap_or(0_u32) as usize, stride)
+        if b.sub(a).cross(c.sub(a)).dot(a.add(b).add(c)) <= 0.0_f32 {
+            ret 10_u32
+        }
+        triangle += 3_usize
+    }
     ret 0_u32
+}
+
+fn point(vertices: Vec[f32], vertex: usize, stride: usize) -> Vec3 {
+    ret Vec3::new(vertices.get(vertex * stride).unwrap_or(0.0_f32), vertices.get(vertex * stride + 1_usize).unwrap_or(0.0_f32), vertices.get(vertex * stride + 2_usize).unwrap_or(0.0_f32))
 }

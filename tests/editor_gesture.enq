@@ -1,0 +1,175 @@
+//! Captured delta snapping and geometric rotation, including nonzero starts.
+import core::option::Option
+import core::vec::Vec
+import graphene::editor_gesture::{gizmo_sin, gizmo_cos}
+import graphene::{GizmoGesture, GizmoProjection, GizmoSnap, gesture_axis_add, gesture_roots, snap_delta, unwrap_angle, Scene, Transform}
+import linalg::Vec3
+
+fn close(a: f32, b: f32) -> bool {
+    ret a - b < 0.0001 && a - b > - 0.0001
+}
+
+fn precise(a: f32, b: f32) -> bool {
+    ret a - b < 0.000001 && a - b > - 0.000001
+}
+
+fn indices(a: u32, b: u32, c: u32, d: u32) -> Vec[u32] {
+    let mut values = Vec[u32]::new()
+    values.push(a)
+    values.push(b)
+    values.push(c)
+    values.push(d)
+    ret values
+}
+
+fn angular_math() -> bool {
+    if !precise(gizmo_sin(0), 0) || !precise(gizmo_cos(0), 1) ||
+    !precise(gizmo_sin(0.39269908), 0.38268343) ||
+    !precise(gizmo_cos(0.39269908), 0.92387953) ||
+    !precise(gizmo_sin(1.5707964), 1) || !precise(gizmo_cos(1.5707964), 0) ||
+    !precise(gizmo_sin(3.1415927), 0) || !precise(gizmo_cos(3.1415927), - 1.0) ||
+    !precise(gizmo_sin(4.712389), - 1.0) || !precise(gizmo_cos(4.712389), 0) {
+        ret false
+    }
+    let mut sample = - 96_i32
+    while sample <= 96 {
+        let angle =(sample as f32) * 3.1415927 / 48
+        let sine = gizmo_sin(angle)
+        let cosine = gizmo_cos(angle)
+        if !precise(sine * sine + cosine * cosine, 1) ||
+        !precise(gizmo_sin( - angle), - sine) || !precise(gizmo_cos( - angle), cosine) ||
+        !close(gizmo_sin(angle + 6.2831855), sine) ||
+        !close(gizmo_cos(angle - 6.2831855), cosine) {
+            ret false
+        }
+        sample += 1
+    }
+    let camera = GizmoProjection::new(Vec3::new(0, 0, 5), 0, 0, 1.0471976, 800, 600)
+    let radial = camera.project(Vec3::new(1, 0, 0)).unwrap_or(Vec3::zero())
+    let mut settings = GizmoSnap::new()
+    settings.toggle("rotate")
+    for point in vec![
+        Vec3::new(0.92387953, 0.38268343, 0.39269908),
+        Vec3::new(0.38268343, 0.92387953, 1.1780972),
+        Vec3::new( - 0.38268343, 0.92387953, 1.9634954),
+        Vec3::new( - 0.92387953, 0.38268343, 2.7488936),
+        Vec3::new( - 0.92387953, - 0.38268343, - 2.7488936),
+        Vec3::new( - 0.38268343, - 0.92387953, - 1.9634954),
+        Vec3::new(0.38268343, - 0.92387953, - 1.1780972),
+        Vec3::new(0.92387953, - 0.38268343, - 0.39269908),
+    ] {
+        let mut gesture = GizmoGesture::begin("rotate", 3, camera, Vec3::zero(), radial.x(), radial.y(), settings)
+        let screen = camera.project(Vec3::new(point.x(), point.y(), 0)).unwrap_or(radial)
+        let _changed = gesture.update(screen.x(), screen.y())
+        if !precise(gesture.raw(), point.z()) {
+            ret false
+        }
+    }
+    ret true
+}
+
+fn main() -> u32 {
+    if !angular_math() {
+        ret 11
+    }
+    let roots = gesture_roots(indices(3, 2, 1, 4), indices(0, 1, 2, 0))
+    if roots.len() != 2 || roots.get(0).unwrap_or(0) != 1 || roots.get(1).unwrap_or(0) != 4 {
+        ret 12
+    }
+    let nested = gesture_roots(indices(3, 2, 0, 0), indices(0, 1, 2, 0))
+    if nested.len() != 1 || nested.get(0).unwrap_or(0) != 2 {
+        ret 13
+    }
+    let mut scene = Scene::new()
+    let root = scene.create_entity("parent", Transform::identity().with_position(Vec3::new(0.37, 0, 0)))
+    let child = scene.create_entity("child", Transform::identity().with_position(Vec3::new(2, 0, 0)))
+    let _parented = scene.set_parent(child, Option[u64]::Some(root))
+    for actor in gesture_roots(indices(1, 2, 0, 0), indices(0, 1, 0, 0)) {
+        let id = actor as u64
+        match scene.get(id) {
+            Option::Some(entity) => {
+                let before = entity.transform()
+                let _moved = scene.set_transform(id, before.with_position(gesture_axis_add(before.position(), 1, 10)))
+            }
+            Option::None => {
+                ret 14
+            }
+        }
+    }
+    if !close(scene.world_position(child).unwrap_or(Vec3::zero()).x(), 12.37) {
+        ret 14
+    }
+    match scene.get(child) {
+        Option::Some(entity) => {
+            if !close(entity.transform().position().x(), 2) {
+                ret 14
+            }
+        }
+        Option::None => {
+            ret 14
+        }
+    }
+    if !close(snap_delta(4.9, 10, true), 0) || !close(snap_delta(5.1, 10, true), 10) ||
+    !close(snap_delta( - 5.1, 10, true), - 10.0) || !close(snap_delta(5, 10, true), 10) ||
+    !close(snap_delta( - 5.0, 10, true), - 10.0) || !close(snap_delta(4.9, 10, false), 4.9) {
+        ret 1
+    }
+    let mut settings = GizmoSnap::new()
+    settings.set_step("move", 1)
+    settings.toggle("move")
+    if settings.enabled("move") || !settings.enabled("rotate") || !settings.enabled("scale") ||
+    !close(settings.step("scale"), 0.1) || !close(settings.step("rotate"), 10) {
+        ret 2
+    }
+    let camera = GizmoProjection::new(Vec3::new(0, 0, 5), 0, 0, 1.0471976, 800, 600)
+    let start = Vec3::new(0.37, 0.23, 0)
+    let screen = camera.project(start).unwrap_or(Vec3::zero())
+    let mut scale = GizmoGesture::begin("scale", 1, camera, start, screen.x(), screen.y(), settings)
+    if !scale.active() || scale.update(screen.x(), screen.y()) || !close(scale.applied(), 0) {
+        ret 3
+    }
+    let _changed = scale.update(screen.x() + 21, screen.y())
+    if !close(scale.applied(), 0.2) || !close(gesture_axis_add(Vec3::new(2, 3, 4), 1, scale.applied()).x(), 2.2) {
+        ret 4
+    }
+    let _negative = scale.update(screen.x() - 1000, screen.y())
+    scale.limit_scale(0.17)
+    if !close(scale.applied(), 0) {
+        ret 5
+    }
+    scale.limit_scale(0.05)
+    if !close(scale.applied(), 0) {
+        ret 6
+    }
+    settings.toggle("move")
+    settings.set_step("move", 0.5)
+    let mut move = GizmoGesture::begin("move", 1, camera, start, screen.x(), screen.y(), settings)
+    let target = camera.project(start.add(Vec3::new(0.6, 0, 0))).unwrap_or(screen)
+    let _moved = move.update(target.x(), target.y())
+    if !close(move.applied(), 0.5) || !close(gesture_axis_add(start, 1, move.applied()).x(), 0.87) {
+        ret 7
+    }
+    if !close(unwrap_angle(3.1, - 3.1), 0.0831855) || !close(unwrap_angle( - 3.1, 3.1), - 0.0831855) {
+        ret 8
+    }
+    let origin = Vec3::zero()
+    let radial = camera.project(Vec3::new(1, 0, 0)).unwrap_or(screen)
+    let mut rotate = GizmoGesture::begin("rotate", 3, camera, origin, radial.x(), radial.y(), settings)
+    let top = camera.project(Vec3::new(0, 1, 0)).unwrap_or(screen)
+    let left = camera.project(Vec3::new( - 1.0, 0, 0)).unwrap_or(screen)
+    let bottom = camera.project(Vec3::new(0, - 1.0, 0)).unwrap_or(screen)
+    let _r1 = rotate.update(top.x(), top.y())
+    let _r2 = rotate.update(left.x(), left.y())
+    let _r3 = rotate.update(bottom.x(), bottom.y())
+    let _r4 = rotate.update(radial.x(), radial.y())
+    let _r5 = rotate.update(top.x(), top.y())
+    if !close(rotate.applied(), 7.8539816) {
+        ret 9
+    }
+    let first = gesture_axis_add(Vec3::new(0.23, 0, 0), 1, rotate.applied())
+    let second = gesture_axis_add(Vec3::new(0.73, 0, 0), 1, rotate.applied())
+    if !close(second.x() - first.x(), 0.5) {
+        ret 10
+    }
+    ret 0
+}

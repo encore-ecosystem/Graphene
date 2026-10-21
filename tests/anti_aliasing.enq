@@ -1,0 +1,75 @@
+//! Project AA codecs, capability fallback, per-object history and jitter contracts.
+import core::option::Option
+import graphene::scene::renderable::RenderItem
+import graphene::temporal_view::{TemporalView, temporal_jitter}
+import graphene::{AntiAliasingMethod, RenderSettings, anti_aliasing_methods, effective_anti_aliasing, MaterialId, MeshId, Renderable, Transform}
+import linalg::{Mat4, Vec3}
+import std::os::{read_file, write_file, remove_file, mkdir_all}
+
+fn main() -> u32 {
+    if RenderSettings::defaults().anti_aliasing().key() != "smaa" {
+        ret 1
+    }
+    for method in anti_aliasing_methods() {
+        let source = "{\"anti_aliasing\":\"" + method.key() + "\"}"
+        let decoded = match RenderSettings::parse(source) {
+            Some(value) => value None => {
+                ret 2
+            }
+        }
+        if decoded.anti_aliasing().key() != method.key() {
+            ret 3
+        }
+        if effective_anti_aliasing(method, 1).samples() > 1 {
+            ret 4
+        }
+    }
+    if RenderSettings::parse("{\"anti_aliasing\":\"unknown\"}").is_some() {
+        ret 5
+    }
+    if effective_anti_aliasing(AntiAliasingMethod::Msaa4, 5).key() != "msaa4" {
+        ret 6
+    }
+    if effective_anti_aliasing(AntiAliasingMethod::Msaa4, 3).key() != "smaa" {
+        ret 7
+    }
+    let root = "target/aa/settings-test"
+    mkdir_all(root + "/Config")
+    write_file(root + "/Config/Rendering.json", "{\"future\":true,\"anti_aliasing\":\"off\"}")
+    if !RenderSettings::defaults().with_anti_aliasing(AntiAliasingMethod::Taa).save(root) {
+        ret 8
+    }
+    if RenderSettings::load(root).anti_aliasing().key() != "taa" || !read_file(root + "/Config/Rendering.json").contains("future") {
+        ret 9
+    }
+    remove_file(root + "/Config/Rendering.json")
+    let mut history = TemporalView::new()
+    let original = RenderItem::new(7, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::identity())
+    if history.previous(original).1 {
+        ret 10
+    }
+    history.commit(vec![original], Mat4::identity())
+    let moved = RenderItem::new(7, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::translation(Vec3::new(3, 0, 0)))
+    let previous = history.previous(moved)
+    if !previous.1 || previous.0.transform_point(Vec3::zero()).x() != 0 {
+        ret 11
+    }
+    let replaced = RenderItem::new(7, Renderable::new(MeshId::new(2), MaterialId::new(1)), Mat4::identity())
+    if history.previous(replaced).1 {
+        ret 12
+    }
+    history.reset()
+    if history.previous(moved).1 {
+        ret 13
+    }
+    for i in 0..8 {
+        let jitter = temporal_jitter(i as u32, 1920, 1080)
+        if jitter.0 < - 1.0_f32 / 1920.0_f32 || jitter.0 > 1.0_f32 / 1920.0_f32 || jitter.1 < - 1.0_f32 / 1080.0_f32 || jitter.1 > 1.0_f32 / 1080.0_f32 {
+            ret 14
+        }
+        if temporal_jitter((i + 8) as u32, 1920, 1080).0 != jitter.0 {
+            ret 15
+        }
+    }
+    ret 0
+}

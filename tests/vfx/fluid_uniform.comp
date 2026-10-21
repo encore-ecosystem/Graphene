@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x=128) in;
+layout(std140,binding=0) uniform Input {vec4 values[21];} source;
+layout(std430,binding=1) buffer Output {float values[];} destination;
+void main(){uint i=gl_GlobalInvocationID.x;if(i<84)destination.values[i]=source.values[i/4][i%4];}

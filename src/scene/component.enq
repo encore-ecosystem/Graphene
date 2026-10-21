@@ -1,0 +1,266 @@
+//! Persistent settings for non-mesh scene actors. Transforms belong to the entity.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import json::{Json, field}
+import linalg::Vec3
+import mod::json_value::{parse_number, vec3_json, json_vec3}
+
+pub struct LightComponent {
+    kind: str
+    color: Vec3
+    intensity: f32
+    range: f32
+    inner_angle: f32
+    outer_angle: f32
+    sun_angle: f32
+}
+pub struct CameraComponent {
+    fov: f32
+    aspect: f32
+    near: f32
+    far: f32
+}
+import refrain::environment::codec::{environment_json, environment_parse}
+import refrain::environment::model::{EnvironmentComponent, is_environment_kind}
+import refrain::audio::model::{AudioSource, sound_json, sound_parse}
+
+import refrain::particles::model::ParticleComponent
+import refrain::particles::codec::{vfx_encode_ParticleComponent,vfx_decode_ParticleComponent}
+
+import refrain::animation::component::{SkeletalMeshComponent,skeletal_component_json,skeletal_component_parse}
+
+pub enum SceneComponent {
+    SkeletalMesh(SkeletalMeshComponent)
+    Particle(ParticleComponent)
+    None
+    Light(LightComponent)
+    Camera(CameraComponent)
+    Environment(EnvironmentComponent)
+    Audio(AudioSource)
+}
+fn scalar(root: Json, key: str, fallback: f32) -> f32 {
+    match root.get(key) {
+        Some(item) => {
+            match item.as_number() {
+                Some(text) => {
+                    ret parse_number(text).unwrap_or(fallback)
+                }
+                None => {
+                }
+            }
+        }
+        None => {
+        }
+    }
+    ret fallback
+}
+fn number(value: f32) -> Json {
+    ret Json::Number(Debug::fmt(value))
+}
+
+impl for LightComponent {
+    pub fn new(kind: str) -> LightComponent {
+        ret LightComponent {
+            kind, Vec3::new(1.0_f32, 0.97_f32, 0.92_f32), if kind == "directional-light" {
+                1.15_f32
+            } else {
+                20.0_f32
+            }
+            , 10.0_f32, 20.0_f32, 35.0_f32, 0.5357_f32
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret(self.kind == "directional-light" || self.kind == "point-light" || self.kind == "spot-light") &&
+        self.intensity >= 0.0_f32 && self.intensity <= 1000000.0_f32 &&
+        self.range >= 0.01_f32 && self.range <= 100000.0_f32 &&
+        self.inner_angle >= 0.0_f32 && self.inner_angle <= self.outer_angle && self.outer_angle < 90.0_f32 &&
+        self.sun_angle >= 0.01_f32 && self.sun_angle <= 20.0_f32 &&
+        self.color.x() >= 0.0_f32 && self.color.x() <= 1.0_f32 &&
+        self.color.y() >= 0.0_f32 && self.color.y() <= 1.0_f32 &&
+        self.color.z() >= 0.0_f32 && self.color.z() <= 1.0_f32
+    }
+}
+
+impl for CameraComponent {
+    pub fn new() -> CameraComponent {
+        ret CameraComponent {
+            60.0_f32, 1.7777778_f32, 0.05_f32, 1000.0_f32
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret self.fov >= 5.0_f32 && self.fov <= 170.0_f32 && self.aspect >= 0.1_f32 && self.aspect <= 10.0_f32 && self.near >= 0.001_f32 && self.near < self.far && self.far <= 1000000.0_f32
+    }
+}
+
+impl for SceneComponent {
+    pub fn for_kind(kind: str) -> SceneComponent {
+        if kind == "skeletal-mesh"{ret SceneComponent::SkeletalMesh(SkeletalMeshComponent::defaults())}
+        if kind == "particle-system" {ret SceneComponent::Particle(ParticleComponent::defaults())}
+        if kind == "audio-source" { ret SceneComponent::Audio(AudioSource::defaults()) }
+        if is_environment_kind(kind) {
+            ret SceneComponent::Environment(EnvironmentComponent::new(kind))
+        }
+        if kind == "camera" {
+            ret SceneComponent::Camera(CameraComponent::new())
+        }
+        if kind == "directional-light" || kind == "point-light" || kind == "spot-light" {
+            ret SceneComponent::Light(LightComponent::new(kind))
+        }
+        ret SceneComponent::None
+    }
+    pub fn kind(self: Self) -> str {
+        match self {
+            SkeletalMesh(_) => {ret "skeletal-mesh"}
+            Particle(_) => {ret "particle-system"}
+            Audio(_) => { ret "audio-source" }
+            None => {
+                ret ""
+            }
+            Light(light) => {
+                ret light.kind
+            }
+            Environment(value) => {
+                ret value.kind
+            }
+            Camera(_) => {
+                ret "camera"
+            }
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        match self {
+            SkeletalMesh(value) => {ret value.valid()}
+            Particle(value) => {ret value.valid()}
+            Audio(value) => { ret value.valid() }
+            None => {
+                ret true
+            }
+            Light(light) => {
+                ret light.valid()
+            }
+            Environment(value) => {
+                ret value.valid()
+            }
+            Camera(camera) => {
+                ret camera.valid()
+            }
+        }
+    }
+    pub fn to_json(self: Self) -> Json {
+        let mut fields = Vec[(str, Json)]::new()
+        match self {
+            SkeletalMesh(value) => {ret skeletal_component_json(value)}
+            Particle(value) => {ret vfx_encode_ParticleComponent(value)}
+            Audio(value) => { ret sound_json(value) }
+            None => {
+                ret Json::Null
+            }
+            Light(light) => {
+                fields.push(field("color", vec3_json(light.color)))
+                fields.push(field("intensity", number(light.intensity)))
+                fields.push(field("range", number(light.range)))
+                fields.push(field("innerAngle", number(light.inner_angle)))
+                fields.push(field("outerAngle", number(light.outer_angle)))
+                fields.push(field("sunAngle", number(light.sun_angle)))
+            }
+            Environment(value) => {
+                ret environment_json(value)
+            }
+            Camera(camera) => {
+                fields.push(field("fov", number(camera.fov)))
+                fields.push(field("aspect", number(camera.aspect)))
+                fields.push(field("near", number(camera.near)))
+                fields.push(field("far", number(camera.far)))
+            }
+        }
+        ret Json::Object(fields)
+    }
+    pub fn from_json(kind: str, root: Json) -> Option[SceneComponent] {
+        match root {
+            Object(_) => {
+            }
+            _ => {
+                ret Option[SceneComponent]::None
+            }
+        }
+        if kind=="skeletal-mesh"{ret match skeletal_component_parse(root){Some(c)=>Option::Some(SceneComponent::SkeletalMesh(c)) None=>Option::None}}
+        if kind=="particle-system" {ret match vfx_decode_ParticleComponent(root) {Ok(c)=>if c.valid() {Option[SceneComponent]::Some(SceneComponent::Particle(c))}else{Option[SceneComponent]::None} Err(_)=>Option[SceneComponent]::None}}
+        if kind == "audio-source" {
+            ret match sound_parse(root) { Some(value) => Option::Some(SceneComponent::Audio(value)) None => Option::None }
+        }
+        if is_environment_kind(kind) {
+            match environment_parse(kind, root) {
+                Some(value) => {
+                    ret Option[SceneComponent]::Some(SceneComponent::Environment(value))
+                }
+                None => {
+                    ret Option[SceneComponent]::None
+                }
+            }
+        }
+        for key in vec!["intensity", "range", "innerAngle", "outerAngle", "sunAngle", "fov", "aspect", "near", "far"] {
+            match root.get(key) {
+                Some(item) => {
+                    match item.as_number() {
+                        Some(text) => {
+                            if parse_number(text).is_none() {
+                                ret Option[SceneComponent]::None
+                            }
+                        }
+                        None => {
+                            ret Option[SceneComponent]::None
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        let mut component = SceneComponent::for_kind(kind)
+        match component {
+            Light(stored) => {
+                let mut light = stored
+                light.intensity = scalar(root, "intensity", light.intensity)
+                light.range = scalar(root, "range", light.range)
+                light.inner_angle = scalar(root, "innerAngle", light.inner_angle)
+                light.outer_angle = scalar(root, "outerAngle", light.outer_angle)
+                light.sun_angle = scalar(root, "sunAngle", light.sun_angle)
+                match root.get("color") {
+                    Some(value) => {
+                        match json_vec3(value) {
+                            Some(color) => {
+                                light.color = color
+                            }
+                            None => {
+                                ret Option[SceneComponent]::None
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+                component = SceneComponent::Light(light)
+            }
+            Camera(stored) => {
+                let mut camera = stored
+                camera.fov = scalar(root, "fov", camera.fov)
+                camera.aspect = scalar(root, "aspect", camera.aspect)
+                camera.near = scalar(root, "near", camera.near)
+                camera.far = scalar(root, "far", camera.far)
+                component = SceneComponent::Camera(camera)
+            }
+            Environment(_) => {
+            }
+            SkeletalMesh(_) => {}
+            Particle(_) => {}
+            Audio(_) => {}
+            None => {
+            }
+        }
+        if !component.valid() {
+            ret Option[SceneComponent]::None
+        }
+        ret Option[SceneComponent]::Some(component)
+    }
+}

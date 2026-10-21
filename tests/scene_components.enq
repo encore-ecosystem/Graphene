@@ -1,0 +1,226 @@
+import core::option::Option
+import core::vec::Vec
+import graphene::EditorCameraState
+import graphene::editor_camera_actor::{scene_camera, load_scene_camera, piloted_transform}
+import graphene::scene::lighting::{scene_light_values, scene_sun}
+import graphene::{BlueprintSimulation, BlueprintClass, blueprint_class_semantic}
+import graphene::{Scene, SceneActor, SceneAsset, Transform, SceneComponent, LightComponent, CameraComponent, EditorState, GrapheneCommand, AddActorCommand, ActorComponentCommand, DuplicateActorCommand, ActorCommand}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut asset = SceneAsset::new()
+    let mut light = LightComponent::new("spot-light")
+    light.color = Vec3::new(0.2_f32, 0.4_f32, 0.8_f32) light.intensity = 45.0_f32 light.range = 8.0_f32
+    light.inner_angle = 12.0_f32 light.outer_angle = 28.0_f32
+    let mut camera = CameraComponent::new() camera.fov = 72.0_f32 camera.aspect = 2.0_f32
+    asset.add(SceneActor::new("Spot", "spot-light", Transform::identity()).with_identity(5_u64).with_component(SceneComponent::Light(light)))
+    asset.add(SceneActor::new("Camera", "camera", Transform::identity()).with_identity(6_u64).with_parent(Option[u64]::Some(5_u64)).with_component(SceneComponent::Camera(camera)))
+    let decoded = match SceneAsset::parse(asset.stringify()) {
+        Some(value) => value None => {
+            ret 1_u32
+        }
+    }
+    if decoded.version() != 6 || decoded.source_version() != 6 || decoded.len() != 2 {
+        ret 2_u32
+    }
+    match decoded.actor_by_id(5) {
+        Some(actor) => {
+            match actor.component() {
+                Light(value) => {
+                    if value.intensity != 45 || value.range != 8 || value.color.z() != 0.8_f32 || value.outer_angle != 28 {
+                        ret 3_u32
+                    }
+                }
+                _ => {
+                    ret 4_u32
+                }
+            }
+        }
+        None => {
+            ret 5_u32
+        }
+    }
+    match decoded.actor_by_id(6) {
+        Some(actor) => {
+            match actor.component() {
+                Camera(value) => {
+                    if value.fov != 72 || value.aspect != 2 || actor.parent() != Option[u64]::Some(5) {
+                        ret 6_u32
+                    }
+                }
+                _ => {
+                    ret 7_u32
+                }
+            }
+        }
+        None => {
+            ret 8_u32
+        }
+    }
+    let mut invalid = light invalid.inner_angle = 40
+    if invalid.valid() {
+        ret 9_u32
+    }
+    let mut invalid_camera = camera invalid_camera.near = invalid_camera.far
+    if invalid_camera.valid() {
+        ret 10_u32
+    }
+
+    let mut state = EditorState::new(Scene::new())
+    let added = state.execute(GrapheneCommand::AddActor(AddActorCommand::with_asset("Spot", Transform::identity(), "@spot-light").with_component(SceneComponent::Light(light))))
+    if !added.success() {
+        ret 11_u32
+    }
+    let id = added.events().get(0).unwrap_or(graphene::GrapheneEvent::new("", Option[u64]::None, 0)).actor().unwrap_or(0)
+    if id == 0 {
+        ret 12_u32
+    }
+    let mut changed = light changed.intensity = 120
+    if !state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                id, SceneComponent::Light(changed)
+            }
+            ,
+        )).success() {
+        ret 13_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 14_u32
+    }
+    match state.scene().get(id) {
+        Some(actor) => {
+            match actor.component() {
+                Light(value) => {
+                    if value.intensity != 45 {
+                        ret 15_u32
+                    }
+                }
+                _ => {
+                    ret 16_u32
+                }
+            }
+        }
+        None => {
+            ret 17_u32
+        }
+    }
+    if !state.execute(GrapheneCommand::Redo).success() {
+        ret 18_u32
+    }
+    if !state.execute(GrapheneCommand::DuplicateActor(DuplicateActorCommand::new(id, "Copy", Transform::identity()))).success() {
+        ret 19_u32
+    }
+    if !state.execute(GrapheneCommand::DeleteActor(ActorCommand::new(id))).success() {
+        ret 20_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 21_u32
+    }
+    match state.scene().get(id) {
+        Some(actor) => {
+            match actor.component() {
+                Light(value) => {
+                    if value.intensity != 120 {
+                        ret 22_u32
+                    }
+                }
+                _ => {
+                    ret 23_u32
+                }
+            }
+        }
+        None => {
+            ret 24_u32
+        }
+    }
+    if !state.begin_interactive(GrapheneCommand::SetComponent(ActorComponentCommand {
+                id, SceneComponent::Light(light)
+            }
+            ,
+        )).success() {
+        ret 25_u32
+    }
+    if !state.preview_interactive(GrapheneCommand::SetComponent(ActorComponentCommand {
+                id, SceneComponent::Light(changed)
+            }
+            ,
+        )).success() {
+        ret 26_u32
+    }
+    if !state.cancel_interactive().success() {
+        ret 27_u32
+    }
+    let payload = scene_light_values(state.scene())
+    if payload.len() != 3140 || payload.get(0).unwrap_or(0) != 2 {
+        ret 28_u32
+    }
+    let mut scene = Scene::new()
+    let sun = scene.create_entity("Sun", Transform::identity())
+    scene.set_component(sun, SceneComponent::Light(LightComponent::new("directional-light")))
+    if scene_sun(scene).direction().z() > - 0.99_f32 {
+        ret 29_u32
+    }
+    if scene_light_values(scene).get(0).unwrap_or(99) != 0 {
+        ret 30_u32
+    }
+    scene.set_visible(sun, false)
+    if scene_sun(scene).intensity() != 0 {
+        ret 31_u32
+    }
+    let camera_id = scene.create_entity("Camera", Transform::identity().with_position(Vec3::new(0, 2, 6)).with_rotation(Vec3::new( - 0.2_f32, 0.4_f32, 0)))
+    scene.set_component(camera_id, SceneComponent::Camera(camera))
+    let mut editor_camera = EditorCameraState::new("perspective", false)
+    if !load_scene_camera(editor_camera, scene, camera_id) {
+        ret 32_u32
+    }
+    match piloted_transform(editor_camera, scene, camera_id) {
+        Some(transform) => {
+            if transform.position().z() != 6 || transform.rotation().x() < - 0.201_f32 || transform.rotation().x() > - 0.199_f32 || transform.rotation().y() < 0.399_f32 || transform.rotation().y() > 0.401_f32 {
+                ret 33_u32
+            }
+        }
+        None => {
+            ret 34_u32
+        }
+    }
+    if scene_camera(scene, sun).is_some() {
+        ret 35_u32
+    }
+    let mut simulation = BlueprintSimulation::new()
+    let classes = Vec[BlueprintClass]::new()
+    match simulation.start("target/scene-component-test-empty", scene, "", blueprint_class_semantic(classes), classes) {
+        Ok(_) => {
+        }
+        Err(_) => {
+            ret 37_u32
+        }
+    }
+    match simulation.scene().get(camera_id) {
+        Some(entity) => {
+            if entity.component().kind() != "camera" {
+                ret 38_u32
+            }
+        }
+        None => {
+            ret 39_u32
+        }
+    }
+    match simulation.scene().get(sun) {
+        Some(entity) => {
+            if entity.component().kind() != "directional-light" {
+                ret 40_u32
+            }
+        }
+        None => {
+            ret 41_u32
+        }
+    }
+    simulation.stop()
+    if !state.execute(GrapheneCommand::SetComponent(ActorComponentCommand {
+                id, SceneComponent::Light(invalid)
+            }
+            ,
+        )).success() {
+        ret 0_u32
+    }
+    ret 36_u32
+}

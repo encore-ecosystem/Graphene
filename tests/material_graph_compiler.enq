@@ -1,0 +1,49 @@
+import core::result::Result
+import graphene::material_graph::*
+import std::io::println
+import std::os::{read_file, write_file_atomic}
+import std::time::perf_counter_ms
+
+fn main() -> u32 {
+    let project = f "target/material-compiler-test-{perf_counter_ms()}"
+    let graph = MaterialGraph::default()
+    let semantic = material_graph_stringify(graph, true)
+    let generated = generate_material(graph)
+    let job = match prepare_material_build(project, semantic, generated.source) {
+        Ok(job) => job Err(error) => {
+            println(error) ret 1
+        }
+    }
+    if run_material_build(job.directory, job.compiler, job.validator, job.cache) != 0 {
+        println(read_file(job.directory + "/compile-vert.log")) println(read_file(job.directory + "/compile-frag.log")) ret 2
+    }
+    if material_spirv(read_file(job.directory + "/preview.vert.spv")).is_err() || material_spirv(read_file(job.directory + "/preview.frag.spv")).is_err() {
+        ret 3
+    }
+    let cached = match prepare_material_build(project, semantic, generated.source) {
+        Ok(job) => job Err(_) => {
+            ret 4
+        }
+    }
+    if !cached.cached || cached.key != job.key {
+        ret 5
+    }
+    if write_file_atomic(cached.directory + "/preview.frag.spv", "corrupt") != 0 {
+        ret 6
+    }
+    let corrupt = match prepare_material_build(project, semantic, generated.source) {
+        Ok(job) => job Err(_) => {
+            ret 7
+        }
+    }
+    if corrupt.cached {
+        ret 8
+    }
+    if run_material_build(corrupt.directory, corrupt.compiler, corrupt.validator, corrupt.cache) != 0 {
+        ret 9
+    }
+    if run_material_build(corrupt.directory, "/nonexistent/graphene-test-glslc", corrupt.validator, corrupt.cache) == 0 {
+        ret 10
+    }
+    ret 0
+}

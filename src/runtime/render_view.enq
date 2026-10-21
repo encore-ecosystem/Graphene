@@ -1,0 +1,144 @@
+//! Temporal reconstruction and paced presentation for standalone game loops.
+//! Poll input on every iteration; tick simulation only when presentation_pending
+//! is false. Generated images reuse the real frame's GPU data and history.
+import core::vec::Vec
+import refrain::anti_aliasing::AntiAliasingView
+import refrain::assets::{MaterialAssets, MeshAssets}
+import refrain::performance::performance_counter_ns
+import refrain::render_settings::RenderSettings
+import refrain::renderer::SceneRenderer
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::light::DirectionalLight
+import refrain::scene::world::Scene
+import refrain::texture_gpu::TextureUpload
+import refrain::texture_image::TextureImage
+
+pub struct RuntimeRenderView {
+    aa: AntiAliasingView<H>
+    output: Swapchain
+    settings: RenderSettings
+    renderer: SceneRenderer
+    layout: BindGroupLayout
+    empty_gi: GpuBuffer
+    textures: Vec[GpuTexture]
+    sampler: GpuSampler
+    ready: bool
+}
+
+impl for RuntimeRenderView {
+    /// Borrows the device and output swapchain; the game owns their lifetime.
+    pub fn create(device: GraphicsDevice, output: Swapchain, settings: RenderSettings) -> RuntimeRenderView<H> {
+        let mut entries = vec![BindGroupLayoutEntry::uniform(0, shader_stage_vertex() | shader_stage_fragment()), BindGroupLayoutEntry::storage(1, shader_stage_vertex())]
+        for binding in 2..5 {
+            entries.push(BindGroupLayoutEntry::storage(binding as u32, shader_stage_fragment()))
+        }
+        for binding in 5..8 {
+            entries.push(BindGroupLayoutEntry::texture_sampler(binding as u32, shader_stage_fragment()))
+        }
+        let layout = device.create_bind_group_layout(entries)
+        let mut aa = AntiAliasingView::create(device, output, layout)
+        aa.set_direct_present(true) aa.set_playing(true) aa.set_settings(settings)
+        let configured = aa.configure(settings.anti_aliasing(), output.width(), output.height(), output)
+        let empty_gi = device.create_buffer(16, buffer_storage(), true)
+        let initialized = empty_gi.write_f32s(0, vec![0_f32, 0_f32, 0_f32, 0_f32])
+        let mut textures = Vec[GpuTexture]::new()
+        for pixel in vec![4294967295_u32, 4294934656_u32] {
+            let texture = match TextureUpload::begin_linear(device, TextureImage {
+                    1, 1, vec![pixel]
+                }
+                ,
+            ) {
+                Some(upload) => {
+                    let _ready = upload.wait() upload.finish()
+                }
+                None => GpuTexture::unavailable()
+            }
+            textures.push(texture)
+        }
+        let sampler = device.create_repeat_sampler()
+        let renderer = SceneRenderer::create_with_gi(device, layout, 2, aa.solid_pipeline(), aa.double_sided_pipeline(), empty_gi, empty_gi, empty_gi, textures.get(0).unwrap_or(GpuTexture::unavailable()), textures.get(1).unwrap_or(GpuTexture::unavailable()), sampler)
+        ret RuntimeRenderView<H> {
+            aa, output, settings, renderer, layout, empty_gi, textures, sampler, configured && initialized && renderer.available()
+        }
+    }
+    pub fn available(self: Self&) -> bool {
+        ret self.ready
+    }
+    pub fn capabilities(self: Self&) -> u32 {
+        ret self.aa.capabilities()
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.aa.reconstruction_error()
+    }
+    pub fn frame_counts(self: Self&) ->(u64, u64, u64) {
+        ret self.aa.frame_counts()
+    }
+    pub fn set_settings(self: mut Self&, settings: RenderSettings) ->() {
+        self.settings = settings self.aa.set_settings(settings) self.aa.cancel_presentations()
+    }
+    pub fn presentation_pending(self: Self&) -> bool {
+        ret self.aa.presentation_pending()
+    }
+    /// False means retry on a later event-loop iteration. No simulation is run.
+    pub fn present_pending(self: mut Self&) -> bool {
+        let now = performance_counter_ns()
+        if self.aa.presentation_expired(now) {
+            self.aa.cancel_presentations() self.aa.invalidate() ret false
+        }
+        if !self.aa.presentation_due(now) {
+            ret false
+        }
+        let frame = self.output.try_acquire_frame()
+        if !frame.available() {
+            frame.destroy() ret false
+        }
+        let presented = self.aa.composite_presentation(frame) && frame.present() frame.destroy()
+        if presented {
+            self.aa.presentation_submitted(performance_counter_ns())
+        }
+        ret presented
+    }
+    pub fn render_scene(self: mut Self&, scene: Scene, camera: PerspectiveCamera, light: DirectionalLight, meshes: MeshAssets, materials: MaterialAssets) -> bool {
+        if self.aa.presentation_pending() {
+            ret false
+        }
+        let started = performance_counter_ns()
+        if !self.aa.configure(self.settings.anti_aliasing(), self.output.width(), self.output.height(), self.output) {
+            ret false
+        }
+        self.aa.observe_camera(camera)
+        let view = self.aa.camera(camera)
+        self.renderer.set_view_pipelines(self.aa.solid_pipeline(), self.aa.double_sided_pipeline(), self.aa.method().temporal(), self.aa.temporal())
+        let items = scene.visible_render_items()
+        let raw = self.aa.target().try_acquire_frame()
+        if !raw.available() {
+            raw.destroy() ret false
+        }
+        let pass = raw.begin_render_pass(self.aa.solid_pipeline(), 0.025_f32, 0.04_f32, 0.06_f32, 1_f32)
+        let recorded = self.renderer.render_items(items, view, light, meshes, materials, pass, raw.slot(), self.output.width() as f32 / self.output.height() as f32) && pass.end()
+        let submitted = recorded && raw.present() raw.destroy()
+        if !submitted {
+            self.aa.invalidate() ret false
+        }
+        let frame = self.output.try_acquire_frame()
+        if !frame.available() {
+            frame.destroy() self.aa.invalidate() ret false
+        }
+        let presented = self.aa.composite(frame, 0, 0) && self.aa.end_composite(frame) && frame.present() frame.destroy()
+        if presented {
+            self.aa.commit(items, view)
+            let now = performance_counter_ns() self.aa.begin_presentations(now - started, now) self.aa.presentation_submitted(now)
+        } else {
+            self.aa.invalidate()
+        }
+        ret presented
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        self.output.wait_readback() self.aa.destroy() self.renderer.destroy()
+        for texture in self.textures {
+            texture.destroy()
+        }
+        self.empty_gi.destroy() self.sampler.destroy() self.layout.destroy()
+    }
+}

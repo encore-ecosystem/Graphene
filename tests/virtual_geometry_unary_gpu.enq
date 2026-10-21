@@ -1,0 +1,141 @@
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import graphene::{DeviceFeatures, GpuVirtualGeometry, GraphicsInstance, VirtualGeometryInstance, buffer_storage, build_virtual_geometry_lods, sphere_mesh, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_record_debug}
+import linalg::{Mat4, Vec3}
+import std::io::println
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    if !instance.available() {
+        ret 1_u32
+    }
+    match instance.preferred_adapter() {
+        Option::Some(adapter) => {
+            let requested = DeviceFeatures::from_mask(
+                DeviceFeatures::mesh_shader().mask(),)
+            let device = instance.create_device_with_features(
+                adapter, DeviceFeatures::none(), requested,)
+            if !device.available() {
+                instance.destroy()
+                ret 2_u32
+            }
+            if !device.enabled_features().contains(requested) {
+                device.destroy()
+                instance.destroy()
+                ret 0_u32
+            }
+            let source = sphere_mesh(0.6_f32, 20_u32, 32_u32).parts()
+            let vertices = source.0
+            let indices = source.1
+            let expected_triangles = indices.len() / 3_usize
+            let mut positions = Vec[Vec3]::new()
+            let mut vertex = 0_usize
+            while vertex < vertices.len() {
+                positions.push(Vec3::new(vertices.get(vertex).unwrap_or(0.0_f32),
+                        vertices.get(vertex + 1_usize).unwrap_or(0.0_f32),
+                        vertices.get(vertex + 2_usize).unwrap_or(0.0_f32),))
+                vertex += 9_usize
+            }
+            let geometry = build_virtual_geometry_lods(positions, indices, 64_usize, 126_usize)
+            let mut has_unary_refinement = false
+            for node in geometry.hierarchy() {
+                if !node.leaf() && node.right_child() == 4294967295_u32 && node.geometric_error() > 0.0_f32 {
+                    has_unary_refinement = true
+                }
+            }
+            if !geometry.valid() || !has_unary_refinement {
+                ret 5_u32
+            }
+            let target = device.create_offscreen_target(64_u32, 64_u32)
+            let gi_scene = device.create_buffer(32_u64, buffer_storage(), true)
+            let gi_surfaces = device.create_buffer(48_u64, buffer_storage(), true)
+            let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
+            gi_scene.write_f32(0_u64, 0.0_f32)
+            gi_history.write_f32(12_u64, 0.0_f32)
+            let virtual_scene = GpuVirtualGeometry::create(
+                device, target, geometry, vertices, 4_usize,
+                gi_scene, gi_surfaces, gi_history,)
+            let target_ready = target.available()
+            let geometry_ready = gpu_virtual_geometry_available(virtual_scene)
+            let mut rendered = target_ready && geometry_ready
+            let mut scene_instances = Vec[VirtualGeometryInstance]::new()
+            scene_instances.push(VirtualGeometryInstance::new(
+                    Mat4::trs(Vec3::new(0.0_f32, 0.0_f32, - 3.0_f32), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)),
+                    Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 0.0_f32, 0.5_f32, false,))
+            let frame = target.acquire_frame()
+            // A very high pixel density forces every positive-error node to
+            // refine. Diagnostic mode retains the complete sphere, including
+            // its back half, so the source triangle count is the coverage oracle.
+            let culled = gpu_virtual_geometry_record_debug(virtual_scene, frame,
+                Mat4::perspective(1.0_f32, 1.0_f32, 0.1_f32, 100.0_f32), Vec3::zero(),
+                scene_instances, 100.0_f32, Vec3::new(0.0_f32, - 1.0_f32, 0.0_f32),
+                Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 1.0_f32, Vec3::new(0.2_f32, 0.2_f32, 0.2_f32),
+                100000000.0_f32, 2_u32, 0_u32,)
+            let pass = frame.begin_render_pass(gpu_virtual_geometry_pipeline(virtual_scene), 0.0_f32, 0.0_f32, 0.0_f32, 1.0_f32)
+            let drawn = pass.available() && gpu_virtual_geometry_draw(virtual_scene, pass)
+            let completed = drawn && pass.end() && frame.present() && target.wait_readback()
+            frame.destroy()
+            let selected = gpu_virtual_geometry_selected_triangle_count(virtual_scene)
+            rendered = rendered && culled && completed && selected == expected_triangles
+            if !rendered {
+                println("Unary AutoLOD refinement: source=" + Debug::fmt(expected_triangles) + " selected=" + Debug::fmt(selected))
+            }
+            let mut normal_quality = expected_triangles
+            let mut distant_quality = expected_triangles
+            let mut reduced_quality = expected_triangles
+            for probe in 0_usize..4_usize {
+                virtual_scene.set_target_error(if probe == 0_usize || probe == 3_usize {
+                        1.0_f32
+                    } else {
+                        8.0_f32
+                    }
+                )
+                virtual_scene.set_autolod_enabled(probe != 2_usize)
+                let mut distant = Vec[VirtualGeometryInstance]::new()
+                distant.push(VirtualGeometryInstance::new(Mat4::trs(Vec3::new(0.0_f32, 0.0_f32, if probe == 3_usize {
+                                    - 1000.0_f32
+                                } else {
+                                    - 30.0_f32
+                                }
+                                ,
+                            ), Vec3::zero(), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32)), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 0.0_f32, 0.5_f32, false))
+                let next = target.acquire_frame()
+                let prepared = gpu_virtual_geometry_record_debug(virtual_scene, next, Mat4::perspective(1.0_f32, 1.0_f32, 0.1_f32, 10000.0_f32), Vec3::zero(), distant, 0.0_f32, Vec3::new(0.0_f32, - 1.0_f32, 0.0_f32), Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 1.0_f32, Vec3::new(0.2_f32, 0.2_f32, 0.2_f32), 720.0_f32, 2_u32, 0_u32)
+                let draw = next.begin_render_pass(gpu_virtual_geometry_pipeline(virtual_scene), 0.0_f32, 0.0_f32, 0.0_f32, 1.0_f32)
+                rendered = prepared && draw.available() && gpu_virtual_geometry_draw(virtual_scene, draw) && draw.end() && next.present() && target.wait_readback() && rendered
+                next.destroy()
+                let count = gpu_virtual_geometry_selected_triangle_count(virtual_scene)
+                if probe == 0_usize {
+                    normal_quality = count
+                } elif probe == 1_usize {
+                    reduced_quality = count
+                } elif probe == 2_usize {
+                    rendered = rendered && count == expected_triangles
+                } else {
+                    distant_quality = count
+                }
+            }
+            rendered = rendered && normal_quality <= expected_triangles && reduced_quality < normal_quality && distant_quality < normal_quality
+            if !rendered {
+                println("AutoLOD quality: normal=" + normal_quality.fmt() + " reduced=" + reduced_quality.fmt())
+            }
+            gpu_virtual_geometry_destroy(virtual_scene)
+            gi_history.destroy()
+            gi_surfaces.destroy()
+            gi_scene.destroy()
+            target.destroy()
+            device.destroy()
+            instance.destroy()
+            ret if rendered {
+                0_u32
+            } else {
+                3_u32
+            }
+        }
+        Option::None => {
+            instance.destroy()
+            ret 4_u32
+        }
+    }
+}

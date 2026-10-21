@@ -1,0 +1,330 @@
+//! Explicitly owned simulation instances. Handles expire on removal; assets own no resources.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::compiler::compile_particle_emitter
+import mod::events::{ParticleEvent, decode_particle_events}
+import mod::model::*
+
+extern fn graphene_vfx_validate(values: f32*, words: usize) -> bool
+extern fn graphene_vfx_error() -> str
+extern fn graphene_vfx_create(capacity: u32, seed: u32) -> usize
+extern fn graphene_vfx_close(id: usize) -> bool
+extern fn graphene_vfx_configure(id: usize, values: f32*, words: usize) -> bool
+extern fn graphene_vfx_publish(id: usize, values: f32*, words: usize) -> bool
+extern fn graphene_vfx_parameters(id: usize, values: f32*, words: usize) -> bool
+extern fn graphene_vfx_tick(id: usize, delta: f32) -> bool
+extern fn graphene_vfx_action(id: usize, action: u32) -> bool
+extern fn graphene_vfx_stat(id: usize, field: u32) -> u64
+extern fn graphene_vfx_copy(id: usize, values: f32*, words: usize) -> bool
+extern fn graphene_vfx_events(id: usize, values: f32*, words: usize) -> bool
+extern fn graphene_vfx_clear_events(id: usize) -> bool
+extern fn graphene_vfx_time(id: usize) -> f32
+
+#attr(safe)
+pub fn particle_program_valid(program: ParticleProgram) -> bool {
+    if !program.valid() {
+        ret false
+    }
+    unsafe {
+        ret graphene_vfx_validate(program.words.as_ptr(), program.words.len())
+    }
+}
+pub enum ParticleStopMode {
+    Drain
+    Kill
+}
+pub struct ParticleSystemHandle {
+    id: u64
+}
+pub struct ParticleParameters {
+    values: Vec[ParticleParameter]
+}
+
+impl for ParticleParameters {
+    pub fn new() -> Self {
+        ret Self { Vec[ParticleParameter]::new() }
+    }
+    pub fn set(self: mut Self, name: str, value: ParticleValue) ->() {
+        for i in 0_usize..self.values.len() {
+            let mut p = self.values.get(i).unwrap_or(ParticleParameter {
+                    "", "vec4", value
+                }
+                ,
+            ) if p.name == name {
+                p.value = value self.values.set(i, p) ret()
+            }
+        }
+        self.values.push(ParticleParameter { name, "vec4", value })
+    }
+}
+pub struct ParticleStats {
+    alive: u64
+    capacity: u64
+    spawned: u64
+    expired: u64
+    dropped: u64
+    dropped_events: u64
+    bytes: u64
+    steps: u64
+}
+pub struct ParticleEmitterHandle {
+    id: usize
+}
+
+impl for ParticleEmitterHandle {
+    #attr(safe)
+    pub fn open(emitter: ParticleEmitter, program: ParticleProgram, seed: u32) -> Result[Self, str] {
+        if !program.valid() {
+            ret Result::Err("Particle graph has compilation errors")
+        }
+        unsafe {
+            let id = graphene_vfx_create(emitter.capacity, seed)
+            if id == 0 {
+                ret Result::Err(graphene_vfx_error())
+            }
+            let c = emitter.config()
+            if !graphene_vfx_configure(id, c.as_ptr(), c.len()) || !graphene_vfx_publish(id, program.words.as_ptr(), program.words.len()) {
+                graphene_vfx_close(id) ret Result::Err("Invalid particle configuration or program")
+            }
+            graphene_vfx_action(id, 4_u32)
+            ret Result::Ok(Self { id })
+        }
+    }
+    #attr(safe)
+    pub fn publish(self: Self, program: ParticleProgram) -> Result[bool, str] {
+        if !program.valid() {
+            ret Result::Err("Particle graph has compilation errors; last working program retained")
+        }
+        unsafe {
+            if !graphene_vfx_publish(self.id, program.words.as_ptr(), program.words.len()) {
+                ret Result::Err(graphene_vfx_error())
+            }
+        }
+        ret Result::Ok(true)
+    }
+    #attr(safe)
+    pub fn configure(self: Self, emitter: ParticleEmitter) -> bool {
+        let c = emitter.config() unsafe {
+            ret graphene_vfx_configure(self.id, c.as_ptr(), c.len())
+        }
+    }
+    #attr(safe)
+    pub fn parameters(self: Self, values: Vec[f32]) -> bool {
+        unsafe {
+            ret graphene_vfx_parameters(self.id, values.as_ptr(), values.len())
+        }
+    }
+    #attr(safe)
+    pub fn tick(self: Self, delta: f32) -> bool {
+        unsafe {
+            ret graphene_vfx_tick(self.id, delta)
+        }
+    }
+    #attr(safe)
+    pub fn action(self: Self, action: u32) -> bool {
+        unsafe {
+            ret graphene_vfx_action(self.id, action)
+        }
+    }
+    #attr(safe)
+    pub fn close(self: Self) -> bool {
+        unsafe {
+            ret graphene_vfx_close(self.id)
+        }
+    }
+    #attr(safe)
+    pub fn count(self: Self) -> usize {
+        unsafe {
+            ret graphene_vfx_stat(self.id, 0_u32) as usize
+        }
+    }
+    #attr(safe)
+    pub fn finished(self: Self) -> bool {
+        unsafe {
+            ret graphene_vfx_stat(self.id, 8_u32) != 0_u64
+        }
+    }
+    #attr(safe)
+    pub fn time(self: Self) -> f32 {
+        unsafe {
+            ret graphene_vfx_time(self.id)
+        }
+    }
+    #attr(safe)
+    pub fn stats(self: Self) -> ParticleStats {
+        unsafe {
+            ret ParticleStats {
+                graphene_vfx_stat(self.id, 0_u32), graphene_vfx_stat(self.id, 1_u32), graphene_vfx_stat(self.id, 2_u32), graphene_vfx_stat(self.id, 3_u32), graphene_vfx_stat(self.id, 4_u32), graphene_vfx_stat(self.id, 5_u32), graphene_vfx_stat(self.id, 6_u32), graphene_vfx_stat(self.id, 7_u32)
+            }
+        }
+    }
+    #attr(safe)
+    pub fn particles(self: Self) -> Vec[f32] {
+        let mut data = Vec[f32]::with_capacity(self.count() * 32_usize)
+        for _i in 0_usize..self.count() * 32_usize {
+            data.push(0)
+        }
+        unsafe {
+            if !graphene_vfx_copy(self.id, data.as_ptr(), data.len()) {
+                data.clear()
+            }
+        }
+        ret data
+    }
+    #attr(safe)
+    pub fn typed_events(self: Self) -> Result[Vec[ParticleEvent], str] {
+        ret decode_particle_events(self.events())
+    }
+    #attr(safe)
+    pub fn drain_events(self: Self) -> Result[Vec[ParticleEvent], str] {
+        let events = self.events()
+        unsafe {
+            graphene_vfx_clear_events(self.id)
+        }
+        ret decode_particle_events(events)
+    }
+    pub fn events(self: Self) -> Vec[f32] {
+        let mut data = Vec[f32]::new()
+        unsafe {
+            let count = graphene_vfx_stat(self.id, 9_u32) as usize for _i in 0_usize..count * 16_usize {
+                data.push(0)
+            }
+            if !graphene_vfx_events(self.id, data.as_ptr(), data.len()) {
+                data.clear()
+            }
+        }
+        ret data
+    }
+}
+struct ParticleInstance {
+    id: u64
+    asset: ParticleSystem
+    emitters: Vec[ParticleEmitterHandle]
+}
+pub struct ParticleWorld {
+    next: u64
+    instances: Vec[ParticleInstance]
+}
+
+impl for ParticleWorld {
+    pub fn new() -> Self {
+        ret Self { 1_u64, Vec[ParticleInstance]::new() }
+    }
+    pub fn instantiate(self: mut Self, asset: ParticleSystem, parameters: ParticleParameters) -> Result[ParticleSystemHandle, str] {
+        let mut programs = Vec[ParticleProgram]::new() for i in 0_usize..asset.emitters.len() {
+            programs.push(compile_particle_emitter(asset, i))
+        }
+        ret self.instantiate_programs(asset, programs, parameters)
+    }
+    pub fn instantiate_programs(self: mut Self, asset: ParticleSystem, programs: Vec[ParticleProgram], parameters: ParticleParameters) -> Result[ParticleSystemHandle, str] {
+        if programs.len() != asset.emitters.len() {
+            ret Result::Err("VFX emitter/program count mismatch")
+        }
+        let mut instance = ParticleInstance { self.next, asset, Vec[ParticleEmitterHandle]::new() }
+        for i in 0_usize..asset.emitters.len() {
+            let emitter = asset.emitters.get(i).unwrap_or(ParticleEmitter::new(""))
+            if !emitter.enabled {
+                continue
+            }
+            match ParticleEmitterHandle::open(emitter, programs.get(i).unwrap_or(ParticleProgram {
+                        Vec[f32]::new(), Vec[ParticleDiagnostic]::new()
+                    }
+                    ,
+                ), asset.seed ^ emitter.seed) {
+                Ok(handle) => {
+                    instance.emitters.push(handle)
+                }
+                Err(message) => {
+                    for handle in instance.emitters {
+                        handle.close()
+                    }
+                    ret Result::Err(message)
+                }
+            }
+        }
+        self.instances.push(instance) self.next += 1_u64
+        let handle = ParticleSystemHandle { instance.id } self.set_parameters(handle, parameters)
+        ret Result::Ok(handle)
+    }
+    pub fn set_parameters(self: Self, handle: ParticleSystemHandle, parameters: ParticleParameters) -> bool {
+        for instance in self.instances {
+            if instance.id == handle.id {
+                let mut words = Vec[f32]::new()
+                for p in instance.asset.parameters {
+                    let mut value = p.value for override in parameters.values {
+                        if p.name == override.name {
+                            value = override.value
+                        }
+                    }
+                    for v in value.values() {
+                        words.push(v)
+                    }
+                }
+                for emitter in instance.emitters {
+                    if !emitter.parameters(words) {
+                        ret false
+                    }
+                }
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn action(self: Self, handle: ParticleSystemHandle, action: u32) -> bool {
+        for instance in self.instances {
+            if instance.id == handle.id {
+                for emitter in instance.emitters {
+                    emitter.action(action)
+                }
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn pause(self: Self, handle: ParticleSystemHandle) -> bool {
+        ret self.action(handle, 0_u32)
+    }
+    pub fn resume(self: Self, handle: ParticleSystemHandle) -> bool {
+        ret self.action(handle, 1_u32)
+    }
+    pub fn restart(self: Self, handle: ParticleSystemHandle) -> bool {
+        ret self.action(handle, 4_u32)
+    }
+    pub fn stop(self: Self, handle: ParticleSystemHandle, mode: ParticleStopMode) -> bool {
+        ret self.action(handle, match mode {
+                Drain => 2_u32 Kill => 3_u32
+            }
+            ,
+        )
+    }
+    pub fn tick(self: Self, delta: f32) ->() {
+        for instance in self.instances {
+            for emitter in instance.emitters {
+                emitter.tick(delta)
+            }
+        }
+    }
+    pub fn remove(self: mut Self, handle: ParticleSystemHandle) -> bool {
+        let mut retained = Vec[ParticleInstance]::new() let mut found = false
+        for instance in self.instances {
+            if instance.id == handle.id {
+                for emitter in instance.emitters {
+                    emitter.close()
+                }
+                found = true
+            } else {
+                retained.push(instance)
+            }
+        }
+        self.instances = retained ret found
+    }
+    pub fn close(self: mut Self) ->() {
+        for instance in self.instances {
+            for emitter in instance.emitters {
+                emitter.close()
+            }
+        }
+        self.instances.clear()
+    }
+}

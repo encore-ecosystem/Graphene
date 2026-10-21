@@ -1,0 +1,129 @@
+//! A nested sequence of adaptive, crack-free cuts with known triangle costs.
+//! Built once per loaded mesh; GPU selection is one comparison per visited node.
+import core::vec::Vec
+import mod::virtual_geometry::{VirtualGeometry, ClusterHierarchyNode}
+
+pub struct LodBudget {
+    refinement_ratios: Vec[f32]
+    source_triangles: usize
+    minimum_triangles: usize
+}
+
+fn higher_priority(nodes: Vec[ClusterHierarchyNode], a: u32, b: u32) -> bool {
+    let left = nodes.get_unchecked_borrowed(a as usize)
+    let right = nodes.get_unchecked_borrowed(b as usize)
+    ret left.geometric_error() > right.geometric_error() ||
+    (left.geometric_error() == right.geometric_error() && a < b)
+}
+fn enqueue(heap: mut Vec[u32], nodes: Vec[ClusterHierarchyNode], node: u32) ->() {
+    if node as usize >= nodes.len() || nodes.get_unchecked_borrowed(node as usize).leaf() {
+        ret()
+    }
+    heap.push(node)
+    let mut index = heap.len() - 1_usize
+    while index > 0_usize {
+        let parent =(index - 1_usize) / 2_usize
+        let previous = heap.get_unchecked_borrowed(parent)
+        if !higher_priority(nodes, node, previous) {
+            break
+        }
+        heap.set(index, previous) index = parent
+    }
+    heap.set(index, node)
+}
+fn dequeue(heap: mut Vec[u32], nodes: Vec[ClusterHierarchyNode]) -> u32 {
+    let result = heap.get_unchecked_borrowed(0)
+    let last = heap.pop().unwrap_or(result)
+    if heap.len() == 0 {
+        ret result
+    }
+    let mut index = 0_usize
+    while index * 2_usize + 1_usize < heap.len() {
+        let mut child = index * 2_usize + 1_usize
+        if child + 1_usize < heap.len() && higher_priority(nodes, heap.get_unchecked_borrowed(child + 1_usize), heap.get_unchecked_borrowed(child)) {
+            child += 1_usize
+        }
+        let value = heap.get_unchecked_borrowed(child)
+        if !higher_priority(nodes, value, last) {
+            break
+        }
+        heap.set(index, value) index = child
+    }
+    heap.set(index, last)
+    ret result
+}
+
+impl for LodBudget {
+    pub fn build(geometry: VirtualGeometry) -> Self {
+        let nodes = geometry.hierarchy()
+        let clusters = geometry.clusters()
+        let mut costs = Vec[usize]::new()
+        let mut thresholds = Vec[f32]::new()
+        let mut source = 0_usize
+        for node in nodes {
+            let mut cost = 0_usize
+            let begin = node.first_cluster() let end = begin + node.cluster_count()
+            for index in begin..end {
+                cost += clusters.get_unchecked_borrowed(index).triangle_count()
+            }
+            costs.push(cost) thresholds.push(2.0_f32)
+            if node.leaf() {
+                source += cost
+            }
+        }
+        let root = geometry.root_node()
+        if root as usize >= nodes.len() || source == 0 {
+            ret Self { thresholds, source, 0_usize }
+        }
+        let minimum = costs.get_unchecked_borrowed(root as usize)
+        let mut total = minimum
+        let mut heap = Vec[u32]::new()
+        enqueue(heap, nodes, root)
+        // Always refine the currently worst geometric error first. Each split
+        // replaces a whole parent group with its children, preserving seams.
+        // Cumulative costs give a nested cut for every budget without per-frame
+        // sorting, an iterative GPU search, or CPU/GPU readback for selection.
+        while heap.len() > 0 {
+            let index = dequeue(heap, nodes)
+            let node = nodes.get_unchecked_borrowed(index as usize)
+            let mut child_cost = costs.get_unchecked_borrowed(node.left_child() as usize)
+            if node.right_child() != 4294967295_u32 {
+                child_cost += costs.get_unchecked_borrowed(node.right_child() as usize)
+            }
+            let old = costs.get_unchecked_borrowed(index as usize)
+            // Monotone thresholds also handle free unary refinement and trees
+            // where a simplifier cannot remove any more locked-boundary edges.
+            if child_cost > old {
+                total += child_cost - old
+            }
+            thresholds.set(index as usize,(total as f32) /(source as f32))
+            enqueue(heap, nodes, node.left_child())
+            enqueue(heap, nodes, node.right_child())
+        }
+        ret Self { thresholds, source, minimum }
+    }
+    pub fn selected_triangles(self: Self, geometry: VirtualGeometry, ratio: f32) -> usize {
+        let nodes = geometry.hierarchy()
+        let mut stack = vec![geometry.root_node()]
+        let mut total = 0_usize
+        while stack.len() > 0 {
+            let index = stack.pop().unwrap_or(4294967295_u32)
+            if index as usize >= nodes.len() {
+                continue
+            }
+            let node = nodes.get_unchecked_borrowed(index as usize)
+            if !node.leaf() &&(ratio >= 1 || ratio >= self.refinement_ratios.get_unchecked_borrowed(index as usize)) {
+                stack.push(node.left_child())
+                if node.right_child() != 4294967295_u32 {
+                    stack.push(node.right_child())
+                }
+            } else {
+                let begin = node.first_cluster() let end = begin + node.cluster_count()
+                for cluster in begin..end {
+                    total += geometry.clusters().get_unchecked_borrowed(cluster).triangle_count()
+                }
+            }
+        }
+        ret total
+    }
+}

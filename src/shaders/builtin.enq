@@ -1,0 +1,14 @@
+//! Embedded immutable SPIR-V; avoid thousands of constant push operations in compiler IR.
+import core::vec::Vec
+extern fn graphene_builtin_shader_length(shader: u32) -> u32
+extern fn graphene_builtin_shader_word(shader: u32, index: u32) -> u32
+pub fn builtin_spirv(shader: u32) -> Vec[u32] {
+    let mut words = Vec[u32]::new()
+    unsafe {
+        let count = graphene_builtin_shader_length(shader)
+        for index in 0..(count as usize) {
+            words.push(graphene_builtin_shader_word(shader, index as u32))
+        }
+    }
+    ret words
+}

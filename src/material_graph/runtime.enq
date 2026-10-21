@@ -1,0 +1,67 @@
+//! Cooked programs publish atomically; runtime never invokes a shader compiler.
+import core::option::Option
+import core::result::Result
+import mod::cooked::{CookedMaterialGraph, load_cooked_material_graph}
+import std::thread::JoinHandle
+pub fn material_path_valid(path: str) -> bool {
+    ret path == "" ||(path.byte_len() > 18 && path.slice_bytes(0, 18) == "Content/Materials/" && !path.contains("..") && !path.contains("\\") && !path.contains(":"))
+}
+pub struct RuntimeMaterial {
+    requested: str
+    worker_path: str
+    worker: Option[JoinHandle[Result[CookedMaterialGraph, str]]]
+    published: Option[CookedMaterialGraph]
+    error: str
+}
+
+impl for RuntimeMaterial {
+    pub fn new() -> RuntimeMaterial<H> {
+        ret RuntimeMaterial<H> {
+            "", "", Option::None, Option::None, ""
+        }
+    }
+    pub fn request(self: mut Self&, path: str) ->() {
+        if self.requested != path {
+            self.requested = path self.error = ""
+        }
+    }
+    pub fn tick(self: mut Self&) -> Option[CookedMaterialGraph] {
+        let ready = match self.worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if ready {
+            match self.worker {
+                Some(worker) => {
+                    let result = worker.join()
+                    if self.worker_path == self.requested {
+                        match result {
+                            Ok(asset) => {
+                                self.published = Option[CookedMaterialGraph]::Some(asset)
+                            }
+                            Err(error) => {
+                                self.error = error
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            self.worker = Option[JoinHandle[Result[CookedMaterialGraph, str]]]::None
+        }
+        if self.worker.is_none() && self.requested != "" && self.worker_path != self.requested {
+            self.worker_path = self.requested self.worker = Option[JoinHandle[Result[CookedMaterialGraph, str]]]::Some(spawn load_cooked_material_graph(self.requested))
+        }
+        let result = self.published self.published = Option[CookedMaterialGraph]::None ret result
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        match self.worker {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        self.worker = Option[JoinHandle[Result[CookedMaterialGraph, str]]]::None
+    }
+}

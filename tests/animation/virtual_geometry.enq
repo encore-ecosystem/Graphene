@@ -1,0 +1,199 @@
+//! Actual skinned VG rendering, shared pages and independent camera histories.
+import core::vec::Vec
+import graphene::animation::cook::{CookedSkeletalMesh, SkinGeometrySection, prepare_skeletal_geometry, skeletal_gpu_bind_mesh, skeletal_bind_mesh}
+import graphene::animation::gpu::{SkinGpuCache, SkinFrameInstance}
+import graphene::animation::gpu_section::SkinGpuSection
+import graphene::animation::math::PoseMatrix
+import graphene::animation::model::{Skeleton, SkeletalMesh, AnimationClip}
+import graphene::animation::pose::{AnimationPose, model_pose, skin_palette}
+import graphene::animation::sample::sample_clip
+import graphene::animation::source::{AnimationSource, decode_animation_source}
+import graphene::rhi::*
+import graphene::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryResources, VirtualGeometryInstance, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_draw, gpu_virtual_geometry_pipeline, gpu_virtual_geometry_destroy, destroy_virtual_geometry_resources, gpu_virtual_geometry_error, gpu_virtual_geometry_selected_triangle_count}
+import linalg::{Mat4, Vec3}
+import mod::fox_render::check_fox
+import std::io::println
+import std::os::write_file
+extern fn encore_vk_target_readback(target: usize, attachment: u32, destination: usize, capacity: usize) -> usize
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+#attr(safe)
+fn pixels(target: Swapchain, path: str, green: bool) -> u64 {
+    let size =(target.width() as usize) *(target.height() as usize) * 4_usize
+    let mut bytes = Vec[u8]::with_capacity(size) for _i in 0_usize..size {
+        bytes.push(0_u8)
+    }
+    unsafe {
+        let pointer = bytes.as_ptr() unsafe ehir {
+            address: usize = pcast pointer: u8 *, usize
+        }
+        if encore_vk_target_readback(target.handle(), 0_u32, address, size) != size {
+            ret 0_u64
+        }
+    }
+    let mut rgb = Vec[u8]::new() let mut sum = 0_u64 let mut wanted = 0_u64 let mut wrong = 0_u64
+    for i in 0_usize..size / 4_usize {
+        wanted += bytes.get_unchecked_borrowed(i * 4_usize + if green {
+                1_usize
+            } else {
+                2_usize
+            }
+        ) as u64 wrong += bytes.get_unchecked_borrowed(i * 4_usize + if green {
+                2_usize
+            } else {
+                1_usize
+            }
+        ) as u64 for c in vec![2_usize, 1_usize, 0_usize] {
+            let value = bytes.get_unchecked_borrowed(i * 4_usize + c) rgb.push(value) sum += value as u64
+        }
+    }
+    unsafe {
+        write_file(path, "P6\n" + target.width().fmt() + " " + target.height().fmt() + "\n255\n" + graphene_asset_bytes(rgb.as_ptr(), rgb.len()))
+    }
+    if wanted < 1000_u64 || wrong > wanted / 10_u64 {
+        ret 0_u64
+    }
+    ret sum
+}
+fn state(source: AnimationSource, time: f32) -> SkinFrameInstance {
+    let mut pose = AnimationPose::rest(source.skeleton, 1_usize) pose = sample_clip(source.clips.get_unchecked_borrowed(0_usize), time, pose).unwrap_or(pose)
+    let mut model = Vec[PoseMatrix]::new() model = model_pose(source.skeleton, pose, model).unwrap_or(model)
+    let mut palette = Vec[PoseMatrix]::new() palette = skin_palette(model, source.mesh, palette).unwrap_or(palette)
+    ret SkinFrameInstance { 42_u64, palette, model, vec![time], true }
+}
+fn main() -> u32 {
+    if ComputePipeline::unavailable().available(){ret 90_u32}
+    let source = match decode_animation_source("FIXTURE_ROOT/fixtures/rig.glb", "vg-rig") {
+        Ok(s) => s Err(e) => {
+            println(e) ret 1_u32
+        }
+    }
+    let cooked = match prepare_skeletal_geometry(source.mesh, source.skeleton, source.clips) {
+        Ok(c) => c Err(e) => {
+            println(e) ret 2_u32
+        }
+    }
+    let instance = GraphicsInstance::create() let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 3_u32
+        }
+    }
+    let device = instance.create_device_with_features(adapter, DeviceFeatures::mesh_shader(), DeviceFeatures::none())
+    if !device.available() {
+        println(device.error()) ret 4_u32
+    }
+    let mut cache = match SkinGpuCache::create(device, source.skeleton, source.mesh, 1_usize) {
+        Ok(c) => c Err(e) => {
+            println(e) ret 5_u32
+        }
+    }
+    let section = cooked.sections.get_unchecked_borrowed(0_usize)
+    let mut skin = match SkinGpuSection::create(device, cache, section) {
+        Ok(s) => s Err(e) => {
+            println(e) ret 6_u32
+        }
+    }
+    let target_a = device.create_shared_offscreen_target(256_u32, 256_u32) let target_b = device.create_shared_offscreen_target(256_u32, 256_u32)
+    let gi_scene = device.create_buffer(32_u64, buffer_storage(), true) let gi_surfaces = device.create_buffer(48_u64, buffer_storage(), true) let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
+    gi_scene.write_f32(0_u64, 0_f32) gi_history.write_f32(12_u64, 0_f32)
+    // Exercise the ordinary static path too: its empty optional compute stages
+    // must use actual RHI constructors, without a global generic fallback.
+    let static_mesh=skeletal_bind_mesh(source.mesh) let static_values=static_mesh.vertices() let mut static_packed=Vec[f32]::new()
+    for index in section.geometry.vertex_indices(){for component in 0_usize..11_usize{static_packed.push(static_values.get_unchecked_borrowed((index as usize)*11_usize+component))}}
+    let mut static_view=GpuVirtualGeometry::create_textured(device,target_a,section.geometry,static_packed,1_usize,gi_scene,gi_surfaces,gi_history,vec![4294967295_u32],1_u32,1_u32)
+    if !static_view.is_ready(){println(gpu_virtual_geometry_error(static_view)) ret 91_u32}
+    let static_frame=target_a.acquire_frame()
+    if !gpu_virtual_geometry_record_debug(static_view,static_frame,Mat4::perspective(1.4_f32,1_f32,0.1_f32,100_f32),Vec3::zero(),vec![VirtualGeometryInstance::new(Mat4::trs(Vec3::new(-0.5_f32,-0.5_f32,-3_f32),Vec3::zero(),Vec3::new(1_f32,1_f32,1_f32)),Vec3::new(0_f32,1_f32,0_f32),0_f32,0.5_f32,true)],100_f32,Vec3::new(0_f32,-1_f32,0_f32),Vec3::new(1_f32,1_f32,1_f32),1_f32,Vec3::zero(),256_f32,0_u32,1_u32){ret 92_u32}
+    let static_pass=static_frame.begin_render_pass(gpu_virtual_geometry_pipeline(static_view),0_f32,0_f32,0_f32,1_f32)
+    if !gpu_virtual_geometry_draw(static_view,static_pass) || !static_pass.end() || !static_frame.present() || !static_frame.destroy() || !target_a.wait_readback(){ret 93_u32}
+    if pixels(target_a,"FIXTURE_ROOT/vg-static.ppm",true)<1000_u64 || !gpu_virtual_geometry_destroy(static_view){ret 94_u32}
+
+    let data = skeletal_gpu_bind_mesh(source.mesh) let values = data.vertices() let mut packed = Vec[f32]::new()
+    for index in section.geometry.vertex_indices() {
+        for component in 0_usize..11_usize {
+            packed.push(values.get_unchecked_borrowed((index as usize) * 11_usize + component))
+        }
+    }
+    let mut view_a = GpuVirtualGeometry::create_skinned(device, target_a, section.geometry, packed, 1_usize, gi_scene, gi_surfaces, gi_history, vec![4294967295_u32], 1_u32, 1_u32, skin)
+    if !view_a.is_ready() {
+        println(gpu_virtual_geometry_error(view_a)) ret 7_u32
+    }
+    let mut view_b = view_a.fork_view(device, target_b, gi_scene, gi_surfaces, gi_history, vec![4294967295_u32], 1_u32, 1_u32)
+    if !view_b.is_ready() {
+        println(gpu_virtual_geometry_error(view_b)) ret 8_u32
+    }
+    let resources = view_a.shared_resources()
+    let mut checksums = Vec[u64]::new()
+    for logical in 1_usize..4_usize {
+        let time = if logical == 1_usize {
+            0_f32
+        } else {
+            1_f32
+        }
+        if cache.stage(logical as u64, vec![state(source, time)]).is_err() {
+            ret 9_u32
+        }
+        for view in 0_usize..2_usize {
+            let mut geometry = if view == 0_usize {
+                view_a
+            } else {
+                view_b
+            }
+            let target = if view == 0_usize {
+                target_a
+            } else {
+                target_b
+            }
+            let frame = target.acquire_frame()
+            let model = Mat4::trs(Vec3::new( - 0.5_f32, - 0.5_f32, - 3_f32), Vec3::zero(), Vec3::new(1_f32, 1_f32, 1_f32))
+            let color = if view == 0_usize {
+                Vec3::new(0_f32, 1_f32, 0_f32)
+            } else {
+                Vec3::new(1_f32, 0_f32, 0_f32)
+            }
+            if !gpu_virtual_geometry_record_debug(geometry, frame, Mat4::perspective(1.4_f32, 1_f32, 0.1_f32, 100_f32), Vec3::zero(), vec![VirtualGeometryInstance::new(model, color, 0_f32, 0.5_f32, true)], 100_f32, Vec3::new(0_f32, - 1_f32, 0_f32), Vec3::new(1_f32, 1_f32, 1_f32), 1_f32, Vec3::zero(), 256_f32, 0_u32, 1_u32) {
+                println("Failed skinned VG recording") ret 10_u32
+            }
+            if destroy_virtual_geometry_resources(resources) {
+                ret 11_u32
+            }
+            if logical==1_usize && view==0_usize{
+                // A separate unsubmitted frame may not consume this producer's
+                // pose/bounds. Submitting that empty frame must not publish a pose.
+                let concurrent=target_b.acquire_frame()
+                if cache.upload(concurrent).is_ok() || skin.record_bounds(concurrent,false).is_ok(){ret 95_u32}
+                concurrent.destroy()
+            }
+            let pass = frame.begin_render_pass(gpu_virtual_geometry_pipeline(geometry), 0_f32, 0_f32, 0_f32, 1_f32)
+            if !gpu_virtual_geometry_draw(geometry, pass) || !pass.end(){ret 96_u32}
+            // Replace pipelines while the command buffer still retains the old
+            // VkPipeline. Retirement must wait for this recording's completion.
+            if logical==1_usize && !geometry.configure_anti_aliasing(device,target,1_u32,false,Mat4::identity()){ret 97_u32}
+            if !frame.present() || !frame.destroy() {
+                println(frame.error()) ret 12_u32
+            }
+        }
+        if !target_a.wait_readback() || !target_b.wait_readback() {
+            ret 13_u32
+        }
+        let sum_a = pixels(target_a, "FIXTURE_ROOT/vg-a-" + logical.fmt() + ".ppm", true) let sum_b = pixels(target_b, "FIXTURE_ROOT/vg-b-" + logical.fmt() + ".ppm", false)
+        if sum_a < 1000_u64 || sum_b < 1000_u64 {
+            println("No skinned pixels") ret 14_u32
+        }
+        checksums.push(sum_a)
+        if gpu_virtual_geometry_selected_triangle_count(view_a) != 1_u32 || gpu_virtual_geometry_selected_triangle_count(view_b) != 1_u32 {
+            ret 15_u32
+        }
+    }
+    if checksums.get_unchecked_borrowed(0_usize) == checksums.get_unchecked_borrowed(1_usize) {
+        ret 16_u32
+    }
+    if !gpu_virtual_geometry_destroy(view_a) || !gpu_virtual_geometry_destroy(view_b) || !destroy_virtual_geometry_resources(resources) || !skin.destroy() || !cache.destroy() {
+        ret 17_u32
+    }
+    target_a.destroy() target_b.destroy()
+    let fox = check_fox(device, gi_scene, gi_surfaces, gi_history) if fox != 0_u32 {
+        ret fox
+    }
+    gi_scene.destroy() gi_surfaces.destroy() gi_history.destroy() device.destroy() instance.destroy()
+    println("Skinned Virtual Geometry: animated pixels, independent view streams, shared geometry/cache, safe retirement: PASS") ret 0_u32
+}

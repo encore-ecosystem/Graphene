@@ -1,0 +1,79 @@
+//! Dense controls stay visible, menus stay in bounds, and 10k assets create bounded widgets.
+import core::vec::Vec
+import graphene::content_browser::thumbnail::content_thumbnail
+import graphene::content_browser::view::{ContentIcons, content_widget, content_popup}
+import graphene::content_browser::{ContentBrowser, ContentAsset}
+import luma::{Widget, Rect, StyleSheet, IconManager, layout_widget}
+import std::io::println
+import std::os::read_file
+import std::time::perf_counter_ms
+
+fn count(widget: Widget) -> usize {
+    let mut total = 1_usize for child in widget.children() {
+        total += count(child)
+    }
+    ret total
+}
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let icons = ContentIcons::load(IconManager::with_bundled("../Luma/assets/icons"))
+    let mut browser = ContentBrowser::new() browser.project = "/tmp/graphene-layout-only" browser.editable = true
+    for width in vec![640.0_f32, 1000.0_f32, 1280.0_f32] {
+        for height in vec![180.0_f32, 280.0_f32, 400.0_f32] {
+            for mode in vec!["grid", "list"] {
+                browser.view = mode browser.bounds = Rect::new(176, 56, width - 176, height - 78)
+                browser.entries = vec![ContentAsset::new("@engine/Primitives/Cube", "Cube", "mesh", 0), ContentAsset::new("@engine/Primitives/Sphere", "Sphere", "mesh", 0)] browser.rebuild()
+                let layout = layout_widget(sheet.apply(content_widget(browser, icons, true), "", "", ""), Rect::new(0, 0, width, height))
+                for id in vec!["cb-add", "cb-import", "cb-query", "cb-view-grid", "cb-view-list", "cb-items", "cb-footer"] {
+                    let bounds = layout.find_bounds(id).unwrap_or(Rect::new(0, 0, 0, 0))
+                    if bounds.width() < 16 || bounds.height() < 18 || bounds.x() < 0 || bounds.right() > width + 1 || bounds.bottom() > height + 1 {
+                        println("Invalid bounds: " + id + " at " + width.fmt() + "x" + height.fmt()) ret 1_u32
+                    }
+                }
+                let cell = layout.find_bounds("cb-item-@engine/Primitives/Cube").unwrap_or(Rect::new(0, 0, 0, 0))
+                if cell.width() < 64 || cell.height() < 24 {
+                    ret 2_u32
+                }
+            }
+        }
+    }
+    browser.entries.clear() let started = perf_counter_ms()
+    for index in 0..10000 {
+        browser.entries.push(ContentAsset::new("Content/Textures/Texture_" + index.fmt() + ".png", "Texture_" + index.fmt(), "texture", 128))
+    }
+    browser.directory = "@all" browser.view = "grid" browser.bounds = Rect::new(176, 56, 1104, 180) browser.rebuild()
+    let nodes = count(content_widget(browser, icons, true))
+    if browser.visible.len() != 10000 || nodes > 800 || browser.window().len() > 80 {
+        ret 3_u32
+    }
+    browser.scroll = 1000000
+    if browser.window().end() != 10000 || count(content_widget(browser, icons, true)) > 800 {
+        ret 4_u32
+    }
+    println("10k asset filtering/layout: " +(perf_counter_ms() - started).fmt() + " ms; nodes " + nodes.fmt())
+    for kind in vec!["add", "sort", "context", "folder", "rename", "move", "delete"] {
+        browser.popup = kind browser.popup_x = 1260 browser.popup_y = 700
+        let popup = content_popup(browser, icons, Rect::new(8, 8, 1264, 704), true)
+        let overlay = Widget::panel("overlay-layer").with_classes("g-overlay-layer").with_child(popup)
+        let layout = layout_widget(sheet.apply(overlay, "", "", ""), Rect::new(0, 0, 1280, 720))
+        let bounds = layout.find_bounds("cb-popup").unwrap_or(Rect::new(0, 0, 0, 0))
+        if bounds.width() < 100 || bounds.height() < 70 || bounds.x() < 0 || bounds.y() < 0 || bounds.right() > 1280 || bounds.bottom() > 720 {
+            ret 5_u32
+        }
+        if kind == "folder" || kind == "rename" || kind == "move" {
+            let field = layout.find_bounds("cb-name").unwrap_or(Rect::new(0, 0, 0, 0))
+            if field.width() < 160 || field.height() < 24 || field.right() > bounds.right() {
+                ret 6_u32
+            }
+        }
+    }
+    let cube = content_thumbnail("", ContentAsset::new("@engine/Primitives/Cube", "Cube", "mesh", 0), 7)
+    let sphere = content_thumbnail("", ContentAsset::new("@engine/Primitives/Sphere", "Sphere", "mesh", 0), 7)
+    if cube.payload.byte_len() != 49160 || sphere.payload.byte_len() != 49160 || cube.payload == sphere.payload || cube.generation != 7 {
+        ret 7_u32
+    }
+    if cube.payload.byte_at(0) != 128 || cube.payload.byte_at(4) != 96 {
+        ret 8_u32
+    }
+    browser.destroy() ret 0_u32
+}

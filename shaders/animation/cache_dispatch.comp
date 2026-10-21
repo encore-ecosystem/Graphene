@@ -1,0 +1,13 @@
+#version 460
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) readonly buffer SceneStream {uint values[];} scene;
+layout(set=0,binding=16,std430) buffer Dispatch {uint values[];} dispatch;
+void main(){
+    uint clusters=scene.values[0],hierarchy=scene.values[2],instances=uint(uintBitsToFloat(scene.values[39]));
+    uint capacity=clusters*instances;
+    uint base=64u+clusters*16u+hierarchy*12u+instances*28u+capacity*4u+clusters+6134u;
+    uint visible=min(scene.values[base],clusters*scene.values[1]);
+    uint skin_groups=(dispatch.values[3]+63u)/64u;
+    dispatch.values[0]=min(skin_groups,65535u);dispatch.values[1]=(skin_groups+65534u)/65535u;dispatch.values[2]=1;
+    dispatch.values[5]=min(visible,65535u);dispatch.values[6]=(visible+65534u)/65535u;dispatch.values[7]=1;
+}

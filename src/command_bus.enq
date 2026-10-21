@@ -1,13 +1,31 @@
+import mod::environment::model::EnvironmentComponent
+import mod::scene::component::{SceneComponent, LightComponent}
 //! Typed editor commands, transactional history, and ordered state events.
 
 import core::option::Option
 import core::vec::Vec
+import linalg::Vec3
+import mod::blueprint::document::{BlueprintCommand, BlueprintDocument}
+import mod::blueprint::model::{BlueprintAsset, BlueprintInstance}
 import mod::scene::renderable::{MaterialId, MeshId, Renderable}
 import mod::scene::transform::Transform
 import mod::scene::world::{Entity, Scene}
 
+pub struct BlueprintActorCommand {
+    name: str
+    instance: BlueprintInstance
+    transform: Transform
+}
+
 pub struct AddActorCommand {
-    name: str value: Transform asset_name: str
+    name: str
+    value: Transform
+    asset_name: str
+    component: SceneComponent
+}
+pub struct ActorComponentCommand {
+    actor: u64
+    value: SceneComponent
 }
 pub struct ActorCommand {
     actor: u64
@@ -18,17 +36,21 @@ pub struct DuplicateActorCommand {
     value: Transform
 }
 pub struct ActorParentCommand {
-    actor: u64 parent: Option[u64]
+    actor: u64
+    parent: Option[u64]
 }
 
 pub struct ActorNameCommand {
-    actor: u64 value: str
+    actor: u64
+    value: str
 }
 pub struct ActorVisibilityCommand {
-    actor: u64 value: bool
+    actor: u64
+    value: bool
 }
 pub struct ActorTransformCommand {
-    actor: u64 value: Transform
+    actor: u64
+    value: Transform
 }
 pub struct ActorSelectionCommand {
     actor: Option[u64]
@@ -78,12 +100,18 @@ pub struct GrapheneDiagnostic {
 }
 
 pub enum GrapheneCommand {
+    OpenBlueprint(BlueprintAsset)
+    CloseBlueprint
+    EditBlueprint(BlueprintCommand)
+    AddBlueprintActor(BlueprintActorCommand)
     AddActor(AddActorCommand)
+    SetupEnvironment(str)
     DuplicateActor(DuplicateActorCommand)
     DeleteActor(ActorCommand)
     SetParent(ActorParentCommand)
     Rename(ActorNameCommand)
     SetVisibility(ActorVisibilityCommand)
+    SetComponent(ActorComponentCommand)
     SetTransform(ActorTransformCommand)
     Select(ActorSelectionCommand)
     SelectSet(ActorSelectionSetCommand)
@@ -104,19 +132,27 @@ pub enum GrapheneCommand {
 }
 
 pub struct GrapheneEvent {
-    kind: str actor: Option[u64] revision: u64
+    kind: str
+    actor: Option[u64]
+    revision: u64
 }
 
 pub struct CommandResult {
-    success: bool message: str revision: u64 events: Vec[GrapheneEvent]
+    success: bool
+    message: str
+    revision: u64
+    events: Vec[GrapheneEvent]
 }
 
 enum CommandEdit {
+    RemoveActors(Vec[u64])
+    RestoreActors(Vec[ActorSnapshot])
     RemoveActor(ActorCommand)
     RestoreActor(ActorSnapshot)
     Parent(ActorParentEdit)
     Rename(ActorNameCommand)
     Visibility(ActorVisibilityCommand)
+    Component(ActorComponentCommand)
     Transform(ActorTransformCommand)
     Transforms(ActorTransformsCommand)
 }
@@ -167,6 +203,8 @@ pub struct EditorState {
     import_source: str
     task: Option[GrapheneTask]
     diagnostics: Vec[GrapheneDiagnostic]
+    blueprint: BlueprintDocument
+    blueprint_open: bool
 }
 
 impl for ActorNameCommand {
@@ -186,12 +224,12 @@ impl for ActorNameCommand {
 impl for AddActorCommand {
     pub fn new(name: str, value: Transform) -> Self {
         ret Self {
-            name, value, ""
+            name, value, "", SceneComponent::None
         }
     }
     pub fn with_asset(name: str, value: Transform, asset_name: str) -> Self {
         ret Self {
-            name, value, asset_name
+            name, value, asset_name, SceneComponent::None
         }
     }
     pub fn name(self: Self) -> str {
@@ -199,6 +237,11 @@ impl for AddActorCommand {
     }
     pub fn value(self: Self) -> Transform {
         ret self.value
+    }
+    pub fn with_component(self: Self, component: SceneComponent) -> Self {
+        ret Self {
+            self.name, self.value, self.asset_name, component
+        }
     }
     pub fn asset_name(self: Self) -> str {
         ret self.asset_name
@@ -479,7 +522,48 @@ impl for CommandResult {
     }
 }
 
+fn scene_light_capacity(scene: Scene) -> bool {
+    let mut count = 0_usize
+    for entity in scene.entities() {
+        if entity.component().kind() == "directional-light" || entity.component().kind() == "point-light" || entity.component().kind() == "spot-light" {
+            count += 1_usize
+        }
+    }
+    ret count < 64_usize
+}
+
 impl for EditorState {
+    pub fn blueprint_asset(self: Self) -> BlueprintAsset {
+        ret self.blueprint.asset()
+    }
+    pub fn blueprint_semantic(self: Self) -> str {
+        ret self.blueprint.semantic()
+    }
+    pub fn blueprint_open(self: Self) -> bool {
+        ret self.blueprint_open
+    }
+    pub fn blueprint_dirty(self: Self) -> bool {
+        ret self.blueprint_open && self.blueprint.dirty()
+    }
+    pub fn blueprint_can_undo(self: Self) -> bool {
+        ret self.blueprint_open && self.blueprint.can_undo()
+    }
+    pub fn blueprint_can_redo(self: Self) -> bool {
+        ret self.blueprint_open && self.blueprint.can_redo()
+    }
+    pub fn blueprint_needs_compile(self: Self) -> bool {
+        ret self.blueprint_open && self.blueprint.needs_compile()
+    }
+    pub fn blueprint_saved(self: mut Self) ->() {
+        self.blueprint.mark_saved()
+    }
+    pub fn blueprint_compiled(self: mut Self, semantic: str) -> bool {
+        ret self.blueprint.mark_compiled(semantic)
+    }
+    pub fn clear_blueprint(self: mut Self) ->() {
+        self.blueprint_open = false
+        self.blueprint = BlueprintDocument::new(BlueprintAsset::new("unopened", "Blueprint"))
+    }
     pub fn new(scene: Scene) -> Self {
         let mut state = Self {
             scene, Option[u64]::None, Vec[u64]::new(), 0_u64, false,
@@ -487,7 +571,7 @@ impl for EditorState {
             Vec[ActorAsset]::new(), 0_i64, 0_i64, Vec[GrapheneEvent]::new(),
             false, "", false, false,
             "", "", "", "", Option[GrapheneTask]::None,
-            Vec[GrapheneDiagnostic]::new()
+            Vec[GrapheneDiagnostic]::new(), BlueprintDocument::new(BlueprintAsset::new("unopened", "Blueprint")), false
         }
         for entity in scene.entities() {
             if entity.renderable().is_some() {
@@ -695,13 +779,127 @@ impl for EditorState {
                 "Commit or cancel the active interactive edit first",)
         }
         match command {
+            GrapheneCommand::CloseBlueprint => {
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before closing a Blueprint")
+                }
+                if self.blueprint_open && self.blueprint.dirty() {
+                    ret CommandResult::error(self.revision, "Save the Blueprint before closing it")
+                }
+                self.clear_blueprint()
+                ret self.state_event("blueprint.closed")
+            }
+            GrapheneCommand::OpenBlueprint(asset) => {
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before editing a Blueprint")
+                }
+                if self.blueprint_open && self.blueprint.dirty() {
+                    ret CommandResult::error(self.revision, "Save the open Blueprint before opening another")
+                }
+                self.blueprint = BlueprintDocument::new(asset)
+                self.blueprint_open = true
+                ret self.state_event("blueprint.opened")
+            }
+            GrapheneCommand::EditBlueprint(edit) => {
+                if !self.blueprint_open {
+                    ret CommandResult::error(self.revision, "No Blueprint is open")
+                }
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before editing a Blueprint")
+                }
+                match self.blueprint.execute(edit) {
+                    Ok(_) => {
+                        ret self.state_event("blueprint.changed")
+                    }
+                    Err(error) => {
+                        ret CommandResult::error(self.revision, error)
+                    }
+                }
+            }
+            GrapheneCommand::AddBlueprintActor(value) => {
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before adding an actor")
+                }
+                let actor = self.scene.create_entity(value.name, value.transform)
+                self.scene.set_blueprint(actor, Option[BlueprintInstance]::Some(value.instance))
+                self.scene.set_renderable(actor, Option[Renderable]::Some(Renderable::new(MeshId::new(1), MaterialId::new(1))))
+                self.set_asset_name(actor, "")
+                ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)), "scene.actor.added", actor)
+            }
+            GrapheneCommand::SetupEnvironment(style) => {
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before setting up environment")
+                }
+                if style != "realistic" && style != "stylized" {
+                    ret CommandResult::error(self.revision, "Unknown environment style")
+                }
+                for actor in self.scene.entities() {
+                    if actor.component().kind() == "sky-atmosphere" {
+                        ret CommandResult::error(self.revision, "An environment already exists; select its actors to edit it")
+                    }
+                }
+                let mut sun = 0_u64
+                let mut light_count = 0_usize
+                for actor in self.scene.entities() {
+                    let kind = actor.component().kind()
+                    if kind == "directional-light" || kind == "point-light" || kind == "spot-light" {
+                        light_count += 1
+                    }
+                    if kind == "directional-light" && self.scene.world_visible(actor.id()) &&(sun == 0 || actor.id() < sun) {
+                        sun = actor.id()
+                    }
+                }
+                if light_count +(if sun == 0 {
+                        2_usize
+                    } else {
+                        1_usize
+                    }
+                ) > 64 {
+                    ret CommandResult::error(self.revision, "Environment setup needs room for sun and moon lights")
+                }
+                let mut actors = Vec[u64]::new()
+                if sun == 0 {
+                    sun = self.scene.create_entity("Sun", Transform::identity().with_position(Vec3::new( - 4, 5, 0)).with_rotation(Vec3::new( - 1, 0, 0)))
+                    self.scene.set_component(sun, SceneComponent::for_kind("directional-light"))
+                    self.set_asset_name(sun, "@directional-light")
+                    actors.push(sun)
+                }
+                let moon = self.scene.create_entity("Moon", Transform::identity().with_position(Vec3::new(4, 5, 0)))
+                let mut moon_light = LightComponent::new("directional-light") moon_light.color = Vec3::new(0.45_f32, 0.58_f32, 0.9_f32) moon_light.intensity = 0.025_f32
+                self.scene.set_component(moon, SceneComponent::Light(moon_light))
+                self.set_asset_name(moon, "@directional-light")
+                let controller = self.scene.create_entity("Weather Controller", Transform::identity())
+                let mut weather = EnvironmentComponent::new("weather-controller") weather.style = style
+                self.scene.set_component(controller, SceneComponent::Environment(weather)) self.set_asset_name(controller, "@weather-controller")
+                actors.push(moon) actors.push(controller)
+                let mut atmosphere = 0_u64
+                for kind in vec!["sky-atmosphere", "sky-light", "cloud-layer", "height-fog"] {
+                    let actor = self.scene.create_entity(kind, Transform::identity())
+                    let mut component = EnvironmentComponent::new(kind)
+                    component.sun = sun component.moon = moon component.controller = controller component.style = style
+                    self.scene.set_component(actor, SceneComponent::Environment(component)) self.set_asset_name(actor, "@" + kind)
+                    actors.push(actor)
+                    if kind == "sky-atmosphere" {
+                        atmosphere = actor
+                    }
+                }
+                self.selection = Option[u64]::Some(controller)
+                ret self.commit(CommandEdit::RemoveActors(actors), "scene.environment.created", atmosphere)
+            }
             GrapheneCommand::AddActor(value) => {
+                if (value.component.kind() == "directional-light" || value.component.kind() == "point-light" || value.component.kind() == "spot-light") && !scene_light_capacity(self.scene) {
+                    ret CommandResult::error(self.revision, "A scene supports up to 64 light sources")
+                }
+                if !value.component.valid() {
+                    ret CommandResult::error(self.revision, "Invalid actor settings")
+                }
                 if value.name() == "" {
                     ret CommandResult::error(self.revision, "Actor name must not be empty")
                 }
                 let actor = self.scene.create_entity(value.name(), value.value())
                 self.scene.set_renderable(actor,
                     Option[Renderable]::Some(Renderable::new(MeshId::new(1_u64), MaterialId::new(1_u64))),)
+                self.scene.set_component(actor, value.component)
                 self.set_asset_name(actor, value.asset_name())
                 ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
                     "scene.actor.added", actor,)
@@ -709,6 +907,9 @@ impl for EditorState {
             GrapheneCommand::DuplicateActor(value) => {
                 match self.scene.get(value.actor()) {
                     Option::Some(source) => {
+                        if (source.component().kind() == "directional-light" || source.component().kind() == "point-light" || source.component().kind() == "spot-light") && !scene_light_capacity(self.scene) {
+                            ret CommandResult::error(self.revision, "A scene supports up to 64 light sources")
+                        }
                         if value.name() == "" {
                             ret CommandResult::error(self.revision,
                                 "Duplicate actor name must not be empty",)
@@ -717,6 +918,8 @@ impl for EditorState {
                         self.scene.set_renderable(actor, source.renderable())
                         self.scene.set_visible(actor, source.visible())
                         self.scene.set_parent(actor, source.parent())
+                        self.scene.set_blueprint(actor, source.blueprint())
+                        self.scene.set_component(actor, source.component())
                         self.set_asset_name(actor, self.asset_name(value.actor()))
                         ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
                             "scene.actor.duplicated", actor,)
@@ -802,6 +1005,26 @@ impl for EditorState {
                         ret self.commit(inverse, "scene.actor.visibility-changed", value.actor())
                     }
                     Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetComponent(value) => {
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if actor.component().kind() != value.value.kind() {
+                            ret CommandResult::error(self.revision, "Actor type cannot be changed by editing its settings")
+                        }
+                        if !self.scene.set_component(value.actor, value.value) {
+                            ret CommandResult::error(self.revision, "Invalid actor settings")
+                        }
+                        ret self.commit(CommandEdit::Component(ActorComponentCommand {
+                                    value.actor, actor.component()
+                                }
+                                ,
+                            ), "scene.actor.settings-changed", value.actor)
+                    }
+                    None => {
                         ret CommandResult::error(self.revision, "Actor was not found")
                     }
                 }
@@ -950,6 +1173,7 @@ impl for EditorState {
                         "Simulation mode must be play or simulate",)
                 }
                 self.simulation_mode = value.mode()
+                self.blueprint.set_playing(true)
                 ret self.state_event("simulation.started")
             }
             GrapheneCommand::StopSimulation => {
@@ -957,6 +1181,7 @@ impl for EditorState {
                     ret CommandResult::error(self.revision, "Simulation is not running")
                 }
                 self.simulation_mode = ""
+                self.blueprint.set_playing(false)
                 ret self.state_event("simulation.stopped")
             }
             GrapheneCommand::RequestProject(value) => {
@@ -1154,6 +1379,27 @@ impl for EditorState {
                     }
                 }
             }
+            GrapheneCommand::SetComponent(value) => {
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if actor.component().kind() != value.value.kind() || !value.value.valid() {
+                            ret CommandResult::error(self.revision, "Invalid actor settings")
+                        }
+                        self.interactive = Option[InteractiveEdit]::Some(InteractiveEdit {
+                                CommandEdit::Component(ActorComponentCommand {
+                                        value.actor, actor.component()
+                                    }
+                                    ,
+                                ), value.actor, "component", "scene.actor.settings-changed"
+                            }
+                            ,
+                        )
+                    }
+                    None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
             GrapheneCommand::SetTransform(value) => {
                 match self.scene.get(value.actor()) {
                     Option::Some(actor) => {
@@ -1218,6 +1464,12 @@ impl for EditorState {
             GrapheneCommand::Rename(value) => {
                 edit.kind == "rename" && edit.actor == value.actor() &&
                 self.scene.rename(value.actor(), value.value())
+            }
+            GrapheneCommand::SetComponent(value) => {
+                edit.kind == "component" && edit.actor == value.actor && match self.scene.get(value.actor) {
+                    Some(actor) => actor.component().kind() == value.value.kind() None => false
+                }
+                && self.scene.set_component(value.actor, value.value)
             }
             GrapheneCommand::SetTransform(value) => {
                 edit.kind == "transform" && edit.actor == value.actor() &&
@@ -1315,6 +1567,41 @@ impl for EditorState {
 
     fn apply_edit(self: mut Self, edit: CommandEdit) -> Option[CommandEdit] {
         match edit {
+            RemoveActors(ids) => {
+                let mut snapshots = Vec[ActorSnapshot]::new()
+                for id in ids {
+                    match self.snapshot(id) {
+                        Some(actor) => {
+                            snapshots.push(actor)
+                        }
+                        None => {
+                            ret Option[CommandEdit]::None
+                        }
+                    }
+                }
+                for id in ids {
+                    self.scene.remove(id)
+                }
+                self.selection = Option[u64]::None
+                ret Option[CommandEdit]::Some(CommandEdit::RestoreActors(snapshots))
+            }
+            RestoreActors(snapshots) => {
+                let mut ids = Vec[u64]::new()
+                for snapshot in snapshots {
+                    if self.scene.get(snapshot.entity.id()).is_some() {
+                        ret Option[CommandEdit]::None
+                    }
+                }
+                for snapshot in snapshots {
+                    let entity = snapshot.entity
+                    self.scene.create_entity_with_id(entity.id(), entity.name(), entity.transform())
+                    self.scene.set_visible(entity.id(), entity.visible()) self.scene.set_renderable(entity.id(), entity.renderable())
+                    self.scene.set_component(entity.id(), entity.component()) self.set_asset_name(entity.id(), snapshot.asset_name)
+                    ids.push(entity.id())
+                }
+                ret Option[CommandEdit]::Some(CommandEdit::RemoveActors(ids))
+            }
+
             CommandEdit::RemoveActor(value) => {
                 match self.snapshot(value.actor()) {
                     Option::Some(snapshot) => {
@@ -1334,6 +1621,8 @@ impl for EditorState {
                 if self.scene.create_entity_with_id(entity.id(), entity.name(), entity.transform()) {
                     self.scene.set_visible(entity.id(), entity.visible())
                     self.scene.set_renderable(entity.id(), entity.renderable())
+                    self.scene.set_blueprint(entity.id(), entity.blueprint())
+                    self.scene.set_component(entity.id(), entity.component())
                     self.set_asset_name(entity.id(), value.asset_name)
                     self.scene.set_parent(entity.id(), entity.parent())
                     for child in value.children {
@@ -1380,6 +1669,21 @@ impl for EditorState {
                         }
                     }
                     Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Component(value) => {
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if self.scene.set_component(value.actor, value.value) {
+                            ret Option[CommandEdit]::Some(CommandEdit::Component(ActorComponentCommand {
+                                        value.actor, actor.component()
+                                    }
+                                    ,
+                                ))
+                        }
+                    }
+                    None => {
                     }
                 }
             }

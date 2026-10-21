@@ -1,0 +1,20 @@
+import core::result::Result
+import graphene::load_obj_asset
+
+fn main() -> u32 {
+    match load_obj_asset("tests/fixtures/obj_texture/Plane.obj") {
+        Result::Ok(asset) => {
+            if asset.texture_width() != 2_u32 || asset.texture_height() != 2_u32 {
+                ret 1_u32
+            }
+            let pixels = asset.texture_pixels()
+            if pixels.len() != 4_usize || pixels.get(0).unwrap_or(0_u32) != 4294967295_u32 || pixels.get(1).unwrap_or(0_u32) != 4278190335_u32 {
+                ret 2_u32
+            }
+        }
+        Result::Err(_) => {
+            ret 3_u32
+        }
+    }
+    ret 0_u32
+}

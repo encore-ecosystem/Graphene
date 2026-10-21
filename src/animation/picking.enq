@@ -1,0 +1,156 @@
+//! Click-time CPU oracle for the current deformed pose. Broad-phase bounds use
+//! the same cooked bone envelopes as VG; triangle tests run only for candidates.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import mod::character::CharacterAsset
+import mod::cook::{CookedSkeletalMesh, SkinGeometrySection}
+import mod::deform::{PoseBounds, DeformedVertex, deform_vertex, deformable_cluster_bounds}
+import mod::math::{PoseVector, PoseMatrix, animation_abs}
+import mod::model::{Skeleton, SkeletalMesh}
+import mod::runtime::{AnimationWorld, PoseSnapshot, AnimationInstanceId}
+import mod::scene::{SceneAnimation, SceneCharacterLibrary, SceneAnimatedActor, SceneAnimatedActorSlot, animated_actor_matrix}
+pub struct AnimationPick {
+    entity: u64
+    distance: f32
+}
+fn vector(value: Vec3) -> PoseVector {
+    ret PoseVector { value.x(), value.y(), value.z() }
+}
+fn bounds_hit(bounds: PoseBounds, origin: PoseVector, direction: PoseVector, limit: f32) -> bool {
+    let mut low = 0_f32 let mut high = limit
+    let origins = vec![origin.x, origin.y, origin.z] let directions = vec![direction.x, direction.y, direction.z]
+    let minimum = vec![bounds.minimum.x, bounds.minimum.y, bounds.minimum.z] let maximum = vec![bounds.maximum.x, bounds.maximum.y, bounds.maximum.z]
+    for i in 0_usize..3_usize {
+        let o = origins.get_unchecked_borrowed(i) let d = directions.get_unchecked_borrowed(i)
+        let a = minimum.get_unchecked_borrowed(i) let b = maximum.get_unchecked_borrowed(i)
+        if d == 0_f32 {
+            if o < a || o > b {
+                ret false
+            }
+        } else {
+            let first =(a - o) / d let second =(b - o) / d
+            let near = if first < second {
+                first
+            } else {
+                second
+            }
+            let far = if first > second {
+                first
+            } else {
+                second
+            }
+            if near > low {
+                low = near
+            }
+            if far < high {
+                high = far
+            }
+            if high < low {
+                ret false
+            }
+        }
+    }
+    ret true
+}
+fn triangle_hit(origin: PoseVector, direction: PoseVector, a: PoseVector, b: PoseVector, c: PoseVector) -> f32 {
+    let edge = b.sub(a) let other = c.sub(a) let cross = direction.cross(other) let determinant = edge.dot(cross)
+    if animation_abs(determinant) < 0.000000001_f32 {
+        ret - 1_f32
+    }
+    let inverse = 1_f32 / determinant let offset = origin.sub(a) let u = offset.dot(cross) * inverse
+    if u < 0_f32 || u > 1_f32 {
+        ret - 1_f32
+    }
+    let q = offset.cross(edge) let v = direction.dot(q) * inverse
+    if v < 0_f32 || u + v > 1_f32 {
+        ret - 1_f32
+    }
+    ret other.dot(q) * inverse
+}
+pub fn pick_animation(animation: SceneAnimation<H>, origin: Vec3, direction: Vec3) -> Option[AnimationPick] {
+    let world = animation.runtime() let mut nearest = 1000000_f32 let mut chosen = 0_u64
+    for index in 0_usize..animation.libraries() {
+        let library = animation.library(index) let asset = library.asset
+        for slot in animation.actors(index) {
+            let actor = match slot.value {
+                Some(a) => a None => {
+                    continue
+                }
+            }
+            if !actor.visible || actor.library_generation != library.generation {
+                continue
+            }
+            let inverse = match animated_actor_matrix(actor).inverse_affine() {
+                Some(m) => m None => {
+                    continue
+                }
+            }
+            let local = inverse.transform_point(origin) let ray = inverse.transform_point(origin.add(direction)).sub(local)
+            let snapshot = match world.snapshot(actor.instance) {
+                Ok(s) => s Err(_) => {
+                    continue
+                }
+            }
+            let model = match world.model(snapshot) {
+                Ok(s) => s Err(_) => {
+                    continue
+                }
+            }
+            let mut candidate = false
+            for section in asset.geometry.sections {
+                let root = section.hierarchy.get_unchecked_borrowed(section.geometry.root_node() as usize)
+                match deformable_cluster_bounds(root, model) {
+                    Ok(bounds) => {
+                        if bounds_hit(bounds, vector(local), vector(ray), nearest) {
+                            candidate = true
+                        }
+                    }
+                    Err(_) => {
+                    }
+                }
+            }
+            if !candidate {
+                continue
+            }
+            let palette = match world.palette(snapshot) {
+                Ok(s) => s Err(_) => {
+                    continue
+                }
+            }
+            let morphs = match world.morphs(snapshot) {
+                Ok(s) => s Err(_) => {
+                    continue
+                }
+            }
+            let mesh = asset.geometry.mesh let mut positions = Vec[PoseVector]::with_capacity(mesh.vertices.len()) let mut valid = true
+            for v in 0_usize..mesh.vertices.len() {
+                match deform_vertex(mesh, v, palette, morphs) {
+                    Ok(vertex) => {
+                        positions.push(vertex.position)
+                    }
+                    Err(_) => {
+                        valid = false break
+                    }
+                }
+            }
+            if !valid {
+                continue
+            }
+            for triangle in 0_usize..mesh.indices.len() / 3_usize {
+                let a = positions.get_unchecked_borrowed(mesh.indices.get_unchecked_borrowed(triangle * 3_usize) as usize)
+                let b = positions.get_unchecked_borrowed(mesh.indices.get_unchecked_borrowed(triangle * 3_usize + 1_usize) as usize)
+                let c = positions.get_unchecked_borrowed(mesh.indices.get_unchecked_borrowed(triangle * 3_usize + 2_usize) as usize)
+                let hit = triangle_hit(vector(local), vector(ray), a, b, c)
+                if hit >= 0_f32 && hit < nearest {
+                    nearest = hit chosen = actor.entity
+                }
+            }
+        }
+    }
+    ret if chosen == 0_u64 {
+        Option::None
+    } else {
+        Option::Some(AnimationPick { chosen, nearest })
+    }
+}

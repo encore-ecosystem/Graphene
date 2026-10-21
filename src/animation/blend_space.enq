@@ -1,0 +1,473 @@
+//! Offline triangulation and allocation-free 1D/2D barycentric blend queries.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{animation_finite, animation_clamp}
+pub struct BlendSample {
+    x: f32
+    y: f32
+    clip: u32
+    rate: f32
+}
+pub struct BlendTriangle {
+    a: u32
+    b: u32
+    c: u32
+}
+pub struct BlendAxis {
+    name: str
+    minimum: f32
+    maximum: f32
+}
+pub struct BlendSpace {
+    version: u32
+    skeleton: str
+    dimensions: u32
+    x: BlendAxis
+    y: BlendAxis
+    samples: Vec[BlendSample]
+}
+pub struct CookedBlendSpace {
+    source: BlendSpace
+    triangles: Vec[BlendTriangle]
+    line: Vec[u32]
+}
+pub struct BlendWeights {
+    a: u32
+    b: u32
+    c: u32
+    wa: f32
+    wb: f32
+    wc: f32
+}
+pub struct BlendSpaceCursor {
+    triangle: usize
+}
+struct BlendPoint {
+    x: f64
+    y: f64
+}
+struct BlendEdge {
+    a: u32
+    b: u32
+}
+fn axis_valid(axis: BlendAxis) -> bool {
+    ret axis.name != "" && animation_finite(axis.minimum) && animation_finite(axis.maximum) && axis.minimum < axis.maximum && axis.minimum >= - 1000000_f32 && axis.maximum <= 1000000_f32
+}
+fn point(sample: BlendSample, space: BlendSpace) -> BlendPoint {
+    ret BlendPoint {
+        ((sample.x as f64) -(space.x.minimum as f64)) /((space.x.maximum as f64) -(space.x.minimum as f64)), if space.dimensions == 1_u32 {
+            0_f64
+        } else {
+            ((sample.y as f64) -(space.y.minimum as f64)) /((space.y.maximum as f64) -(space.y.minimum as f64))
+        }
+    }
+}
+fn orient(a: BlendPoint, b: BlendPoint, c: BlendPoint) -> f64 {
+    ret(b.x - a.x) *(c.y - a.y) -(b.y - a.y) *(c.x - a.x)
+}
+fn circle(a: BlendPoint, b: BlendPoint, c: BlendPoint, p: BlendPoint) -> f64 {
+    let ax = a.x - p.x let ay = a.y - p.y let bx = b.x - p.x let by = b.y - p.y let cx = c.x - p.x let cy = c.y - p.y
+    ret(ax * ax + ay * ay) *(bx * cy - by * cx) -(bx * bx + by * by) *(ax * cy - ay * cx) +(cx * cx + cy * cy) *(ax * by - ay * bx)
+}
+fn add_edge(edges: mut Vec[BlendEdge], a: u32, b: u32) ->() {
+    for i in 0_usize..edges.len() {
+        let e = edges.get_unchecked_borrowed(i) if (e.a == b && e.b == a) ||(e.a == a && e.b == b) {
+            let last = edges.pop().unwrap_or(e) if i < edges.len() {
+                edges.set(i, last)
+            }
+            ret()
+        }
+    }
+    edges.push(BlendEdge { a, b })
+}
+pub fn cook_blend_space(space: BlendSpace, clip_count: usize) -> Result[CookedBlendSpace, str] {
+    if space.version != 1_u32 || space.skeleton == "" ||(space.dimensions != 1_u32 && space.dimensions != 2_u32) || !axis_valid(space.x) || !axis_valid(space.y) || space.samples.len() == 0_usize || space.samples.len() > 256_usize {
+        ret Result::Err("Invalid blend space")
+    }
+    let mut points = Vec[BlendPoint]::with_capacity(space.samples.len() + 3_usize)
+    for i in 0_usize..space.samples.len() {
+        let sample = space.samples.get_unchecked_borrowed(i)
+        if !(sample.x >= space.x.minimum && sample.x <= space.x.maximum && sample.y >= space.y.minimum && sample.y <= space.y.maximum) || !(sample.rate > 0_f32 && sample.rate <= 100_f32) || sample.clip as usize >= clip_count {
+            ret Result::Err("Invalid blend sample")
+        }
+        for j in 0_usize..i {
+            let previous = space.samples.get_unchecked_borrowed(j) if sample.x == previous.x &&(space.dimensions == 1_u32 || sample.y == previous.y) {
+                ret Result::Err("Coincident blend samples")
+            }
+        }
+        points.push(point(sample, space))
+    }
+    let mut triangles = Vec[BlendTriangle]::new()
+    if space.dimensions == 2_u32 && points.len() > 2_usize {
+        let size = points.len() as u32
+        points.push(BlendPoint { - 16_f64, - 16_f64 }) points.push(BlendPoint { 16_f64, - 16_f64 }) points.push(BlendPoint {
+                0_f64, 16_f64
+            }
+            ,
+        )
+        triangles.push(BlendTriangle { size, size + 1_u32, size + 2_u32 })
+        let mut edges = Vec[BlendEdge]::with_capacity(32_usize)
+        for index in 0_usize..size as usize {
+            edges.clear() let mut count = 0_usize
+            for i in 0_usize..triangles.len() {
+                let t = triangles.get_unchecked_borrowed(i)
+                if circle(points.get_unchecked_borrowed(t.a as usize), points.get_unchecked_borrowed(t.b as usize), points.get_unchecked_borrowed(t.c as usize), points.get_unchecked_borrowed(index)) > 0_f64 {
+                    add_edge(edges, t.a, t.b) add_edge(edges, t.b, t.c) add_edge(edges, t.c, t.a)
+                } else {
+                    triangles.set(count, t) count += 1_usize
+                }
+            }
+            while triangles.len() > count {
+                triangles.pop()
+            }
+            for edge in edges {
+                let area = orient(points.get_unchecked_borrowed(edge.a as usize), points.get_unchecked_borrowed(edge.b as usize), points.get_unchecked_borrowed(index))
+                if area > 0_f64 {
+                    triangles.push(BlendTriangle { edge.a, edge.b, index as u32 })
+                } elif area < 0_f64 {
+                    triangles.push(BlendTriangle { edge.b, edge.a, index as u32 })
+                }
+            }
+        }
+        let mut count = 0_usize
+        for i in 0_usize..triangles.len() {
+            let t = triangles.get_unchecked_borrowed(i) if t.a < size && t.b < size && t.c < size {
+                triangles.set(count, t) count += 1_usize
+            }
+        }
+        while triangles.len() > count {
+            triangles.pop()
+        }
+        while points.len() > size as usize {
+            points.pop()
+        }
+    }
+    let mut line = Vec[u32]::new()
+    // A 2D set with no triangles is collinear; order along its dominant axis.
+    if triangles.len() == 0_usize {
+        let first = points.get_unchecked_borrowed(0_usize)
+        let mut dx = 0_f64 let mut dy = 0_f64
+        for p in points {
+            let x = p.x - first.x let y = p.y - first.y if x * x > dx {
+                dx = x * x
+            }
+            if y * y > dy {
+                dy = y * y
+            }
+        }
+        let y_axis = space.dimensions == 2_u32 && dy > dx
+        for i in 0_usize..points.len() {
+            line.push(i as u32)
+        }
+        for i in 1_usize..line.len() {
+            let value = line.get_unchecked_borrowed(i) let p = points.get_unchecked_borrowed(value as usize) let key = if y_axis {
+                p.y
+            } else {
+                p.x
+            }
+            let mut j = i
+            while j > 0_usize {
+                let before = points.get_unchecked_borrowed(line.get_unchecked_borrowed(j - 1_usize) as usize) let k = if y_axis {
+                    before.y
+                } else {
+                    before.x
+                }
+                if k <= key {
+                    break
+                }
+                line.set(j, line.get_unchecked_borrowed(j - 1_usize)) j -= 1_usize
+            }
+            line.set(j, value)
+        }
+    }
+    let cooked = CookedBlendSpace { space, triangles, line } cooked.validate(clip_count)? ret Result::Ok(cooked)
+}
+fn barycentric(space: BlendSpace, t: BlendTriangle, p: BlendPoint) -> BlendWeights {
+    let a = point(space.samples.get_unchecked_borrowed(t.a as usize), space)
+    let b = point(space.samples.get_unchecked_borrowed(t.b as usize), space)
+    let c = point(space.samples.get_unchecked_borrowed(t.c as usize), space)
+    let d = orient(a, b, c)
+    let wa =(orient(b, c, p) / d) as f32 let wb =(orient(c, a, p) / d) as f32
+    ret BlendWeights { t.a, t.b, t.c, wa, wb, 1_f32 - wa - wb }
+}
+fn segment(space: BlendSpace, ia: u32, ib: u32, p: BlendPoint) -> BlendWeights {
+    let a = point(space.samples.get_unchecked_borrowed(ia as usize), space) let b = point(space.samples.get_unchecked_borrowed(ib as usize), space)
+    let dx = b.x - a.x let dy = b.y - a.y let length = dx * dx + dy * dy
+    let projection = if length > 0_f64 {
+        ((p.x - a.x) * dx +(p.y - a.y) * dy) / length
+    } else {
+        0_f64
+    }
+    let t = animation_clamp(projection as f32, 0_f32, 1_f32)
+    ret BlendWeights { ia, ib, ib, 1_f32 - t, t, 0_f32 }
+}
+fn distance(space: BlendSpace, w: BlendWeights, p: BlendPoint) -> f64 {
+    let a = point(space.samples.get_unchecked_borrowed(w.a as usize), space)
+    let b = point(space.samples.get_unchecked_borrowed(w.b as usize), space)
+    let c = point(space.samples.get_unchecked_borrowed(w.c as usize), space)
+    let dx = a.x *(w.wa as f64) + b.x *(w.wb as f64) + c.x *(w.wc as f64) - p.x
+    let dy = a.y *(w.wa as f64) + b.y *(w.wb as f64) + c.y *(w.wc as f64) - p.y
+    ret dx * dx + dy * dy
+}
+fn inside(w: BlendWeights) -> bool {
+    ret w.wa >= - 0.000001_f32 && w.wb >= - 0.000001_f32 && w.wc >= - 0.000001_f32
+}
+fn normalized(w: BlendWeights) -> BlendWeights {
+    let a = animation_clamp(w.wa, 0_f32, 1_f32) let b = animation_clamp(w.wb, 0_f32, 1_f32) let c = animation_clamp(w.wc, 0_f32, 1_f32) let sum = a + b + c
+    ret BlendWeights { w.a, w.b, w.c, a / sum, b / sum, c / sum }
+}
+
+impl for BlendSpaceCursor {
+    pub fn new() -> Self {
+        ret Self { 0_usize }
+    }
+    pub fn weights(self: mut Self, cooked: CookedBlendSpace, x: f32, y: f32) -> Result[BlendWeights, str] {
+        if !animation_finite(x) || !animation_finite(y) || cooked.source.samples.len() == 0_usize {
+            ret Result::Err("Invalid blend query")
+        }
+        let space = cooked.source
+        let p = point(BlendSample {
+                animation_clamp(x, space.x.minimum, space.x.maximum), animation_clamp(y, space.y.minimum, space.y.maximum), 0_u32, 1_f32
+            }
+            , space,)
+        if self.triangle < cooked.triangles.len() {
+            let w = barycentric(space, cooked.triangles.get_unchecked_borrowed(self.triangle), p) if inside(w) {
+                ret Result::Ok(normalized(w))
+            }
+        }
+        let mut best = BlendWeights { 0_u32, 0_u32, 0_u32, 1_f32, 0_f32, 0_f32 } let mut best_distance = 4_f64
+        if cooked.triangles.len() > 0_usize {
+            for i in 0_usize..cooked.triangles.len() {
+                let t = cooked.triangles.get_unchecked_borrowed(i) let w = barycentric(space, t, p)
+                if inside(w) {
+                    self.triangle = i ret Result::Ok(normalized(w))
+                }
+                for edge in 0_usize..3_usize {
+                    let a = if edge == 0_usize {
+                        t.a
+                    } elif edge == 1_usize {
+                        t.b
+                    } else {
+                        t.c
+                    }
+                    let b = if edge == 0_usize {
+                        t.b
+                    } elif edge == 1_usize {
+                        t.c
+                    } else {
+                        t.a
+                    }
+                    let candidate = segment(space, a, b, p) let d = distance(space, candidate, p)
+                    if d < best_distance {
+                        best = candidate best_distance = d
+                    }
+                }
+            }
+        } else {
+            for i in 1_usize..cooked.line.len() {
+                let candidate = segment(space, cooked.line.get_unchecked_borrowed(i - 1_usize), cooked.line.get_unchecked_borrowed(i), p) let d = distance(space, candidate, p) if d < best_distance {
+                    best = candidate best_distance = d
+                }
+            }
+        }
+        ret Result::Ok(best)
+    }
+}
+
+import mod::blend::{BoneMask, blend_poses}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip}
+import mod::player::playback_floor
+import mod::pose::AnimationPose
+import mod::sample::sample_clip
+
+impl for CookedBlendSpace {
+    /// Validate stored indices and finite geometry before binding runtime data.
+    pub fn validate(self: Self, clip_count: usize) -> Result[bool, str] {
+        let space = self.source
+        if space.version != 1_u32 || space.skeleton == "" ||(space.dimensions != 1_u32 && space.dimensions != 2_u32) || !axis_valid(space.x) || !axis_valid(space.y) || space.samples.len() == 0_usize || space.samples.len() > 256_usize || self.triangles.len() > 1024_usize {
+            ret Result::Err("Invalid cooked blend space")
+        }
+        for sample in space.samples {
+            if sample.clip as usize >= clip_count || !(sample.x >= space.x.minimum && sample.x <= space.x.maximum && sample.y >= space.y.minimum && sample.y <= space.y.maximum) || !(sample.rate > 0_f32 && sample.rate <= 100_f32) {
+                ret Result::Err("Invalid cooked blend sample")
+            }
+        }
+        let mut used = Vec[bool]::with_capacity(space.samples.len()) for _i in 0_usize..space.samples.len() {
+            used.push(false)
+        }
+        if self.triangles.len() > 0_usize {
+            if space.dimensions != 2_u32 || self.line.len() != 0_usize {
+                ret Result::Err("Invalid cooked blend topology")
+            }
+            for t in self.triangles {
+                if t.a as usize >= space.samples.len() || t.b as usize >= space.samples.len() || t.c as usize >= space.samples.len() {
+                    ret Result::Err("Invalid cooked blend triangle index")
+                }
+                let a = point(space.samples.get_unchecked_borrowed(t.a as usize), space) let b = point(space.samples.get_unchecked_borrowed(t.b as usize), space) let c = point(space.samples.get_unchecked_borrowed(t.c as usize), space)
+                if !(orient(a, b, c) > 0_f64) {
+                    ret Result::Err("Degenerate cooked blend triangle")
+                }
+                used.set(t.a as usize, true) used.set(t.b as usize, true) used.set(t.c as usize, true)
+            }
+        } else {
+            if self.line.len() != space.samples.len() {
+                ret Result::Err("Invalid cooked blend segment list")
+            }
+            for id in self.line {
+                if id as usize >= space.samples.len() || used.get_unchecked_borrowed(id as usize) {
+                    ret Result::Err("Invalid cooked blend segment index")
+                }
+                used.set(id as usize, true)
+            }
+        }
+        for value in used {
+            if !value {
+                ret Result::Err("Cooked blend space omits an authored sample")
+            }
+        }
+        ret Result::Ok(true)
+    }
+}
+
+pub struct BlendSpaceWorkspace {
+    skeleton: str
+    cursor: BlendSpaceCursor
+    first: AnimationPose
+    second: AnimationPose
+    third: AnimationPose
+    intermediate: AnimationPose
+    output: AnimationPose
+    mask: BoneMask
+}
+
+impl for BlendSpaceWorkspace {
+    pub fn new(cooked: CookedBlendSpace, skeleton: Skeleton, mesh: SkeletalMesh, clips: Vec[AnimationClip]) -> Result[BlendSpaceWorkspace<H>, str] {
+        cooked.validate(clips.len())? skeleton.validate()? mesh.validate(skeleton)?
+        if cooked.source.skeleton != skeleton.identity {
+            ret Result::Err("Blend space skeleton mismatch")
+        }
+        for clip in clips {
+            clip.validate(skeleton, mesh.morphs.len())?
+        }
+        let mut weights = Vec[f32]::with_capacity(skeleton.bones.len()) for _i in 0_usize..skeleton.bones.len() {
+            weights.push(1_f32)
+        }
+        ret Result::Ok(BlendSpaceWorkspace<H> {
+                skeleton.identity, BlendSpaceCursor::new(), AnimationPose::rest(skeleton, mesh.morphs.len()), AnimationPose::rest(skeleton, mesh.morphs.len()), AnimationPose::rest(skeleton, mesh.morphs.len()), AnimationPose::rest(skeleton, mesh.morphs.len()), AnimationPose::rest(skeleton, mesh.morphs.len()), BoneMask {
+                    skeleton.identity, weights
+                }
+            }
+            ,
+        )
+    }
+    /// Synchronized normalized phase, including endpoint 1 for a non-looping
+    /// preview. The returned pose aliases this workspace until its next call.
+    pub fn evaluate(self: mut Self&, cooked: CookedBlendSpace, skeleton: Skeleton, mesh: SkeletalMesh, clips: Vec[AnimationClip], x: f32, y: f32, phase: f32) -> Result[AnimationPose, str] {
+        if skeleton.identity != self.skeleton || cooked.source.skeleton != self.skeleton || !(phase >= 0_f32 && phase <= 1_f32) {
+            ret Result::Err("Invalid blend space binding or phase")
+        }
+        let w = self.cursor.weights(cooked, x, y)?
+        let a = cooked.source.samples.get_unchecked_borrowed(w.a as usize).clip as usize let b = cooked.source.samples.get_unchecked_borrowed(w.b as usize).clip as usize let c = cooked.source.samples.get_unchecked_borrowed(w.c as usize).clip as usize
+        if a >= clips.len() || b >= clips.len() || c >= clips.len() {
+            ret Result::Err("Blend space clip binding changed")
+        }
+        self.first.reset(skeleton, mesh)?
+        let clip = clips.get_unchecked_borrowed(a) self.first = sample_clip(clip, phase * clip.duration, self.first)?
+        self.second.reset(skeleton, mesh)? self.third.reset(skeleton, mesh)?
+        if w.wb > 0_f32 {
+            let clip = clips.get_unchecked_borrowed(b) self.second = sample_clip(clip, phase * clip.duration, self.second)?
+        }
+        if w.wc > 0_f32 {
+            let clip = clips.get_unchecked_borrowed(c) self.third = sample_clip(clip, phase * clip.duration, self.third)?
+        }
+        let sum = w.wa + w.wb
+        if w.wb > 0_f32 {
+            self.intermediate = blend_poses(self.first, self.second, w.wb / sum, self.mask, self.intermediate)?
+        } else {
+            self.intermediate.copy_from(self.first)?
+        }
+        if w.wc > 0_f32 {
+            self.output = blend_poses(self.intermediate, self.third, w.wc, self.mask, self.output)?
+        } else {
+            self.output.copy_from(self.intermediate)?
+        }
+        ret Result::Ok(self.output)
+    }
+}
+pub struct BlendSpacePlayback {
+    phase: f32
+    previous: f64
+    current: f64
+    weights: BlendWeights
+}
+pub struct BlendSpaceClock {
+    cycles: f64
+    speed: f32
+    playing: bool
+}
+
+impl for BlendSpaceClock {
+    pub fn new() -> Self {
+        ret Self { 0_f64, 1_f32, true }
+    }
+    pub fn playback(self: mut Self, speed: f32, playing: bool) -> Result[bool, str] {
+        if !(speed >= - 100_f32 && speed <= 100_f32) {
+            ret Result::Err("Invalid blend space speed")
+        }
+        self.speed = speed self.playing = playing ret Result::Ok(true)
+    }
+    /// Integrate rate from weighted cycle lengths; changing speed coordinates
+    /// preserves phase instead of recomputing it from absolute wall time.
+    pub fn advance(self: mut Self, cooked: CookedBlendSpace, clips: Vec[AnimationClip], weights: BlendWeights, delta: f64) -> Result[BlendSpacePlayback, str] {
+        if !(delta >= 0_f64 && delta <= 86400_f64) {
+            ret Result::Err("Invalid blend space delta")
+        }
+        let mut duration = 0_f64
+        for i in 0_usize..3_usize {
+            let id = if i == 0_usize {
+                weights.a
+            } elif i == 1_usize {
+                weights.b
+            } else {
+                weights.c
+            }
+            let weight = if i == 0_usize {
+                weights.wa
+            } elif i == 1_usize {
+                weights.wb
+            } else {
+                weights.wc
+            }
+            if id as usize >= cooked.source.samples.len() || !(weight >= 0_f32 && weight <= 1_f32) {
+                ret Result::Err("Invalid blend space weights")
+            }
+            let sample = cooked.source.samples.get_unchecked_borrowed(id as usize)
+            if sample.clip as usize >= clips.len() || !(sample.rate > 0_f32 && sample.rate <= 100_f32) {
+                ret Result::Err("Invalid blend space clip binding")
+            }
+            let seconds = clips.get_unchecked_borrowed(sample.clip as usize).duration
+            if !(seconds >= 0_f32 && seconds <= 86400_f32) {
+                ret Result::Err("Invalid blend clip duration")
+            }
+            duration +=(seconds as f64) /(sample.rate as f64) *(weight as f64)
+        }
+        let sum = weights.wa + weights.wb + weights.wc
+        if animation_finite(sum) == false || sum < 0.9999_f32 || sum > 1.0001_f32 {
+            ret Result::Err("Blend weights are not normalized")
+        }
+        let previous = self.cycles
+        let mut current = previous
+        if self.playing && duration > 0_f64 {
+            current += delta *(self.speed as f64) / duration
+        }
+        if !(current >= - 1000000000_f64 && current <= 1000000000_f64) {
+            ret Result::Err("Blend space clock range exceeded")
+        }
+        self.cycles = current
+        ret Result::Ok(BlendSpacePlayback {
+                (current -(playback_floor(current) as f64)) as f32, previous, current, weights
+            }
+            ,
+        )
+    }
+}

@@ -1,0 +1,129 @@
+//! Exercises Encore packing, actual GPU dispatch and rendered pixels together.
+//! Run from Graphene after compiling tests/vfx/fluid_uniform.comp to target/vfx/fluid-uniform-copy.spv.
+import core::vec::Vec
+import graphene::particles::fluid::FluidGpu
+import graphene::particles::gpu::particle_spirv
+import graphene::particles::presets::particle_template
+import graphene::{Swapchain, GraphicsInstance, GraphicsDevice, PerspectiveCamera, RenderPipelineOptions, VertexBufferLayout, BindGroupLayoutEntry, buffer_storage, buffer_transfer_destination, shader_stage_compute, shader_stage_vertex, shader_stage_fragment}
+import linalg::Vec3
+import std::io::println
+import std::os::{write_file, read_file}
+extern fn encore_vk_target_readback(target: usize, attachment: u32, destination: usize, capacity: usize) -> usize
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+#attr(safe)
+fn capture(target: Swapchain, name: str) -> bool {
+    let mut visible = false
+    let mut bytes = Vec[u8]::new()
+    for _i in 0_usize..1048576_usize {
+        bytes.push(0_u8)
+    }
+    unsafe {
+        let pointer = bytes.as_ptr()
+        unsafe ehir {
+            address: usize = pcast pointer: u8 *, usize
+        }
+        let written = encore_vk_target_readback(target.handle(), 0_u32, address, bytes.len())
+        println(f "pixels={written}")
+        let mut rgb = Vec[u8]::with_capacity(786432_usize)
+        let mut nonzero = 0_usize
+        for pixel in 0_usize..262144_usize {
+            // The default offscreen target is BGRA8; PPM stores RGB.
+            for channel in vec![2_usize, 1_usize, 0_usize] {
+                let value = bytes.get(pixel * 4_usize + channel).unwrap_or(0_u8)
+                rgb.push(value) if value > 0_u8 {
+                    nonzero += 1_usize
+                }
+            }
+        }
+        println(f "{name}: nonzero={nonzero}")
+        visible = written == 1048576_usize && nonzero > 100_usize
+        let payload = graphene_asset_bytes(rgb.as_ptr(), rgb.len())
+        write_file("target/vfx/fluid-" + name + ".ppm", "P6\n512 512\n255\n" + payload)
+    }
+    ret visible
+}
+fn inspect_uniform(fluid: FluidGpu<H>, device: GraphicsDevice) -> bool {
+    let bytes = read_file("target/vfx/fluid-uniform-copy.spv")
+    let mut words = Vec[u32]::new()
+    for i in 0_usize..bytes.byte_len() / 4_usize {
+        words.push((bytes.byte_at(i * 4_usize) as u32) |((bytes.byte_at(i * 4_usize + 1_usize) as u32) << 8_u32) |((bytes.byte_at(i * 4_usize + 2_usize) as u32) << 16_u32) |((bytes.byte_at(i * 4_usize + 3_usize) as u32) << 24_u32))
+    }
+    let shader = device.create_shader_module(words, shader_stage_compute())
+    let layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0_u32, shader_stage_compute()), BindGroupLayoutEntry::storage(1_u32, shader_stage_compute())])
+    let snapshot = device.create_buffer(336_u64, buffer_storage(), true)
+    let group = device.create_buffer_bind_group_many(layout, vec![0_u32, 1_u32], vec![fluid.uniform, snapshot], vec![0_u64, 0_u64], vec![336_u64, 336_u64])
+    let pipeline = device.create_compute_pipeline(shader, layout)
+    let encoder = device.create_encoder()
+    if !encoder.bind_compute_pipeline(pipeline) || !encoder.bind_compute_group(pipeline, group) || !encoder.dispatch(1_u32, 1_u32, 1_u32) || !encoder.storage_host_barrier() || !encoder.submit_and_wait() {
+        println("Uniform snapshot failed")
+    }
+    encoder.destroy()
+    let values = snapshot.read_f32s(0_u64, 84_usize)
+    for i in 4_usize..21_usize {
+        let k = i * 4_usize println(f "uniform[{k}]: {values.get(k).unwrap_or(0)}, {values.get(k+1_usize).unwrap_or(0)}, {values.get(k+2_usize).unwrap_or(0)}, {values.get(k+3_usize).unwrap_or(0)}")
+    }
+    let valid = values.len() == 84_usize && values.get(39_usize).unwrap_or(1_f32) == 0_f32 && values.get(79_usize).unwrap_or(0_f32) == - 1_f32
+    group.destroy() pipeline.destroy() layout.destroy() shader.destroy() snapshot.destroy()
+    ret valid
+}
+fn check_fluid(device: GraphicsDevice, name: str) -> u32 {
+    let asset = particle_template(name)
+    let emitter = match asset.emitters.get(0_usize) {
+        Some(e) => e None => {
+            ret 2_u32
+        }
+    }
+    let fluid = match FluidGpu::create(device, emitter, asset.parameters, 7_u32) {
+        Ok(fluid) => fluid Err(message) => {
+            println(message) ret 3_u32
+        }
+    }
+    println(f "grid={fluid.dimensions.x},{fluid.dimensions.y},{fluid.dimensions.z},{fluid.dimensions.w}; source={fluid.source.x},{fluid.source.y},{fluid.source.z},{fluid.source.w}; injection={fluid.injection.x}; paused={fluid.paused}; emitting={fluid.emitting}")
+    let target = device.create_shared_offscreen_target(512_u32, 512_u32)
+    let vertex = device.create_shader_module(particle_spirv(5_u32), shader_stage_vertex())
+    let fragment = device.create_shader_module(particle_spirv(4_u32), shader_stage_fragment())
+    let pipeline = device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::empty(), fluid.layout, RenderPipelineOptions::depth().with_depth_write(false).with_depth_test(false).with_alpha_blending())
+    if !pipeline.available() {
+        println(pipeline.error()) ret 4_u32
+    }
+    let camera = PerspectiveCamera::new(Vec3::new(4, 3, 6), Vec3::new(0, 1, 0), 0.7853982_f32, 0.05_f32, 100)
+    for _i in 0_usize..60_usize {
+        let frame = target.acquire_frame()
+        if !fluid.prepare(frame, camera, 1, 0.016666667_f32) {
+            println(frame.error()) ret 5_u32
+        }
+        let pass = frame.begin_render_pass(pipeline, 0, 0, 0, 1)
+        if !fluid.record(frame, target) || !pass.end() || !frame.present() {
+            println(frame.error()) ret 6_u32
+        }
+        frame.destroy() target.wait_readback()
+    }
+    println(f "clock={fluid.clock}; initialized={fluid.initialized}; accumulated={fluid.accumulator}")
+    let uniform_valid = inspect_uniform(fluid, device)
+    let visible = capture(target, name)
+    target.destroy() pipeline.destroy() vertex.destroy() fragment.destroy() fluid.destroy()
+    ret if uniform_valid && visible {
+        0_u32
+    } else {
+        8_u32
+    }
+}
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    let adapter = match instance.preferred_adapter() {
+        Some(adapter) => adapter None => {
+            ret 1_u32
+        }
+    }
+    let device = instance.create_device(adapter)
+    let mut result = 0_u32
+    for name in vec!["Gas 2D", "Smoke 3D", "Fire 3D", "Liquid", "Shallow Water"] {
+        let code = check_fluid(device, name)
+        if code != 0_u32 {
+            result = code println(f "FAILED {name}: {code}")
+        }
+    }
+    device.destroy() instance.destroy()
+    ret result
+}

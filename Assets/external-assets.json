@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "description": "Optional local asset packs; paths are repository-relative. These files are excluded from Git, not deleted.",
+  "groups": {
+    "grass_sources": [
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585.mtlx",
+        "bytes": 7576,
+        "sha256": "33ff91bc72766db486c12bfbbd1eed31c0eb19925d35ed5fc933f269b886e006"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585_AmbientOcclusion.jpg",
+        "bytes": 476800,
+        "sha256": "50f03807f79bad2534f9be3363a5c75cc32f3ecc9b59718d0a0c93fb9b4e8c68"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585_BaseColor.jpg",
+        "bytes": 1080205,
+        "sha256": "2bfbf5fc6069cfaaf092ca4f4c00d33350766225c1601f07679b92aa6e2a5e33"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585_Displacement.tiff",
+        "bytes": 1599969,
+        "sha256": "e8a418b301536890739cc0a425bc9762cdd2d03df8ed269be6a212d9541da1de"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585_Metallic.jpg",
+        "bytes": 5223,
+        "sha256": "4d03c4b04e071d72a0fb184b11992dc2f9000d0231a0bb0c2437f4cf4810cd9a"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585_Normal.png",
+        "bytes": 2179060,
+        "sha256": "24c8e9f00acde12b826823eefc19600da31b8d9e9062c124ef827dd79100c72c"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/1K/Poliigon_GrassPatchyGround_4585_Roughness.jpg",
+        "bytes": 486450,
+        "sha256": "0f490448d9c9e2db5bac08424b7aa0242d759f1ee51a72b0cb707eab07b76771"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585.mtlx",
+        "bytes": 7576,
+        "sha256": "ca8d31a7923b03665fb9a07f5c8d763b2e1f2895d6ffe33f3098d841d8912973"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585_AmbientOcclusion.jpg",
+        "bytes": 2414814,
+        "sha256": "5af1ee1dcc6d93cf5105bfbf98aeb1e14d973a6fb32e9ddcbddc8ba04cdda3ec"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585_BaseColor.jpg",
+        "bytes": 4654477,
+        "sha256": "1396ac4f43f02054ea002e52689fba1de729261b8f9b0fd8bdd27d5d2fcd3525"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585_Displacement.tiff",
+        "bytes": 5896421,
+        "sha256": "f3a2ad18bedcaac684b0e3b12b8c4a5f9c88deb32513afa4ca074771e40f65f4"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585_Metallic.jpg",
+        "bytes": 17511,
+        "sha256": "f42e7507ee978b07a32bd0c3c9a1643f94baa97f1d7a54330a7cf93eb8160411"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585_Normal.png",
+        "bytes": 10109111,
+        "sha256": "5f67181c331528c4cae577288756046c192897b96b4eb529cd5c1c77cb6ac241"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/2K/Poliigon_GrassPatchyGround_4585_Roughness.jpg",
+        "bytes": 2191312,
+        "sha256": "19c55828c7b33599c75d78c9aa5702b0594bc09be77243d7926926d2e46c921a"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585.mtlx",
+        "bytes": 7576,
+        "sha256": "1b921004259927b8e0caeed6f0d7fd736bf5b05dccfe5b5a3553e987bbde21b1"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585_AmbientOcclusion.jpg",
+        "bytes": 10106942,
+        "sha256": "a0afae5593a16a8d7754df85efe482a36d86a7cd950ff1f26de33f74b4144189"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585_BaseColor.jpg",
+        "bytes": 18831915,
+        "sha256": "e89ebe291ffa2c17882b4e8b1f85ef88283681506ad7f50053b9d21f8fd7ff6d"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585_Displacement.tiff",
+        "bytes": 20318559,
+        "sha256": "4b567a18009bedfdc1fb795183e5ed83a9bb22ef162fea3ca5f666bf41033fa0"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585_Metallic.jpg",
+        "bytes": 66663,
+        "sha256": "ee4181159e76626d1e2ac7099f43417d9a202c2b1c895234d40a35c691bb7a99"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585_Normal.png",
+        "bytes": 42619559,
+        "sha256": "c1bb9fbacce56e83f7a48594d16dfdc93ecd6727fbe94bbcc851523945ad1b27"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/4K/Poliigon_GrassPatchyGround_4585_Roughness.jpg",
+        "bytes": 9187928,
+        "sha256": "f83a9f6424622756a746a23d953f87696a5f91e21204eaf32dd3738b6706a6e2"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585.mtlx",
+        "bytes": 7576,
+        "sha256": "d94f7ae960ada33ab901f2bb778bdc5c5adf814b58f91481ea778d8bb39906b9"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585_AmbientOcclusion.jpg",
+        "bytes": 26594983,
+        "sha256": "87af9485dd0074a76fc826986f4081e20fe74baa8723ad1b7bc56a8e572dd255"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585_BaseColor.jpg",
+        "bytes": 45763367,
+        "sha256": "152e8d5ed8d210877c1d00cccdb65b408876285cba68ee4acb15c935427d26ab"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585_Displacement.tiff",
+        "bytes": 62938003,
+        "sha256": "22c48d43f17615071a1fe7dd211a1c0cc413574d3909a7a485e906eabfc49626"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585_Metallic.jpg",
+        "bytes": 263271,
+        "sha256": "e4261f132daa060d4c31cd4d0c0e8f224fb0a86bc2b8b86a5199127d2684f404"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585_Normal.png",
+        "bytes": 152006641,
+        "sha256": "1af87af2755292732dcc355b87e68c987b017884a8f29113b6ee28356c701b60"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/8K/Poliigon_GrassPatchyGround_4585_Roughness.jpg",
+        "bytes": 18438900,
+        "sha256": "c7a2d871f839c2c8ab8edc6eb06b656eba6b2aad2396ddf2c3d76b3ddac72e3b"
+      },
+      {
+        "path": "Assets/Materials/Flat Grass/Poliigon_GrassPatchyGround_4585_Preview1.png",
+        "bytes": 8788237,
+        "sha256": "2c392f00949727a3963399266a028026d535ee00fe5293a0160bd3a893186d1b"
+      }
+    ],
+    "rock_sources": [
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049.fbx",
+        "bytes": 1786972,
+        "sha256": "01b7265129e1804f8fddd1783f875a9d6e72548f5a6621a6ccb00b7201f5cd0a"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_AO_4K_METALNESS.jpg",
+        "bytes": 6649570,
+        "sha256": "c662aea1a123a080cd398a0f4a340ae38263201142757de1c967778ddb58fdba"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_BUMP16_4K_METALNESS.tiff",
+        "bytes": 33578583,
+        "sha256": "6333a82fac8fda1a4ddc1c8ec694a5f6c197234646e0b18a13623e8ad26ef6d0"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_BUMP_4K_METALNESS.jpg",
+        "bytes": 5572605,
+        "sha256": "a6429af950dbca7ecd271660e84d843a1ae4009f22d76a32e64d412f07983c64"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_COL_4K_METALNESS.jpg",
+        "bytes": 17811281,
+        "sha256": "9f0d4949f7429e32ea3fe38c23fee2217fca6395da5527f70c9caeda5075e13b"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_DISP16_4K_METALNESS.tiff",
+        "bytes": 33577423,
+        "sha256": "3516975cbf265e947d25c7d3983ff34d70269593ae3d043134aec542b75fc858"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_DISP_4K_METALNESS.jpg",
+        "bytes": 2575507,
+        "sha256": "26d14c1436b14925202be723a60657d8f29ae17bd1159f236b71077ac639f3af"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_LOD0.fbx",
+        "bytes": 19231500,
+        "sha256": "019fe885a71836b8f57b80f860a59c53e08bd6f5a88f732623b9b95ee7de4910"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_METALNESS_4K_METALNESS.jpg",
+        "bytes": 77313,
+        "sha256": "ca67bd97852b8f4cc39331875327fec6101f9c56a31585bc24dd53e89aedce09"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_NRM_4K_LOD0.jpg",
+        "bytes": 23996330,
+        "sha256": "0327e803a432ccdfab5c8d0a7feb6f50d98ec437fb58b80839b9156312d5d5df"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_NRM_4K_LOD0_METALNESS.jpg",
+        "bytes": 23996330,
+        "sha256": "0327e803a432ccdfab5c8d0a7feb6f50d98ec437fb58b80839b9156312d5d5df"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_NRM_4K_METALNESS.jpg",
+        "bytes": 24009879,
+        "sha256": "2a2579456d74882e84e69822a1e9e8a33a35cdc20616df900a027ad8d3708519"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_ROUGHNESS_4K_METALNESS.jpg",
+        "bytes": 7265609,
+        "sha256": "80fa8e30cd4a6e72306b4b4f5a6bf0d6a556dee31449b68568c62b16927b1efb"
+      },
+      {
+        "path": "Assets/Models/Rocks/RockBoulderLarge049/RockBoulderLarge049_preview1.png",
+        "bytes": 4486959,
+        "sha256": "32735a40a0e668b55223f3a131db17db3434d8e26ee7040a94de89bed5424ff9"
+      }
+    ]
+  }
+}

@@ -1,0 +1,264 @@
+//! Blueprint documents contain stable identities, not executable editor state.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+import refrain::scene::transform::Transform
+
+pub enum BlueprintType {
+    Exec
+    Bool
+    I32
+    F32
+    String
+    Vector
+    Actor
+    Component
+}
+
+pub enum BlueprintValue {
+    Bool(bool)
+    I32(i32)
+    F32(f32)
+    String(str)
+    Vector(Vec3)
+    Actor(u64)
+    Component(u64)
+}
+
+impl for BlueprintType {
+    pub fn name(self: Self) -> str {
+        ret match self {
+            Exec => "exec" Bool => "bool" I32 => "i32" F32 => "f32"
+            String => "str" Vector => "vec3" Actor => "actor" Component => "component"
+        }
+    }
+    pub fn parse(name: str) -> Option[BlueprintType] {
+        ret match name {
+            "exec" => Option[BlueprintType]::Some(BlueprintType::Exec) "bool" => Option[BlueprintType]::Some(BlueprintType::Bool)
+            "i32" => Option[BlueprintType]::Some(BlueprintType::I32) "f32" => Option[BlueprintType]::Some(BlueprintType::F32)
+            "str" => Option[BlueprintType]::Some(BlueprintType::String) "vec3" => Option[BlueprintType]::Some(BlueprintType::Vector)
+            "actor" => Option[BlueprintType]::Some(BlueprintType::Actor) "component" => Option[BlueprintType]::Some(BlueprintType::Component)
+            _ => Option[BlueprintType]::None
+        }
+    }
+}
+
+impl for BlueprintValue {
+    pub fn value_type(self: Self) -> BlueprintType {
+        ret match self {
+            Bool(_) => BlueprintType::Bool I32(_) => BlueprintType::I32 F32(_) => BlueprintType::F32
+            String(_) => BlueprintType::String Vector(_) => BlueprintType::Vector
+            Actor(_) => BlueprintType::Actor Component(_) => BlueprintType::Component
+        }
+    }
+}
+
+pub struct BlueprintProperty {
+    id: u64
+    name: str
+    default_value: BlueprintValue
+}
+
+pub struct BlueprintOverride {
+    property: u64
+    value: BlueprintValue
+}
+
+pub struct BlueprintInstance {
+    asset: str
+    overrides: Vec[BlueprintOverride]
+}
+
+pub struct BlueprintComponent {
+    id: u64
+    parent: u64
+    name: str
+    kind: str
+    transform: Transform
+    mesh: str
+    material: str
+    visible: bool
+}
+
+/// Port names are catalog identities, independent of display labels.
+pub struct BlueprintEndpoint {
+    node: u64
+    pin: str
+}
+
+pub struct BlueprintLink {
+    source: BlueprintEndpoint
+    target: BlueprintEndpoint
+}
+
+/// Operation is a closed catalog key; `reference` addresses properties/components.
+/// Coordinates are presentation only and are excluded from compilation identity.
+pub struct BlueprintNode {
+    id: u64
+    operation: str
+    value_type: BlueprintType
+    reference: u64
+    text: str
+    value: BlueprintValue
+    x: f32
+    y: f32
+}
+
+impl for BlueprintNode {
+    pub fn new(id: u64, operation: str, value_type: BlueprintType) -> BlueprintNode {
+        ret BlueprintNode { id, operation, value_type, 0, "", BlueprintValue::F32(0), 0, 0 }
+    }
+    pub fn at(self: Self, x: f32, y: f32) -> BlueprintNode {
+        ret BlueprintNode {
+            self.id, self.operation, self.value_type, self.reference, self.text, self.value, x, y
+        }
+    }
+    pub fn with_reference(self: Self, reference: u64) -> BlueprintNode {
+        ret BlueprintNode {
+            self.id, self.operation, self.value_type, reference, self.text, self.value, self.x, self.y
+        }
+    }
+    pub fn with_value(self: Self, value: BlueprintValue) -> BlueprintNode {
+        ret BlueprintNode {
+            self.id, self.operation, value.value_type(), self.reference, self.text, value, self.x, self.y
+        }
+    }
+    pub fn with_text(self: Self, text: str) -> BlueprintNode {
+        ret BlueprintNode {
+            self.id, self.operation, self.value_type, self.reference, text, self.value, self.x, self.y
+        }
+    }
+}
+
+pub struct BlueprintPin {
+    key: str
+    value_type: BlueprintType
+    output: bool
+    required: bool
+}
+
+pub struct BlueprintAsset {
+    id: str
+    name: str
+    components: Vec[BlueprintComponent]
+    properties: Vec[BlueprintProperty]
+    nodes: Vec[BlueprintNode]
+    links: Vec[BlueprintLink]
+}
+
+impl for BlueprintAsset {
+    pub fn new(id: str, name: str) -> BlueprintAsset {
+        ret BlueprintAsset {
+            id, name,
+            vec![BlueprintComponent { 1, 0, "Root", "scene", Transform::identity(), "", "", true }],
+            Vec[BlueprintProperty]::new(), Vec[BlueprintNode]::new(), Vec[BlueprintLink]::new()
+        }
+    }
+    pub fn node(self: Self, id: u64) -> Option[BlueprintNode] {
+        for node in self.nodes {
+            if node.id == id {
+                ret Option[BlueprintNode]::Some(node)
+            }
+        }
+        ret Option[BlueprintNode]::None
+    }
+    pub fn property(self: Self, id: u64) -> Option[BlueprintProperty] {
+        for property in self.properties {
+            if property.id == id {
+                ret Option[BlueprintProperty]::Some(property)
+            }
+        }
+        ret Option[BlueprintProperty]::None
+    }
+    pub fn component(self: Self, id: u64) -> Option[BlueprintComponent] {
+        for component in self.components {
+            if component.id == id {
+                ret Option[BlueprintComponent]::Some(component)
+            }
+        }
+        ret Option[BlueprintComponent]::None
+    }
+    pub fn next_node_id(self: Self) -> u64 {
+        let mut id = 1_u64
+        for node in self.nodes {
+            if node.id >= id {
+                id = node.id + 1
+            }
+        }
+        ret id
+    }
+    pub fn connect(self: mut Self, source: u64, source_pin: str, target: u64, target_pin: str) ->() {
+        self.links.push(BlueprintLink {
+                BlueprintEndpoint { source, source_pin }, BlueprintEndpoint {
+                    target, target_pin
+                }
+            }
+            ,
+        )
+    }
+}
+
+pub struct BlueprintDiagnostic {
+    node: u64
+    pin: str
+    message: str
+}
+
+fn input(key: str, value_type: BlueprintType) -> BlueprintPin {
+    ret BlueprintPin { key, value_type, false, true }
+}
+fn output(key: str, value_type: BlueprintType) -> BlueprintPin {
+    ret BlueprintPin { key, value_type, true, false }
+}
+pub fn blueprint_event(operation: str) -> bool {
+    ret operation == "construction" || operation == "begin-play" || operation == "tick" ||
+    operation == "input-pressed" || operation == "input-released"
+}
+pub fn blueprint_pins(node: BlueprintNode) -> Vec[BlueprintPin] {
+    let exec = BlueprintType::Exec
+    let value_type = node.value_type
+    let operation = node.operation
+    if operation == "construction" || operation == "begin-play" || operation == "input-pressed" || operation == "input-released" {
+        ret vec![output("then", exec)]
+    }
+    if operation == "constant" || operation == "get-variable" {
+        ret vec![output("value", value_type)]
+    }
+    if operation == "add" || operation == "subtract" || operation == "multiply" || operation == "divide" {
+        ret vec![input("a", value_type), input("b", value_type), output("value", value_type)]
+    }
+    if operation == "equal" || operation == "less" || operation == "greater" {
+        ret vec![input("a", value_type), input("b", value_type), output("value", BlueprintType::Bool)]
+    }
+    if operation == "and" || operation == "or" {
+        ret vec![input("a", BlueprintType::Bool), input("b", BlueprintType::Bool), output("value", BlueprintType::Bool)]
+    }
+    if operation == "get-position" || operation == "get-rotation" || operation == "get-scale" {
+        ret vec![output("value", BlueprintType::Vector)]
+    }
+    if operation == "set-position" || operation == "set-rotation" || operation == "set-scale" || operation == "add-offset" || operation == "add-rotation" {
+        ret vec![input("in", exec), input("value", BlueprintType::Vector), output("then", exec)]
+    }
+    ret match operation {
+        "tick" => vec![output("then", exec), output("delta", BlueprintType::F32)]
+        "set-variable" => vec![input("in", exec), input("value", value_type), output("then", exec)]
+        "not" => vec![input("value", BlueprintType::Bool), output("result", BlueprintType::Bool)]
+        "make-vector" => vec![input("x", BlueprintType::F32), input("y", BlueprintType::F32), input("z", BlueprintType::F32), output("value", BlueprintType::Vector)]
+        "break-vector" => vec![input("value", BlueprintType::Vector), output("x", BlueprintType::F32), output("y", BlueprintType::F32), output("z", BlueprintType::F32)]
+        "branch" => vec![input("in", exec), input("condition", BlueprintType::Bool), output("true", exec), output("false", exec)]
+        "sequence" => vec![input("in", exec), output("first", exec), output("second", exec)]
+        "get-visible" => vec![output("value", BlueprintType::Bool)]
+        "set-visible" => vec![input("in", exec), input("value", BlueprintType::Bool), output("then", exec)]
+        "print" => vec![input("in", exec), input("value", BlueprintType::String), output("then", exec)]
+        _ => Vec[BlueprintPin]::new()
+    }
+}
+
+pub fn blueprint_pin(node: BlueprintNode, key: str, output_pin: bool) -> Option[BlueprintPin] {
+    for pin in blueprint_pins(node) {
+        if pin.key == key && pin.output == output_pin {
+            ret Option[BlueprintPin]::Some(pin)
+        }
+    }
+    ret Option[BlueprintPin]::None
+}

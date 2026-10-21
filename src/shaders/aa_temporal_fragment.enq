@@ -1,0 +1,6 @@
+import core::vec::Vec
+import mod::aa_data::aa_spirv
+
+pub fn aa_temporal_fragment() -> Vec[u32] {
+    ret aa_spirv(14_u32)
+}

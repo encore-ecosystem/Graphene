@@ -1,0 +1,545 @@
+//! Typed material lowering and background GLSL -> SPIR-V compilation.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::model::*
+import std::os::{env, file_exists, file_sha256, mkdir_all, read_file, write_file_atomic}
+import std::path::Path
+import std::process::run_args_capture
+import std::string::String
+
+extern fn encore_text_sha256(contents: str) -> str
+extern fn graphene_bp_stage(parent: str) -> str
+pub struct MaterialGenerated {
+    source: str
+    diagnostics: Vec[MaterialDiagnostic]
+    expressions: usize
+}
+pub struct MaterialBuild {
+    directory: str
+    key: str
+    semantic: str
+    cached: bool
+    compiler: str
+    validator: str
+    cache: str
+    project: str
+}
+
+fn has(ids: Vec[u64], id: u64) -> bool {
+    for value in ids {
+        if value == id {
+            ret true
+        }
+    }
+    ret false
+}
+fn finite(value: f32) -> bool {
+    ret value >= - 100000000000000000000.0_f32 && value <= 100000000000000000000.0_f32
+}
+pub fn material_connection_error(graph: MaterialGraph, link: MaterialLink) -> str {
+    let source = match graph.node(link.source.node) {
+        Some(n) => n None => {
+            ret "Source node does not exist"
+        }
+    }
+    let target = match graph.node(link.target.node) {
+        Some(n) => n None => {
+            ret "Target node does not exist"
+        }
+    }
+    let output = match material_pin(source, link.source.pin, true) {
+        Some(p) => p None => {
+            ret "Source output does not exist"
+        }
+    }
+    let input = match material_pin(target, link.target.pin, false) {
+        Some(p) => p None => {
+            ret "Target input does not exist"
+        }
+    }
+    if output.kind != input.kind && output.kind != "scalar" {
+        ret "Cannot connect a color to a scalar input"
+    }
+    let mut pending = vec![link.target.node] let mut visited = Vec[u64]::new()
+    while pending.len() > 0 {
+        let id = pending.pop().unwrap_or(0)
+        if id == link.source.node {
+            ret "Material expressions cannot contain cycles"
+        }
+        if !has(visited, id) {
+            visited.push(id)
+            for edge in graph.links {
+                if edge.source.node == id && !(edge.target.node == link.target.node && edge.target.pin == link.target.pin) {
+                    pending.push(edge.target.node)
+                }
+            }
+        }
+    }
+    ret ""
+}
+fn number(value: f32) -> str {
+    // Scientific notation is valid GLSL, while integer-looking floats need a decimal.
+    let text = Debug::fmt(value)
+    ret if text.contains(".") || text.contains("e") || text.contains("E") {
+        text
+    } else {
+        text + ".0"
+    }
+}
+fn literal(node: MaterialNode) -> str {
+    ret if node.kind == "vec3" {
+        "vec3(" + number(node.value.x()) + "," + number(node.value.y()) + "," + number(node.value.z()) + ")"
+    } else {
+        number(node.value.x())
+    }
+}
+fn input_source(graph: MaterialGraph, node: MaterialNode, key: str, kind: str, fallback: str) -> str {
+    for link in graph.links {
+        if link.target.node == node.id && link.target.pin == key {
+            let source = graph.node(link.source.node).unwrap_or(node)
+            let value = f "m_{source.id}"
+            ret if kind == "vec3" && source.kind == "scalar" {
+                "vec3(" + value + ")"
+            } else {
+                value
+            }
+        }
+    }
+    ret fallback
+}
+fn expression(graph: MaterialGraph, node: MaterialNode) -> str {
+    let op = node.operation
+    let a = input_source(graph, node, "a", node.kind, literal(node))
+    let b = input_source(graph, node, "b", node.kind, literal(node))
+    if op == "scalar" || op == "color" {
+        ret literal(node)
+    }
+    if op == "add" {
+        ret "(" + a + "+" + b + ")"
+    }
+    if op == "subtract" {
+        ret "(" + a + "-" + b + ")"
+    }
+    if op == "multiply" {
+        ret "(" + a + "*" + b + ")"
+    }
+    if op == "divide" {
+        ret "(" + a + "/max(abs(" + b + "),0.00001))"
+    }
+    if op == "lerp" {
+        ret "mix(" + a + "," + b + ",clamp(" + input_source(graph, node, "weight", "scalar", "0.5") + ",0.0,1.0))"
+    }
+    if op == "clamp" {
+        ret "clamp(" + a + ",0.0,1.0)"
+    }
+    if op == "step" {
+        ret "(floor((" + a + ")*max(" + number(node.value.x()) + ",1.0))/max(" + number(node.value.x()) + ",1.0))"
+    }
+    if op == "gradient" {
+        ret "smoothstep(0.0,1.0," + a + ")"
+    }
+    if op == "noise" {
+        ret "mgNoise(" + input_source(graph, node, "position", "vec3", "mg_position") + "*" + number(node.value.x()) + ")"
+    }
+    ret match op {
+        "world-position" => "mg_position" "view-direction" => "mg_direction" "uv" => "vec3(mg_uv,0.0)"
+        "time" => "mg_environment[0].w" "time-of-day" => "mg_environment[0].z"
+        "sun-direction" => "mg_environment[4].xyz" "moon-direction" => "(-mg_environment[4].xyz)"
+        "wind" => "mg_environment[2].xyz" "cloudiness" => "mg_environment[1].x" "rain" => "mg_environment[1].y"
+        "snow" => "mg_environment[1].z" "fog" => "mg_environment[1].w" "wetness" => "mg_environment[3].x"
+        "snow-coverage" => "mg_environment[3].y" "temperature" => "mg_environment[2].w" "sky-light" => "mg_environment[7].xyz" _ => "0.0"
+    }
+}
+pub fn material_context_source() -> str {
+    ret "vec3 mg_position;vec3 mg_direction;vec2 mg_uv;vec4 mg_environment[8];\nfloat mgHash(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}\nfloat mgNoise(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(mix(mgHash(i),mgHash(i+vec3(1,0,0)),f.x),mix(mgHash(i+vec3(0,1,0)),mgHash(i+vec3(1,1,0)),f.x),f.y),mix(mix(mgHash(i+vec3(0,0,1)),mgHash(i+vec3(1,0,1)),f.x),mix(mgHash(i+vec3(0,1,1)),mgHash(i+vec3(1)),f.x),f.y),f.z);}\n"
+}
+
+pub fn generate_material(graph: MaterialGraph) -> MaterialGenerated {
+    let mut diagnostics = Vec[MaterialDiagnostic]::new()
+    let mut output = Option[MaterialNode]::None
+    let mut seen = Vec[u64]::new()
+    for node in graph.nodes {
+        if node.id == 0 || has(seen, node.id) {
+            diagnostics.push(MaterialDiagnostic {
+                    node.id, "", "Node identity must be unique and nonzero"
+                }
+                ,
+            )
+        }
+        seen.push(node.id)
+        if material_is_output(node) {
+            if output.is_some() {
+                diagnostics.push(MaterialDiagnostic {
+                        node.id, "", "A material must have exactly one output"
+                    }
+                    ,
+                )
+            }
+            output = Option[MaterialNode]::Some(node)
+        } else {
+            let mut known = false
+            for operation in material_operations() {
+                if node.operation == operation {
+                    known = true
+                }
+            }
+            if !known {
+                diagnostics.push(MaterialDiagnostic {
+                        node.id, "", "Unknown material expression: " + node.operation
+                    }
+                    ,
+                )
+            }
+        }
+        if (node.kind != "scalar" && node.kind != "vec3") ||(node.operation == "scalar" && node.kind != "scalar") ||(node.operation == "color" && node.kind != "vec3") {
+            diagnostics.push(MaterialDiagnostic { node.id, "", "Invalid expression type" })
+        }
+        if !finite(node.value.x()) || !finite(node.value.y()) || !finite(node.value.z()) {
+            diagnostics.push(MaterialDiagnostic {
+                    node.id, "", "Expression values must be finite"
+                }
+                ,
+            )
+        }
+    }
+    for link in graph.links {
+        let error = material_connection_error(graph, link)
+        if error != "" {
+            diagnostics.push(MaterialDiagnostic {
+                    link.target.node, link.target.pin, error
+                }
+                ,
+            )
+        }
+        let mut count = 0
+        for other in graph.links {
+            if other.target.node == link.target.node && other.target.pin == link.target.pin {
+                count += 1
+            }
+        }
+        if count > 1 {
+            diagnostics.push(MaterialDiagnostic {
+                    link.target.node, link.target.pin, "An input can have only one connection"
+                }
+                ,
+            )
+        }
+    }
+    let root = match output {
+        Some(node) => node None => {
+            diagnostics.push(MaterialDiagnostic { 0, "", "Material Output is missing" })
+            ret MaterialGenerated { "", diagnostics, 0 }
+        }
+    }
+    if diagnostics.len() > 0 {
+        ret MaterialGenerated { "", diagnostics, 0 }
+    }
+    // Iterative reachability/topological lowering avoids recursion on user graphs.
+    let mut needed = vec![root.id] let mut pending = vec![root.id]
+    while pending.len() > 0 {
+        let id = pending.pop().unwrap_or(0)
+        for link in graph.links {
+            if link.target.node == id && !has(needed, link.source.node) {
+                needed.push(link.source.node) pending.push(link.source.node)
+            }
+        }
+    }
+    let mut done = Vec[u64]::new() let mut body = "" let mut progress = true
+    while progress {
+        progress = false
+        for node in graph.nodes {
+            if !material_is_output(node) && has(needed, node.id) && !has(done, node.id) {
+                let mut ready = true
+                for link in graph.links {
+                    if link.target.node == node.id && !has(done, link.source.node) {
+                        ready = false
+                    }
+                }
+                if ready {
+                    let lowered = expression(graph, node)
+                    let glsl_type = if node.kind == "scalar" {
+                        "float"
+                    } else {
+                        "vec3"
+                    }
+                    body += f "    {glsl_type} m_{node.id} = {lowered};\n"
+                    done.push(node.id) progress = true
+                }
+            }
+        }
+    }
+    let domain = graph.domain.key()
+    let base = input_source(graph, root, if domain == "surface" {
+            "base_color"
+        } elif domain == "sky" {
+            "radiance"
+        } elif domain == "volume" {
+            "scattering"
+        } else {
+            "color"
+        }
+        , "vec3", "vec3(0.34,0.38,0.44)",)
+    let metal = input_source(graph, root, if domain == "surface" {
+            "metallic"
+        } elif domain == "volume" {
+            "density"
+        } else {
+            "opacity"
+        }
+        , "scalar", if domain == "surface" {
+            "0.0"
+        } else {
+            "1.0"
+        }
+        ,
+    )
+    let rough = input_source(graph, root, "roughness", "scalar", "0.5")
+    let emission = input_source(graph, root, "emission", "vec3", "vec3(0.0)")
+    let volume = if domain == "volume" {
+        "void evaluateVolume(out vec3 scattering,out float density,out vec3 emission){\n" + body + "scattering=max(" + base + ",vec3(0));density=max(" + metal + ",0.0);emission=max(" + emission + ",vec3(0));}\n"
+    } else {
+        ""
+    }
+    ret MaterialGenerated {
+        "#define GRAPHENE_DOMAIN_" + if domain == "surface" {
+            "SURFACE"
+        } elif domain == "sky" {
+            "SKY"
+        } elif domain == "volume" {
+            "VOLUME"
+        } else {
+            "PARTICLE"
+        }
+        + " 1\n" + material_context_source() + volume + "void evaluateMaterial(out vec3 baseColor, out float metallic, out float roughness) {\n" + body +
+        "    baseColor = " + if domain == "surface" {
+            "clamp(" + base + ",0.0,1.0)"
+        } else {
+            "max(" + base + "+" + emission + ",vec3(0))"
+        }
+        + ";\n    metallic = clamp(" + metal + ",0.0,1.0);\n    roughness = clamp(" + rough + ",0.0,1.0);\n}\n", diagnostics, done.len()
+    }
+}
+
+pub fn material_vertex_source() -> str {
+    ret "#version 450\nlayout(location=0) in vec3 position;\nlayout(location=1) in vec3 normal;\nlayout(location=0) out vec3 worldNormal;\nlayout(location=1) out vec3 worldPosition;\nlayout(set=0,binding=0) uniform Preview { mat4 viewProjection; vec4 camera; vec4 environment[8]; } frame;\nvoid main(){worldNormal=normal;worldPosition=position;gl_Position=frame.camera.w>0.5?vec4(position.xy,0.0,1.0):frame.viewProjection*vec4(position,1.0);}\n"
+}
+pub fn material_fragment_source(generated: str) -> str {
+    ret "#version 450\nlayout(location=0) in vec3 worldNormal;\nlayout(location=1) in vec3 worldPosition;\nlayout(location=0) out vec4 outputColor;\nlayout(set=0,binding=0) uniform Preview { mat4 viewProjection; vec4 camera; vec4 environment[8]; } frame;\n" + generated +
+    "void main(){mg_position=worldPosition;mg_direction=normalize(worldPosition-frame.camera.xyz);mg_uv=worldPosition.xy*.5+.5;for(int i=0;i<8;++i)mg_environment[i]=frame.environment[i];\n#ifndef GRAPHENE_DOMAIN_SURFACE\nvec3 forward=normalize(-frame.camera.xyz),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);mg_direction=normalize(forward+right*worldPosition.x+up*worldPosition.y);mg_position=frame.camera.xyz+mg_direction*1000.;\n#endif\nvec3 base;float metal;float rough;evaluateMaterial(base,metal,rough);vec3 n=normalize(worldNormal);vec3 l=normalize(vec3(0.5,0.8,0.6));vec3 v=normalize(frame.camera.xyz-worldPosition);float diffuse=max(dot(n,l),0.0);vec3 h=normalize(l+v);float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,rough));vec3 linear=base*(0.18+diffuse*0.8)*(1.0-metal)+mix(vec3(0.04),base,metal)*spec*(1.0-rough);\n#ifdef GRAPHENE_DOMAIN_SKY\nlinear=base;\n#elif defined(GRAPHENE_DOMAIN_VOLUME)\nvec3 sum=vec3(0);float through=1.;for(int i=0;i<32;++i){mg_position=vec3(worldPosition.xy*2.,float(i)/16.-1.);vec3 scattering,emission;float density;evaluateVolume(scattering,density,emission);float opacity=1.-exp(-max(density,0.)*.2);sum+=through*opacity*(scattering+emission);through*=1.-opacity;}linear=sum+through*vec3(.025,.04,.065);\n#elif defined(GRAPHENE_DOMAIN_PARTICLE)\nfloat soft=1.-smoothstep(.35,1.,length(worldPosition.xy));linear=mix(vec3(.025,.04,.065),base,metal*soft);\n#endif\nvec3 encoded=mix(linear*12.92,1.055*pow(max(linear,vec3(0.0)),vec3(1.0/2.4))-0.055,greaterThan(linear,vec3(0.0031308)));outputColor=vec4(encoded,1.0); }\n"
+}
+#attr(safe)
+fn digest(source: str) -> str {
+    unsafe {
+        ret encore_text_sha256(source)
+    }
+}
+fn resolve_tool(name: str) -> Result[str, str] {
+    if name.contains("/") || name.contains("\\") {
+        let path = Path::new(name).resolve().as_str()
+        if file_exists(path) {
+            ret Result::Ok(path)
+        }
+    } else {
+        let separator = if env("OS").unwrap_or("") == "Windows_NT" {
+            ";"
+        } else {
+            ":"
+        }
+        for directory in String::from_str(env("PATH").unwrap_or("")).split_char(separator) {
+            let path = Path::new(directory.as_str()).join(name).resolve().as_str()
+            if file_exists(path) {
+                ret Result::Ok(path)
+            }
+        }
+    }
+    ret Result::Err("Shader tool not found: " + name)
+}
+pub fn material_runtime_variants(domain: str) -> Vec[str] {
+    if domain == "surface" {
+        ret vec!["scene-linear", "scene-temporal", "mesh-linear", "mesh-temporal", "triangle-linear", "triangle-temporal"]
+    }
+    if domain == "particle" {
+        ret vec!["particle"]
+    }
+    if domain == "sky" || domain == "volume" {
+        ret vec!["environment"]
+    }
+    ret Vec[str]::new()
+}
+fn shader_root() -> str {
+    ret Path::new(env("GRAPHENE_SHADER_ROOT").unwrap_or("shaders")).resolve().as_str()
+}
+fn shader_files() -> Vec[str] {
+    ret vec!["cube.frag", "virtual_scene.frag", "virtual_scene_triangle.frag", "environment_sky.frag", "environment_atmosphere.glsl", "environment_precipitation.frag", "scene_lighting.glsl", "environment_surface.glsl", "environment_weather.glsl", "material_normal.glsl", "aa_motion.glsl", "aa_decode.glsl"]
+}
+fn runtime_shader_fingerprint() -> str {
+    let mut content = "runtime-material-abi-2"
+    for file in shader_files() {
+        content += read_file(shader_root() + "/" + file)
+    }
+    ret digest(content)
+}
+fn generated_domain(source: str) -> str {
+    if source.contains("#define GRAPHENE_DOMAIN_SKY") {
+        ret "sky"
+    }
+    if source.contains("#define GRAPHENE_DOMAIN_VOLUME") {
+        ret "volume"
+    }
+    if source.contains("#define GRAPHENE_DOMAIN_PARTICLE") {
+        ret "particle"
+    }
+    ret "surface"
+}
+fn prepare_runtime_sources(directory: str, generated: str) -> bool {
+    for file in shader_files() {
+        let source = read_file(shader_root() + "/" + file)
+        if source.byte_len() == 0 || write_file_atomic(directory + "/" + file, source) != 0 {
+            ret false
+        }
+    }
+    ret write_file_atomic(directory + "/material_graph_generated.glsl", generated) == 0 && write_file_atomic(directory + "/domain", generated_domain(generated)) == 0
+}
+fn material_receipt(directory: str, domain: str) -> str {
+    let mut receipt = ""
+    let mut names = vec!["preview.vert", "preview.frag"]
+    for variant in material_runtime_variants(domain) {
+        names.push(variant)
+    }
+    for name in names {
+        let hash = file_sha256(directory + "/" + name + ".spv")
+        if hash.byte_len() != 64 {
+            ret ""
+        }
+        receipt += name + ":" + hash + "\n"
+    }
+    ret receipt
+}
+fn compile_runtime_material(directory: str, compiler: str, validator: str) -> i32 {
+    let domain = read_file(directory + "/domain")
+    for variant in material_runtime_variants(domain) {
+        let source = if variant == "particle" {
+            "environment_precipitation.frag"
+        } elif variant == "environment" {
+            "environment_sky.frag"
+        } elif variant.contains("triangle") {
+            "virtual_scene_triangle.frag"
+        } elif variant.contains("mesh") {
+            "virtual_scene.frag"
+        } else {
+            "cube.frag"
+        }
+        let mut args = vec!["-O", "--target-env=vulkan1.2", "-I" + directory, "-DGRAPHENE_LINEAR_COLOR"]
+        if domain == "surface" {
+            args.push("-DGRAPHENE_MATERIAL_GRAPH") args.push("-DGRAPHENE_ENVIRONMENT_SHELTER") args.push("-DGRAPHENE_BASE_COLOR_TEXTURE")
+            if variant.contains("temporal") {
+                args.push("-DGRAPHENE_TEMPORAL")
+            }
+        } elif domain == "particle" {
+            args.push("-DGRAPHENE_PARTICLE_GRAPH")
+        } elif domain == "sky" {
+            args.push("-DGRAPHENE_SKY_GRAPH")
+        } elif domain == "volume" {
+            args.push("-DGRAPHENE_VOLUME_GRAPH") args.push("-DGRAPHENE_CLOUD_ONLY")
+        }
+        args.push(directory + "/" + source) args.push("-o") args.push(directory + "/" + variant + ".spv")
+        if run_args_capture(compiler, args, directory + "/runtime.log") != 0 {
+            ret 4
+        }
+        if run_args_capture(validator, vec!["--target-env", "vulkan1.2", directory + "/" + variant + ".spv"], directory + "/runtime-validate.log") != 0 {
+            ret 5
+        }
+    }
+    ret 0
+}
+
+pub fn prepare_material_build(project: str, semantic: str, generated: str) -> Result[MaterialBuild, str] {
+    let compiler = resolve_tool(env("GRAPHENE_GLSLC").unwrap_or("glslc"))?
+    let validator = resolve_tool(env("GRAPHENE_SPIRV_VAL").unwrap_or("spirv-val"))?
+    let vertex = material_vertex_source() let fragment = material_fragment_source(generated)
+    let key = digest(vertex + fragment + file_sha256(compiler) + file_sha256(validator) + runtime_shader_fingerprint() + "-O --target-env=vulkan1.2 material-runtime-abi-2")
+    let root = Path::new(project).resolve().join("target/materials").as_str()
+    if key.byte_len() != 64 || mkdir_all(root) != 0 {
+        ret Result::Err("Unable to create material compiler cache")
+    }
+    let cache = root + "/" + key
+    if mkdir_all(cache) != 0 {
+        ret Result::Err("Unable to create material cache entry")
+    }
+    let expected_receipt = material_receipt(cache, generated_domain(generated))
+    let cached = expected_receipt != "" && read_file(cache + "/receipt") == expected_receipt
+    // A worker writes only its private directory; receipts publish complete cache entries last.
+    let directory = if cached {
+        cache
+    } else {
+        reserve_stage(root)
+    }
+    if directory == "" {
+        ret Result::Err("Unable to reserve material build directory")
+    }
+    if !cached &&(write_file_atomic(directory + "/preview.vert", vertex) != 0 || write_file_atomic(directory + "/preview.frag", fragment) != 0) {
+        ret Result::Err("Unable to write material shader source")
+    }
+    if !cached && !prepare_runtime_sources(directory, generated) {
+        ret Result::Err("Unable to prepare engine shader variants")
+    }
+    ret Result::Ok(MaterialBuild {
+            directory, key, semantic, cached, compiler, validator, cache, project
+        }
+        ,
+    )
+}
+#attr(safe)
+fn reserve_stage(root: str) -> str {
+    unsafe {
+        ret graphene_bp_stage(root)
+    }
+}
+pub fn run_material_build(directory: str, compiler: str, validator: str, cache: str) -> i32 {
+    for stage in vec!["vert", "frag"] {
+        let source = directory + "/preview." + stage let binary = source + ".spv"
+        if run_args_capture(compiler, vec!["-O", "--target-env=vulkan1.2", source, "-o", binary], directory + "/compile-" + stage + ".log") != 0 {
+            ret 1
+        }
+        if run_args_capture(validator, vec!["--target-env", "vulkan1.2", binary], directory + "/validate-" + stage + ".log") != 0 {
+            ret 2
+        }
+    }
+    let runtime_result = compile_runtime_material(directory, compiler, validator)
+    if runtime_result != 0 {
+        ret runtime_result
+    }
+    let domain = read_file(directory + "/domain")
+    if directory != cache {
+        for variant in material_runtime_variants(domain) {
+            if write_file_atomic(cache + "/" + variant + ".spv", read_file(directory + "/" + variant + ".spv")) != 0 {
+                ret 3
+            }
+        }
+        if write_file_atomic(cache + "/domain", domain) != 0 {
+            ret 3
+        }
+        for suffix in vec!["vert", "frag", "vert.spv", "frag.spv"] {
+            if write_file_atomic(cache + "/preview." + suffix, read_file(directory + "/preview." + suffix)) != 0 {
+                ret 3
+            }
+        }
+    }
+    ret write_file_atomic(cache + "/receipt", material_receipt(cache, domain))
+}
+pub fn material_spirv(bytes: str) -> Result[Vec[u32], str] {
+    if bytes.byte_len() < 20 || bytes.byte_len() > 16777216 || bytes.byte_len() % 4 != 0 {
+        ret Result::Err("Invalid SPIR-V size")
+    }
+    let mut words = Vec[u32]::new()
+    for index in 0..bytes.byte_len() / 4 {
+        let offset = index * 4
+        words.push((bytes.byte_at(offset) as u32) |((bytes.byte_at(offset + 1) as u32) << 8) |((bytes.byte_at(offset + 2) as u32) << 16) |((bytes.byte_at(offset + 3) as u32) << 24))
+    }
+    if words.get(0).unwrap_or(0) != 0x07230203_u32 {
+        ret Result::Err("Invalid SPIR-V magic")
+    }
+    ret Result::Ok(words)
+}

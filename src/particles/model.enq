@@ -1,0 +1,179 @@
+//! Authoring data and the shared vector instruction ABI. No GPU handles in assets.
+import core::option::Option
+import core::vec::Vec
+import linalg::Vec3
+
+pub struct ParticleValue {
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+}
+
+impl for ParticleValue {
+    pub fn scalar(x: f32) -> Self {
+        ret Self { x, x, x, x }
+    }
+    pub fn vector(x: f32, y: f32, z: f32, w: f32) -> Self {
+        ret Self { x, y, z, w }
+    }
+    pub fn values(self: Self) -> Vec[f32] {
+        ret vec![self.x, self.y, self.z, self.w]
+    }
+}
+pub struct ParticleParameter {
+    name: str
+    kind: str
+    value: ParticleValue
+}
+pub struct ParticleCurvePoint {
+    time: f32
+    value: ParticleValue
+}
+pub struct ParticleNode {
+    id: u64
+    operation: str
+    kind: str
+    value: ParticleValue
+    attribute: u32
+    parameter: str
+    x: f32
+    y: f32
+    points: Vec[ParticleCurvePoint]
+}
+
+impl for ParticleNode {
+    pub fn new(id: u64, operation: str, x: f32, y: f32) -> Self {
+        ret Self {
+            id, operation, "vec4", ParticleValue::scalar(0), 0_u32, "", x, y, Vec[ParticleCurvePoint]::new()
+        }
+    }
+}
+pub struct ParticleLink {
+    from: u64
+    to: u64
+    input: u32
+}
+pub struct ParticleModule {
+    identity: str
+    name: str
+    version: u32
+    stage: u32
+    enabled: bool
+    nodes: Vec[ParticleNode]
+    links: Vec[ParticleLink]
+}
+
+impl for ParticleModule {
+    pub fn new(name: str, stage: u32) -> Self {
+        ret Self {
+            "", name, 1_u32, stage, true, Vec[ParticleNode]::new(), Vec[ParticleLink]::new()
+        }
+    }
+}
+pub struct ParticleEmitter {
+    identity: str
+    name: str
+    backend: str
+    renderer: str
+    material: str
+    mesh: str
+    capacity: u32
+    rate: f32
+    burst: u32
+    lifetime: f32
+    speed: f32
+    size: f32
+    gravity: f32
+    drag: f32
+    position: Vec3
+    direction: Vec3
+    color: ParticleValue
+    local_space: bool
+    enabled: bool
+    duration: f32
+    delay: f32
+    looping: bool
+    seed: u32
+    modules: Vec[ParticleModule]
+}
+
+impl for ParticleEmitter {
+    pub fn new(name: str) -> Self {
+        ret Self {
+            "", name, "gpu", "sprite", "", "", 4096_u32, 200, 0_u32, 3, 2, 0.12_f32, - 0.5_f32, 0.1_f32,
+            Vec3::zero(), Vec3::new(0, 1, 0), ParticleValue::vector(1, 0.4_f32, 0.08_f32, 0.8_f32), false, true, 5, 0, true, 1_u32, Vec[ParticleModule]::new()
+        }
+    }
+    /// Simulation owns scalar settings and an empty module list; bytecode is separate.
+    pub fn runtime_copy(self: Self, seed: u32) -> Self {
+        ret Self {
+            self.identity, self.name, self.backend, self.renderer, self.material, self.mesh, self.capacity, self.rate, self.burst, self.lifetime, self.speed, self.size, self.gravity, self.drag, self.position, self.direction, self.color, self.local_space, self.enabled, self.duration, self.delay, self.looping, seed, Vec[ParticleModule]::new()
+        }
+    }
+    pub fn config(self: Self) -> Vec[f32] {
+        ret vec![self.rate, self.lifetime, self.speed, self.size, self.gravity, self.drag, self.position.x(), self.position.y(), self.position.z(), self.direction.x(), self.direction.y(), self.direction.z(), self.color.x, self.color.y, self.color.z, self.color.w, if self.local_space {
+                1_f32
+            } else {
+                0_f32
+            }
+            , self.burst as f32, self.duration, self.delay, if self.looping {
+                1_f32
+            } else {
+                0_f32
+            }
+        ]
+    }
+}
+pub struct ParticleSystem {
+    version: u32
+    identity: str
+    name: str
+    seed: u32
+    parent: str
+    parameters: Vec[ParticleParameter]
+    emitters: Vec[ParticleEmitter]
+}
+
+impl for ParticleSystem {
+    pub fn new(name: str) -> Self {
+        ret Self {
+            1_u32, "", name, 1_u32, "", Vec[ParticleParameter]::new(), Vec[ParticleEmitter]::new()
+        }
+    }
+}
+pub struct ParticleDiagnostic {
+    emitter: usize
+    module: usize
+    node: u64
+    message: str
+}
+pub struct ParticleProgram {
+    words: Vec[f32]
+    diagnostics: Vec[ParticleDiagnostic]
+}
+
+impl for ParticleProgram {
+    pub fn valid(self: Self) -> bool {
+        ret self.diagnostics.len() == 0
+    }
+}
+pub struct ParticleComponent {
+    asset: str
+    autoplay: bool
+    preview: bool
+    seed: u32
+    rate_scale: f32
+}
+
+impl for ParticleComponent {
+    pub fn defaults() -> Self {
+        ret Self { "", true, false, 1_u32, 1 }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret(self.asset == "" ||(self.asset.byte_len() > 8 && self.asset.slice_bytes(0, 8) == "Content/" && !self.asset.contains("..") && !self.asset.contains("\\"))) && self.rate_scale >= 0 && self.rate_scale <= 100
+    }
+}
+pub fn particle_operations() -> Vec[str] {
+    ret vec!["constant", "load", "store", "add", "subtract", "multiply", "divide", "lerp", "clamp", "sin", "cos", "normalize", "length", "dot", "random", "noise", "context", "parameter", "curve", "select", "less", "greater", "cross", "sphere", "box", "cone", "plane-collision", "attract", "kill", "event", "abs", "min", "max", "power", "floor", "fract"]
+}

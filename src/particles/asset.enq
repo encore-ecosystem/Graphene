@@ -1,0 +1,255 @@
+//! Authoring inheritance is resolved before cooking; packaged games consume bytecode.
+import binary::{encode, decode}
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import mod::codec::{particle_system_parse, particle_system_stringify}
+import mod::compiler::compile_particle_emitter
+import mod::model::*
+import mod::runtime::particle_program_valid
+import refrain::native_asset::{save_vfx_payload, load_vfx_payload, asset_source_stamp}
+import std::os::{read_file, write_file_atomic, file_exists}
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+pub struct CookedParticleSystem {
+    version: u32
+    asset: ParticleSystem
+    programs: Vec[ParticleProgram]
+    dependencies: Vec[(str, str)]
+    authoring: str
+}
+fn vfx_ends(path: str, suffix: str) -> bool {
+    ret path.byte_len() >= suffix.byte_len() && path.slice_bytes(path.byte_len() - suffix.byte_len(), suffix.byte_len()) == suffix
+}
+pub fn particle_path_valid(path: str) -> bool {
+    ret path.byte_len() > 8_usize && path.slice_bytes(0, 8) == "Content/" && !path.contains("..") && !path.contains("\\") && !path.contains(":") &&(vfx_ends(path, ".graphene-particle.json") || vfx_ends(path, ".gparticle"))
+}
+fn vfx_emitter_override(base: ParticleEmitter, overrides: Vec[ParticleEmitter]) -> ParticleEmitter {
+    for value in overrides {
+        if value.identity != "" && value.identity == base.identity {
+            ret value
+        }
+    }
+    ret base
+}
+fn vfx_parameter_override(base: ParticleParameter, overrides: Vec[ParticleParameter]) -> ParticleParameter {
+    for value in overrides {
+        if value.name == base.name {
+            ret value
+        }
+    }
+    ret base
+}
+fn vfx_resolve(project: str, path: str, visited: mut Vec[str], dependencies: mut Vec[(str, str)]) -> Result[ParticleSystem, str] {
+    if !particle_path_valid(path) {
+        ret Result::Err("Invalid particle asset path")
+    }
+    if visited.len() > 32_usize {
+        ret Result::Err("Particle inheritance exceeds 32 levels")
+    }
+    for previous in visited {
+        if previous == path {
+            ret Result::Err("Particle asset dependency cycle: " + path)
+        }
+    }
+    visited.push(path)
+    dependencies.push((path, asset_source_stamp(project + "/" + path)))
+    let mut asset = particle_system_parse(read_file(project + "/" + path))?
+    if asset.parent != "" {
+        let base = vfx_resolve(project, asset.parent, visited, dependencies)?
+        let mut emitters = Vec[ParticleEmitter]::new()
+        for inherited in base.emitters {
+            emitters.push(vfx_emitter_override(inherited, asset.emitters))
+        }
+        for override in asset.emitters {
+            let mut exists = false for inherited in base.emitters {
+                if override.identity != "" && override.identity == inherited.identity {
+                    exists = true
+                }
+            }
+            if !exists {
+                emitters.push(override)
+            }
+        }
+        let mut parameters = Vec[ParticleParameter]::new()
+        for inherited in base.parameters {
+            parameters.push(vfx_parameter_override(inherited, asset.parameters))
+        }
+        for override in asset.parameters {
+            let mut exists = false for inherited in base.parameters {
+                if override.name == inherited.name {
+                    exists = true
+                }
+            }
+            if !exists {
+                parameters.push(override)
+            }
+        }
+        asset.emitters = emitters asset.parameters = parameters
+    }
+    ret Result::Ok(asset)
+}
+pub fn prepare_particle_system(project: str, path: str) -> Result[CookedParticleSystem, str] {
+    let mut dependencies = Vec[(str, str)]::new() let mut visited = Vec[str]::new() let asset = vfx_resolve(project, path, visited, dependencies)?
+    let mut programs = Vec[ParticleProgram]::new()
+    for i in 0_usize..asset.emitters.len() {
+        let program = compile_particle_emitter(asset, i) if !program.valid() {
+            ret Result::Err(program.diagnostics.get(0_usize).unwrap_or(ParticleDiagnostic {
+                        0_usize, 0_usize, 0_u64, "Invalid graph"
+                    }
+                    ,
+                ).message)
+        }
+        programs.push(program)
+    }
+    ret Result::Ok(CookedParticleSystem {
+            1_u32, asset, programs, dependencies, particle_system_stringify(asset)
+        }
+        ,
+    )
+}
+// Runtime records are flat: no graph traversal or JSON decoding during game load.
+// Editor source travels separately so a cooked asset remains inspectable.
+struct VfxCookedWire {
+    version: u32
+    seed: u32
+    metadata: Vec[str]
+    integers: Vec[u32]
+    config: Vec[f32]
+    parameter_names: Vec[str]
+    parameter_values: Vec[f32]
+    offsets: Vec[u32]
+    words: Vec[f32]
+    dependencies: Vec[(str, str)]
+    authoring: str
+}
+#attr(safe)
+pub fn save_cooked_particles(path: str, asset: CookedParticleSystem) -> Result[bool, str] {
+    let mut wire = VfxCookedWire {
+        1_u32, asset.asset.seed, vec![asset.asset.identity, asset.asset.name, asset.asset.parent], Vec[u32]::new(), Vec[f32]::new(), Vec[str]::new(), Vec[f32]::new(), vec![0_u32], Vec[f32]::new(), asset.dependencies, asset.authoring
+    }
+    for i in 0_usize..asset.asset.emitters.len() {
+        let emitter = asset.asset.emitters.get(i).unwrap_or(ParticleEmitter::new(""))
+        for name in vec![emitter.identity, emitter.name, emitter.backend, emitter.renderer, emitter.material, emitter.mesh] {
+            wire.metadata.push(name)
+        }
+        wire.integers.push(emitter.capacity) wire.integers.push(emitter.seed) wire.integers.push(if emitter.enabled {
+                1_u32
+            } else {
+                0_u32
+            }
+        )
+        for value in emitter.config() {
+            wire.config.push(value)
+        }
+        let program = asset.programs.get(i).unwrap_or(ParticleProgram {
+                Vec[f32]::new(), Vec[ParticleDiagnostic]::new()
+            }
+            ,
+        )
+        if !particle_program_valid(program) {
+            ret Result::Err("Cannot cook invalid VFX bytecode")
+        }
+        for word in program.words {
+            wire.words.push(word)
+        }
+        wire.offsets.push(wire.words.len() as u32)
+    }
+    for p in asset.asset.parameters {
+        wire.parameter_names.push(p.name) wire.parameter_names.push(p.kind) for v in p.value.values() {
+            wire.parameter_values.push(v)
+        }
+    }
+    let bytes = match encode(wire) {
+        Ok(b) => b Err(e) => {
+            ret Result::Err(e.message())
+        }
+    }
+    let mut data = "" unsafe {
+        data = graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+    }
+    if !save_vfx_payload(path, "particle-system", "", "", data) {
+        ret Result::Err("Unable to save native VFX asset")
+    }
+    ret Result::Ok(true)
+}
+pub fn load_cooked_particles(path: str) -> Result[CookedParticleSystem, str] {
+    let data = load_vfx_payload(path, "particle-system", "")? let mut bytes = Vec[u8]::new() for i in 0_usize..data.byte_len() {
+        bytes.push(data.byte_at(i))
+    }
+    let wire = match decode[VfxCookedWire](bytes) {
+        Ok(b) => b Err(e) => {
+            ret Result::Err(e.message())
+        }
+    }
+    for dependency in wire.dependencies {
+        if !particle_path_valid(dependency.0) {
+            ret Result::Err("Unsafe native VFX dependency path")
+        }
+    }
+    let count = wire.integers.len() / 3_usize let parameters = wire.parameter_names.len() / 2_usize
+    if wire.version != 1_u32 || count > 256_usize || parameters > 64_usize || wire.metadata.len() != 3_usize + count * 6_usize || wire.integers.len() != count * 3_usize || wire.config.len() != count * 21_usize || wire.offsets.len() != count + 1_usize || wire.parameter_names.len() != parameters * 2_usize || wire.parameter_values.len() != parameters * 4_usize || wire.authoring.byte_len() > 16777216_usize {
+        ret Result::Err("Unsupported native VFX schema")
+    }
+    let mut asset = ParticleSystem::new(wire.metadata.get(1_usize).unwrap_or("")) asset.identity = wire.metadata.get(0_usize).unwrap_or("") asset.parent = wire.metadata.get(2_usize).unwrap_or("") asset.seed = wire.seed
+    let mut programs = Vec[ParticleProgram]::new()
+    for i in 0_usize..count {
+        let base = i * 21_usize let meta = 3_usize + i * 6_usize let mut e = ParticleEmitter::new(wire.metadata.get(meta + 1_usize).unwrap_or(""))
+        e.identity = wire.metadata.get(meta).unwrap_or("") e.backend = wire.metadata.get(meta + 2_usize).unwrap_or("gpu") e.renderer = wire.metadata.get(meta + 3_usize).unwrap_or("sprite") e.material = wire.metadata.get(meta + 4_usize).unwrap_or("") e.mesh = wire.metadata.get(meta + 5_usize).unwrap_or("")
+        e.capacity = wire.integers.get(i * 3_usize).unwrap_or(0_u32) e.seed = wire.integers.get(i * 3_usize + 1_usize).unwrap_or(0_u32) e.enabled = wire.integers.get(i * 3_usize + 2_usize).unwrap_or(0_u32) != 0_u32
+        e.rate = wire.config.get(base).unwrap_or(0) e.lifetime = wire.config.get(base + 1_usize).unwrap_or(0) e.speed = wire.config.get(base + 2_usize).unwrap_or(0) e.size = wire.config.get(base + 3_usize).unwrap_or(0) e.gravity = wire.config.get(base + 4_usize).unwrap_or(0) e.drag = wire.config.get(base + 5_usize).unwrap_or(0)
+        e.position = Vec3::new(wire.config.get(base + 6_usize).unwrap_or(0), wire.config.get(base + 7_usize).unwrap_or(0), wire.config.get(base + 8_usize).unwrap_or(0)) e.direction = Vec3::new(wire.config.get(base + 9_usize).unwrap_or(0), wire.config.get(base + 10_usize).unwrap_or(0), wire.config.get(base + 11_usize).unwrap_or(0))
+        e.color = ParticleValue::vector(wire.config.get(base + 12_usize).unwrap_or(0), wire.config.get(base + 13_usize).unwrap_or(0), wire.config.get(base + 14_usize).unwrap_or(0), wire.config.get(base + 15_usize).unwrap_or(0)) e.local_space = wire.config.get(base + 16_usize).unwrap_or(0) > 0.5_f32 e.burst = wire.config.get(base + 17_usize).unwrap_or(0) as u32 e.duration = wire.config.get(base + 18_usize).unwrap_or(0) e.delay = wire.config.get(base + 19_usize).unwrap_or(0) e.looping = wire.config.get(base + 20_usize).unwrap_or(0) > 0.5_f32
+        let start = wire.offsets.get(i).unwrap_or(0_u32) as usize let end = wire.offsets.get(i + 1_usize).unwrap_or(0_u32) as usize
+        if start > end || end > wire.words.len() {
+            ret Result::Err("Invalid native VFX instruction range")
+        }
+        let mut program = ParticleProgram { Vec[f32]::new(), Vec[ParticleDiagnostic]::new() } for j in start..end {
+            program.words.push(wire.words.get(j).unwrap_or(0))
+        }
+        if !particle_program_valid(program) {
+            ret Result::Err("Invalid native VFX instruction program")
+        }
+        asset.emitters.push(e) programs.push(program)
+    }
+    for i in 0_usize..parameters {
+        let p = i * 4_usize asset.parameters.push(ParticleParameter {
+                wire.parameter_names.get(i * 2_usize).unwrap_or(""), wire.parameter_names.get(i * 2_usize + 1_usize).unwrap_or("vec4"), ParticleValue::vector(wire.parameter_values.get(p).unwrap_or(0), wire.parameter_values.get(p + 1_usize).unwrap_or(0), wire.parameter_values.get(p + 2_usize).unwrap_or(0), wire.parameter_values.get(p + 3_usize).unwrap_or(0))
+            }
+            ,
+        )
+    }
+    ret Result::Ok(CookedParticleSystem {
+            1_u32, asset, programs, wire.dependencies, wire.authoring
+        }
+        ,
+    )
+}
+pub fn load_particle_system(project: str, path: str) -> Result[CookedParticleSystem, str] {
+    if !particle_path_valid(path) {
+        ret Result::Err("Invalid particle asset path")
+    }
+    if vfx_ends(path, ".gparticle") {
+        ret load_cooked_particles(project + "/" + path)
+    }
+    let cooked = project + "/" + path + ".gparticle"
+    if file_exists(cooked) {
+        match load_cooked_particles(cooked) {
+            Ok(asset) => {
+                let mut current = true for dependency in asset.dependencies {
+                    if file_exists(project + "/" + dependency.0) && asset_source_stamp(project + "/" + dependency.0) != dependency.1 {
+                        current = false
+                    }
+                }
+                if current {
+                    ret Result::Ok(asset)
+                }
+            }
+            Err(_) => {
+            }
+        }
+    }
+    let asset = prepare_particle_system(project, path)? save_cooked_particles(cooked, asset)? ret Result::Ok(asset)
+}
+pub fn save_particle_system(path: str, asset: ParticleSystem) -> bool {
+    ret write_file_atomic(path, particle_system_stringify(asset)) == 0_i32
+}

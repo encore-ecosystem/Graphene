@@ -1,0 +1,14 @@
+//! CPU texture data shared by import, native assets and GPU upload.
+import core::vec::Vec
+
+/// Raw RGBA8 PNG samples, top-to-bottom. GPU usage selects sRGB for color or linear for data maps.
+pub struct TextureImage {
+    width: u32
+    height: u32
+    pixels: Vec[u32]
+}
+
+pub fn texture_path_valid(path: str) -> bool {
+    ret path == "" ||(path.byte_len() > 17 && path.slice_bytes(0, 17) == "Content/Textures/" &&
+        !path.contains("..") && !path.contains("\\") && !path.contains(":") && path.slice_bytes(17, path.byte_len() - 17) != "")
+}

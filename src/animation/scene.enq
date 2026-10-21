@@ -1,0 +1,703 @@
+//! Scene-owned animation clocks and immutable asset libraries. Views only consume
+//! snapshots; source IO is joined from a single background load at a time.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::{Mat4, Vec3}
+import mod::character::{CharacterAsset, load_character}
+import mod::component::{SkeletalMeshComponent, CharacterMorphControl, CharacterMorphChoice, character_path_valid, morph_controls_equal}
+import mod::cook::CookedSkeletalMesh
+import mod::graph::AnimationGraph
+import mod::math::{LocalTransform, PoseMatrix, PoseVector}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip}
+import mod::player::AnimationEvent
+import mod::root_motion::RootMotionDelta
+import mod::runtime::{AnimationWorld, AnimationInstanceId, AnimationLibraryId, AnimationStats, PoseSnapshot}
+import refrain::scene::world::Scene
+import std::thread::JoinHandle
+
+struct CharacterLoad {
+    project: str
+    path: str
+    result: Result[CharacterAsset, str]
+}
+fn load(project: str, path: str) -> sending CharacterLoad {
+    ret CharacterLoad {
+        project, path, load_character(project + "/" + path, "")
+    }
+}
+pub struct SceneCharacterLibrary {
+    path: str
+    asset: CharacterAsset
+    runtime: AnimationLibraryId
+    generation: u64
+    clips: Vec[(str, str)]
+    morphs: Vec[CharacterMorphChoice]
+}
+struct CharacterLoadFailure {
+    path: str
+    message: str
+}
+struct LibrarySlot {
+    value: SceneCharacterLibrary<H>
+}
+pub struct SceneAnimatedActor {
+    entity: u64
+    library: usize
+    library_generation: u64
+    instance: AnimationInstanceId
+    settings: SkeletalMeshComponent
+    visible: bool
+    model: Mat4
+    previous: Mat4
+    history_valid: bool
+    root: RootMotionDelta
+    seen: bool
+}
+pub struct SceneAnimatedActorSlot {
+    value: Option[SceneAnimatedActor<H>]
+}
+pub struct SceneAnimationEvent {
+    entity: u64
+    event: AnimationEvent
+}
+pub struct SceneAnimation {
+    project: str
+    source: Scene
+    revision: u64
+    dirty: bool
+    playing: bool
+    serial: u64
+    world: AnimationWorld
+    libraries: Vec[LibrarySlot]
+    actors: Vec[SceneAnimatedActorSlot]
+    worker: Option[JoinHandle[CharacterLoad]]
+    failed: Vec[CharacterLoadFailure]
+    events: Vec[SceneAnimationEvent]
+    event_storage: Vec[AnimationEvent]
+    message: str
+    generation: u64
+    reloads: Vec[str]
+}
+
+impl for SceneAnimation {
+    pub fn new() -> SceneAnimation<H> {
+        ret SceneAnimation<H> {
+            "", Scene::new(), 0_u64, true, false, 0_u64, AnimationWorld::new(), Vec[LibrarySlot]::new(), Vec[SceneAnimatedActorSlot]::new(), Option[JoinHandle[CharacterLoad]]::None, Vec[CharacterLoadFailure]::new(), Vec[SceneAnimationEvent]::new(), Vec[AnimationEvent]::with_capacity(16_usize), "", 0_u64, Vec[str]::new()
+        }
+    }
+    pub fn configure(self: mut Self&, project: str) ->() {
+        if self.project == project {
+            ret()
+        }
+        self.project = project self.world = AnimationWorld::new() self.libraries.clear() self.actors.clear() self.failed.clear() self.events.clear() self.reloads.clear() self.dirty = true self.message = ""
+    }
+    pub fn sync(self: mut Self&, scene: Scene, playing: bool) ->() {
+        if self.revision != scene.revision() || self.playing != playing {
+            self.dirty = true
+        }
+        self.revision = scene.revision() self.source = scene self.playing = playing
+    }
+    pub fn reload(self: mut Self&, path: str) ->() {
+        if path == "" || !character_path_valid(path) {
+            ret()
+        }
+        for queued in self.reloads {
+            if queued == path {
+                ret()
+            }
+        }
+        let mut failed = Vec[CharacterLoadFailure]::new() for previous in self.failed {
+            if previous.path != path {
+                failed.push(previous)
+            }
+        }
+        self.failed = failed
+        self.reloads.push(path)
+    }
+    pub fn clip_choices(self: Self&, entity: u64) -> Vec[(str, str)] {
+        let mut out = Vec[(str, str)]::new()
+        let c = match self.source.get(entity) {
+            Some(actor) => match actor.component() {
+                SkeletalMesh(c) => c _ => {
+                    ret out
+                }
+            }
+            None => {
+                ret out
+            }
+        }
+        let index = self.library_index(c.asset) if index == self.libraries.len() {
+            ret out
+        }
+        ret self.libraries.get_unchecked_borrowed(index).value.clips
+    }
+
+    pub fn morph_choices(self: Self&, entity: u64) -> Vec[CharacterMorphChoice] {
+        let mut out = Vec[CharacterMorphChoice]::new()
+        let c = match self.source.get(entity) {
+            Some(actor) => match actor.component() {
+                SkeletalMesh(c) => c _ => {
+                    ret out
+                }
+            }
+            None => {
+                ret out
+            }
+        }
+        let index = self.library_index(c.asset) if index == self.libraries.len() {
+            ret out
+        }
+        ret self.libraries.get_unchecked_borrowed(index).value.morphs
+    }
+
+    /// Current actor bindings determine Details diagnostics. An earlier invalid
+    /// root/morph on another actor must not leave a stale warning here.
+    pub fn diagnostic(self: Self&, entity: u64) -> str {
+        let c = match self.source.get(entity) {
+            Some(actor) => match actor.component() {
+                SkeletalMesh(c) => c _ => {
+                    ret ""
+                }
+            }
+            None => {
+                ret ""
+            }
+        }
+        if c.asset == "" {
+            ret ""
+        }
+        let index = self.library_index(c.asset)
+        for failure in self.failed {
+            if failure.path == c.asset {
+                ret failure.message + if index < self.libraries.len() {
+                    " · using last good asset"
+                } else {
+                    ""
+                }
+            }
+        }
+        if index == self.libraries.len() {
+            ret "Loading character…"
+        }
+        let asset = self.libraries.get_unchecked_borrowed(index).value.asset
+        match asset.clip_index(c.clip) {
+            Ok(_) => {
+            }
+            Err(message) => {
+                ret message
+            }
+        }
+        if c.root_motion_bone != "" {
+            let mut found = false for bone in asset.skeleton.bones {
+                if bone.name == c.root_motion_bone {
+                    found = true break
+                }
+            }
+            if !found {
+                ret "Root motion bone is missing: " + c.root_motion_bone
+            }
+        }
+        for control in c.morphs {
+            let mut found = false for morph in asset.geometry.mesh.morphs {
+                if morph.name == control.name {
+                    found = true break
+                }
+            }
+            if !found {
+                ret "Morph control was not found: " + control.name
+            }
+        }
+        for slot in self.actors {
+            match slot.value {
+                Some(actor) => {
+                    if actor.entity == entity {
+                        for failure in self.world.failures() {
+                            if failure.instance.key() == actor.instance.key() {
+                                ret failure.message
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret ""
+    }
+    pub fn message(self: Self&) -> str {
+        ret self.message
+    }
+    pub fn logical_frame(self: Self&) -> u64 {
+        ret self.serial
+    }
+    pub fn libraries(self: Self&) -> usize {
+        ret self.libraries.len()
+    }
+    pub fn library(self: Self&, index: usize) -> SceneCharacterLibrary<H> {
+        ret self.libraries.get_unchecked_borrowed(index).value
+    }
+    pub fn runtime(self: Self&) -> AnimationWorld {
+        ret self.world
+    }
+    pub fn actor_count(self: Self&) -> usize {
+        let mut count = 0_usize for slot in self.actors {
+            if slot.value.is_some() {
+                count += 1_usize
+            }
+        }
+        ret count
+    }
+    pub fn actor_slots(self: Self&) -> Vec[SceneAnimatedActorSlot] {
+        ret self.actors
+    }
+    pub fn actors(self: Self&, library: usize) -> Vec[SceneAnimatedActorSlot] {
+        let mut out = Vec[SceneAnimatedActorSlot]::new()
+        for slot in self.actors {
+            match slot.value {
+                Some(actor) => {
+                    if actor.library == library {
+                        out.push(slot)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret out
+    }
+    /// Runtime graph bindings are transient; cooked graph assets/editor authoring
+    /// will provide persistent bindings separately.
+    pub fn bind_graph(self: mut Self&, entity: u64, graph: AnimationGraph) -> Result[bool, str] {
+        for i in 0_usize..self.actors.len() {
+            let mut actor = match self.actors.get_unchecked_borrowed(i).value {
+                Some(v) => v None => {
+                    continue
+                }
+            }
+            if actor.entity == entity {
+                self.world.bind_graph(actor.instance, graph)? actor.history_valid = false ret Result::Ok(true)
+            }
+        }
+        ret Result::Err("Animated scene actor is missing")
+    }
+    pub fn parameter(self: mut Self&, entity: u64, name: str, value: f32) -> Result[bool, str] {
+        for slot in self.actors {
+            match slot.value {
+                Some(actor) => {
+                    if actor.entity == entity {
+                        ret self.world.parameter(actor.instance, name, value)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret Result::Err("Animated scene actor is missing")
+    }
+    pub fn node_clock(self: mut Self&, entity: u64, node: u64, rate: f32, offset: f64, looping: bool, notify: bool) -> Result[bool, str] {
+        for slot in self.actors {
+            match slot.value {
+                Some(actor) => {
+                    if actor.entity == entity {
+                        ret self.world.node_clock(actor.instance, node, rate, offset, looping, notify)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret Result::Err("Animated scene actor is missing")
+    }
+    pub fn events(self: Self&) -> Vec[SceneAnimationEvent] {
+        ret self.events
+    }
+    pub fn loading(self: Self&) -> bool {
+        ret self.worker.is_some() || self.reloads.len() > 0_usize
+    }
+    pub fn active(self: Self&) -> bool {
+        if self.worker.is_some() || self.reloads.len() > 0_usize {
+            ret true
+        }
+        for entity in self.source.entities() {
+            match entity.component() {
+                SkeletalMesh(c) => {
+                    if c.asset != "" && c.autoplay &&(self.playing || c.preview) {
+                        ret true
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        ret false
+    }
+    fn library_index(self: Self&, path: str) -> usize {
+        for i in 0_usize..self.libraries.len() {
+            if self.libraries.get_unchecked_borrowed(i).value.path == path {
+                ret i
+            }
+        }
+        ret self.libraries.len()
+    }
+    fn request(self: mut Self&, path: str) ->() {
+        if self.worker.is_some() {
+            ret()
+        }
+        for previous in self.failed {
+            if previous.path == path {
+                ret()
+            }
+        }
+        self.worker = Option[JoinHandle[CharacterLoad]]::Some(spawn load(self.project, path))
+    }
+    fn poll(self: mut Self&) ->() {
+        let ready = match self.worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if !ready {
+            ret()
+        }
+        let worker = match self.worker {
+            Some(worker) => worker None => {
+                ret()
+            }
+        }
+        self.worker = Option[JoinHandle[CharacterLoad]]::None
+        let result = worker.join()
+        if result.project != self.project {
+            ret()
+        }
+        self.dirty = true
+        match result.result {
+            Ok(asset) => {
+                match self.world.register_library(asset.skeleton, asset.geometry.mesh, asset.clips) {
+                    Ok(runtime) => {
+                        self.generation += 1_u64
+                        let index = self.library_index(result.path)
+                        let mut choices = Vec[(str, str)]::with_capacity(asset.clips.len())
+                        for i in 0_usize..asset.clips.len() {
+                            let clip = asset.clips.get_unchecked_borrowed(i) let mut same = 0_usize let mut occurrence = 0_usize
+                            for j in 0_usize..asset.clips.len() {
+                                if asset.clips.get_unchecked_borrowed(j).name == clip.name {
+                                    same += 1_usize if j < i {
+                                        occurrence += 1_usize
+                                    }
+                                }
+                            }
+                            choices.push((clip.identity, clip.name + if same > 1_usize {
+                                        " (" +(occurrence + 1_usize).fmt() + ")"
+                                    } else {
+                                        ""
+                                    }
+                                    ,
+                                ))
+                        }
+                        let mut morphs = Vec[CharacterMorphChoice]::with_capacity(asset.geometry.mesh.morphs.len())
+                        for morph in asset.geometry.mesh.morphs {
+                            morphs.push(CharacterMorphChoice {
+                                    morph.name, morph.minimum, morph.maximum, morph.default_weight
+                                }
+                                ,
+                            )
+                        }
+                        let next = LibrarySlot {
+                            SceneCharacterLibrary<H> {
+                                result.path, asset, runtime, self.generation, choices, morphs
+                            }
+                        }
+                        match self.publish_library(index, next) {
+                            Ok(_) => {
+                                self.message = ""
+                            }
+                            Err(error) => {
+                                self.world.unregister_library(runtime)
+                                self.message = error self.failed.push(CharacterLoadFailure {
+                                        result.path, error
+                                    }
+                                    ,
+                                )
+                            }
+                        }
+
+                    }
+                    Err(error) => {
+                        self.message = error self.failed.push(CharacterLoadFailure {
+                                result.path, error
+                            }
+                            ,
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                self.message = error self.failed.push(CharacterLoadFailure { result.path, error })
+            }
+        }
+    }
+    /// Prepare every live binding before publishing either CPU or GPU generation.
+    fn publish_library(self: mut Self&, index: usize, next: LibrarySlot) -> Result[bool, str] {
+        if index >= self.libraries.len() {
+            self.libraries.push(next) ret Result::Ok(true)
+        }
+        let mut replacements = Vec[SceneAnimatedActorSlot]::new() let mut positions = Vec[usize]::new()
+        for i in 0_usize..self.actors.len() {
+            let actor = match self.actors.get_unchecked_borrowed(i).value {
+                Some(v) => v None => {
+                    continue
+                }
+            }
+            if actor.library != index {
+                continue
+            }
+            // Removed actors no longer constrain a replacement asset.
+            if self.source.get(actor.entity).is_none() {
+                continue
+            }
+            let time = self.world.time(actor.instance)?
+            let prepared = self.create_actor_from(actor.entity, index, next.value, actor.settings, actor.model)
+            let mut replacement = match prepared {
+                Ok(v) => v Err(error) => {
+                    for slot in replacements {
+                        match slot.value {
+                            Some(v) => {
+                                self.world.remove(v.instance)
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    ret Result::Err("Character reimport rejected: " + error)
+                }
+            }
+            match self.world.seek(replacement.instance, time) {
+                Ok(_) => {
+                }
+                Err(error) => {
+                    self.world.remove(replacement.instance)
+                    for slot in replacements {
+                        match slot.value {
+                            Some(v) => {
+                                self.world.remove(v.instance)
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    ret Result::Err("Character reimport rejected: " + error)
+                }
+            }
+            replacement.root = actor.root replacement.previous = actor.previous replacement.history_valid = false
+            replacements.push(SceneAnimatedActorSlot {
+                    Option[SceneAnimatedActor<H>]::Some(replacement)
+                }
+            ) positions.push(i)
+        }
+        for j in 0_usize..positions.len() {
+            let i = positions.get_unchecked_borrowed(j)
+            match self.actors.get_unchecked_borrowed(i).value {
+                Some(v) => {
+                    self.world.remove(v.instance)
+                }
+                None => {
+                }
+            }
+            self.actors.set(i, replacements.get_unchecked_borrowed(j))
+        }
+        let old = self.libraries.get_unchecked_borrowed(index).value.runtime
+        self.libraries.set(index, next) self.world.unregister_library(old) ret Result::Ok(true)
+    }
+    fn create_actor(self: mut Self&, entity: u64, library: usize, c: SkeletalMeshComponent, model: Mat4) -> Result[SceneAnimatedActor<H>, str] {
+        let data = self.libraries.get_unchecked_borrowed(library).value
+        ret self.create_actor_from(entity, library, data, c, model)
+    }
+    fn create_actor_from(self: mut Self&, entity: u64, library: usize, data: SceneCharacterLibrary<H>, c: SkeletalMeshComponent, model: Mat4) -> Result[SceneAnimatedActor<H>, str] {
+        let clip = data.asset.clip_index(c.clip)?
+        let instance = self.world.instantiate_registered(data.runtime, clip)?
+        let result = self.configure_actor(instance, data.asset, c)
+        if result.is_err() {
+            self.world.remove(instance) result?
+        }
+        ret Result::Ok(SceneAnimatedActor<H> {
+                entity, library, data.generation, instance, c, self.source.world_visible(entity), model, model, false, RootMotionDelta::identity(), true
+            }
+            ,
+        )
+    }
+    fn configure_actor(self: mut Self&, instance: AnimationInstanceId, asset: CharacterAsset, c: SkeletalMeshComponent) -> Result[bool, str] {
+        self.world.play(instance, asset.clip_index(c.clip)?, c.looping)?
+        self.world.seek(instance, c.start_time as f64)?
+        self.world.playback(instance, c.speed, c.autoplay &&(self.playing || c.preview))?
+        let mut root = Option[u32]::None
+        if c.root_motion_bone != "" {
+            for i in 0_usize..asset.skeleton.bones.len() {
+                if asset.skeleton.bones.get_unchecked_borrowed(i).name == c.root_motion_bone {
+                    root = Option[u32]::Some(i as u32)
+                }
+            }
+            if root.is_none() {
+                ret Result::Err("Root motion bone is missing: " + c.root_motion_bone)
+            }
+        }
+        self.world.root_motion(instance, root)?
+        self.configure_morphs(instance, c.morphs)? ret Result::Ok(true)
+    }
+    fn configure_morphs(self: mut Self&, instance: AnimationInstanceId, controls: Vec[CharacterMorphControl]) -> Result[bool, str] {
+        let mut names = Vec[str]::with_capacity(controls.len()) let mut weights = Vec[f32]::with_capacity(controls.len())
+        for control in controls {
+            names.push(control.name) weights.push(control.weight)
+        }
+        self.world.set_morphs(instance, names, weights)?
+        ret Result::Ok(true)
+    }
+    fn reconcile(self: mut Self&) ->() {
+        for i in 0_usize..self.actors.len() {
+            let mut slot = self.actors.get_unchecked_borrowed(i) let mut actor = match slot.value {
+                Some(a) => a None => {
+                    continue
+                }
+            }
+            actor.seen = false
+        }
+        for entity in self.source.entities() {
+            let c = match entity.component() {
+                SkeletalMesh(c) => c _ => {
+                    continue
+                }
+            }
+            if c.asset == "" {
+                continue
+            }
+            let library = self.library_index(c.asset)
+            if library == self.libraries.len() {
+                for i in 0_usize..self.actors.len() {
+                    let mut slot = self.actors.get_unchecked_borrowed(i) let mut actor = match slot.value {
+                        Some(a) => a None => {
+                            continue
+                        }
+                    }
+                    if actor.entity == entity.id() {
+                        actor.seen = true
+                    }
+                }
+                self.request(c.asset) continue
+            }
+            let model = self.source.world_matrix(entity.id()).unwrap_or(Mat4::identity())
+            let mut found = false
+            for i in 0_usize..self.actors.len() {
+                let mut slot = self.actors.get_unchecked_borrowed(i)
+                let mut actor = match slot.value {
+                    Some(a) => a None => {
+                        continue
+                    }
+                }
+                if actor.entity != entity.id() {
+                    continue
+                }
+                found = true actor.seen = true
+                let old = actor.settings
+                let reset = actor.library != library || actor.library_generation != self.libraries.get_unchecked_borrowed(library).value.generation || old.clip != c.clip || old.looping != c.looping || old.start_time != c.start_time || old.root_motion_bone != c.root_motion_bone
+                if reset {
+                    let reimport = actor.library == library && actor.library_generation != self.libraries.get_unchecked_borrowed(library).value.generation && old.clip == c.clip && old.start_time == c.start_time && old.root_motion_bone == c.root_motion_bone
+                    let time = self.world.time(actor.instance).unwrap_or(c.start_time as f64)
+                    let mut replacement = match self.create_actor(entity.id(), library, c, model) {
+                        Ok(a) => a Err(error) => {
+                            self.message = error continue
+                        }
+                    }
+                    if reimport {
+                        self.world.seek(replacement.instance, time) replacement.root = actor.root replacement.previous = actor.previous replacement.history_valid = false
+                    }
+                    self.world.remove(actor.instance)
+                    let mut destination = self.actors.get_unchecked_borrowed(i) destination.value = Option[SceneAnimatedActor<H>]::Some(replacement) self.actors.set(i, destination)
+                } else {
+                    if !morph_controls_equal(old.morphs, c.morphs) {
+                        match self.configure_morphs(actor.instance, c.morphs) {
+                            Ok(_) => {
+                            }
+                            Err(error) => {
+                                self.message = error continue
+                            }
+                        }
+                    }
+                    self.world.playback(actor.instance, c.speed, c.autoplay &&(self.playing || c.preview))
+                    actor.settings = c actor.visible = self.source.world_visible(entity.id()) actor.model = model
+                }
+                break
+            }
+            if !found {
+                match self.create_actor(entity.id(), library, c, model) {
+                    Ok(actor) => {
+                        self.actors.push(SceneAnimatedActorSlot {
+                                Option[SceneAnimatedActor<H>]::Some(actor)
+                            }
+                        )
+                    }
+                    Err(error) => {
+                        self.message = error
+                    }
+                }
+            }
+        }
+        for i in 0_usize..self.actors.len() {
+            let mut slot = self.actors.get_unchecked_borrowed(i) match slot.value {
+                Some(actor) => {
+                    if !actor.seen {
+                        self.world.remove(actor.instance) slot.value = Option[SceneAnimatedActor<H>]::None self.actors.set(i, slot)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        self.dirty = false
+    }
+    pub fn tick(self: mut Self&, delta: f32) -> Result[AnimationStats, str] {
+        for i in 0_usize..self.actors.len() {
+            let mut slot = self.actors.get_unchecked_borrowed(i) let mut actor = match slot.value {
+                Some(a) => a None => {
+                    continue
+                }
+            }
+            actor.previous = animated_actor_matrix(actor) actor.history_valid = true
+        }
+        self.poll()
+        if self.worker.is_none() && self.reloads.len() > 0_usize {
+            let path = self.reloads.pop().unwrap_or("") self.request(path)
+        }
+        if self.dirty {
+            self.reconcile()
+        }
+        self.serial += 1_u64 self.events.clear()
+        let stats = self.world.advance(self.serial, delta as f64)?
+        for i in 0_usize..self.actors.len() {
+            let mut slot = self.actors.get_unchecked_borrowed(i) let mut actor = match slot.value {
+                Some(a) => a None => {
+                    continue
+                }
+            }
+            self.event_storage = self.world.drain_events(actor.instance, self.event_storage)?
+            for event in self.event_storage {
+                self.events.push(SceneAnimationEvent {
+                        actor.entity, event
+                    }
+                    ,
+                )
+            }
+            actor.root = actor.root.mul(self.world.take_root_motion(actor.instance)?)
+        }
+        ret Result::Ok(stats)
+    }
+}
+pub fn animated_actor_matrix(actor: SceneAnimatedActor<H>) -> Mat4 {
+    let p = PoseMatrix::from_local(LocalTransform {
+            actor.root.translation, actor.root.rotation, PoseVector::one()
+        }
+        ,
+    )
+    ret actor.model.mul(Mat4 {
+            p.m00, p.m01, p.m02, p.m03, p.m10, p.m11, p.m12, p.m13, p.m20, p.m21, p.m22, p.m23, 0_f32, 0_f32, 0_f32, 1_f32
+        }
+        ,
+    )
+}

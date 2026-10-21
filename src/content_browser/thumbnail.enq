@@ -1,0 +1,294 @@
+//! One bounded CPU preview worker. No Vulkan resources or UI handles cross threads.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import mod::model::{ContentAsset, ContentThumb}
+import mod::path::ends
+import refrain::material_asset::{material_asset_parse, load_material_asset_file}
+import refrain::native_asset::{load_native_mesh, load_native_texture, asset_source_stamp}
+import refrain::scene::obj::parse_obj
+import refrain::scene::primitive::{MeshData, cube_mesh, plane_mesh, sphere_mesh}
+import refrain::texture_asset::{decode_png, TextureImage}
+import std::os::read_file
+
+extern fn graphene_content_pixels(address: usize, count: usize) -> str
+fn color(r: f32, g: f32, b: f32) -> u32 {
+    let red = if r < 0 {
+        0_u32
+    } elif r > 1 {
+        255_u32
+    } else {
+        (r * 255) as u32
+    }
+    let green = if g < 0 {
+        0_u32
+    } elif g > 1 {
+        255_u32
+    } else {
+        (g * 255) as u32
+    }
+    let blue = if b < 0 {
+        0_u32
+    } elif b > 1 {
+        255_u32
+    } else {
+        (b * 255) as u32
+    }
+    ret red |(green << 8) |(blue << 16) | 4278190080_u32
+}
+#attr(safe)
+fn payload(pixels: Vec[u32]) -> str {
+    unsafe {
+        ret graphene_content_pixels(pixels.as_ptr() as usize, pixels.len())
+    }
+}
+fn background() -> Vec[u32] {
+    let mut pixels = vec![128_u32, 96_u32]
+    for y in 0..96 {
+        for x in 0..128 {
+            pixels.push(if (x / 8 + y / 8) % 2 == 0 {
+                    4280557860_u32
+                } else {
+                    4280821032_u32
+                }
+            )
+        }
+    }
+    ret pixels
+}
+fn projection(p: Vec3) -> Vec3 {
+    ret Vec3::new((p.x() - p.z()) * 0.7071068_f32, p.y() * 0.8164966_f32 -(p.x() + p.z()) * 0.4082483_f32,(p.x() + p.y() + p.z()) * 0.5773503_f32)
+}
+fn edge(a: Vec3, b: Vec3, x: f32, y: f32) -> f32 {
+    ret(x - a.x()) *(b.y() - a.y()) -(y - a.y()) *(b.x() - a.x())
+}
+fn mesh_pixels(mesh: MeshData, tint: Vec3) -> str {
+    let vertices = mesh.vertices() let indices = mesh.indices() let stride =(mesh.stride() / 4) as usize
+    if stride < 3 || vertices.len() < stride || indices.len() < 3 {
+        ret ""
+    }
+    let mut projected = Vec[Vec3]::new() let mut world = Vec[Vec3]::new()
+    let mut low = Vec3::new(1000000000, 1000000000, 1000000000) let mut high = low.scale( - 1)
+    let mut i = 0_usize
+    while i + 2 < vertices.len() {
+        let p = Vec3::new(vertices.get(i).unwrap_or(0), vertices.get(i + 1).unwrap_or(0), vertices.get(i + 2).unwrap_or(0))
+        if !(p.x() - p.x() == 0 && p.y() - p.y() == 0 && p.z() - p.z() == 0) {
+            ret ""
+        }
+        let q = projection(p) world.push(p) projected.push(q)
+        low = Vec3::new(if q.x() < low.x() {
+                q.x()
+            } else {
+                low.x()
+            }
+            , if q.y() < low.y() {
+                q.y()
+            } else {
+                low.y()
+            }
+            , 0,)
+        high = Vec3::new(if q.x() > high.x() {
+                q.x()
+            } else {
+                high.x()
+            }
+            , if q.y() > high.y() {
+                q.y()
+            } else {
+                high.y()
+            }
+            , 0,)
+        i += stride
+    }
+    let cx =(low.x() + high.x()) * 0.5_f32 let cy =(low.y() + high.y()) * 0.5_f32
+    let w = high.x() - low.x() let h = high.y() - low.y()
+    if w <= 0.000001_f32 && h <= 0.000001_f32 {
+        ret ""
+    }
+    let sx = if w > 0.000001_f32 {
+        108 / w
+    } else {
+        100000.0_f32
+    }
+    let sy = if h > 0.000001_f32 {
+        76 / h
+    } else {
+        100000.0_f32
+    }
+    let scale = if sx < sy {
+        sx
+    } else {
+        sy
+    }
+    let mut screen = Vec[Vec3]::new()
+    for p in projected {
+        screen.push(Vec3::new(64 +(p.x() - cx) * scale, 48 -(p.y() - cy) * scale, p.z()))
+    }
+    let mut pixels = background() let mut depth = Vec[f32]::new() for _ in 0..12288 {
+        depth.push( - 1000000000)
+    }
+    let light = Vec3::new(0.4_f32, 0.8_f32, 0.6_f32).normalized()
+    let mut triangle = 0_usize
+    while triangle + 2 < indices.len() && triangle < 60000 {
+        let ia = indices.get(triangle).unwrap_or(0) as usize let ib = indices.get(triangle + 1).unwrap_or(0) as usize let ic = indices.get(triangle + 2).unwrap_or(0) as usize
+        let a = screen.get(ia).unwrap_or(Vec3::zero()) let b = screen.get(ib).unwrap_or(Vec3::zero()) let c = screen.get(ic).unwrap_or(Vec3::zero())
+        let area = edge(a, b, c.x(), c.y())
+        if area > 0.00001_f32 || area < - 0.00001_f32 {
+            let wa = world.get(ia).unwrap_or(Vec3::zero()) let wb = world.get(ib).unwrap_or(wa) let wc = world.get(ic).unwrap_or(wa)
+            let normal = wb.sub(wa).cross(wc.sub(wa)).normalized() let lambert = normal.dot(light)
+            let shade = 0.38_f32 + if lambert > 0 {
+                lambert * 0.62_f32
+            } else {
+                0.0_f32
+            }
+            let paint = color(tint.x() * shade, tint.y() * shade, tint.z() * shade)
+            // Bounded 128x96 rasterization; a conservative pixel box avoids work outside a triangle.
+            let mut minx = a.x() let mut maxx = a.x() let mut miny = a.y() let mut maxy = a.y()
+            for p in vec![b, c] {
+                if p.x() < minx {
+                    minx = p.x()
+                }
+                if p.x() > maxx {
+                    maxx = p.x()
+                }
+                if p.y() < miny {
+                    miny = p.y()
+                }
+                if p.y() > maxy {
+                    maxy = p.y()
+                }
+            }
+            let left = if minx < 0 {
+                0_usize
+            } else {
+                minx as usize
+            }
+            let right = if maxx >= 128 {
+                127_usize
+            } else {
+                maxx as usize
+            }
+            let top = if miny < 0 {
+                0_usize
+            } else {
+                miny as usize
+            }
+            let bottom = if maxy >= 96 {
+                95_usize
+            } else {
+                maxy as usize
+            }
+            if left <= right && top <= bottom {
+                for y in top..(bottom + 1) {
+                    for x in left..(right + 1) {
+                        let px = x as f32 + 0.5_f32 let py = y as f32 + 0.5_f32
+                        let u = edge(b, c, px, py) / area let v = edge(c, a, px, py) / area let t = 1 - u - v
+                        if u >= 0 && v >= 0 && t >= 0 {
+                            let z = a.z() * u + b.z() * v + c.z() * t let offset = y * 128 + x
+                            if z > depth.get(offset).unwrap_or( - 1000000000) {
+                                depth.set(offset, z) pixels.set(offset + 2, paint)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        triangle += 3
+    }
+    ret payload(pixels)
+}
+fn channel(pixel: u32, shift: u32) -> f32 {
+    let value =(pixel >> shift) & 255 ret value as f32
+}
+fn png_pixels(texture: TextureImage) -> str {
+    let mut pixels = background()
+    let width = texture.width as usize let height = texture.height as usize
+    let fw = texture.width as f32 let fh = texture.height as f32
+    let fit = if fw / fh > 128.0_f32 / 96 {
+        128.0_f32 / fw
+    } else {
+        96.0_f32 / fh
+    }
+    let w =(fw * fit) as usize let h =(fh * fit) as usize
+    let left =(128 - w) / 2 let top =(96 - h) / 2
+    if w > 0 && h > 0 {
+        for y in 0..h {
+            for x in 0..w {
+                let sample = texture.pixels.get((y * height / h) * width + x * width / w).unwrap_or(0)
+                let index =(top + y) * 128 + left + x + 2 let base = pixels.get(index).unwrap_or(0)
+                let alpha = channel(sample, 24) / 255 let inverse = 1 - alpha
+                pixels.set(index, color((channel(sample, 0) * alpha + channel(base, 0) * inverse) / 255,
+                        (channel(sample, 8) * alpha + channel(base, 8) * inverse) / 255,
+                        (channel(sample, 16) * alpha + channel(base, 16) * inverse) / 255,))
+            }
+        }
+    }
+    ret payload(pixels)
+}
+pub fn content_thumbnail(project: str, asset: ContentAsset, generation: u64) -> sending ContentThumb {
+    let mut image = ""
+    if asset.kind == "texture" &&(asset.bytes <= 67108864 ||(ends(asset.path, ".gtexture") && asset.bytes <= 269484032)) {
+        let texture = if ends(asset.path, ".gtexture") {
+            load_native_texture(project + "/" + asset.path, "")
+        } else {
+            decode_png(read_file(project + "/" + asset.path))
+        }
+        match texture {
+            Ok(texture) => {
+                image = png_pixels(texture)
+            }
+            Err(_) => {
+            }
+        }
+    } elif asset.kind == "mesh" {
+        let mut mesh = Option[MeshData]::None
+        if asset.path == "@engine/Primitives/Cube" {
+            mesh = Option[MeshData]::Some(cube_mesh(1))
+        } elif asset.path == "@engine/Primitives/Plane" {
+            mesh = Option[MeshData]::Some(plane_mesh(1.5_f32))
+        } elif asset.path == "@engine/Primitives/Sphere" {
+            mesh = Option[MeshData]::Some(sphere_mesh(0.6_f32, 16, 24))
+        } elif ends(asset.path, ".gmesh") {
+            match load_native_mesh(project + "/" + asset.path, "") {
+                Ok(value) => {
+                    mesh = Option[MeshData]::Some(value.mesh())
+                }
+                Err(_) => {
+                }
+            }
+        } elif asset.bytes <= 16777216 {
+            let native = load_native_mesh(project + "/" + asset.path + ".gmesh", asset_source_stamp(project + "/" + asset.path))
+            let prepared = match native {
+                Ok(value) => Option[MeshData]::Some(value.mesh()) Err(_) => Option[MeshData]::None
+            }
+            if prepared.is_some() {
+                mesh = prepared
+            } else {
+                match parse_obj(read_file(project + "/" + asset.path)) {
+                    Ok(value) => {
+                        mesh = Option[MeshData]::Some(value)
+                    }
+                    Err(_) => {
+                    }
+                }
+            }
+        }
+        match mesh {
+            Some(value) => {
+                image = mesh_pixels(value, Vec3::new(0.56_f32, 0.7_f32, 0.85_f32))
+            }
+            None => {
+            }
+        }
+    } elif asset.kind == "material" && asset.bytes < 1048576 {
+        match load_material_asset_file(project + "/" + asset.path) {
+            Some(material) => {
+                image = mesh_pixels(sphere_mesh(0.6_f32, 16, 24), material.base_color())
+            }
+            None => {
+            }
+        }
+    }
+    ret ContentThumb { generation, project, asset.path, image }
+}

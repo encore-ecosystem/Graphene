@@ -1,0 +1,176 @@
+//! Authored sound policy. Native playback resources never enter scene history.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import refrain::scene::json_value::parse_number
+import std::os::{read_file, mkdir_all, write_file_atomic}
+
+pub struct AudioSource {
+    asset: str
+    spatial: bool
+    gain: f32
+    pitch: f32
+    looped: bool
+    autoplay: bool
+    bus: str
+    minimum: f32
+    maximum: f32
+    rolloff: f32
+    inner_angle: f32
+    outer_angle: f32
+    outer_gain: f32
+}
+
+impl for AudioSource {
+    pub fn defaults() -> Self {
+        ret Self {
+            "", true, 1, 1, false, true, "SFX", 1, 100, 1, 360, 360, 1
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret sound_path_valid(self.asset) && self.gain >= 0 && self.gain <= 4 && self.pitch >= 0.125_f32 && self.pitch <= 8 && self.minimum >= 0.01_f32 && self.maximum > self.minimum && self.maximum <= 100000 && self.rolloff >= 0 && self.rolloff <= 10 && self.inner_angle >= 0 && self.outer_angle >= self.inner_angle && self.outer_angle <= 360 && self.outer_gain >= 0 && self.outer_gain <= 1 &&(self.bus == "Music" || self.bus == "SFX" || self.bus == "UI")
+    }
+}
+pub fn sound_path_valid(path: str) -> bool {
+    ret path == "" ||(path.byte_len() > 8 && path.slice_bytes(0, 8) == "Content/" && !path.contains("..") && !path.contains("\\") && !path.contains(":"))
+}
+fn scalar(root: Json, key: str, fallback: f32) -> f32 {
+    match root.get(key) {
+        Some(value) => {
+            match value.as_number() {
+                Some(text) => {
+                    ret parse_number(text).unwrap_or( - 999999.0_f32)
+                }
+                None => {
+                    ret - 999999.0_f32
+                }
+            }
+        }
+        None => {
+            ret fallback
+        }
+    }
+}
+fn boolean(root: Json, key: str, fallback: bool) -> bool {
+    ret match root.get(key) {
+        Some(value) => value.as_bool().unwrap_or(fallback) None => fallback
+    }
+}
+fn text(root: Json, key: str, fallback: str) -> str {
+    ret match root.get(key) {
+        Some(value) => value.as_str().unwrap_or(fallback) None => fallback
+    }
+}
+pub fn sound_value(c: AudioSource, key: str) -> f32 {
+    ret match key {
+        "gain" => c.gain "pitch" => c.pitch "minimum" => c.minimum "maximum" => c.maximum "rolloff" => c.rolloff "inner" => c.inner_angle "outer" => c.outer_angle "outerGain" => c.outer_gain _ => 0.0_f32
+    }
+}
+pub fn sound_set(c: AudioSource, key: str, value: f32) -> AudioSource {
+    let mut out = c
+    if key == "gain" {
+        out.gain = value
+    } elif key == "pitch" {
+        out.pitch = value
+    } elif key == "minimum" {
+        out.minimum = value
+    } elif key == "maximum" {
+        out.maximum = value
+    } elif key == "rolloff" {
+        out.rolloff = value
+    } elif key == "inner" {
+        out.inner_angle = value
+    } elif key == "outer" {
+        out.outer_angle = value
+    } elif key == "outerGain" {
+        out.outer_gain = value
+    }
+    ret out
+}
+pub fn sound_fields() -> Vec[(str, str)] {
+    ret vec![("gain", "Volume"),("pitch", "Pitch"),("minimum", "Min distance · m"),("maximum", "Max distance · m"),("rolloff", "Rolloff"),("inner", "Inner cone · °"),("outer", "Outer cone · °"),("outerGain", "Outer gain")]
+}
+pub fn sound_json(c: AudioSource) -> Json {
+    let mut fields = vec![field("asset", Json::String(c.asset)), field("spatial", Json::Bool(c.spatial)), field("loop", Json::Bool(c.looped)), field("autoplay", Json::Bool(c.autoplay)), field("bus", Json::String(c.bus))]
+    for row in sound_fields() {
+        fields.push(field(row.0, Json::Number(Debug::fmt(sound_value(c, row.0)))))
+    }
+    ret Json::Object(fields)
+}
+pub fn sound_parse(value: Json) -> Option[AudioSource] {
+    let mut c = AudioSource::defaults()
+    c.asset = text(value, "asset", "") c.spatial = boolean(value, "spatial", true) c.looped = boolean(value, "loop", false) c.autoplay = boolean(value, "autoplay", true) c.bus = text(value, "bus", "SFX")
+    for row in sound_fields() {
+        c = sound_set(c, row.0, scalar(value, row.0, sound_value(c, row.0)))
+    }
+    ret if c.valid() {
+        Option::Some(c)
+    } else {
+        Option::None
+    }
+}
+pub struct AudioSettings {
+    headphones: bool
+    max_voices: u32
+    gains: Vec[f32]
+    mutes: Vec[bool]
+}
+pub fn audio_bus_names() -> Vec[str] {
+    ret vec!["Master", "Music", "SFX", "UI"]
+}
+
+impl for AudioSettings {
+    /// Vec fields are shared graph regions; history needs independent regions.
+    pub fn snapshot(self: Self) -> Self {
+        let mut gains = Vec[f32]::new()
+        let mut mutes = Vec[bool]::new()
+        for i in 0_usize..4_usize {
+            gains.push(self.gains.get(i).unwrap_or(1)) mutes.push(self.mutes.get(i).unwrap_or(false))
+        }
+        ret Self { self.headphones, self.max_voices, gains, mutes }
+    }
+
+    pub fn defaults() -> Self {
+        ret Self {
+            true, 64_u32, vec![1.0_f32, 1.0_f32, 1.0_f32, 1.0_f32], vec![false, false, false, false]
+        }
+    }
+    pub fn load(project: str) -> Self {
+        let mut out = Self::defaults()
+        match parse(read_file(project + "/Config/Audio.json")) {
+            Ok(root) => {
+                out.headphones = boolean(root, "headphones", true)
+                let maximum = scalar(root, "maxVoices", 64)
+                if maximum >= 1 && maximum <= 1024 {
+                    out.max_voices = maximum as u32
+                }
+                for i in 0_usize..4_usize {
+                    let name = audio_bus_names().get(i).unwrap_or("Master")
+                    let gain = scalar(root, name, 1)
+                    out.gains.set(i, if gain >= 0 && gain <= 4 {
+                            gain
+                        } else {
+                            1.0_f32
+                        }
+                        ,
+                    )
+                    out.mutes.set(i, boolean(root, name + "Muted", false))
+                }
+            }
+            Err(_) => {
+            }
+        }
+        ret out
+    }
+    pub fn save(self: Self, project: str) -> bool {
+        if mkdir_all(project + "/Config") != 0 {
+            ret false
+        }
+        let mut fields = vec![field("headphones", Json::Bool(self.headphones)), field("maxVoices", Json::Number(Debug::fmt(self.max_voices)))]
+        for i in 0_usize..4_usize {
+            let name = audio_bus_names().get(i).unwrap_or("Master") fields.push(field(name, Json::Number(Debug::fmt(self.gains.get(i).unwrap_or(1))))) fields.push(field(name + "Muted", Json::Bool(self.mutes.get(i).unwrap_or(false))))
+        }
+        ret write_file_atomic(project + "/Config/Audio.json", stringify(Json::Object(fields)) + "\n") == 0
+    }
+}

@@ -1,0 +1,105 @@
+//! Runtime playback must survive the disposable Blueprint scene and stop cleanly.
+import audio::{AudioConfig, AudioEngine}
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import graphene::blueprint::simulation::{BlueprintSimulation, BlueprintClass}
+import graphene::{Scene, SceneAsset, SceneComponent, SceneAudio, AudioSettings, AudioPanel}
+import linalg::Vec3
+import std::io::println
+import std::os::read_file
+import std::time::sleep_ms
+
+fn main() -> u32 {
+    let mut panel = AudioPanel::new()
+    panel.poll(true)
+    panel.runtime.playing = true
+    if !panel.needs_tick() || !panel.poll(true) {
+        ret 8
+    }
+    panel.runtime.playing = false
+    if !panel.poll(true) {
+        ret 9
+    }
+    let asset = SceneAsset::parse(read_file("tests/fixtures/audio/scene.graphene.json")).unwrap_or(SceneAsset::new())
+    let mut scene = Scene::new()
+    for i in 0_usize..asset.len() {
+        let actor = match asset.actor(i) {
+            Some(actor) => actor None => {
+                ret 7
+            }
+        }
+        scene.create_entity_with_id(actor.id(), actor.name(), actor.transform())
+        scene.set_visible(actor.id(), actor.visible())
+        scene.set_component(actor.id(), actor.component())
+    }
+    for i in 0_usize..asset.len() {
+        let actor = match asset.actor(i) {
+            Some(actor) => actor None => {
+                ret 7
+            }
+        }
+        scene.set_parent(actor.id(), actor.parent())
+    }
+    let mut simulation = BlueprintSimulation::new()
+    match simulation.start("tests/fixtures/audio", scene, "", "", Vec[BlueprintClass]::new()) {
+        Ok(_) => {
+        }
+        Err(error) => {
+            println(error) ret 1
+        }
+    }
+    let mut count = 0_u32
+    for actor in simulation.scene().entities() {
+        match actor.component() {
+            Audio(_) => {
+                count += 1
+            }
+            _ => {
+            }
+        }
+    }
+    println("runtime audio components " + count.fmt())
+    if count != 2 {
+        ret 2
+    }
+    let mut audio = SceneAudio::new()
+    let mut settings = AudioSettings::defaults() settings.headphones = false
+    audio.configure("tests/fixtures/audio", settings)
+    let mut config = AudioConfig::defaults() config.offline = true
+    let engine = match AudioEngine::open(config) {
+        Ok(value) => value Err(error) => {
+            println(error.message()) ret 3
+        }
+    }
+    audio.engine = Option[AudioEngine]::Some(engine)
+    for tick in 0_usize..1000_usize {
+        audio.poll()
+        audio.update(simulation.scene(), Vec3::new(0, 2, 4), Vec3::new(0, 0, - 1), Vec3::new(0, 1, 0), 0.016_f32, true)
+        if tick % 100 == 0 {
+            println("voices " + audio.stats().voices.fmt() + " retained " + audio.voices.len().fmt() + " playing " + audio.playing.fmt() + " sounds " + audio.sounds.len().fmt() + " queued " + audio.queue.len().fmt() + " message " + audio.message)
+        }
+        match engine.render(256_u32) {
+            Ok(_) => {
+            }
+            Err(error) => {
+                println(error.message()) ret 4
+            }
+        }
+        sleep_ms(1_u64)
+    }
+    println("final voices " + audio.stats().voices.fmt())
+    if audio.stats().voices != 2_u64 {
+        audio.close() ret 5
+    }
+    audio.update(simulation.scene(), Vec3::zero(), Vec3::new(0, 0, - 1), Vec3::new(0, 1, 0), 0.016_f32, false)
+    if audio.stats().voices != 0_u64 {
+        audio.close() ret 6
+    }
+    audio.set_scene_preview(true) audio.playing = true
+    audio.close()
+    if audio.scene_preview || audio.playing {
+        ret 10
+    }
+    simulation.stop() ret 0
+}

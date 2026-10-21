@@ -1,0 +1,212 @@
+//! Weather presets use the same strict component codec and checked native envelope.
+import binary::{encode, decode}
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, parse}
+import mod::codec::environment_parse
+import mod::model::WeatherSample
+import refrain::native_asset::{asset_source_stamp, load_environment_payload, save_environment_payload}
+import std::os::read_file
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+pub struct WeatherPreset {
+    version: u32,
+    name: str,
+    weather: WeatherSample
+}
+pub fn parse_weather_preset(source: str) -> Option[WeatherPreset] {
+    let root = match parse(source) {
+        Ok(root) => root Err(_) => {
+            ret Option[WeatherPreset]::None
+        }
+    }
+    if root.get("format").unwrap_or(Json::Null).as_str().unwrap_or("") != "graphene-weather-preset" || root.get("version").unwrap_or(Json::Null).as_number().unwrap_or("") != "1" {
+        ret Option[WeatherPreset]::None
+    }
+    let weather = match root.get("weather") {
+        Some(value) => value None => {
+            ret Option[WeatherPreset]::None
+        }
+    }
+    match environment_parse("weather-controller", weather) {
+        Some(component) => {
+            ret Option[WeatherPreset]::Some(WeatherPreset {
+                    1, root.get("name").unwrap_or(Json::Null).as_str().unwrap_or("Weather"), component.weather
+                }
+                ,
+            )
+        }
+        None => {
+            ret Option[WeatherPreset]::None
+        }
+    }
+}
+pub fn load_weather_preset(path: str) -> Result[WeatherPreset, str] {
+    let stamp = asset_source_stamp(path)
+    match load_environment_payload(path + ".gweather", "weather-preset", stamp) {
+        Ok(payload) => {
+            let mut bytes = Vec[u8]::new() for i in 0..payload.byte_len() {
+                bytes.push(payload.byte_at(i))
+            }
+            match decode[WeatherPreset](bytes) {
+                Ok(preset) => {
+                    if preset.version == 1 && preset.weather.valid() {
+                        ret Result::Ok(preset)
+                    }
+                }
+                Err(_) => {
+                }
+            }
+        }
+        Err(_) => {
+        }
+    }
+    let preset = match parse_weather_preset(read_file(path)) {
+        Some(preset) => preset None => {
+            ret Result::Err("Invalid weather preset")
+        }
+    }
+    let bytes = match encode(preset) {
+        Ok(bytes) => bytes Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    let mut payload = "" unsafe {
+        payload = graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+    }
+    if !save_environment_payload(path + ".gweather", "weather-preset", path, stamp, payload) {
+        ret Result::Err("Unable to cook weather preset")
+    }
+    ret Result::Ok(preset)
+}
+
+pub struct WeatherKeyframe {
+    time: f32,
+    weather: WeatherSample
+}
+pub struct WeatherSequence {
+    version: u32,
+    duration: f32,
+    looping: bool,
+    keys: Vec[WeatherKeyframe]
+}
+
+impl for WeatherSequence {
+    pub fn empty() -> Self {
+        ret Self { 1, 1, true, Vec[WeatherKeyframe]::new() }
+    }
+    pub fn sample(self: Self, elapsed: f32) -> Option[WeatherSample] {
+        if self.keys.len() == 0 {
+            ret Option[WeatherSample]::None
+        }
+        let mut time = elapsed
+        if self.looping && time >= self.duration {
+            let cycles =(time / self.duration) as u64
+            time -=(cycles as f32) * self.duration
+        }
+        let mut previous = self.keys.get(0).unwrap_or(WeatherKeyframe { 0, WeatherSample::clear() })
+        for key in self.keys {
+            if time <= key.time {
+                let duration = key.time - previous.time
+                let t = if duration > 0 {
+                    mod::model::bounded((time - previous.time) / duration, 0, 1)
+                } else {
+                    0.0_f32
+                }
+                ret Option[WeatherSample]::Some(previous.weather.blend(key.weather, t * t *(3 - 2 * t)))
+            }
+            previous = key
+        }
+        ret Option[WeatherSample]::Some(previous.weather)
+    }
+}
+pub fn parse_weather_sequence(source: str) -> Option[WeatherSequence] {
+    let root = match parse(source) {
+        Ok(root) => root Err(_) => {
+            ret Option[WeatherSequence]::None
+        }
+    }
+    if root.get("format").unwrap_or(Json::Null).as_str().unwrap_or("") != "graphene-weather-sequence" || root.get("version").unwrap_or(Json::Null).as_number().unwrap_or("") != "1" {
+        ret Option[WeatherSequence]::None
+    }
+    let duration = match refrain::scene::json_value::parse_number(root.get("duration").unwrap_or(Json::Null).as_number().unwrap_or("")) {
+        Some(v) => v None => {
+            ret Option[WeatherSequence]::None
+        }
+    }
+    if !(duration > 0 && duration <= 86400) {
+        ret Option[WeatherSequence]::None
+    }
+    let looping = match root.get("loop").unwrap_or(Json::Bool(true)).as_bool() {
+        Some(v) => v None => {
+            ret Option[WeatherSequence]::None
+        }
+    }
+    let entries = match root.get("keys").unwrap_or(Json::Null).as_array() {
+        Some(v) => v None => {
+            ret Option[WeatherSequence]::None
+        }
+    }
+    if entries.len() == 0 || entries.len() > 1024 {
+        ret Option[WeatherSequence]::None
+    }
+    let mut keys = Vec[WeatherKeyframe]::new() let mut previous = - 1.0_f32
+    for entry in entries {
+        let time = match refrain::scene::json_value::parse_number(entry.get("time").unwrap_or(Json::Null).as_number().unwrap_or("")) {
+            Some(v) => v None => {
+                ret Option[WeatherSequence]::None
+            }
+        }
+        if !(time >= 0 && time > previous && time <= duration) {
+            ret Option[WeatherSequence]::None
+        }
+        let weather = match environment_parse("weather-controller", entry.get("weather").unwrap_or(Json::Null)) {
+            Some(c) => c.weather None => {
+                ret Option[WeatherSequence]::None
+            }
+        }
+        keys.push(WeatherKeyframe { time, weather }) previous = time
+    }
+    if keys.get_unchecked_borrowed(0).time != 0 {
+        ret Option[WeatherSequence]::None
+    }
+    ret Option[WeatherSequence]::Some(WeatherSequence { 1, duration, looping, keys })
+}
+pub fn load_weather_sequence(path: str) -> Result[WeatherSequence, str] {
+    let stamp = asset_source_stamp(path)
+    match load_environment_payload(path + ".gweather", "weather-sequence", stamp) {
+        Ok(payload) => {
+            let mut bytes = Vec[u8]::new() for i in 0..payload.byte_len() {
+                bytes.push(payload.byte_at(i))
+            }
+            match decode[WeatherSequence](bytes) {
+                Ok(sequence) => {
+                    if sequence.version == 1 && sequence.duration > 0 && sequence.duration <= 86400 && sequence.keys.len() > 0 && sequence.keys.len() <= 1024 {
+                        ret Result::Ok(sequence)
+                    }
+                }
+                Err(_) => {
+                }
+            }
+        }
+        Err(_) => {
+        }
+    }
+    let sequence = match parse_weather_sequence(read_file(path)) {
+        Some(v) => v None => {
+            ret Result::Err("Invalid weather sequence")
+        }
+    }
+    let bytes = match encode(sequence) {
+        Ok(bytes) => bytes Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    let mut payload = "" unsafe {
+        payload = graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+    }
+    if !save_environment_payload(path + ".gweather", "weather-sequence", path, stamp, payload) {
+        ret Result::Err("Unable to cook weather sequence")
+    }
+    ret Result::Ok(sequence)
+}

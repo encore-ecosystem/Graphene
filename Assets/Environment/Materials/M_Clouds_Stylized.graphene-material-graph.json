@@ -1,0 +1,109 @@
+{
+  "format": "graphene-material-graph",
+  "version": 2,
+  "domain": "volume",
+  "name": "M_Clouds_Stylized",
+  "nodes": [
+    {
+      "id": 1,
+      "operation": "world-position",
+      "kind": "vec3",
+      "value": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "position": [
+        30,
+        60,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "operation": "noise",
+      "kind": "scalar",
+      "value": [
+        0.0018,
+        0.0018,
+        0.0018
+      ],
+      "position": [
+        310,
+        60,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "operation": "cloudiness",
+      "kind": "scalar",
+      "value": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "position": [
+        30,
+        240,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "operation": "multiply",
+      "kind": "scalar",
+      "value": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "position": [
+        590,
+        80,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "operation": "output-volume",
+      "kind": "vec3",
+      "value": [
+        0,
+        0,
+        0
+      ],
+      "position": [
+        870,
+        80,
+        0
+      ]
+    }
+  ],
+  "links": [
+    {
+      "source": 1,
+      "output": "value",
+      "target": 2,
+      "input": "position"
+    },
+    {
+      "source": 2,
+      "output": "value",
+      "target": 4,
+      "input": "a"
+    },
+    {
+      "source": 3,
+      "output": "value",
+      "target": 4,
+      "input": "b"
+    },
+    {
+      "source": 4,
+      "output": "value",
+      "target": 5,
+      "input": "density"
+    }
+  ]
+}

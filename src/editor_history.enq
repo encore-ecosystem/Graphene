@@ -309,7 +309,7 @@ fn contains_id(values: Vec[u64], expected: u64) -> bool {
     ret false
 }
 
-fn restore_parent_links(ids: Vec[u64], parents: Vec[Option[u64]], actor: ActorRecord, inserted: bool)
+fn restore_parent_links(ids: Vec[u64], parents: mut Vec[Option[u64]], actor: ActorRecord, inserted: bool)
 -> Vec[Option[u64]] {
     let mut result = parents
     let mut index = 0_usize
@@ -349,8 +349,8 @@ impl for EditorActors {
     pub fn apply(self: Self, actor: ActorRecord, insert: bool) -> EditorActors {
         let index =(actor.index() - 1_u32) as usize
         let ids = edit_u64(self.ids, index, actor.id(), insert)
-        let parents = restore_parent_links(ids, edit_parent(self.parents, index, actor.parent(), insert),
-            actor, insert,)
+        let mut edited_parents = edit_parent(self.parents, index, actor.parent(), insert)
+        let parents = restore_parent_links(ids, edited_parents, actor, insert)
         ret EditorActors {
             ids,
             parents,
@@ -404,7 +404,7 @@ pub fn editor_actors_from_scene(scene: Scene, previous_ids: Vec[u64],
     let mut rotations = Vec[Vec3]::new()
     let mut scales = Vec[Vec3]::new()
     for entity in scene.entities() {
-        if entity.renderable().is_some() {
+        if entity.renderable().is_some() || entity.component().kind() != "" {
             ids.push(entity.id())
             parents.push(entity.parent())
             names.push(entity.name())
@@ -428,6 +428,7 @@ pub fn editor_actors_from_scene(scene: Scene, previous_ids: Vec[u64],
                 }
                 index = index + 1_usize
             }
+            if entity.component().kind() != "" { mesh_name = "@" + entity.component().kind() }
             mesh_names.push(mesh_name)
             visibilities.push(entity.visible())
             positions.push(entity.transform().position())

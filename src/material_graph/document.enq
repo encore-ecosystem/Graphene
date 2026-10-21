@@ -1,0 +1,197 @@
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::codec::material_graph_stringify
+import mod::compiler::material_connection_error
+import mod::model::*
+
+pub enum MaterialCommand {
+    Domain(MaterialDomain)
+    Add(MaterialNode)
+    Set(MaterialNode)
+    Delete(Vec[u64])
+    Connect(MaterialLink)
+    Disconnect(MaterialEndpoint)
+    BeginGesture
+    CommitGesture
+    CancelGesture
+    Undo
+    Redo
+}
+pub struct MaterialDocument {
+    graph: MaterialGraph
+    undo: Vec[MaterialGraph]
+    redo: Vec[MaterialGraph]
+    gesture: Option[MaterialGraph]
+    saved: str
+    revision: u64
+}
+fn has(ids: Vec[u64], id: u64) -> bool {
+    for value in ids {
+        if value == id {
+            ret true
+        }
+    }
+    ret false
+}
+
+impl for MaterialDocument {
+    pub fn new(graph: MaterialGraph) -> Self {
+        ret MaterialDocument {
+            graph.snapshot(), Vec[MaterialGraph]::new(), Vec[MaterialGraph]::new(), Option::None, material_graph_stringify(graph, false), 0
+        }
+    }
+    pub fn graph(self: Self) -> MaterialGraph {
+        ret self.graph.snapshot()
+    }
+    pub fn semantic(self: Self) -> str {
+        ret material_graph_stringify(self.graph, true)
+    }
+    pub fn dirty(self: Self) -> bool {
+        ret material_graph_stringify(self.graph, false) != self.saved
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn can_undo(self: Self) -> bool {
+        ret self.undo.len() > 0 && self.gesture.is_none()
+    }
+    pub fn can_redo(self: Self) -> bool {
+        ret self.redo.len() > 0 && self.gesture.is_none()
+    }
+    pub fn mark_saved(self: mut Self) ->() {
+        self.saved = material_graph_stringify(self.graph, false)
+    }
+    pub fn execute(self: mut Self, command: MaterialCommand) -> Result[bool, str] {
+        match command {
+            BeginGesture => {
+                if self.gesture.is_some() {
+                    ret Result::Err("A gesture is already active")
+                }
+                self.gesture = Option[MaterialGraph]::Some(self.graph.snapshot()) ret Result::Ok(false)
+            }
+            CommitGesture => {
+                match self.gesture {
+                    Some(previous) => {
+                        if material_graph_stringify(previous, false) != material_graph_stringify(self.graph, false) {
+                            self.undo.push(previous) self.redo.clear()
+                        }
+                    }
+                    None => {
+                    }
+                }
+                self.gesture = Option[MaterialGraph]::None ret Result::Ok(false)
+            }
+            CancelGesture => {
+                match self.gesture {
+                    Some(previous) => {
+                        self.graph = previous self.revision += 1
+                    }
+                    None => {
+                    }
+                }
+                self.gesture = Option[MaterialGraph]::None ret Result::Ok(true)
+            }
+            Undo => {
+                if self.gesture.is_some() {
+                    ret Result::Err("Finish the gesture before Undo")
+                }
+                match self.undo.pop() {
+                    Some(previous) => {
+                        self.redo.push(self.graph.snapshot()) self.graph = previous self.revision += 1 ret Result::Ok(true)
+                    }
+                    None => {
+                        ret Result::Ok(false)
+                    }
+                }
+            }
+            Redo => {
+                if self.gesture.is_some() {
+                    ret Result::Err("Finish the gesture before Redo")
+                }
+                match self.redo.pop() {
+                    Some(next) => {
+                        self.undo.push(self.graph.snapshot()) self.graph = next self.revision += 1 ret Result::Ok(true)
+                    }
+                    None => {
+                        ret Result::Ok(false)
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+        let previous = self.graph.snapshot()
+        match command {
+            Domain(domain) => {
+                self.graph = self.graph.with_domain(domain)
+            }
+            Add(node) => {
+                if self.graph.node(node.id).is_some() || node.id == 0 || material_is_output(node) {
+                    ret Result::Err("Invalid new node")
+                }
+                self.graph.nodes.push(node)
+            }
+            Set(node) => {
+                let mut found = false let mut index = 0_usize
+                for old in self.graph.nodes {
+                    if old.id == node.id {
+                        self.graph.nodes.set(index, node) found = true
+                    }
+                    index += 1
+                }
+                if !found {
+                    ret Result::Err("Node does not exist")
+                }
+            }
+            Delete(ids) => {
+                let mut nodes = Vec[MaterialNode]::new() let mut links = Vec[MaterialLink]::new()
+                let mut removed = Vec[u64]::new()
+                for node in self.graph.nodes {
+                    if has(ids, node.id) && !material_is_output(node) {
+                        removed.push(node.id)
+                    } else {
+                        nodes.push(node)
+                    }
+                }
+                for link in self.graph.links {
+                    if !has(removed, link.source.node) && !has(removed, link.target.node) {
+                        links.push(link)
+                    }
+                }
+                self.graph.nodes = nodes self.graph.links = links
+            }
+            Connect(link) => {
+                let error = material_connection_error(self.graph, link)
+                if error != "" {
+                    ret Result::Err(error)
+                }
+                let mut links = Vec[MaterialLink]::new()
+                for old in self.graph.links {
+                    if old.target.node != link.target.node || old.target.pin != link.target.pin {
+                        links.push(old)
+                    }
+                }
+                links.push(link) self.graph.links = links
+            }
+            Disconnect(endpoint) => {
+                let mut links = Vec[MaterialLink]::new()
+                for link in self.graph.links {
+                    if link.target.node != endpoint.node || link.target.pin != endpoint.pin {
+                        links.push(link)
+                    }
+                }
+                self.graph.links = links
+            }
+            _ => {
+            }
+        }
+        if material_graph_stringify(previous, false) == material_graph_stringify(self.graph, false) {
+            ret Result::Ok(false)
+        }
+        if self.gesture.is_none() {
+            self.undo.push(previous) self.redo.clear()
+        }
+        self.revision += 1 ret Result::Ok(true)
+    }
+}

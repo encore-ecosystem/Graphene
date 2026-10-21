@@ -1,0 +1,545 @@
+import mod::native_asset::{asset_source_stamp, load_native_texture, save_native_texture}
+//! Bounded PNG decoding and project-owned textures, without native codecs.
+// PNG: W3C PNG specification. Zlib/DEFLATE: RFC 1950 and RFC 1951.
+
+import core::result::Result
+import core::vec::Vec
+import std::os::{file_exists, mkdir_all, file_sha256, write_file_atomic}
+
+extern fn encore_text_sha256(contents: str) -> str
+extern fn encore_file_open(path: str, writing: bool) -> u64
+extern fn encore_file_read(id: u64, size: usize) -> str
+extern fn encore_file_close(id: u64) -> bool
+extern fn encore_file_error_code() -> i32
+
+#attr(safe)
+fn texture_digest(contents: str) -> str {
+    unsafe {
+        ret encore_text_sha256(contents)
+    }
+}
+
+// Uses the existing system runtime: this version of index@std does not yet
+// re-export checked File. Handles remain worker-local and are always closed.
+#attr(safe)
+fn read_texture_file(path: str) -> Result[str, str] {
+    unsafe {
+        let file = encore_file_open(path, false)
+        if file == 0 {
+            ret Result::Err("Unable to open texture: " + path)
+        }
+        let bytes = encore_file_read(file, 67108865)
+        let failed = encore_file_error_code() != 0
+        let closed = encore_file_close(file)
+        if failed || !closed {
+            ret Result::Err("Unable to read texture: " + path)
+        }
+        if bytes.byte_len() > 67108864 {
+            ret Result::Err("PNG exceeds the 64 MiB file limit")
+        }
+        ret Result::Ok(bytes)
+    }
+}
+
+pub import mod::texture_image::{TextureImage, texture_path_valid}
+
+/// The worker owns its result until the UI joins it. Failed loads never replace a material.
+pub struct TextureLoad {
+    path: str
+    error: str
+    image: TextureImage
+}
+
+struct Bits {
+    bytes: Vec[u8]
+    position: usize
+    end: usize
+    valid: bool
+}
+
+impl for Bits {
+    fn read(self: mut Self, count: u32) -> u32 {
+        if !self.valid || self.position + count as usize > self.end {
+            self.valid = false
+            ret 0
+        }
+        let mut value = 0_u32
+        let mut shift = 0_u32
+        while shift < count {
+            let byte = self.bytes.get(self.position / 8).unwrap_or(0)
+            value |=(((byte as u32) >>((self.position % 8) as u32)) & 1) << shift
+            self.position += 1
+            shift += 1
+        }
+        ret value
+    }
+}
+
+// Canonical Huffman tables, sorted by length then symbol. Decoding consumes the
+// transmitted MSB-first code one bit at a time, not reversed little-endian codes.
+struct Huffman {
+    counts: Vec[u32]
+    symbols: Vec[u32]
+    valid: bool
+}
+
+fn huffman(lengths: Vec[u32]) -> Huffman {
+    let mut counts = Vec[u32]::new()
+    let mut offsets = Vec[u32]::new()
+    let mut symbols = Vec[u32]::new()
+    for _ in 0..16 {
+        counts.push(0) offsets.push(0)
+    }
+    for length in lengths {
+        if length > 15 {
+            ret Huffman { counts, symbols, false }
+        }
+        if length > 0 {
+            counts.set(length as usize, counts.get(length as usize).unwrap_or(0) + 1)
+        }
+        symbols.push(0)
+    }
+    let mut available = 1_i32
+    let mut offset = 0_u32
+    for length in 1..16 {
+        available = available * 2 - counts.get(length).unwrap_or(0) as i32
+        if available < 0 {
+            ret Huffman { counts, symbols, false }
+        }
+        offsets.set(length, offset)
+        offset += counts.get(length).unwrap_or(0)
+    }
+    let mut symbol = 0_u32
+    for length in lengths {
+        if length > 0 {
+            let index = offsets.get(length as usize).unwrap_or(0)
+            symbols.set(index as usize, symbol)
+            offsets.set(length as usize, index + 1)
+        }
+        symbol += 1
+    }
+    // RFC 1951 permits an incomplete single-code tree (and an empty distance
+    // tree for literal-only blocks), but not arbitrary incomplete trees.
+    let valid = available == 0 || offset == 0 ||(offset == 1 && counts.get(1).unwrap_or(0) == 1)
+    ret Huffman { counts, symbols, valid }
+}
+
+fn decode_symbol(bits: mut Bits, tree: Huffman) -> u32 {
+    if !tree.valid {
+        bits.valid = false ret 0
+    }
+    let mut code = 0_u32
+    let mut first = 0_u32
+    let mut index = 0_u32
+    for length in 1..16 {
+        code =(code << 1) | bits.read(1)
+        let count = tree.counts.get(length).unwrap_or(0)
+        if code >= first && code - first < count {
+            ret tree.symbols.get((index + code - first) as usize).unwrap_or(0)
+        }
+        index += count
+        first =(first + count) << 1
+    }
+    bits.valid = false
+    ret 0
+}
+
+fn inflate(bytes: mut Vec[u8], limit: usize) -> Result[Vec[u8], str] {
+    if bytes.len() < 6 {
+        ret Result::Err("Truncated PNG zlib stream")
+    }
+    let cmf = bytes.get(0).unwrap_or(0) as u32
+    let flags = bytes.get(1).unwrap_or(0) as u32
+    if (cmf & 15) != 8 ||(cmf >> 4) > 7 ||(cmf * 256 + flags) % 31 != 0 ||(flags & 32) != 0 {
+        ret Result::Err("Unsupported PNG zlib header")
+    }
+    let mut bits = Bits { bytes, 16,(bytes.len() - 4) * 8, true }
+    let mut output = Vec[u8]::with_capacity(limit)
+    let mut final_block = false
+    while !final_block && bits.valid {
+        final_block = bits.read(1) != 0
+        let kind = bits.read(2)
+        if kind == 0 {
+            bits.position =(bits.position + 7) / 8 * 8
+            let length = bits.read(16)
+            let inverse = bits.read(16)
+            if !bits.valid ||(length ^ inverse) != 65535 || output.len() + length as usize > limit {
+                ret Result::Err("Invalid PNG stored block")
+            }
+            for _ in 0..(length as usize) {
+                output.push(bits.read(8) as u8)
+            }
+        } elif kind == 1 || kind == 2 {
+            let mut lengths = Vec[u32]::new()
+            let mut distances = Vec[u32]::new()
+            if kind == 1 {
+                for symbol in 0..288 {
+                    lengths.push(if symbol < 144 {
+                            8_u32
+                        } elif symbol < 256 {
+                            9_u32
+                        } elif symbol < 280 {
+                            7_u32
+                        } else {
+                            8_u32
+                        }
+                    )
+                }
+                for _ in 0..32 {
+                    distances.push(5)
+                }
+            } else {
+                let literals = bits.read(5) + 257
+                let distance_count = bits.read(5) + 1
+                let code_count = bits.read(4) + 4
+                if literals > 286 {
+                    ret Result::Err("Invalid PNG Huffman alphabet")
+                }
+                let order = vec![16_u32, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+                let mut code_lengths = Vec[u32]::new()
+                for _ in 0..19 {
+                    code_lengths.push(0)
+                }
+                for index in 0..(code_count as usize) {
+                    code_lengths.set(order.get(index).unwrap_or(0) as usize, bits.read(3))
+                }
+                let codes = huffman(code_lengths)
+                // Code-length alphabets must be complete, unlike distance alphabets.
+                let mut code_space = 1_i32
+                for length in 1..16 {
+                    code_space = code_space * 2 - codes.counts.get(length).unwrap_or(0) as i32
+                }
+                if !codes.valid || code_space != 0 {
+                    ret Result::Err("Invalid PNG code-length tree")
+                }
+                let mut all = Vec[u32]::new()
+                while all.len() <(literals + distance_count) as usize && bits.valid {
+                    let symbol = decode_symbol(bits, codes)
+                    if symbol < 16 {
+                        all.push(symbol)
+                    } else {
+                        if symbol == 16 && all.len() == 0 {
+                            ret Result::Err("Invalid PNG code repeat")
+                        }
+                        let count = if symbol == 16 {
+                            bits.read(2) + 3
+                        } elif symbol == 17 {
+                            bits.read(3) + 3
+                        } else {
+                            bits.read(7) + 11
+                        }
+                        let value = if symbol == 16 {
+                            all.get(all.len() - 1).unwrap_or(0)
+                        } else {
+                            0
+                        }
+                        if all.len() + count as usize >(literals + distance_count) as usize {
+                            ret Result::Err("PNG code repeat exceeds alphabet")
+                        }
+                        for _ in 0..(count as usize) {
+                            all.push(value)
+                        }
+                    }
+                }
+                for index in 0..(literals as usize) {
+                    lengths.push(all.get(index).unwrap_or(0))
+                }
+                for index in 0..(distance_count as usize) {
+                    distances.push(all.get(literals as usize + index).unwrap_or(0))
+                }
+            }
+            if lengths.get(256).unwrap_or(0) == 0 {
+                ret Result::Err("PNG block has no end code")
+            }
+            let literal_tree = huffman(lengths)
+            let distance_tree = huffman(distances)
+            let length_base = vec![3_u32, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+            let length_extra = vec![0_u32, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+            let distance_base = vec![1_u32, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+            let distance_extra = vec![0_u32, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+            while bits.valid {
+                let symbol = decode_symbol(bits, literal_tree)
+                if symbol == 256 {
+                    break
+                }
+                if symbol < 256 {
+                    if output.len() >= limit {
+                        ret Result::Err("PNG expands beyond image dimensions")
+                    }
+                    output.push(symbol as u8)
+                } else {
+                    if symbol > 285 {
+                        ret Result::Err("Invalid PNG length code")
+                    }
+                    let slot =(symbol - 257) as usize
+                    let length = length_base.get(slot).unwrap_or(0) + bits.read(length_extra.get(slot).unwrap_or(0))
+                    let distance_symbol = decode_symbol(bits, distance_tree)
+                    if distance_symbol > 29 {
+                        ret Result::Err("Invalid PNG distance code")
+                    }
+                    let distance = distance_base.get(distance_symbol as usize).unwrap_or(0) + bits.read(distance_extra.get(distance_symbol as usize).unwrap_or(0))
+                    if !bits.valid || distance as usize > output.len() || distance >(1_u32 <<((cmf >> 4) + 8)) || output.len() + length as usize > limit {
+                        ret Result::Err("Invalid PNG back-reference")
+                    }
+                    for _ in 0..(length as usize) {
+                        output.push(output.get(output.len() - distance as usize).unwrap_or(0))
+                    }
+                }
+            }
+        } else {
+            ret Result::Err("Reserved PNG DEFLATE block")
+        }
+    }
+    if !bits.valid || output.len() != limit ||(bits.position + 7) / 8 != bytes.len() - 4 {
+        ret Result::Err("Truncated or oversized PNG image data")
+    }
+    let mut a = 1_u32
+    let mut b = 0_u32
+    for byte in output {
+        a =(a + byte as u32) % 65521 b =(b + a) % 65521
+    }
+    let end = bytes.len() - 4
+    let expected =((bytes.get(end).unwrap_or(0) as u32) << 24) |
+    ((bytes.get(end + 1).unwrap_or(0) as u32) << 16) |
+    ((bytes.get(end + 2).unwrap_or(0) as u32) << 8) | bytes.get(end + 3).unwrap_or(0) as u32
+    if ((b << 16) | a) != expected {
+        ret Result::Err("PNG Adler-32 checksum mismatch")
+    }
+    ret Result::Ok(output)
+}
+
+fn be32(data: str, offset: usize) -> u32 {
+    ret((data.byte_at(offset) as u32) << 24) |((data.byte_at(offset + 1) as u32) << 16) |
+    ((data.byte_at(offset + 2) as u32) << 8) | data.byte_at(offset + 3) as u32
+}
+
+fn crc32(data: str, start: usize, length: usize) -> u32 {
+    let mut crc = 4294967295_u32
+    for index in start..(start + length) {
+        crc ^= data.byte_at(index) as u32
+        for _ in 0..8 {
+            crc =(crc >> 1) ^(if (crc & 1) != 0 {
+                    3988292384_u32
+                } else {
+                    0_u32
+                }
+            )
+        }
+    }
+    ret crc ^ 4294967295_u32
+}
+
+fn paeth(left: u32, above: u32, corner: u32) -> u32 {
+    let p = left as i32 + above as i32 - corner as i32
+    let a = if p >= left as i32 {
+        p - left as i32
+    } else {
+        left as i32 - p
+    }
+    let b = if p >= above as i32 {
+        p - above as i32
+    } else {
+        above as i32 - p
+    }
+    let c = if p >= corner as i32 {
+        p - corner as i32
+    } else {
+        corner as i32 - p
+    }
+    ret if a <= b && a <= c {
+        left
+    } elif b <= c {
+        above
+    } else {
+        corner
+    }
+}
+
+/// Decodes static 8-bit RGB/RGBA PNG. Bounds cover compressed and decoded data.
+pub fn decode_png(data: str) -> Result[TextureImage, str] {
+    if data.byte_len() < 33 || data.byte_len() > 67108864 ||
+    be32(data, 0) != 2303741511 || be32(data, 4) != 218765834 {
+        ret Result::Err("Not a supported PNG file (maximum file size: 64 MiB)")
+    }
+    let mut width = 0_u32
+    let mut height = 0_u32
+    let mut channels = 0_usize
+    let mut compressed = Vec[u8]::new()
+    let mut offset = 8_usize
+    let mut header = false
+    let mut image_data = false
+    let mut data_closed = false
+    let mut ended = false
+    while offset + 12 <= data.byte_len() {
+        let length = be32(data, offset) as usize
+        if length > data.byte_len() - offset - 12 {
+            ret Result::Err("Truncated PNG chunk")
+        }
+        let kind = data.slice_bytes(offset + 4, 4)
+        if crc32(data, offset + 4, length + 4) != be32(data, offset + 8 + length) {
+            ret Result::Err("PNG chunk CRC mismatch: " + kind)
+        }
+        if !header && kind != "IHDR" {
+            ret Result::Err("PNG must start with IHDR")
+        }
+        if image_data && kind != "IDAT" {
+            data_closed = true
+        }
+        if kind == "IHDR" {
+            if header || length != 13 {
+                ret Result::Err("Invalid PNG header")
+            }
+            width = be32(data, offset + 8)
+            height = be32(data, offset + 12)
+            let color = data.byte_at(offset + 17)
+            if width == 0 || height == 0 || width > 4096 || height > 4096 {
+                ret Result::Err("PNG dimensions must be between 1 and 4096")
+            }
+            if data.byte_at(offset + 16) != 8 ||(color != 2 && color != 6) ||
+            data.byte_at(offset + 18) != 0 || data.byte_at(offset + 19) != 0 || data.byte_at(offset + 20) != 0 {
+                ret Result::Err("Use an 8-bit RGB or RGBA PNG without interlace")
+            }
+            channels = if color == 6 {
+                4
+            } else {
+                3
+            }
+            header = true
+        } elif kind == "IDAT" {
+            if data_closed {
+                ret Result::Err("PNG IDAT chunks must be consecutive")
+            }
+            for index in 0..length {
+                compressed.push(data.byte_at(offset + 8 + index))
+            }
+            image_data = true
+        } elif kind == "IEND" {
+            if length != 0 || !image_data {
+                ret Result::Err("Invalid PNG end chunk")
+            }
+            ended = true
+            offset += 12
+            break
+        } elif kind == "acTL" || kind == "iCCP" {
+            ret Result::Err("Animated PNG and ICC color profiles are not supported yet; export as sRGB PNG")
+        } elif kind != "PLTE" &&(data.byte_at(offset + 4) & 32) == 0 {
+            ret Result::Err("Unsupported PNG critical chunk: " + kind)
+        }
+        offset += length + 12
+    }
+    if !ended || offset != data.byte_len() {
+        ret Result::Err("Missing PNG end chunk or trailing data")
+    }
+    let row_bytes =(width as usize) * channels
+    // Reconstruct in place. Completed rows stay unchanged; no row copies,
+    // temporary row buffers or buffer rebinding are needed.
+    let mut raw = inflate(compressed,(row_bytes + 1) *(height as usize))?
+    let mut pixels = Vec[u32]::with_capacity((width as usize) *(height as usize))
+    for y in 0..(height as usize) {
+        let start = y *(row_bytes + 1)
+        let filter = raw.get(start).unwrap_or(255)
+        if filter > 4 {
+            ret Result::Err("Invalid PNG row filter")
+        }
+        for x in 0..row_bytes {
+            let left = if x >= channels {
+                raw.get(start + 1 + x - channels).unwrap_or(0) as u32
+            } else {
+                0
+            }
+            let above = if y > 0 {
+                raw.get(start - row_bytes + x).unwrap_or(0) as u32
+            } else {
+                0
+            }
+            let corner = if y > 0 && x >= channels {
+                raw.get(start - row_bytes + x - channels).unwrap_or(0) as u32
+            } else {
+                0
+            }
+            let predictor = match filter {
+                0 => {
+                    0_u32
+                }
+                1 => {
+                    left
+                }
+                2 => {
+                    above
+                }
+                3 => {
+                    (left + above) / 2_u32
+                }
+                _ => {
+                    paeth(left, above, corner)
+                }
+            }
+            raw.set(start + 1 + x,((raw.get(start + 1 + x).unwrap_or(0) as u32 + predictor) & 255) as u8)
+        }
+        for x in 0..(width as usize) {
+            let index = start + 1 + x * channels
+            let alpha = if channels == 4 {
+                raw.get(index + 3).unwrap_or(255) as u32
+            } else {
+                255
+            }
+            pixels.push(raw.get(index).unwrap_or(0) as u32 |((raw.get(index + 1).unwrap_or(0) as u32) << 8) |
+                ((raw.get(index + 2).unwrap_or(0) as u32) << 16) |(alpha << 24))
+        }
+    }
+    ret Result::Ok(TextureImage { width, height, pixels })
+}
+
+/// Texture references are project-relative; no traversal or absolute paths.
+/// Loads on a worker. Imports are content-addressed, so same-name files cannot overwrite assets.
+pub fn load_material_texture(project: str, source: str, importing: bool) -> sending TextureLoad {
+    let empty = TextureImage { 0, 0, Vec[u32]::new() }
+    let source_path = if importing {
+        source
+    } else {
+        project + "/" + source
+    }
+    if !importing && !texture_path_valid(source) {
+        ret TextureLoad {
+            source, "Invalid project texture path", empty
+        }
+    }
+    if !importing {
+        let native = if source_path.byte_len() > 9 && source_path.slice_bytes(source_path.byte_len() - 9, 9) == ".gtexture" { source_path } else { source_path + ".gtexture" }
+        match load_native_texture(native, if native == source_path { "" } else { asset_source_stamp(source_path) }) {
+            Result::Ok(image) => { ret TextureLoad { source, "", image } }
+            Result::Err(error) => { if native == source_path { ret TextureLoad { source, error, empty } } }
+        }
+    }
+    let data = match read_texture_file(source_path) {
+        Result::Ok(value) => value
+        Result::Err(error) => {
+            ret TextureLoad { source, error, empty }
+        }
+    }
+    let image = match decode_png(data) {
+        Result::Ok(value) => value
+        Result::Err(error) => {
+            ret TextureLoad { source, error, empty }
+        }
+    }
+    let mut relative = source
+    if importing {
+        // SHA-256 gives stable identity across restarts and different source file names.
+        let digest = texture_digest(data)
+        if digest.byte_len() != 64 {
+            ret TextureLoad { source, "Unable to hash texture", empty }
+        }
+        relative = "Content/Textures/" + digest + ".png"
+        if mkdir_all(project + "/Content/Textures") != 0 {
+            ret TextureLoad { relative, "Unable to create project texture directory", empty }
+        }
+        let destination = project + "/" + relative
+        if (!file_exists(destination) || file_sha256(destination) != digest) && write_file_atomic(destination, data) != 0 {
+            ret TextureLoad { relative, "Unable to copy texture into project", empty }
+        }
+    }
+    let saved_path = project + "/" + relative
+    let _saved = save_native_texture(saved_path + ".gtexture", relative, asset_source_stamp(saved_path), image)
+    ret TextureLoad { relative, "", image }
+}

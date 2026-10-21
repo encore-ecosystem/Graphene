@@ -1,0 +1,340 @@
+//! Shared selected-vertex cache. Pose uploads are recorded once per scene frame;
+//! every actual producer/consumer frame retains a completion token.
+import core::result::Result
+import core::vec::Vec
+import mod::gpu_pack::{PackedSkinSource, pack_skin_source, append_pose_matrix}
+import mod::math::{PoseMatrix, animation_finite, animation_clamp}
+import mod::model::{Skeleton, SkeletalMesh}
+import refrain::rhi::*
+extern fn graphene_animation_shader_length(shader: u32) -> u32
+extern fn graphene_animation_shader_word(shader: u32, index: u32) -> u32
+#attr(safe)
+pub fn animation_spirv(shader: u32) -> Vec[u32] {
+    let count = graphene_animation_shader_length(shader) let mut out = Vec[u32]::with_capacity(count as usize)
+    for i in 0_usize..count as usize {
+        out.push(graphene_animation_shader_word(shader, i as u32))
+    }
+    ret out
+}
+pub struct SkinFrameInstance {
+    key: u64
+    palette: Vec[PoseMatrix]
+    model: Vec[PoseMatrix]
+    morphs: Vec[f32]
+    history_valid: bool
+}
+pub struct SkinGpuCache {
+    device: GraphicsDevice
+    layout: BindGroupLayout
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    group: BindGroup
+    vertices: GpuBuffer
+    spans: GpuBuffer
+    deltas: GpuBuffer
+    palette: GpuBuffer
+    previous_palette: GpuBuffer
+    models: GpuBuffer
+    weights: GpuBuffer
+    requests: GpuBuffer
+    output: GpuBuffer
+    tags: GpuBuffer
+    dispatch: GpuBuffer
+    info: GpuBuffer
+    status: GpuBuffer
+    mesh: SkeletalMesh
+    bones: usize
+    maximum_instances: usize
+    capacity: usize
+    delta_count: u32
+    staged: bool
+    staged_frame: u64
+    uploaded: bool
+    uploaded_frame: u64
+    epoch: u32
+    initialize_tags: bool
+    pending_palette: Vec[f32]
+    pending_models: Vec[f32]
+    pending_morphs: Vec[f32]
+    pending_keys: Vec[u64]
+    pending_history: Vec[bool]
+    last_morphs: Vec[f32]
+    last_keys: Vec[u64]
+    history: Vec[u32]
+    weight_pairs: Vec[f32]
+    uses: Vec[GpuCompletion]
+    producer: GpuCompletion
+}
+fn skin_storage(device: GraphicsDevice, bytes: u64) -> GpuBuffer {
+    ret device.create_buffer(if bytes < 16_u64 {
+            16_u64
+        } else {
+            bytes
+        }
+        , buffer_storage() | buffer_transfer_source() | buffer_transfer_destination(), false,)
+}
+fn source_storage(device: GraphicsDevice, words: Vec[u32]) -> Result[GpuBuffer, str] {
+    let buffer = device.create_buffer(if words.len() < 4_usize {
+            16_u64
+        } else {
+            (words.len() as u64) * 4_u64
+        }
+        , buffer_storage(), true,)
+    if !buffer.available() ||(words.len() > 0_usize && !buffer.write_u32s(0_u64, words)) {
+        buffer.destroy() ret Result::Err("Unable to upload immutable skin source")
+    }
+    ret Result::Ok(buffer)
+}
+
+impl for SkinGpuCache {
+    pub fn create(device: GraphicsDevice, skeleton: Skeleton, mesh: SkeletalMesh, maximum_instances: usize) -> Result[SkinGpuCache<H>, str] {
+        skeleton.validate()? mesh.validate(skeleton)?
+        if maximum_instances == 0_usize || maximum_instances > 100000_usize {
+            ret Result::Err("Invalid skin instance capacity")
+        }
+        let capacity =(mesh.vertices.len() as u64) *(maximum_instances as u64)
+        let palette_count =(skeleton.bones.len() as u64) *(maximum_instances as u64)
+        let weight_count =(mesh.morphs.len() as u64) *(maximum_instances as u64)
+        let mut morph_deltas = 0_u64 for morph in mesh.morphs {
+            morph_deltas += morph.deltas.len() as u64
+        }
+        let bytes = capacity * 100_u64 + palette_count * 144_u64 + weight_count * 8_u64 +(mesh.vertices.len() as u64) * 136_u64 + morph_deltas * 64_u64
+        if bytes > 536870912_u64 {
+            ret Result::Err("Selected-vertex skin cache exceeds its 512 MiB allocation budget")
+        }
+        let source = pack_skin_source(mesh)
+        let vertices = source_storage(device, source.vertices)?
+        let spans = match source_storage(device, source.spans) {
+            Ok(v) => v Err(e) => {
+                vertices.destroy() ret Result::Err(e)
+            }
+        }
+        let deltas = match source_storage(device, source.deltas) {
+            Ok(v) => v Err(e) => {
+                vertices.destroy() spans.destroy() ret Result::Err(e)
+            }
+        }
+        let palette = skin_storage(device, palette_count * 48_u64) let previous_palette = skin_storage(device, palette_count * 48_u64) let models = skin_storage(device, palette_count * 48_u64)
+        let weights = skin_storage(device, weight_count * 8_u64) let requests = skin_storage(device, capacity * 32_u64) let output = skin_storage(device, capacity * 64_u64) let tags = skin_storage(device, capacity * 4_u64)
+        let dispatch = device.create_buffer(32_u64, buffer_storage() | buffer_transfer_source() | buffer_transfer_destination() | buffer_indirect(), false)
+        let info = skin_storage(device, 32_u64) let status = skin_storage(device, 16_u64)
+        let mut entries = Vec[BindGroupLayoutEntry]::new() for i in 0_usize..10_usize {
+            entries.push(BindGroupLayoutEntry::storage(i as u32, shader_stage_compute()))
+        }
+        let layout = device.create_bind_group_layout(entries) let shader = device.create_shader_module(animation_spirv(0_u32), shader_stage_compute()) let pipeline = device.create_compute_pipeline(shader, layout)
+        let buffers = vec![info, vertices, palette, previous_palette, spans, deltas, weights, requests, output, status]
+        let mut bindings = Vec[u32]::new() let mut offsets = Vec[u64]::new() let mut ranges = Vec[u64]::new()
+        let mut available = true
+        for i in 0_usize..buffers.len() {
+            let b = buffers.get_unchecked_borrowed(i) available = available && b.available() bindings.push(i as u32) offsets.push(0_u64) ranges.push(b.size())
+        }
+        let group = device.create_buffer_bind_group_many(layout, bindings, buffers, offsets, ranges)
+        if !available || !models.available() || !tags.available() || !dispatch.available() || !layout.available() || !shader.available() || !pipeline.available() || !group.available() {
+            group.destroy() pipeline.destroy() shader.destroy() layout.destroy()
+            for buffer in buffers {
+                buffer.destroy()
+            }
+            models.destroy() tags.destroy() dispatch.destroy()
+            ret Result::Err("Unable to allocate skin deformation resources")
+        }
+        ret Result::Ok(SkinGpuCache<H> {
+                device, layout, shader, pipeline, group, vertices, spans, deltas, palette, previous_palette, models, weights, requests, output, tags, dispatch, info, status, mesh, skeleton.bones.len(), maximum_instances, capacity as usize, source.delta_count, false, 0_u64, false, 0_u64, 0_u32, true, Vec[f32]::new(), Vec[f32]::new(), Vec[f32]::new(), Vec[u64]::new(), Vec[bool]::new(), Vec[f32]::new(), Vec[u64]::new(), Vec[u32]::new(), Vec[f32]::new(), Vec[GpuCompletion]::new(), GpuCompletion::unavailable()
+            }
+            ,
+        )
+    }
+    pub fn stage(self: mut Self&, logical_frame: u64, instances: Vec[SkinFrameInstance]) -> Result[bool, str] {
+        if instances.len() > self.maximum_instances ||(self.staged && logical_frame <= self.staged_frame) {
+            ret Result::Err("Invalid or duplicate staged skin frame")
+        }
+        // Preflight before modifying the last staged frame.
+        for i in 0_usize..instances.len() {
+            let instance = instances.get_unchecked_borrowed(i)
+            if instance.palette.len() != self.bones || instance.model.len() != self.bones || instance.morphs.len() != self.mesh.morphs.len() {
+                ret Result::Err("Skin instance pose layout mismatch")
+            }
+            for matrix in instance.palette {
+                if !matrix.finite() {
+                    ret Result::Err("Non-finite skin palette")
+                }
+            }
+            for matrix in instance.model {
+                if !matrix.finite() {
+                    ret Result::Err("Non-finite skin model pose")
+                }
+            }
+            for value in instance.morphs {
+                if !animation_finite(value) {
+                    ret Result::Err("Non-finite skin morph weight")
+                }
+            }
+            for j in 0_usize..i {
+                if instances.get_unchecked_borrowed(j).key == instance.key {
+                    ret Result::Err("Duplicate skin instance key")
+                }
+            }
+        }
+        self.pending_palette.clear() self.pending_models.clear() self.pending_morphs.clear() self.pending_keys.clear() self.pending_history.clear()
+        for instance in instances {
+            for matrix in instance.palette {
+                append_pose_matrix(self.pending_palette, matrix)
+            }
+            for matrix in instance.model {
+                append_pose_matrix(self.pending_models, matrix)
+            }
+            for i in 0_usize..instance.morphs.len() {
+                let morph = self.mesh.morphs.get_unchecked_borrowed(i) self.pending_morphs.push(animation_clamp(instance.morphs.get_unchecked_borrowed(i), morph.minimum, morph.maximum))
+            }
+            self.pending_keys.push(instance.key) self.pending_history.push(instance.history_valid)
+        }
+        self.epoch += 1_u32 if self.epoch == 0_u32 {
+            self.epoch = 1_u32 self.initialize_tags = true
+        }
+        self.staged = true self.staged_frame = logical_frame ret Result::Ok(true)
+    }
+    pub fn upload(self: mut Self&, frame: RenderFrame) -> Result[bool, str] {
+        if !self.staged {
+            ret Result::Err("Skin frame has not been staged")
+        }
+        self.track(frame)?
+        let token = frame.completion()
+        if !token.available() {
+            ret Result::Err("Unable to retain skin producer")
+        }
+        if self.producer.available() {
+            if self.producer.status() == GpuCompletionStatus::Cancelled {
+                self.uploaded = false self.initialize_tags = true self.last_keys.clear() self.last_morphs.clear()
+            } elif !self.producer.same_submission(token) && !self.producer.submitted() {
+                token.destroy() ret Result::Err("Skin producer has not been submitted")
+            }
+        }
+        if self.uploaded && self.uploaded_frame == self.staged_frame {
+            token.destroy() ret Result::Ok(true)
+        }
+        if self.producer.available() {
+            self.producer.destroy()
+        }
+        self.producer = token
+        let result = self.record_upload(frame)
+        if result.is_err() {
+            self.uploaded = false self.initialize_tags = true self.last_keys.clear() self.last_morphs.clear()
+        }
+        ret result
+    }
+    fn record_upload(self: mut Self&, frame: RenderFrame) -> Result[bool, str] {
+        self.history.clear() self.weight_pairs.clear()
+        let sequential = self.uploaded && self.uploaded_frame + 1_u64 == self.staged_frame
+        for i in 0_usize..self.pending_keys.len() {
+            let valid = sequential && i < self.last_keys.len() && self.last_keys.get_unchecked_borrowed(i) == self.pending_keys.get_unchecked_borrowed(i) && self.pending_history.get_unchecked_borrowed(i)
+            self.history.push(if valid {
+                    1_u32
+                } else {
+                    0_u32
+                }
+            )
+            for m in 0_usize..self.mesh.morphs.len() {
+                let at = i * self.mesh.morphs.len() + m let current = self.pending_morphs.get_unchecked_borrowed(at) self.weight_pairs.push(current) self.weight_pairs.push(if valid {
+                        self.last_morphs.get_unchecked_borrowed(at)
+                    } else {
+                        current
+                    }
+                )
+            }
+        }
+        let old_count = self.last_keys.len() * self.bones
+        if old_count > 0_usize && !frame.copy_buffer(self.palette, self.previous_palette, 0_u64, 0_u64,(old_count as u64) * 48_u64) {
+            ret Result::Err("Unable to preserve previous skin palette")
+        }
+        if self.initialize_tags {
+            if !frame.fill_buffer(self.tags, 0_u64, self.tags.size(), 0_u32) || !frame.transfer_storage_barrier() {
+                ret Result::Err("Unable to initialize skin cache tags")
+            }
+        }
+        let info = vec![0_u32, self.mesh.vertices.len() as u32,(self.pending_keys.len() * self.bones) as u32, self.mesh.morphs.len() as u32, self.delta_count, self.capacity as u32, self.pending_morphs.len() as u32, old_count as u32]
+        if !frame.update_f32s(self.palette, 0_u64, self.pending_palette) || !frame.update_f32s(self.models, 0_u64, self.pending_models) || !frame.update_f32s(self.weights, 0_u64, self.weight_pairs) || !frame.update_u32s(self.info, 0_u64, info) || !frame.fill_buffer(self.status, 0_u64, 16_u64, 0_u32) {
+            ret Result::Err("Unable to record skin pose upload")
+        }
+        self.last_keys.clear() for key in self.pending_keys {
+            self.last_keys.push(key)
+        }
+        self.last_morphs.clear() for weight in self.pending_morphs {
+            self.last_morphs.push(weight)
+        }
+        self.uploaded = true self.uploaded_frame = self.staged_frame self.initialize_tags = false ret Result::Ok(true)
+    }
+    pub fn record_selected(self: mut Self&, frame: RenderFrame, group: BindGroup, dispatch_pipeline: ComputePipeline, request_pipeline: ComputePipeline) -> bool {
+        if !self.uploaded || self.uploaded_frame != self.staged_frame {
+            ret false
+        }
+        ret frame.fill_buffer(self.dispatch, 0_u64, 32_u64, 0_u32) && frame.transfer_storage_barrier() &&
+        frame.dispatch_compute(dispatch_pipeline, group, 1_u32, 1_u32, 1_u32) && frame.compute_barrier() &&
+        frame.dispatch_compute_indirect(request_pipeline, group, self.dispatch, 20_u64) && frame.compute_barrier() &&
+        frame.dispatch_compute(dispatch_pipeline, group, 1_u32, 1_u32, 1_u32) && frame.compute_barrier() &&
+        frame.copy_buffer(self.dispatch, self.info, 12_u64, 0_u64, 4_u64) &&
+        frame.dispatch_compute_indirect(self.pipeline, self.group, self.dispatch, 0_u64) && frame.compute_barrier()
+    }
+    pub fn track(self: mut Self&, frame: RenderFrame) -> Result[bool, str] {
+        self.collect()
+        let token = frame.completion()
+        if !token.available() {
+            ret Result::Err("Unable to retain skin GPU completion")
+        }
+        self.uses.push(token) ret Result::Ok(true)
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut count = 0_usize
+        for i in 0_usize..self.uses.len() {
+            let token = self.uses.get_unchecked_borrowed(i) if token.ready() {
+                token.destroy()
+            } else {
+                self.uses.set(count, token) count += 1_usize
+            }
+        }
+        while self.uses.len() > count {
+            self.uses.pop()
+        }
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        self.collect() if self.uses.len() > 0_usize {
+            ret false
+        }
+        if self.producer.available() {
+            self.producer.destroy()
+        }
+        self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy()
+        for b in vec![self.vertices, self.spans, self.deltas, self.palette, self.previous_palette, self.models, self.weights, self.requests, self.output, self.tags, self.dispatch, self.info, self.status] {
+            b.destroy()
+        }
+        ret true
+    }
+    pub fn cache_buffer(self: Self&) -> GpuBuffer {
+        ret self.output
+    }
+    pub fn tags_buffer(self: Self&) -> GpuBuffer {
+        ret self.tags
+    }
+    pub fn dispatch_buffer(self: Self&) -> GpuBuffer {
+        ret self.dispatch
+    }
+    pub fn requests_buffer(self: Self&) -> GpuBuffer {
+        ret self.requests
+    }
+    pub fn model_buffer(self: Self&) -> GpuBuffer {
+        ret self.models
+    }
+    pub fn geometry_configuration(self: Self&) -> Vec[u32] {
+        ret vec![self.mesh.vertices.len() as u32, self.bones as u32, self.mesh.morphs.len() as u32, self.epoch]
+    }
+    pub fn instance_history(self: Self&) -> Vec[u32] {
+        ret self.history
+    }
+    pub fn instance_count(self: Self&) -> usize {
+        ret self.pending_keys.len()
+    }
+    pub fn maximum_instance_count(self: Self&) -> usize {
+        ret self.maximum_instances
+    }
+    pub fn logical_frame(self: Self&) -> u64 {
+        ret self.staged_frame
+    }
+}

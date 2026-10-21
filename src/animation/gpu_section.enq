@@ -1,0 +1,171 @@
+//! Shared per-section dynamic bounds and VG descriptors. Culling uses animated
+//! hierarchy bounds before deciding which vertices need skinning.
+import core::result::Result
+import core::vec::Vec
+import mod::cook::SkinGeometrySection
+import mod::deform::DeformableCluster
+import mod::gpu::{SkinGpuCache, animation_spirv}
+import mod::gpu_pack::{PackedDeformableBounds, pack_deformable_bounds}
+import refrain::rhi::*
+
+pub struct SkinGpuSection {
+    cache: SkinGpuCache<H>
+    layout: BindGroupLayout
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    group: BindGroup
+    info: GpuBuffer
+    bone_bounds: GpuBuffer
+    requests: GpuBuffer
+    bounds: GpuBuffer
+    configuration: GpuBuffer
+    status: GpuBuffer
+    cluster_count: usize
+    hierarchy_count: usize
+    bound_count: usize
+    nodes: usize
+    maximum_instances: usize
+    recorded: bool
+    logical_frame: u64
+    uses: Vec[GpuCompletion]
+    producer: GpuCompletion
+}
+
+impl for SkinGpuSection {
+    pub fn create(device: GraphicsDevice, cache: SkinGpuCache<H>, section: SkinGeometrySection) -> Result[SkinGpuSection<H>, str] {
+        let mut nodes = Vec[DeformableCluster]::with_capacity(section.clusters.len() + section.hierarchy.len())
+        for cluster in section.clusters {
+            nodes.push(cluster)
+        }
+        for node in section.hierarchy {
+            nodes.push(node)
+        }
+        if nodes.len() == 0_usize || nodes.len() > 1000000_usize {
+            ret Result::Err("Invalid deformable section hierarchy")
+        }
+        let maximum_instances = cache.maximum_instance_count() let count = nodes.len() * maximum_instances
+        let packed = pack_deformable_bounds(nodes)
+        if (count as u64) * 64_u64 +(packed.words.len() as u64) * 4_u64 > 268435456_u64 {
+            ret Result::Err("Deformable section bounds exceed the 256 MiB allocation budget")
+        }
+        let bone_bounds = device.create_buffer((packed.words.len() as u64) * 4_u64, buffer_storage(), true)
+        let requests = device.create_buffer((count as u64) * 16_u64, buffer_storage(), true)
+        let mut request_words = Vec[u32]::with_capacity(count * 4_usize)
+        let config = cache.geometry_configuration() let bones = config.get_unchecked_borrowed(1_usize) as usize
+        for instance in 0_usize..maximum_instances {
+            for i in 0_usize..nodes.len() {
+                request_words.push(packed.spans.get_unchecked_borrowed(i * 2_usize)) request_words.push(packed.spans.get_unchecked_borrowed(i * 2_usize + 1_usize)) request_words.push((instance * bones) as u32) request_words.push((instance * nodes.len() + i) as u32)
+            }
+        }
+        let info = device.create_buffer(16_u64, buffer_storage() | buffer_transfer_destination(), false)
+        let bounds = device.create_buffer((count as u64) * 48_u64, buffer_storage(), false)
+        let configuration = device.create_buffer((32_usize + maximum_instances * 16_usize) as u64, buffer_storage() | buffer_transfer_destination(), false)
+        let status = device.create_buffer(16_u64, buffer_storage() | buffer_transfer_destination(), false)
+        let mut entries = Vec[BindGroupLayoutEntry]::new() for i in 0_usize..6_usize {
+            entries.push(BindGroupLayoutEntry::storage(i as u32, shader_stage_compute()))
+        }
+        let layout = device.create_bind_group_layout(entries) let shader = device.create_shader_module(animation_spirv(1_u32), shader_stage_compute()) let pipeline = device.create_compute_pipeline(shader, layout)
+        let buffers = vec![info, bone_bounds, cache.model_buffer(), requests, bounds, status]
+        let mut bindings = Vec[u32]::new() let mut ranges = Vec[u64]::new() let mut offsets = Vec[u64]::new()
+        let mut available = true for i in 0_usize..buffers.len() {
+            let buffer = buffers.get_unchecked_borrowed(i) available = available && buffer.available() bindings.push(i as u32) offsets.push(0_u64) ranges.push(buffer.size())
+        }
+        let group = device.create_buffer_bind_group_many(layout, bindings, buffers, offsets, ranges)
+        if !available || !configuration.available() || !layout.available() || !shader.available() || !pipeline.available() || !group.available() || !bone_bounds.write_u32s(0_u64, packed.words) || !requests.write_u32s(0_u64, request_words) {
+            group.destroy() pipeline.destroy() shader.destroy() layout.destroy() info.destroy() bone_bounds.destroy() requests.destroy() bounds.destroy() configuration.destroy() status.destroy() ret Result::Err("Unable to allocate deformable section resources")
+        }
+        ret Result::Ok(SkinGpuSection<H> {
+                cache, layout, shader, pipeline, group, info, bone_bounds, requests, bounds, configuration, status, section.clusters.len(), section.hierarchy.len(), packed.words.len() / 12_usize, nodes.len(), maximum_instances, false, 0_u64, Vec[GpuCompletion]::new(), GpuCompletion::unavailable()
+            }
+            ,
+        )
+    }
+    pub fn record_bounds(self: mut Self&, frame: RenderFrame, view_history_valid: bool) -> Result[bool, str] {
+        self.cache.upload(frame)?
+        let token = frame.completion() if !token.available() {
+            ret Result::Err("Unable to retain section completion")
+        }
+        self.collect()
+        if self.producer.available() {
+            if self.producer.status() == GpuCompletionStatus::Cancelled {
+                self.recorded = false
+            } elif !self.producer.same_submission(token) && !self.producer.submitted() {
+                token.destroy() ret Result::Err("Skin bounds producer has not been submitted")
+            }
+        }
+        self.uses.push(token)
+        let count = self.cache.instance_count()
+        let mut configuration = self.cache.geometry_configuration()
+        let bones = configuration.get_unchecked_borrowed(1_usize) as usize
+        configuration.push(self.maximum_instances as u32) configuration.push(self.cluster_count as u32) configuration.push(self.hierarchy_count as u32) configuration.push(count as u32)
+        let history = self.cache.instance_history()
+        for i in 0_usize..count {
+            configuration.push(history.get_unchecked_borrowed(i)) configuration.push(if view_history_valid {
+                    1_u32
+                } else {
+                    0_u32
+                }
+            ) configuration.push(0_u32) configuration.push(0_u32)
+        }
+        if !frame.update_u32s(self.configuration, 0_u64, configuration) {
+            ret Result::Err("Unable to record skin section configuration")
+        }
+        if count == 0_usize ||(self.recorded && self.logical_frame == self.cache.logical_frame()) {
+            ret Result::Ok(true)
+        }
+        if self.producer.available() {
+            self.producer.destroy()
+        }
+        self.producer = token.retained() self.recorded = false
+        let info = vec![(count * self.nodes) as u32, self.bound_count as u32,(bones * count) as u32,(self.maximum_instances * self.nodes) as u32]
+        let groups =(count * self.nodes + 63_usize) / 64_usize let x = if groups > 65535_usize {
+            65535_usize
+        } else {
+            groups
+        }
+        let y =(groups + 65534_usize) / 65535_usize
+        if !frame.fill_buffer(self.status, 0_u64, 16_u64, 0_u32) || !frame.transfer_storage_barrier() || !frame.update_u32s(self.info, 0_u64, info) || !frame.dispatch_compute(self.pipeline, self.group, x as u32, y as u32, 1_u32) || !frame.compute_barrier() {
+            ret Result::Err("Unable to record dynamic skin bounds")
+        }
+        self.logical_frame = self.cache.logical_frame() self.recorded = true ret Result::Ok(true)
+    }
+    pub fn append_bindings(self: Self&, bindings: mut Vec[u32], buffers: mut Vec[GpuBuffer], offsets: mut Vec[u64], ranges: mut Vec[u64]) ->() {
+        let skin_buffers = vec![self.cache.cache_buffer(), self.configuration, self.bounds, self.cache.tags_buffer(), self.cache.dispatch_buffer(), self.cache.requests_buffer()]
+        for i in 0_usize..skin_buffers.len() {
+            let buffer = skin_buffers.get_unchecked_borrowed(i) bindings.push(12_u32 + i as u32) buffers.push(buffer) offsets.push(0_u64) ranges.push(buffer.size())
+        }
+    }
+    pub fn record_selected(self: mut Self&, frame: RenderFrame, group: BindGroup, dispatch_pipeline: ComputePipeline, request_pipeline: ComputePipeline) -> bool {
+        ret self.cache.record_selected(frame, group, dispatch_pipeline, request_pipeline)
+    }
+    pub fn frame(self: Self&) -> u64 {
+        ret self.cache.logical_frame()
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut count = 0_usize for i in 0_usize..self.uses.len() {
+            let token = self.uses.get_unchecked_borrowed(i) if token.ready() {
+                token.destroy()
+            } else {
+                self.uses.set(count, token) count += 1_usize
+            }
+        }
+        while self.uses.len() > count {
+            self.uses.pop()
+        }
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        self.collect() if self.uses.len() > 0_usize {
+            ret false
+        }
+        if self.producer.available() {
+            self.producer.destroy()
+        }
+        self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy() self.info.destroy() self.bone_bounds.destroy() self.requests.destroy() self.bounds.destroy() self.configuration.destroy() self.status.destroy() ret true
+    }
+}
+
+impl for SkinGpuSection {
+    pub fn matches(self: Self&, clusters: usize, hierarchy: usize, maximum_instances: usize) -> bool {
+        ret clusters == self.cluster_count && hierarchy == self.hierarchy_count && maximum_instances == self.maximum_instances
+    }
+}

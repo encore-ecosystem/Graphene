@@ -1,0 +1,163 @@
+//! CPU material data independent of rendering and asset import.
+import core::vec::Vec
+import linalg::Vec3
+
+pub struct StandardMaterial {
+    base_color: Vec3
+    metallic: f32
+    roughness: f32
+    unlit: bool
+    double_sided: bool
+    base_color_texture: str
+    normal_texture: str
+    normal_scale: f32
+    normal_flip_y: bool
+}
+
+fn saturate(value: f32) -> f32 {
+    ret if value < 0.0_f32 {
+        0.0_f32
+    } else {
+        if value > 1.0_f32 {
+            1.0_f32
+        } else {
+            value
+        }
+    }
+}
+
+impl for StandardMaterial {
+    pub fn new(base_color: Vec3, metallic: f32, roughness: f32) -> StandardMaterial {
+        ret StandardMaterial {
+            base_color, saturate(metallic), saturate(roughness), false, false, "", "", 1.0, false
+        }
+    }
+    pub fn default() -> StandardMaterial {
+        ret StandardMaterial::new(Vec3::new(1.0_f32, 1.0_f32, 1.0_f32), 0.0_f32, 0.5_f32)
+    }
+    pub fn editor_default() -> StandardMaterial {
+        ret StandardMaterial::new(Vec3::new(0.34_f32, 0.38_f32, 0.44_f32), 0.08_f32, 0.48_f32)
+    }
+    pub fn base_color(self: Self) -> Vec3 {
+        ret self.base_color
+    }
+    pub fn metallic(self: Self) -> f32 {
+        ret self.metallic
+    }
+    pub fn roughness(self: Self) -> f32 {
+        ret self.roughness
+    }
+    pub fn unlit(self: Self) -> bool {
+        ret self.unlit
+    }
+    pub fn double_sided(self: Self) -> bool {
+        ret self.double_sided
+    }
+    pub fn base_color_texture(self: Self) -> str {
+        ret self.base_color_texture
+    }
+    pub fn normal_texture(self: Self) -> str {
+        ret self.normal_texture
+    }
+    pub fn normal_scale(self: Self) -> f32 {
+        ret self.normal_scale
+    }
+    pub fn normal_flip_y(self: Self) -> bool {
+        ret self.normal_flip_y
+    }
+    pub fn with_normal_texture(self: Self, path: str) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness,
+            self.unlit, self.double_sided, self.base_color_texture, path, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_normal_scale(self: Self, value: f32) -> StandardMaterial {
+        let scale = if value >= 0.0 && value <= 4.0 {
+            value
+        } elif value > 4.0 {
+            4.0
+        } else {
+            0.0
+        }
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness,
+            self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, scale, self.normal_flip_y
+        }
+    }
+    pub fn with_normal_flip_y(self: Self, value: bool) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness,
+            self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, value
+        }
+    }
+    /// Separate from the legacy material uniform: per-instance texture parameters.
+    pub fn texture_uniform_values(self: Self) -> Vec[f32] {
+        ret vec![if self.normal_texture == "" {
+                0.0_f32
+            } else {
+                self.normal_scale
+            }
+            ,
+            if self.normal_flip_y {
+                - 1.0_f32
+            } else {
+                1.0_f32
+            }
+            , 0.0_f32, 0.0_f32]
+    }
+    pub fn with_base_color_texture(self: Self, path: str) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness,
+            self.unlit, self.double_sided, path, self.normal_texture, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_base_color(self: Self, value: Vec3) -> StandardMaterial {
+        ret StandardMaterial {
+            value, self.metallic, self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_metallic(self: Self, value: f32) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, saturate(value), self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_roughness(self: Self, value: f32) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, saturate(value), self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_unlit_value(self: Self, value: bool) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness, value, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_unlit(self: Self) -> StandardMaterial {
+        ret self.with_unlit_value(true)
+    }
+    pub fn with_double_sided_value(self: Self, value: bool) -> StandardMaterial {
+        ret StandardMaterial {
+            self.base_color, self.metallic, self.roughness, self.unlit, value, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+        }
+    }
+    pub fn with_double_sided(self: Self) -> StandardMaterial {
+        ret self.with_double_sided_value(true)
+    }
+    pub fn uniform_values(self: Self) -> Vec[f32] {
+        let mut values = Vec[f32]::new()
+        values.push(self.base_color.x()) values.push(self.base_color.y()) values.push(self.base_color.z())
+        values.push(1.0_f32)
+        values.push(self.metallic) values.push(self.roughness)
+        values.push(if self.unlit {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        ) values.push(if self.base_color_texture != "" {
+                1.0_f32
+            } else {
+                0.0_f32
+            }
+        )
+        ret values
+    }
+}

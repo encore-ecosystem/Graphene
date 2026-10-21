@@ -1,0 +1,556 @@
+//! Per-character shared VG geometry/deformation, with separate viewport streams.
+//! Retired generations keep their real producer/consumer completion records.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::{Mat4, Vec3}
+import mod::character::CharacterAsset
+import mod::cook::{CookedSkeletalMesh, SkinGeometrySection, skeletal_gpu_bind_mesh}
+import mod::gpu::{SkinGpuCache, SkinFrameInstance}
+import mod::gpu_section::SkinGpuSection
+import mod::material::{AnimationSourceMaterial, AnimationSourceImage}
+import mod::model::{SkeletalMesh, Skeleton}
+import mod::runtime::{AnimationWorld, PoseSnapshot, AnimationInstanceId}
+import mod::scene::{SceneAnimation, SceneCharacterLibrary, SceneAnimatedActor, SceneAnimatedActorSlot, animated_actor_matrix}
+import refrain::lod_groups::{LodGroups, LodGroup}
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::light::DirectionalLight
+import refrain::texture_gpu::TextureUpload
+import refrain::texture_image::TextureImage
+import refrain::virtual_geometry::VirtualGeometry
+import refrain::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryResources, VirtualGeometryInstance, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_destroy, destroy_virtual_geometry_resources, gpu_virtual_geometry_error, gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_replace_texture_groups}
+
+pub struct CharacterRenderView {
+    target: Swapchain
+    camera: PerspectiveCamera
+    width: u32
+    height: u32
+    samples: u32
+    temporal: bool
+    previous_view_projection: Mat4
+    light: DirectionalLight
+    ambient: Vec3
+    lights: Vec[f32]
+    shading: u32
+    shelter: GpuTexture
+}
+struct CharacterPart {
+    main: GpuVirtualGeometry<H>
+    preview: GpuVirtualGeometry<H>
+    mask: GpuVirtualGeometry<H>
+    silhouette: GpuVirtualGeometry<H>
+    resources: VirtualGeometryResources<H>
+    skin: SkinGpuSection<H>
+    material: AnimationSourceMaterial
+    normal: GpuTexture
+    sampler: GpuSampler
+    main_ready: bool
+    preview_ready: bool
+    mask_ready: bool
+    silhouette_ready: bool
+    retirement: u32
+}
+struct PartSlot {
+    value: CharacterPart<H>
+}
+struct CharacterDrawActor {
+    entity: u64
+    model: Mat4
+    previous: Mat4
+    history: bool
+}
+struct CharacterGpuSet {
+    generation: u64
+    capacity: usize
+    cache: SkinGpuCache<H>
+    parts: Vec[PartSlot]
+    frame: u64
+    staged: bool
+    actors: Vec[CharacterDrawActor]
+}
+struct SetSlot {
+    value: Option[CharacterGpuSet<H>]
+}
+pub struct SceneCharacters {
+    device: GraphicsDevice
+    sets: Vec[SetSlot]
+    retired: Vec[SetSlot]
+    project: str
+    groups: LodGroups
+    message: str
+}
+
+impl for SceneCharacters {
+    pub fn create(device: GraphicsDevice) -> SceneCharacters<H> {
+        ret SceneCharacters<H> {
+            device, Vec[SetSlot]::new(), Vec[SetSlot]::new(), "", LodGroups::defaults(), ""
+        }
+    }
+    pub fn configure(self: mut Self&, project: str) ->() {
+        if self.project == project {
+            ret()
+        }
+        for slot in self.sets {
+            self.retired.push(slot)
+        }
+        self.sets.clear()
+        self.project = project self.groups = LodGroups::load(project)
+    }
+    pub fn message(self: Self&) -> str {
+        ret self.message
+    }
+    fn collect(self: mut Self&) ->() {
+        for i in 0_usize..self.retired.len() {
+            let mut slot = self.retired.get_unchecked_borrowed(i) let mut set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            if retire_set(set) {
+                slot.value = Option[CharacterGpuSet<H>]::None self.retired.set(i, slot)
+            }
+        }
+        let mut count = 0_usize
+        for i in 0_usize..self.retired.len() {
+            let slot = self.retired.get_unchecked_borrowed(i) if slot.value.is_some() {
+                self.retired.set(count, slot) count += 1_usize
+            }
+        }
+        while self.retired.len() > count {
+            self.retired.pop()
+        }
+    }
+    pub fn prepare(self: mut Self&, animation: SceneAnimation<H>, frame: RenderFrame, view: CharacterRenderView, preview: bool, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> bool {
+        ret self.prepare_view(animation, frame, view, if preview {
+                1_u32
+            } else {
+                0_u32
+            }
+            , Vec[u64]::new(), gi_scene, gi_surfaces, gi_history,)
+    }
+    pub fn prepare_selection(self: mut Self&, animation: SceneAnimation<H>, frame: RenderFrame, view: CharacterRenderView, selected: Vec[u64], silhouette: bool, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> bool {
+        ret self.prepare_view(animation, frame, view, if silhouette {
+                3_u32
+            } else {
+                2_u32
+            }
+            , selected, gi_scene, gi_surfaces, gi_history,)
+    }
+    fn prepare_view(self: mut Self&, animation: SceneAnimation<H>, frame: RenderFrame, view: CharacterRenderView, kind: u32, selected: Vec[u64], gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> bool {
+        self.collect()
+        while self.sets.len() < animation.libraries() {
+            self.sets.push(SetSlot {
+                    Option[CharacterGpuSet<H>]::None
+                }
+            )
+        }
+        for index in 0_usize..self.sets.len() {
+            let mut slot = self.sets.get_unchecked_borrowed(index)
+            if index >= animation.libraries() {
+                continue
+            }
+            let library = animation.library(index)
+            let actors = animation.actor_slots()
+            let mut count = 0_usize for slot in actors {
+                match slot.value {
+                    Some(a) => {
+                        if a.library == index && a.library_generation == library.generation && a.visible {
+                            count += 1_usize
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            let rebuild = match slot.value {
+                Some(set) => set.generation != library.generation || set.capacity < count None => count > 0_usize
+            }
+            if rebuild {
+                let mut capacity = 16_usize while capacity < count {
+                    capacity *= 2_usize
+                }
+                match create_set(self.device, view.target, library, capacity, gi_scene, gi_surfaces, gi_history) {
+                    Ok(set) => {
+                        if slot.value.is_some() {
+                            self.retired.push(SetSlot { slot.value })
+                        }
+                        slot.value = Option[CharacterGpuSet<H>]::Some(set) self.sets.set(index, slot)
+                    }
+                    Err(error) => {
+                        self.message = error ret false
+                    }
+                }
+            }
+            let mut set = match slot.value {
+                Some(set) => set None => {
+                    continue
+                }
+            }
+            for i in 0_usize..set.parts.len() {
+                let mut part = set.parts.get_unchecked_borrowed(i).value if kind == 0_u32 {
+                    part.main_ready = false
+                } elif kind == 1_u32 {
+                    part.preview_ready = false
+                } elif kind == 2_u32 {
+                    part.mask_ready = false
+                } else {
+                    part.silhouette_ready = false
+                }
+            }
+            if count == 0_usize {
+                continue
+            }
+            if !set.staged || set.frame != animation.logical_frame() {
+                let world = animation.runtime() let mut states = Vec[SkinFrameInstance]::with_capacity(count)
+                set.actors.clear()
+                for slot in actors {
+                    let actor = match slot.value {
+                        Some(a) => a None => {
+                            continue
+                        }
+                    }
+                    if actor.library != index || actor.library_generation != library.generation || !actor.visible {
+                        continue
+                    }
+                    let snapshot = match world.snapshot(actor.instance) {
+                        Ok(s) => s Err(e) => {
+                            self.message = e ret false
+                        }
+                    }
+                    let palette = match world.palette(snapshot) {
+                        Ok(s) => s Err(e) => {
+                            self.message = e ret false
+                        }
+                    }
+                    let model = match world.model(snapshot) {
+                        Ok(s) => s Err(e) => {
+                            self.message = e ret false
+                        }
+                    }
+                    let morphs = match world.morphs(snapshot) {
+                        Ok(s) => s Err(e) => {
+                            self.message = e ret false
+                        }
+                    }
+                    let history = world.history_valid(snapshot).unwrap_or(false)
+                    states.push(SkinFrameInstance {
+                            actor.instance.key(), palette, model, morphs, history
+                        }
+                        ,
+                    )
+                    set.actors.push(CharacterDrawActor {
+                            actor.entity, animated_actor_matrix(actor), actor.previous, actor.history_valid && history
+                        }
+                        ,
+                    )
+                }
+                match set.cache.stage(animation.logical_frame(), states) {
+                    Ok(_) => {
+                    }
+                    Err(e) => {
+                        self.message = e ret false
+                    }
+                }
+                set.frame = animation.logical_frame() set.staged = true
+            }
+            for i in 0_usize..set.parts.len() {
+                let mut part = set.parts.get_unchecked_borrowed(i).value
+                let mut geometry = if kind == 0_u32 {
+                    part.main
+                } elif kind == 1_u32 {
+                    part.preview
+                } elif kind == 2_u32 {
+                    part.mask
+                } else {
+                    part.silhouette
+                }
+                geometry.set_lights(view.lights)
+                geometry.set_lod_projection(view.camera.projection((view.width as f32) /(view.height as f32)).values().get(5_usize).unwrap_or(1_f32), view.camera.near_clip())
+                match self.groups.find("default") {
+                    Some(group) => {
+                        geometry.set_lod_group(group)
+                    }
+                    None => {
+                    }
+                }
+                if view.shelter.available() && geometry.set_shelter_texture(view.shelter) {
+                    let groups = gpu_virtual_geometry_texture_groups(geometry, self.device, GpuTexture::unavailable(), part.normal, part.sampler)
+                    if groups.len() == 0_usize {
+                        self.message = "Unable to bind character textures" ret false
+                    }
+                    for old in gpu_virtual_geometry_replace_texture_groups(geometry, groups) {
+                        old.destroy()
+                    }
+                }
+                let configured = if kind >= 2_u32 {
+                    geometry.configure_selection(self.device, view.target)
+                } else {
+                    geometry.configure_anti_aliasing(self.device, view.target, view.samples, view.temporal, view.previous_view_projection)
+                }
+                if !configured {
+                    self.message = "Unable to configure character AA" ret false
+                }
+                let material = part.material let mut instances = Vec[VirtualGeometryInstance]::with_capacity(set.actors.len())
+                for actor in set.actors {
+                    let mut base = Vec3::new(material.base_color.x, material.base_color.y, material.base_color.z)
+                    if kind >= 2_u32 {
+                        let mut on = false for entity in selected {
+                            if entity == actor.entity {
+                                on = true
+                            }
+                        }
+                        base = Vec3::new(if on {
+                                1_f32
+                            } else {
+                                0_f32
+                            }
+                            , if kind == 3_u32 {
+                                1_f32
+                            } else {
+                                0_f32
+                            }
+                            , 0_f32,)
+                    }
+                    instances.push(VirtualGeometryInstance::new(actor.model, base, material.metallic, material.roughness, material.unlit).with_normal_map(if material.normal_image.has_texture {
+                                material.normal_scale
+                            } else {
+                                0_f32
+                            }
+                            , false,).with_previous(actor.previous, actor.history))
+                }
+                let ready = gpu_virtual_geometry_record_debug(geometry, frame, view.camera.view_projection((view.width as f32) /(view.height as f32)), view.camera.position(), instances, 0_f32, view.light.direction(), view.light.color(), view.light.intensity(), view.ambient, view.height as f32, view.shading, index as u32)
+                if kind == 0_u32 {
+                    part.main_ready = ready
+                } elif kind == 1_u32 {
+                    part.preview_ready = ready
+                } elif kind == 2_u32 {
+                    part.mask_ready = ready
+                } else {
+                    part.silhouette_ready = ready
+                }
+                if !ready {
+                    self.message = "Unable to record animated Virtual Geometry" ret false
+                }
+            }
+        }
+        ret true
+    }
+    pub fn draw(self: Self&, pass: RenderPassEncoder, frame_slot: u32, preview: bool, mode: u32) -> bool {
+        for slot in self.sets {
+            let set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            for part in set.parts {
+                if preview {
+                    if part.value.preview_ready && !gpu_virtual_geometry_draw_slot(part.value.preview, pass, frame_slot as usize, mode) {
+                        ret false
+                    }
+                } else {
+                    if part.value.main_ready && !gpu_virtual_geometry_draw_slot(part.value.main, pass, frame_slot as usize, mode) {
+                        ret false
+                    }
+                }
+            }
+        }
+        ret true
+    }
+    pub fn draw_selection(self: Self&, pass: RenderPassEncoder, frame_slot: u32, silhouette: bool) -> bool {
+        for slot in self.sets {
+            let set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            for slot in set.parts {
+                let part = slot.value let ready = if silhouette {
+                    part.silhouette_ready
+                } else {
+                    part.mask_ready
+                }
+                let geometry = if silhouette {
+                    part.silhouette
+                } else {
+                    part.mask
+                }
+                if ready && !gpu_virtual_geometry_draw_slot(geometry, pass, frame_slot as usize, 0_u32) {
+                    ret false
+                }
+            }
+        }
+        ret true
+    }
+    pub fn selection_pipeline(self: Self&, silhouette: bool) -> RenderPipeline {
+        for slot in self.sets {
+            let set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            if set.parts.len() > 0_usize {
+                let part = set.parts.get_unchecked_borrowed(0_usize).value ret if silhouette {
+                    part.silhouette.pipeline_for_mode(0_u32)
+                } else {
+                    part.mask.pipeline_for_mode(0_u32)
+                }
+            }
+        }
+        ret RenderPipeline::unavailable()
+    }
+    pub fn pipeline(self: Self&, preview: bool, mode: u32) -> RenderPipeline {
+        for slot in self.sets {
+            let set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            if set.parts.len() > 0_usize {
+                let part = set.parts.get_unchecked_borrowed(0_usize).value ret if preview {
+                    part.preview.pipeline_for_mode(mode)
+                } else {
+                    part.main.pipeline_for_mode(mode)
+                }
+            }
+        }
+        ret RenderPipeline::unavailable()
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        for slot in self.sets {
+            self.retired.push(slot)
+        }
+        self.sets.clear() self.collect() ret self.retired.len() == 0_usize
+    }
+}
+fn create_set(device: GraphicsDevice, target: Swapchain, library: SceneCharacterLibrary<H>, capacity: usize, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> Result[CharacterGpuSet<H>, str] {
+    let asset = library.asset
+    let mut cache = SkinGpuCache::create(device, asset.skeleton, asset.geometry.mesh, capacity)?
+    let mut set = CharacterGpuSet<H> {
+        library.generation, capacity, cache, Vec[PartSlot]::new(), 0_u64, false, Vec[CharacterDrawActor]::with_capacity(capacity)
+    }
+    for index in 0_usize..asset.geometry.sections.len() {
+        let section = asset.geometry.sections.get_unchecked_borrowed(index)
+        let name = asset.geometry.mesh.sections.get_unchecked_borrowed(index).material
+        let mut selected = 0_usize for i in 0_usize..asset.materials.len() {
+            if asset.materials.get_unchecked_borrowed(i).name == name {
+                selected = i
+            }
+        }
+        match create_part(device, target, cache, asset.geometry.mesh, section, asset.materials.get_unchecked_borrowed(selected), capacity, gi_scene, gi_surfaces, gi_history) {
+            Ok(part) => {
+                set.parts.push(PartSlot { part })
+            }
+            Err(error) => {
+                retire_set(set) ret Result::Err(error)
+            }
+        }
+    }
+    ret Result::Ok(set)
+}
+fn create_part(device: GraphicsDevice, target: Swapchain, cache: SkinGpuCache<H>, mesh: SkeletalMesh, section: SkinGeometrySection, material: AnimationSourceMaterial, capacity: usize, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> Result[CharacterPart<H>, str] {
+    let mut skin = SkinGpuSection::create(device, cache, section)?
+    let values = skeletal_gpu_bind_mesh(mesh).vertices() let mut packed = Vec[f32]::with_capacity(section.geometry.vertex_indices().len() * 11_usize)
+    for index in section.geometry.vertex_indices() {
+        for c in 0_usize..11_usize {
+            packed.push(values.get_unchecked_borrowed((index as usize) * 11_usize + c))
+        }
+    }
+    let image = material.base_image
+    let mut main = GpuVirtualGeometry::create_skinned(device, target, section.geometry, packed, capacity, gi_scene, gi_surfaces, gi_history, image.pixels, image.width, image.height, skin)
+    if !main.is_ready() {
+        let error = gpu_virtual_geometry_error(main) gpu_virtual_geometry_destroy(main) skin.destroy() ret Result::Err(error)
+    }
+    let mut preview = main.fork_view(device, target, gi_scene, gi_surfaces, gi_history, image.pixels, image.width, image.height)
+    let mut mask = main.fork_view(device, target, gi_scene, gi_surfaces, gi_history, image.pixels, image.width, image.height)
+    let mut silhouette = main.fork_view(device, target, gi_scene, gi_surfaces, gi_history, image.pixels, image.width, image.height)
+    let mut part = CharacterPart<H> {
+        main, preview, mask, silhouette, main.shared_resources(), skin, material, GpuTexture::unavailable(), device.create_sampler(), false, false, false, false, 0_u32
+    }
+    if !preview.is_ready() || !mask.is_ready() || !silhouette.is_ready() {
+        let error = "Unable to create character render views" retire_part(part) ret Result::Err(error)
+    }
+    let normal_image = material.normal_image
+    let upload = match TextureUpload::begin_linear(device, TextureImage {
+            normal_image.width, normal_image.height, normal_image.pixels
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            retire_part(part) ret Result::Err("Unable to upload character normal texture")
+        }
+    }
+    let uploaded = upload.wait() part.normal = upload.finish()
+    if !uploaded {
+        retire_part(part) ret Result::Err("Character normal texture transfer failed")
+    }
+    for index in 0_usize..2_usize {
+        let geometry = if index == 0_usize {
+            main
+        } else {
+            preview
+        }
+        let groups = gpu_virtual_geometry_texture_groups(geometry, device, GpuTexture::unavailable(), part.normal, part.sampler)
+        if groups.len() == 0_usize {
+            retire_part(part) ret Result::Err("Unable to initialize character texture bindings")
+        }
+        for old in gpu_virtual_geometry_replace_texture_groups(geometry, groups) {
+            old.destroy()
+        }
+    }
+    ret Result::Ok(part)
+}
+fn retire_part(part: mut CharacterPart<H>) -> bool {
+    if part.retirement == 0_u32 {
+        if !gpu_virtual_geometry_destroy(part.main) {
+            ret false
+        }
+        part.retirement = 1_u32
+    }
+    if part.retirement == 1_u32 {
+        if !gpu_virtual_geometry_destroy(part.preview) {
+            ret false
+        }
+        part.retirement = 2_u32
+    }
+    if part.retirement == 2_u32 {
+        if !gpu_virtual_geometry_destroy(part.mask) {
+            ret false
+        }
+        part.retirement = 3_u32
+    }
+    if part.retirement == 3_u32 {
+        if !gpu_virtual_geometry_destroy(part.silhouette) {
+            ret false
+        }
+        part.retirement = 4_u32
+    }
+    if part.retirement == 4_u32 {
+        if !destroy_virtual_geometry_resources(part.resources) {
+            ret false
+        }
+        part.retirement = 5_u32
+    }
+    if part.retirement == 5_u32 {
+        if !part.skin.destroy() {
+            ret false
+        }
+        part.retirement = 6_u32
+    }
+    if part.retirement == 6_u32 {
+        part.normal.destroy() part.sampler.destroy() part.retirement = 7_u32
+    }
+    ret true
+}
+fn retire_set(set: mut CharacterGpuSet<H>) -> bool {
+    let mut ready = true
+    for i in 0_usize..set.parts.len() {
+        let mut part = set.parts.get_unchecked_borrowed(i).value if !retire_part(part) {
+            ready = false
+        }
+    }
+    if !ready {
+        ret false
+    }
+    ret set.cache.destroy()
+}

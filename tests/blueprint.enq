@@ -1,0 +1,58 @@
+//! Documents, graph validation and instance identity are tested without a GPU.
+import core::option::Option
+import core::vec::Vec
+import graphene::blueprint::*
+import graphene::scene::json_value::parse_number
+
+fn main() -> u32 {
+    let mut asset = BlueprintAsset::new("rotator", "BP_Rotator")
+    asset.properties.push(BlueprintProperty { 41, "Speed", BlueprintValue::F32(2) })
+    asset.nodes.push(BlueprintNode::new(1, "tick", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(2, "get-variable", BlueprintType::F32).with_reference(41))
+    if validate_blueprint(asset).len() != 0 {
+        ret 1
+    }
+    let encoded = blueprint_stringify(asset)
+    let restored = match blueprint_parse(encoded) {
+        Ok(value) => value Err(_) => {
+            ret 2
+        }
+    }
+    if blueprint_stringify(restored) != encoded {
+        ret 3
+    }
+    let instance = BlueprintInstance {
+        "Content/Blueprints/Rotator.graphene-blueprint.json",
+        vec![BlueprintOverride { 41, BlueprintValue::F32(5) }]
+    }
+    if validate_blueprint_instance(restored, instance).len() != 0 {
+        ret 4
+    }
+    let semantic = blueprint_semantic_source(asset)
+    let moved = asset.nodes.get(0).unwrap_or(BlueprintNode::new(0, "", BlueprintType::Exec)).at(500, 400)
+    asset.nodes.set(0, moved)
+    if blueprint_semantic_source(asset) != semantic || blueprint_stringify(asset) == encoded {
+        ret 5
+    }
+    asset.properties.set(0, BlueprintProperty { 41, "Angular Speed", BlueprintValue::F32(2) })
+    if validate_blueprint_instance(asset, instance).len() != 0 {
+        ret 6
+    }
+    asset.properties.set(0, BlueprintProperty { 41, "Angular Speed", BlueprintValue::Bool(true) })
+    if validate_blueprint_instance(asset, instance).len() == 0 {
+        ret 7
+    }
+    asset.nodes.push(BlueprintNode::new(3, "add", BlueprintType::F32))
+    asset.connect(3, "value", 3, "a")
+    asset.connect(3, "value", 3, "b")
+    if validate_blueprint(asset).len() == 0 {
+        ret 8
+    }
+    if blueprint_parse("{\"format\":\"graphene-blueprint\",\"version\":2}").is_ok() {
+        ret 9
+    }
+    if parse_number("1e999999999999999999999999999999").is_some() || parse_number("3.5e38").is_some() {
+        ret 10
+    }
+    ret 0
+}

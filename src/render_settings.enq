@@ -1,0 +1,524 @@
+//! Project rendering policy. GPU support never changes the saved preference.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import mod::scene::json_value::parse_number
+import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
+
+pub enum AntiAliasingMethod {
+    Off
+    Fxaa
+    Smaa
+    Msaa2
+    Msaa4
+    Taa
+    Fsr
+    Dlss
+    Dlaa
+}
+
+impl for AntiAliasingMethod {
+    pub fn name(self: Self) -> str {
+        match self {
+            AntiAliasingMethod::Off => {
+                ret "Off"
+            }
+            AntiAliasingMethod::Fxaa => {
+                ret "FXAA"
+            }
+            AntiAliasingMethod::Smaa => {
+                ret "SMAA"
+            }
+            AntiAliasingMethod::Msaa2 => {
+                ret "MSAA 2×"
+            }
+            AntiAliasingMethod::Msaa4 => {
+                ret "MSAA 4×"
+            }
+            AntiAliasingMethod::Taa => {
+                ret "TAA"
+            }
+            AntiAliasingMethod::Fsr => {
+                ret "AMD FSR 3.1"
+            }
+            AntiAliasingMethod::Dlss => {
+                ret "NVIDIA DLSS"
+            }
+            AntiAliasingMethod::Dlaa => {
+                ret "NVIDIA DLAA"
+            }
+        }
+    }
+    pub fn key(self: Self) -> str {
+        match self {
+            AntiAliasingMethod::Off => {
+                ret "off"
+            }
+            AntiAliasingMethod::Fxaa => {
+                ret "fxaa"
+            }
+            AntiAliasingMethod::Smaa => {
+                ret "smaa"
+            }
+            AntiAliasingMethod::Msaa2 => {
+                ret "msaa2"
+            }
+            AntiAliasingMethod::Msaa4 => {
+                ret "msaa4"
+            }
+            AntiAliasingMethod::Taa => {
+                ret "taa"
+            }
+            AntiAliasingMethod::Fsr => {
+                ret "fsr"
+            }
+            AntiAliasingMethod::Dlss => {
+                ret "dlss"
+            }
+            AntiAliasingMethod::Dlaa => {
+                ret "dlaa"
+            }
+        }
+    }
+    pub fn samples(self: Self) -> u32 {
+        match self {
+            AntiAliasingMethod::Off => {
+                ret 1_u32
+            }
+            AntiAliasingMethod::Fxaa => {
+                ret 1_u32
+            }
+            AntiAliasingMethod::Smaa => {
+                ret 1_u32
+            }
+            AntiAliasingMethod::Msaa2 => {
+                ret 2_u32
+            }
+            AntiAliasingMethod::Msaa4 => {
+                ret 4_u32
+            }
+            _ => {
+                ret 1_u32
+            }
+        }
+    }
+    pub fn temporal(self: Self) -> bool {
+        ret self.key() == "taa" || self.reconstruction()
+    }
+    pub fn reconstruction(self: Self) -> bool {
+        ret self.key() == "fsr" || self.key() == "dlss" || self.key() == "dlaa"
+    }
+    pub fn provider(self: Self) -> u32 {
+        ret if self.key() == "fsr" {
+            1_u32
+        } elif self.key() == "dlss" {
+            2_u32
+        } elif self.key() == "dlaa" {
+            3_u32
+        } else {
+            0_u32
+        }
+    }
+    pub fn parse(value: str) -> Option[AntiAliasingMethod] {
+        match value {
+            "off" => {
+                ret Option[AntiAliasingMethod]::Some(AntiAliasingMethod::Off)
+            }
+            "fxaa" => {
+                ret Option[AntiAliasingMethod]::Some(AntiAliasingMethod::Fxaa)
+            }
+            "smaa" => {
+                ret Option[AntiAliasingMethod]::Some(AntiAliasingMethod::Smaa)
+            }
+            "msaa2" => {
+                ret Option[AntiAliasingMethod]::Some(AntiAliasingMethod::Msaa2)
+            }
+            "msaa4" => {
+                ret Option[AntiAliasingMethod]::Some(AntiAliasingMethod::Msaa4)
+            }
+            "taa" => {
+                ret Option[AntiAliasingMethod]::Some(AntiAliasingMethod::Taa)
+            }
+            "fsr" => {
+                ret Option::Some(AntiAliasingMethod::Fsr)
+            }
+            "dlss" => {
+                ret Option::Some(AntiAliasingMethod::Dlss)
+            }
+            "dlaa" => {
+                ret Option::Some(AntiAliasingMethod::Dlaa)
+            }
+            _ => {
+                ret Option[AntiAliasingMethod]::None
+            }
+        }
+    }
+}
+pub fn anti_aliasing_methods() -> Vec[AntiAliasingMethod] {
+    ret vec![AntiAliasingMethod::Off, AntiAliasingMethod::Fxaa, AntiAliasingMethod::Smaa, AntiAliasingMethod::Msaa2, AntiAliasingMethod::Msaa4, AntiAliasingMethod::Taa, AntiAliasingMethod::Fsr, AntiAliasingMethod::Dlss, AntiAliasingMethod::Dlaa]
+}
+pub enum UpscalingQuality {
+    Native
+    Quality
+    Balanced
+    Performance
+    UltraPerformance
+}
+
+impl for UpscalingQuality {
+    pub fn key(self: Self) -> str {
+        match self {
+            Self::Native => {
+                ret "native_aa"
+            }
+            Self::Quality => {
+                ret "quality"
+            }
+            Self::Balanced => {
+                ret "balanced"
+            }
+            Self::Performance => {
+                ret "performance"
+            }
+            Self::UltraPerformance => {
+                ret "ultra_performance"
+            }
+        }
+    }
+    pub fn name(self: Self) -> str {
+        match self {
+            Self::Native => {
+                ret "Native AA"
+            }
+            Self::Quality => {
+                ret "Quality"
+            }
+            Self::Balanced => {
+                ret "Balanced"
+            }
+            Self::Performance => {
+                ret "Performance"
+            }
+            Self::UltraPerformance => {
+                ret "Ultra Performance"
+            }
+        }
+    }
+    pub fn value(self: Self) -> u32 {
+        match self {
+            Self::Native => {
+                ret 0
+            }
+            Self::Quality => {
+                ret 1
+            }
+            Self::Balanced => {
+                ret 2
+            }
+            Self::Performance => {
+                ret 3
+            }
+            Self::UltraPerformance => {
+                ret 4
+            }
+        }
+    }
+    pub fn parse(key: str) -> Option[Self] {
+        for value in upscaling_qualities() {
+            if value.key() == key {
+                ret Option::Some(value)
+            }
+        }
+        ret Option::None
+    }
+}
+pub fn upscaling_qualities() -> Vec[UpscalingQuality] {
+    ret vec![UpscalingQuality::Native, UpscalingQuality::Quality, UpscalingQuality::Balanced, UpscalingQuality::Performance, UpscalingQuality::UltraPerformance]
+}
+pub enum FrameGenerationMethod {
+    Off
+    Fsr
+    Dlss
+}
+
+impl for FrameGenerationMethod {
+    pub fn key(self: Self) -> str {
+        match self {
+            Self::Off => {
+                ret "off"
+            }
+            Self::Fsr => {
+                ret "fsr"
+            }
+            Self::Dlss => {
+                ret "dlss"
+            }
+        }
+    }
+    pub fn name(self: Self) -> str {
+        match self {
+            Self::Off => {
+                ret "Off"
+            }
+            Self::Fsr => {
+                ret "AMD FSR"
+            }
+            Self::Dlss => {
+                ret "NVIDIA DLSS"
+            }
+        }
+    }
+    pub fn provider(self: Self) -> u32 {
+        match self {
+            Self::Off => {
+                ret 0
+            }
+            Self::Fsr => {
+                ret 4
+            }
+            Self::Dlss => {
+                ret 5
+            }
+        }
+    }
+    pub fn parse(key: str) -> Option[Self] {
+        if key == "off" {
+            ret Option::Some(Self::Off)
+        }
+        if key == "fsr" {
+            ret Option::Some(Self::Fsr)
+        }
+        if key == "dlss" {
+            ret Option::Some(Self::Dlss)
+        }
+        ret Option::None
+    }
+}
+pub struct RenderSettings {
+    anti_aliasing: AntiAliasingMethod
+    quality: UpscalingQuality
+    frame_generation: FrameGenerationMethod
+    multiplier: u32
+    sharpness: f32
+}
+
+impl for RenderSettings {
+    pub fn defaults() -> Self {
+        ret Self {
+            AntiAliasingMethod::Smaa, UpscalingQuality::Quality, FrameGenerationMethod::Off, 2, 0.25_f32
+        }
+    }
+    pub fn with_anti_aliasing(self: Self, value: AntiAliasingMethod) -> Self {
+        ret Self {
+            value, if value.key() == "dlss" && self.quality.key() == "native_aa" {
+                UpscalingQuality::Quality
+            } else {
+                self.quality
+            }
+            , self.frame_generation, self.multiplier, self.sharpness
+        }
+    }
+    pub fn with_quality(self: Self, value: UpscalingQuality) -> Self {
+        ret Self {
+            self.anti_aliasing, value, self.frame_generation, self.multiplier, self.sharpness
+        }
+    }
+    pub fn with_frame_generation(self: Self, value: FrameGenerationMethod) -> Self {
+        ret Self {
+            self.anti_aliasing, self.quality, value, self.multiplier, self.sharpness
+        }
+    }
+    pub fn with_multiplier(self: Self, value: u32) -> Self {
+        ret Self {
+            self.anti_aliasing, self.quality, self.frame_generation, if value >= 2 && value <= 4 {
+                value
+            } else {
+                2
+            }
+            , self.sharpness
+        }
+    }
+    pub fn with_sharpness(self: Self, value: f32) -> Self {
+        ret Self {
+            self.anti_aliasing, self.quality, self.frame_generation, self.multiplier, if value >= 0 && value <= 1 {
+                value
+            } else {
+                0.25_f32
+            }
+        }
+    }
+    pub fn anti_aliasing(self: Self) -> AntiAliasingMethod {
+        ret self.anti_aliasing
+    }
+    pub fn quality(self: Self) -> UpscalingQuality {
+        ret self.quality
+    }
+    pub fn frame_generation(self: Self) -> FrameGenerationMethod {
+        ret self.frame_generation
+    }
+    pub fn multiplier(self: Self) -> u32 {
+        ret self.multiplier
+    }
+    pub fn sharpness(self: Self) -> f32 {
+        ret self.sharpness
+    }
+    pub fn parse(source: str) -> Option[Self] {
+        let value = match parse(source) {
+            Ok(value) => value Err(_) => {
+                ret Option::None
+            }
+        }
+        let mut settings = Self::defaults()
+        match value {
+            Json::Object(_) => {
+            }
+            _ => {
+                ret Option::None
+            }
+        }
+        match value.get("anti_aliasing") {
+            Some(v) => {
+                settings = settings.with_anti_aliasing(match AntiAliasingMethod::parse(v.as_str().unwrap_or("")) {
+                        Some(v) => v None => {
+                            ret Option::None
+                        }
+                    }
+                )
+            }
+            None => {
+            }
+        }
+        match value.get("upscaling_quality") {
+            Some(v) => {
+                settings = settings.with_quality(match UpscalingQuality::parse(v.as_str().unwrap_or("")) {
+                        Some(v) => v None => {
+                            ret Option::None
+                        }
+                    }
+                )
+            }
+            None => {
+            }
+        }
+        match value.get("frame_generation") {
+            Some(v) => {
+                settings = settings.with_frame_generation(match FrameGenerationMethod::parse(v.as_str().unwrap_or("")) {
+                        Some(v) => v None => {
+                            ret Option::None
+                        }
+                    }
+                )
+            }
+            None => {
+            }
+        }
+        match value.get("frame_generation_multiplier") {
+            Some(v) => {
+                let n = parse_number(v.as_number().unwrap_or("")).unwrap_or(0_f32)
+                if n != 2 && n != 3 && n != 4 {
+                    ret Option::None
+                }
+                settings = settings.with_multiplier(n as u32)
+            }
+            None => {
+            }
+        }
+        match value.get("upscaling_sharpness") {
+            Some(v) => {
+                let n = parse_number(v.as_number().unwrap_or("")).unwrap_or( - 1_f32)
+                if n < 0 || n > 1 {
+                    ret Option::None
+                }
+                settings = settings.with_sharpness(n as f32)
+            }
+            None => {
+            }
+        }
+        ret Option::Some(settings)
+    }
+    pub fn load(project: str) -> Self {
+        ret Self::parse(read_file(project + "/Config/Rendering.json")).unwrap_or(Self::defaults())
+    }
+    pub fn save(self: Self, project: str) -> bool {
+        if project == "" || mkdir_all(project + "/Config") != 0_i32 {
+            ret false
+        }
+        let path = project + "/Config/Rendering.json" let mut fields = Vec[(str, Json)]::new()
+        if file_exists(path) {
+            let value = match parse(read_file(path)) {
+                Ok(v) => v _ => {
+                    ret false
+                }
+            }
+            match value {
+                Json::Object(previous) => {
+                    for item in previous {
+                        if item.0 != "anti_aliasing" && item.0 != "upscaling_quality" && item.0 != "frame_generation" && item.0 != "frame_generation_multiplier" && item.0 != "upscaling_sharpness" {
+                            fields.push(item)
+                        }
+                    }
+                }
+                _ => {
+                    ret false
+                }
+            }
+        }
+        fields.push(field("anti_aliasing", Json::String(self.anti_aliasing.key())))
+        fields.push(field("upscaling_quality", Json::String(self.quality.key())))
+        fields.push(field("frame_generation", Json::String(self.frame_generation.key())))
+        fields.push(field("frame_generation_multiplier", Json::Number(Debug::fmt(self.multiplier))))
+        fields.push(field("upscaling_sharpness", Json::Number(Debug::fmt(self.sharpness))))
+        ret write_file_atomic(path, stringify(Json::Object(fields)) + "\n") == 0_i32
+    }
+}
+/// Capability bits: FSR, DLSS, DLAA, FSR FG, DLSS FG, MFG 3x, MFG 4x.
+pub fn effective_reconstruction(requested: AntiAliasingMethod, samples: u32, capabilities: u32) -> AntiAliasingMethod {
+    if requested.key() == "dlss" &&(capabilities & 2) == 0 {
+        ret if (capabilities & 1) != 0 {
+            AntiAliasingMethod::Fsr
+        } else {
+            AntiAliasingMethod::Taa
+        }
+    }
+    if requested.key() == "dlaa" &&(capabilities & 4) == 0 {
+        ret AntiAliasingMethod::Taa
+    }
+    if requested.key() == "fsr" &&(capabilities & 1) == 0 {
+        ret AntiAliasingMethod::Taa
+    }
+    ret effective_anti_aliasing(requested, samples)
+}
+pub fn effective_frame_generation(settings: RenderSettings, capabilities: u32, playing: bool) -> FrameGenerationMethod {
+    if !playing || !settings.anti_aliasing().temporal() {
+        ret FrameGenerationMethod::Off
+    }
+    let requested = settings.frame_generation() let flag = if requested.key() == "fsr" {
+        8_u32
+    } elif requested.key() == "dlss" {
+        16_u32
+    } else {
+        0_u32
+    }
+    if flag == 0 ||(capabilities & flag) == 0 {
+        ret FrameGenerationMethod::Off
+    }
+    if requested.key() == "fsr" && settings.multiplier() != 2 {
+        ret FrameGenerationMethod::Off
+    }
+    if settings.multiplier() == 3 &&(capabilities & 32) == 0 {
+        ret FrameGenerationMethod::Off
+    }
+    if settings.multiplier() == 4 &&(capabilities & 64) == 0 {
+        ret FrameGenerationMethod::Off
+    }
+    ret requested
+}
+/// A sample count is valid only when color and depth formats support it.
+pub fn effective_anti_aliasing(requested: AntiAliasingMethod, supported_samples: u32) -> AntiAliasingMethod {
+    if (supported_samples & requested.samples()) == 0 {
+        ret AntiAliasingMethod::Smaa
+    }
+    ret requested
+}

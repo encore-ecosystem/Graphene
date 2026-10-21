@@ -1,12 +1,27 @@
+import mod::autolod_settings::AutoLodSettings
+import mod::animation::gpu_section::SkinGpuSection
+import mod::animation::gpu::animation_spirv
+import mod::rhi::{GpuCompletion, GpuCompletionStatus}
+import mod::lod_budget::LodBudget
+import mod::lod_groups::{LodGroup, LodCurvePoint}
+import mod::mesh_prepare::prepare_mesh_geometry
+import mod::shaders::aa_linear_mesh::aa_linear_mesh
+import mod::shaders::aa_linear_virtual_fragment::aa_linear_virtual_fragment
+import mod::shaders::aa_linear_virtual_triangle::aa_linear_virtual_triangle
+import mod::shaders::aa_temporal_mesh::aa_temporal_mesh
+import mod::shaders::aa_temporal_virtual_fragment::aa_temporal_virtual_fragment
+import mod::shaders::aa_temporal_virtual_triangle::aa_temporal_virtual_triangle
 //! GPU execution, feedback, and residency for Graphene Virtual Geometry.
 
 import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
 import linalg::{Mat4, Vec3}
-import mod::rhi::{BindGroup, BindGroupLayout, BindGroupLayoutEntry, ComputePipeline, GpuBuffer, GpuSampler, GpuTexture, GraphicsDevice, RenderFrame, RenderPassEncoder, RenderPipeline, RenderPipelineOptions, ShaderModule, Swapchain, buffer_indirect, buffer_storage, buffer_transfer_destination, buffer_transfer_source, format_rgba8_unorm, shader_stage_compute, shader_stage_fragment, shader_stage_mesh, texture_layout_shader_read, texture_layout_transfer_destination, texture_sampled, texture_transfer_destination}
+import mod::rhi::{BindGroup, BindGroupLayout, BindGroupLayoutEntry, ComputePipeline, GpuBuffer, GpuSampler, GpuTexture, GraphicsDevice, RenderFrame, RenderPassEncoder, RenderPipeline, RenderPipelineOptions, ShaderModule, Swapchain, buffer_indirect, buffer_storage, buffer_transfer_destination, buffer_transfer_source, format_rgba8_unorm, format_rgba8_srgb, shader_stage_compute, shader_stage_fragment, shader_stage_mesh, texture_layout_shader_read, texture_layout_transfer_destination, texture_sampled, texture_transfer_destination}
 import mod::scene::primitive::MeshData
-import mod::shaders::{cluster_cull_spirv, virtual_scene_cull_spirv, virtual_scene_post_cull_spirv, virtual_scene_fragment_spirv, virtual_scene_mesh_spirv, virtual_scene_triangle_spirv}
+import mod::shaders::{virtual_scene_dispatch_spirv, cluster_cull_spirv, virtual_scene_cull_spirv, virtual_scene_post_cull_spirv, virtual_scene_fragment_spirv, virtual_scene_mesh_spirv, virtual_scene_triangle_spirv}
+import mod::texture_gpu::TextureUpload
+import mod::texture_image::TextureImage
 import mod::virtual_geometry::{ClusterHierarchyNode, GeometryCluster, VirtualGeometry, build_virtual_geometry_lods}
 import mod::virtual_geometry_archive::{GeometryPageArchive, geometry_page_archive_available, geometry_page_archive_bytes, geometry_page_archive_destroy, geometry_page_archive_prefetch, geometry_page_archive_triangles, geometry_page_archive_vertices}
 import mod::virtual_geometry_page_pool::{GeometryPagePool, geometry_page_pool_capacity, geometry_page_pool_destroy, geometry_page_pool_request, geometry_page_pool_resident_count}
@@ -18,13 +33,27 @@ pub struct VirtualGeometryInstance {
     metallic: f32
     roughness: f32
     unlit: bool
+    normal_scale: f32
+    normal_flip_y: bool
+    previous_model: Mat4
+    previous_valid: bool
 }
 
 impl for VirtualGeometryInstance {
     pub fn new(model: Mat4, base_color: Vec3,
         metallic: f32, roughness: f32, unlit: bool,) -> Self {
         ret Self {
-            model, base_color, metallic, roughness, unlit
+            model, base_color, metallic, roughness, unlit, 0.0, false, model, false
+        }
+    }
+    pub fn with_previous(self: Self, model: Mat4, valid: bool) -> Self {
+        ret Self {
+            self.model, self.base_color, self.metallic, self.roughness, self.unlit, self.normal_scale, self.normal_flip_y, model, valid
+        }
+    }
+    pub fn with_normal_map(self: Self, scale: f32, flip_y: bool) -> Self {
+        ret Self {
+            self.model, self.base_color, self.metallic, self.roughness, self.unlit, scale, flip_y, self.previous_model, self.previous_valid
         }
     }
 }
@@ -32,26 +61,11 @@ impl for VirtualGeometryInstance {
 /// Persistent per-mesh GPU resources used by the editor's virtualized scene
 /// path. Culling is recorded into Luma's frame and the compacted stream is
 /// consumed directly by the mesh shader in the following render pass.
-pub struct GpuVirtualGeometry {
-    // Keep heap handles before retained generic/value fields. Encore's current
-    // generic aggregate ABI can otherwise misaddress a borrowed nested handle.
-    page_cache: GeometryPagePool < H >
+/// Shared immutable geometry and queue-ordered residency. Views own streams,
+/// culling history and pipelines; the asset owner retires shared resources once.
+pub struct VirtualGeometryResources {
+    page_cache: GeometryPagePool<H>
     page_archive: GeometryPageArchive
-    layout: BindGroupLayout
-    groups: Vec[BindGroup]
-    cull_shader: ShaderModule
-    cull_pipeline: ComputePipeline
-    post_cull_shader: ShaderModule
-    post_cull_pipeline: ComputePipeline
-    mesh_shader: ShaderModule
-    fragment_shader: ShaderModule
-    triangle_debug_shader: ShaderModule
-    render_pipeline: RenderPipeline
-    triangle_debug_pipeline: RenderPipeline
-    overdraw_pipeline: RenderPipeline
-    streams: Vec[GpuBuffer]
-    texture: GpuTexture
-    sampler: GpuSampler
     vertices: GpuBuffer
     triangles: GpuBuffer
     page_staging_vertices: GpuBuffer
@@ -60,14 +74,68 @@ pub struct GpuVirtualGeometry {
     hierarchy: Vec[ClusterHierarchyNode]
     cluster_lods: Vec[u32]
     lod_roots: Vec[u32]
+    lod_budget: LodBudget
     cluster_slots: Vec[u32]
     cluster_resident: Vec[bool]
     frame_index: u64
-    slot_frames: Vec[u64]
-    active_slot: usize
-    active_indirect_offset: u64
+    residency_version: u64
+    resident_mask_version: u64
+    resident_mask: u32
     maximum_lod: u32
     object_radius: f32
+    object_center: Vec3
+    data: VirtualGeometry
+    available: bool
+    uses: Vec[GpuCompletion]
+    page_producer: GpuCompletion
+    pending_pages: Vec[u32]
+}
+
+pub struct GpuVirtualGeometry {
+    resources: VirtualGeometryResources<H>
+    skin: Option[SkinGpuSection<H>]
+    layout: BindGroupLayout
+    groups: Vec[BindGroup]
+    light_buffers: Vec[GpuBuffer]
+    light_values: Vec[f32]
+    temporal_buffers: Vec[GpuBuffer]
+    lod_history: GpuBuffer
+    previous_view_projection: Mat4
+    aa_signature: u32
+    graph_key: str
+    graph_applied: str
+    graph_shaders: Vec[Vec[u32]]
+    cull_shader: ShaderModule
+    cull_pipeline: ComputePipeline
+    post_cull_shader: ShaderModule
+    post_cull_pipeline: ComputePipeline
+    dispatch_shader: ShaderModule
+    dispatch_pipeline: ComputePipeline
+    mesh_shader: ShaderModule
+    fragment_shader: ShaderModule
+    triangle_debug_shader: ShaderModule
+    render_pipeline: RenderPipeline
+    triangle_debug_pipeline: RenderPipeline
+    overdraw_pipeline: RenderPipeline
+    streams: Vec[GpuBuffer]
+    texture: GpuTexture
+    normal_texture: GpuTexture
+    shelter_texture: GpuTexture
+    shelter_bound: bool
+    sampler: GpuSampler
+    gi_buffers: Vec[GpuBuffer]
+    lod_smooth: bool
+    lod_curve: Vec[LodCurvePoint]
+    slot_frames: Vec[u64]
+    metadata_versions: Vec[u64]
+    metadata_modes: Vec[u32]
+    metadata_primitives: Vec[u32]
+    active_slot: usize
+    active_indirect_offset: u64
+    target_pixel_error: f32
+    autolod_enabled: bool
+    lod_focal_y: f32
+    lod_near: f32
     maximum_instances: usize
     active_candidates: u32
     active_traversal_instances: u32
@@ -78,6 +146,56 @@ pub struct GpuVirtualGeometry {
     view_mode: u32
     primitive_id: u32
     available: bool
+    owns_resources: bool
+    uses: Vec[GpuCompletion]
+    record_completion: GpuCompletion
+    request_shader: ShaderModule
+    request_pipeline: ComputePipeline
+    cache_dispatch_shader: ShaderModule
+    cache_dispatch_pipeline: ComputePipeline
+    skin_frame: u64
+    skin_has_frame: bool
+    skin_view_history: bool
+    retired_pipelines: Vec[RetiredVirtualPipelines]
+}
+
+struct RetiredVirtualPipelines {
+    solid: RenderPipeline
+    triangles: RenderPipeline
+    overdraw: RenderPipeline
+    uses: Vec[GpuCompletion]
+}
+fn collect_virtual_pipelines(retired: mut Vec[RetiredVirtualPipelines]) ->(){
+    let mut count=0_usize
+    for i in 0_usize..retired.len(){
+        let entry=retired.get_unchecked_borrowed(i) let mut ready=true
+        for token in entry.uses{if !token.ready(){ready=false}}
+        if ready{
+            for token in entry.uses{token.destroy()}
+            entry.solid.destroy() entry.triangles.destroy() entry.overdraw.destroy()
+        }else{retired.set(count,entry) count+=1_usize}
+    }
+    while retired.len()>count{retired.pop()}
+}
+fn retire_virtual_pipelines(self: mut GpuVirtualGeometry&) ->(){
+    collect_virtual_pipelines(self.retired_pipelines)
+    let mut uses=Vec[GpuCompletion]::new()
+    for token in self.uses{if !token.ready(){uses.push(token.retained())}}
+    self.retired_pipelines.push(RetiredVirtualPipelines{self.render_pipeline,self.triangle_debug_pipeline,self.overdraw_pipeline,uses})
+    collect_virtual_pipelines(self.retired_pipelines)
+}
+/// A page marked resident on the CPU must be uploaded again if its recording
+/// was discarded. A second view cannot race a still-recording producer.
+fn reconcile_virtual_page_uploads(resources: mut VirtualGeometryResources&,frame: RenderFrame) -> bool {
+    if !resources.page_producer.available(){ret true}
+    let token=frame.completion() if !token.available(){ret false}
+    let same=resources.page_producer.same_submission(token) token.destroy()
+    if same{ret true}
+    if resources.page_producer.status()==GpuCompletionStatus::Cancelled{
+        for page in resources.pending_pages{__borrowed_bool_set(resources.cluster_resident,page as usize,false)}
+        resources.residency_version+=1_u64
+    }elif !resources.page_producer.submitted(){ret false}
+    resources.pending_pages.clear() resources.page_producer.destroy() resources.page_producer=GpuCompletion::unavailable() ret true
 }
 
 fn __borrowed_f32_at(values: Vec[f32], index: usize) -> f32 {
@@ -159,7 +277,7 @@ fn __borrowed_cluster_word(clusters: Vec[GeometryCluster],
 }
 
 #attr(safe)
-fn __gpu_virtual_geometry_address(self: GpuVirtualGeometry &) -> usize {
+fn __gpu_virtual_geometry_address(self: GpuVirtualGeometry&) -> usize {
     unsafe {
         unsafe ehir {
             address: usize = pcast self: GpuVirtualGeometry &, usize
@@ -194,203 +312,13 @@ fn geometry_page_triangles(source_triangles: Vec[u32],
     ret page_triangles
 }
 
-impl for GpuVirtualGeometry {
-    pub fn is_ready(self: Self &) -> bool {
-        ret self.available
-    }
 
-    // Methods keep the retained editor path on the same borrowed ABI as the
-    // free-function implementation.
-    pub fn error_message(self: Self &) -> str {
-        ret gpu_virtual_geometry_error(self)
-    }
-    pub fn pipeline_for_mode(self: Self &, view_mode: u32) -> RenderPipeline {
-        ret gpu_virtual_geometry_pipeline_for_mode(self, view_mode)
-    }
-    pub fn record_debug(self: Self &, frame: RenderFrame,
-        view_projection: Mat4, camera: Vec3,
-        instances: Vec[VirtualGeometryInstance], maximum_distance: f32,
-        light_direction: Vec3, light_color: Vec3, light_intensity: f32,
-        indirect_ambient: Vec3, viewport_height: f32,
-        view_mode: u32, primitive_id: u32,) -> bool {
-        ret gpu_virtual_geometry_record_debug(self, frame, view_projection,
-            camera, instances, maximum_distance, light_direction, light_color,
-            light_intensity, indirect_ambient, viewport_height, view_mode,
-            primitive_id,)
-    }
-    pub fn record_error(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_record_error(self)
-    }
-    pub fn draw_slot(self: Self &, pass: RenderPassEncoder,
-        slot: usize, view_mode: u32,) -> bool {
-        ret gpu_virtual_geometry_draw_slot(self, pass, slot, view_mode)
-    }
-    pub fn pipeline(self: Self &) -> RenderPipeline {
-        ret gpu_virtual_geometry_pipeline(self)
-    }
-    pub fn cluster_count(self: Self &) -> usize {
-        ret gpu_virtual_geometry_cluster_count(self)
-    }
-    pub fn triangle_count(self: Self &) -> usize {
-        ret gpu_virtual_geometry_triangle_count(self)
-    }
-    pub fn resident_pages(self: Self &) -> usize {
-        ret gpu_virtual_geometry_resident_pages(self)
-    }
-    pub fn page_capacity(self: Self &) -> usize {
-        ret gpu_virtual_geometry_page_capacity(self)
-    }
-    pub fn traversal_instances(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_traversal_instances(self)
-    }
-    pub fn candidate_count(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_candidate_count(self)
-    }
-    pub fn post_candidate_count(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_post_candidate_count(self)
-    }
-    pub fn main_visible_count(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_main_visible_count(self)
-    }
-    pub fn post_visible_count(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_post_visible_count(self)
-    }
-    pub fn maximum_lod(self: Self &) -> u32 {
-        ret gpu_virtual_geometry_maximum_lod(self)
-    }
-
-    pub fn create_from_mesh(device: GraphicsDevice, target: Swapchain,
-        data: MeshData, maximum_instances: usize,
-        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer,
-        gi_history: GpuBuffer,) -> GpuVirtualGeometry < H > {
-        let source_vertices = data.vertices()
-        let source_indices = data.indices()
-        let stride =(data.stride() / 4_u32) as usize
-        let mut positions = Vec[Vec3]::new()
-        let mut source = 0_usize
-        while stride >= 3_usize && source + 2_usize < source_vertices.len() {
-            let mut x = 0.0_f32
-            let mut y = 0.0_f32
-            let mut z = 0.0_f32
-            match source_vertices.get(source) {
-                Option::Some(value) => {
-                    x = value
-                }
-                Option::None => {
-                }
-            }
-            match source_vertices.get(source + 1_usize) {
-                Option::Some(value) => {
-                    y = value
-                }
-                Option::None => {
-                }
-            }
-            match source_vertices.get(source + 2_usize) {
-                Option::Some(value) => {
-                    z = value
-                }
-                Option::None => {
-                }
-            }
-            positions.push(Vec3::new(x, y, z))
-            source += stride
-        }
-        let geometry = build_virtual_geometry_lods(
-            positions, source_indices, 64_usize, 126_usize,)
-        let mut packed_vertices = Vec[f32]::new()
-        for vertex in geometry.vertex_indices() {
-            let base =(vertex as usize) * stride
-            let mut component = 0_usize
-            while component < 11_usize {
-                match source_vertices.get(base + component) {
-                    Option::Some(value) => {
-                        packed_vertices.push(value)
-                    }
-                    Option::None => {
-                        packed_vertices.push(if component == 8_usize {
-                                1.0_f32
-                            } else {
-                                0.0_f32
-                            }
-                        )
-                    }
-                }
-                component += 1_usize
-            }
-        }
-        let mut white = Vec[u32]::new()
-        white.push(4294967295_u32)
-        ret GpuVirtualGeometry::create_textured(
-            device, target, geometry, packed_vertices, maximum_instances,
-            gi_scene, gi_surfaces, gi_history, white, 1_u32, 1_u32,)
-    }
-    pub fn create_from_mesh_textured(device: GraphicsDevice, target: Swapchain,
-        data: MeshData, maximum_instances: usize,
-        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
-        texture_pixels: Vec[u32], texture_width: u32, texture_height: u32,) -> GpuVirtualGeometry < H > {
-        let source_vertices = data.vertices()
-        let source_indices = data.indices()
-        let stride =(data.stride() / 4_u32) as usize
-        let mut positions = Vec[Vec3]::new()
-        let mut source = 0_usize
-        while stride >= 3_usize && source + 2_usize < source_vertices.len() {
-            positions.push(Vec3::new(__borrowed_f32_at(source_vertices, source),
-                    __borrowed_f32_at(source_vertices, source + 1_usize),
-                    __borrowed_f32_at(source_vertices, source + 2_usize),))
-            source += stride
-        }
-        let geometry = build_virtual_geometry_lods(positions, source_indices, 64_usize, 126_usize,)
-        let mut packed_vertices = Vec[f32]::new()
-        for vertex in geometry.vertex_indices() {
-            let base =(vertex as usize) * stride
-            let mut component = 0_usize
-            while component < 11_usize {
-                packed_vertices.push(match source_vertices.get(base + component) {
-                        Option::Some(value) => value
-                        Option::None => if component == 8_usize {
-                            1.0_f32
-                        } else {
-                            0.0_f32
-                        }
-                    }
-                )
-                component += 1_usize
-            }
-        }
-        ret GpuVirtualGeometry::create_textured(device, target, geometry, packed_vertices,
-            maximum_instances, gi_scene, gi_surfaces, gi_history,
-            texture_pixels, texture_width, texture_height,)
-    }
-    pub fn create(device: GraphicsDevice, target: Swapchain,
-        geometry: VirtualGeometry, packed_vertices: Vec[f32],
-        maximum_instances: usize,
-        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer,
-        gi_history: GpuBuffer,) -> GpuVirtualGeometry < H > {
-        let mut expanded = Vec[f32]::new()
-        let mut base = 0_usize
-        while base < packed_vertices.len() {
-            let mut component = 0_usize
-            while component < 9_usize {
-                expanded.push(__borrowed_f32_at(packed_vertices, base + component))
-                component += 1_usize
-            }
-            expanded.push(0.0_f32) expanded.push(0.0_f32)
-            base += 9_usize
-        }
-        let mut white = Vec[u32]::new()
-        white.push(4294967295_u32)
-        ret GpuVirtualGeometry::create_textured(device, target, geometry, expanded,
-            maximum_instances, gi_scene, gi_surfaces, gi_history, white, 1_u32, 1_u32,)
-    }
-    pub fn create_textured(device: GraphicsDevice, target: Swapchain,
-        geometry: VirtualGeometry, packed_vertices: Vec[f32], maximum_instances: usize,
-        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
-        texture_pixels: Vec[u32], texture_width: u32, texture_height: u32,) -> GpuVirtualGeometry < H > {
-        let mut source_page_vertices = packed_vertices
+fn create_virtual_geometry_resources(device: GraphicsDevice,geometry: VirtualGeometry,packed_vertices: Vec[f32]) -> VirtualGeometryResources<H> {
+        let source_page_vertices = packed_vertices
         let mut clusters = geometry.clusters()
         let hierarchy = geometry.hierarchy()
         let lods = geometry.lods()
+        let lod_budget = LodBudget::build(geometry)
         let root_node = geometry.root_node()
         let root_error = if root_node as usize < hierarchy.len() {
             match hierarchy.get(root_node as usize) {
@@ -420,28 +348,64 @@ impl for GpuVirtualGeometry {
             cluster_lods.push(cluster_lod)
             cluster_index += 1_usize
         }
-        let mut object_radius = 0.0_f32
-        if lods.len() > 0_usize {
-            match lods.get(0_usize) {
-                Option::Some(base_lod) => {
-                    let mut base_index = base_lod.first_cluster()
-                    while base_index < base_lod.first_cluster() + base_lod.cluster_count() {
-                        match clusters.get(base_index) {
-                            Option::Some(cluster) => {
-                                let extent = cluster.center().length() + cluster.radius()
-                                if extent > object_radius {
-                                    object_radius = extent
-                                }
-                            }
-                            Option::None => {
-                            }
-                        }
-                        base_index += 1_usize
+        // Bounds come from the source level, independent of the selected cut.
+        let mut minimum = Vec3::new(340282346638528859811704183484516925440.0_f32, 340282346638528859811704183484516925440.0_f32, 340282346638528859811704183484516925440.0_f32)
+        let mut maximum = minimum.scale( - 1.0_f32)
+        let base_count = match lods.get(0) {
+            Some(lod) => lod.cluster_count() None => 0_usize
+        }
+        for index in 0_usize..base_count {
+            let cluster = clusters.get_unchecked_borrowed(index)
+            let begin = cluster.vertex_offset() let end = begin + cluster.vertex_count()
+            for vertex in begin..end {
+                let x = __borrowed_f32_at(source_page_vertices, vertex * 11)
+                let y = __borrowed_f32_at(source_page_vertices, vertex * 11 + 1)
+                let z = __borrowed_f32_at(source_page_vertices, vertex * 11 + 2)
+                minimum = Vec3::new(if x < minimum.x() {
+                        x
+                    } else {
+                        minimum.x()
                     }
-                }
-                Option::None => {
-                }
+                    , if y < minimum.y() {
+                        y
+                    } else {
+                        minimum.y()
+                    }
+                    , if z < minimum.z() {
+                        z
+                    } else {
+                        minimum.z()
+                    }
+                    ,
+                )
+                maximum = Vec3::new(if x > maximum.x() {
+                        x
+                    } else {
+                        maximum.x()
+                    }
+                    , if y > maximum.y() {
+                        y
+                    } else {
+                        maximum.y()
+                    }
+                    , if z > maximum.z() {
+                        z
+                    } else {
+                        maximum.z()
+                    }
+                    ,
+                )
             }
+        }
+        let object_center = if base_count > 0 {
+            minimum.add(maximum).scale(0.5_f32)
+        } else {
+            Vec3::zero()
+        }
+        let object_radius = if base_count > 0 {
+            maximum.sub(minimum).length() * 0.5_f32
+        } else {
+            0.0_f32
         }
         let maximum_lod = if lods.len() == 0_usize {
             0_u32
@@ -494,15 +458,6 @@ impl for GpuVirtualGeometry {
         let mut packed_triangles = geometry.triangle_indices()
         let page_archive = GeometryPageArchive::create(
             source_page_vertices, packed_triangles,)
-        let maximum_candidates = clusters.len() * maximum_instances
-        // Two 64x36 hierarchical depth pyramids (down to 1x1) are kept in
-        // the persistent stream. The culler reads the completed previous
-        // pyramid while atomically building the current one.
-        let hiz_words = 3067_usize
-        let stream_words = 64_usize + clusters.len() * 16_usize +
-        hierarchy.len() * 12_usize +
-        maximum_instances * 24_usize + maximum_candidates * 4_usize +
-        clusters.len() + hiz_words * 2_usize + 7_usize
         let vertices = device.create_buffer(
             (geometry_page_pool_capacity(page_cache) as u64) *
             64_u64 * 11_u64 * 4_u64,
@@ -511,14 +466,14 @@ impl for GpuVirtualGeometry {
             (geometry_page_pool_capacity(page_cache) as u64) *
             126_u64 * 3_u64 * 4_u64,
             buffer_storage() | buffer_transfer_destination(), true,)
-        // Eight bounded upload pages replace the old full-mesh GPU source
+        // Eight bounded upload pages per in-flight slot replace the full-mesh GPU source
         // copy, so VRAM use is governed by the physical pool rather than
         // source-asset size.
         let page_staging_vertices = device.create_buffer(
-            8_u64 * 64_u64 * 11_u64 * 4_u64,
+            16_u64 * 64_u64 * 11_u64 * 4_u64,
             buffer_storage() | buffer_transfer_source(), true,)
         let page_staging_triangles = device.create_buffer(
-            8_u64 * 126_u64 * 3_u64 * 4_u64,
+            16_u64 * 126_u64 * 3_u64 * 4_u64,
             buffer_storage() | buffer_transfer_source(), true,)
         let mut initial_pages_uploaded =
         page_staging_vertices.available() && page_staging_triangles.available()
@@ -557,6 +512,240 @@ impl for GpuVirtualGeometry {
             }
             resident_index += 1_usize
         }
+        let available=geometry.valid() && geometry_page_archive_available(page_archive) && vertices.available() && triangles.available() && initial_pages_uploaded
+        ret VirtualGeometryResources<H>{page_cache,page_archive,vertices,triangles,page_staging_vertices,page_staging_triangles,clusters,hierarchy,cluster_lods,lod_roots,lod_budget,cluster_slots,cluster_resident,0_u64,1_u64,0_u64,0_u32,maximum_lod,object_radius,object_center,geometry,available,Vec[GpuCompletion]::new(),GpuCompletion::unavailable(),Vec[u32]::new()}
+}
+
+impl for GpuVirtualGeometry {
+    pub fn is_ready(self: Self&) -> bool {
+        ret self.available
+    }
+
+    // Methods keep the retained editor path on the same borrowed ABI as the
+    // free-function implementation.
+    pub fn error_message(self: Self&) -> str {
+        ret gpu_virtual_geometry_error(self)
+    }
+    pub fn pipeline_for_mode(self: Self&, view_mode: u32) -> RenderPipeline {
+        ret gpu_virtual_geometry_pipeline_for_mode(self, view_mode)
+    }
+    /// Fixed-detail rendering uses the same textured mesh path, refining to
+    /// source leaves rather than losing material bindings in a fallback draw.
+    pub fn set_autolod_enabled(self: mut Self&, enabled: bool) ->() {
+        self.autolod_enabled = enabled
+    }
+    pub fn autolod_enabled(self: Self&) -> bool {
+        ret self.autolod_enabled
+    }
+
+    pub fn set_target_error(self: mut Self&, value: f32) ->() {
+        self.lod_curve = Vec[LodCurvePoint]::new()
+        self.target_pixel_error = AutoLodSettings::bounded_error(value)
+    }
+
+    pub fn set_lod_group(self: mut Self&, group: LodGroup) -> bool {
+        if !group.valid() {
+            ret false
+        }
+        self.lod_curve = group.curve self.lod_smooth = group.interpolation.smooth()
+        ret true
+    }
+    pub fn set_lod_projection(self: mut Self&, focal_y: f32, near: f32) ->() {
+        self.lod_focal_y = if focal_y < 0 {
+            - focal_y
+        } else {
+            focal_y
+        }
+        self.lod_near = near
+    }
+    pub fn set_shelter_texture(self: mut Self&, texture: GpuTexture) -> bool {
+        if self.shelter_bound {
+            ret false
+        }
+        self.shelter_texture = texture self.shelter_bound = true ret true
+    }
+    pub fn set_lights(self: mut Self&, values: Vec[f32]) ->() {
+        self.light_values = values
+    }
+    pub fn record_debug(self: mut Self&, frame: RenderFrame,
+        view_projection: Mat4, camera: Vec3,
+        instances: Vec[VirtualGeometryInstance], maximum_distance: f32,
+        light_direction: Vec3, light_color: Vec3, light_intensity: f32,
+        indirect_ambient: Vec3, viewport_height: f32,
+        view_mode: u32, primitive_id: u32,) -> bool {
+        ret gpu_virtual_geometry_record_debug(self, frame, view_projection,
+            camera, instances, maximum_distance, light_direction, light_color,
+            light_intensity, indirect_ambient, viewport_height, view_mode,
+            primitive_id,)
+    }
+    pub fn record_error(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_record_error(self)
+    }
+    pub fn draw_slot(self: Self&, pass: RenderPassEncoder,
+        slot: usize, view_mode: u32,) -> bool {
+        ret gpu_virtual_geometry_draw_slot(self, pass, slot, view_mode)
+    }
+    pub fn pipeline(self: Self&) -> RenderPipeline {
+        ret gpu_virtual_geometry_pipeline(self)
+    }
+    pub fn cluster_count(self: Self&) -> usize {
+        ret gpu_virtual_geometry_cluster_count(self)
+    }
+    pub fn triangle_count(self: Self&) -> usize {
+        ret gpu_virtual_geometry_triangle_count(self)
+    }
+    pub fn resident_pages(self: Self&) -> usize {
+        ret gpu_virtual_geometry_resident_pages(self)
+    }
+    pub fn page_capacity(self: Self&) -> usize {
+        ret gpu_virtual_geometry_page_capacity(self)
+    }
+    pub fn traversal_instances(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_traversal_instances(self)
+    }
+    pub fn candidate_count(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_candidate_count(self)
+    }
+    pub fn post_candidate_count(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_post_candidate_count(self)
+    }
+    pub fn main_visible_count(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_main_visible_count(self)
+    }
+    pub fn post_visible_count(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_post_visible_count(self)
+    }
+    pub fn maximum_lod(self: Self&) -> u32 {
+        ret gpu_virtual_geometry_maximum_lod(self)
+    }
+
+    pub fn create_from_mesh(device: GraphicsDevice, target: Swapchain,
+        data: MeshData, maximum_instances: usize,
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer,
+        gi_history: GpuBuffer,) -> GpuVirtualGeometry<H> {
+        let data = data.with_uvs()
+        let source_vertices = data.vertices()
+        let stride =(data.stride() / 4_u32) as usize
+        let geometry = prepare_mesh_geometry(data)
+        let mut packed_vertices = Vec[f32]::new()
+        for vertex in geometry.vertex_indices() {
+            let base =(vertex as usize) * stride
+            let mut component = 0_usize
+            while component < 11_usize {
+                match source_vertices.get(base + component) {
+                    Option::Some(value) => {
+                        packed_vertices.push(value)
+                    }
+                    Option::None => {
+                        packed_vertices.push(if component == 8_usize {
+                                1.0_f32
+                            } else {
+                                0.0_f32
+                            }
+                        )
+                    }
+                }
+                component += 1_usize
+            }
+        }
+        let mut white = Vec[u32]::new()
+        white.push(4294967295_u32)
+        ret GpuVirtualGeometry::create_textured(
+            device, target, geometry, packed_vertices, maximum_instances,
+            gi_scene, gi_surfaces, gi_history, white, 1_u32, 1_u32,)
+    }
+    pub fn create_from_mesh_textured(device: GraphicsDevice, target: Swapchain,
+        data: MeshData, maximum_instances: usize,
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
+        texture_pixels: Vec[u32], texture_width: u32, texture_height: u32,) -> GpuVirtualGeometry<H> {
+        ret GpuVirtualGeometry::create_from_mesh_textured_prepared(device, target, data,
+            prepare_mesh_geometry(data), maximum_instances,
+            gi_scene, gi_surfaces, gi_history, texture_pixels, texture_width, texture_height,)
+    }
+    /// Uses the validated cluster hierarchy stored in a native mesh asset.
+    pub fn create_from_mesh_textured_prepared(device: GraphicsDevice, target: Swapchain,
+        data: MeshData, geometry: VirtualGeometry, maximum_instances: usize,
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
+        texture_pixels: Vec[u32], texture_width: u32, texture_height: u32,) -> GpuVirtualGeometry<H> {
+        let data = data.with_uvs()
+        let source_vertices = data.vertices()
+        let stride =(data.stride() / 4) as usize
+        let mut packed_vertices = Vec[f32]::new()
+        for vertex in geometry.vertex_indices() {
+            let base =(vertex as usize) * stride
+            let mut component = 0_usize
+            while component < 11_usize {
+                packed_vertices.push(match source_vertices.get(base + component) {
+                        Option::Some(value) => value
+                        Option::None => if component == 8_usize {
+                            1.0_f32
+                        } else {
+                            0.0_f32
+                        }
+                    }
+                )
+                component += 1_usize
+            }
+        }
+        ret GpuVirtualGeometry::create_textured(device, target, geometry, packed_vertices,
+            maximum_instances, gi_scene, gi_surfaces, gi_history,
+            texture_pixels, texture_width, texture_height,)
+    }
+    pub fn create(device: GraphicsDevice, target: Swapchain,
+        geometry: VirtualGeometry, packed_vertices: Vec[f32],
+        maximum_instances: usize,
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer,
+        gi_history: GpuBuffer,) -> GpuVirtualGeometry<H> {
+        let mut expanded = Vec[f32]::new()
+        let mut base = 0_usize
+        while base < packed_vertices.len() {
+            let mut component = 0_usize
+            while component < 9_usize {
+                expanded.push(__borrowed_f32_at(packed_vertices, base + component))
+                component += 1_usize
+            }
+            expanded.push(0.0_f32) expanded.push(0.0_f32)
+            base += 9_usize
+        }
+        let mut white = Vec[u32]::new()
+        white.push(4294967295_u32)
+        ret GpuVirtualGeometry::create_textured(device, target, geometry, expanded,
+            maximum_instances, gi_scene, gi_surfaces, gi_history, white, 1_u32, 1_u32,)
+    }
+    pub fn create_textured(device: GraphicsDevice, target: Swapchain,
+        geometry: VirtualGeometry, packed_vertices: Vec[f32], maximum_instances: usize,
+        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
+        texture_pixels: Vec[u32], texture_width: u32, texture_height: u32,) -> GpuVirtualGeometry<H> {
+        ret Self::create_textured_view(device,target,geometry,packed_vertices,maximum_instances,gi_scene,gi_surfaces,gi_history,texture_pixels,texture_width,texture_height,Option[VirtualGeometryResources<H>]::None,Option[SkinGpuSection<H>]::None)
+    }
+    fn create_textured_view(device: GraphicsDevice,target: Swapchain,geometry: VirtualGeometry,packed_vertices: Vec[f32],maximum_instances: usize,gi_scene: GpuBuffer,gi_surfaces: GpuBuffer,gi_history: GpuBuffer,texture_pixels: Vec[u32],texture_width: u32,texture_height: u32,shared: Option[VirtualGeometryResources<H>],skin: Option[SkinGpuSection<H>]) -> GpuVirtualGeometry<H> {
+        let owns_resources=shared.is_none()
+        let resources=match shared {Some(resources)=>resources None=>create_virtual_geometry_resources(device,geometry,packed_vertices)}
+        let page_cache=resources.page_cache
+        let page_archive=resources.page_archive
+        let vertices=resources.vertices
+        let triangles=resources.triangles
+        let page_staging_vertices=resources.page_staging_vertices
+        let page_staging_triangles=resources.page_staging_triangles
+        let clusters=resources.clusters
+        let hierarchy=resources.hierarchy
+        let cluster_lods=resources.cluster_lods
+        let lod_roots=resources.lod_roots
+        let lod_budget=resources.lod_budget
+        let cluster_slots=resources.cluster_slots
+        let cluster_resident=resources.cluster_resident
+        let frame_index=resources.frame_index
+        let residency_version=resources.residency_version
+        let resident_mask_version=resources.resident_mask_version
+        let resident_mask=resources.resident_mask
+        let maximum_lod=resources.maximum_lod
+        let object_radius=resources.object_radius
+        let object_center=resources.object_center
+        let lods=geometry.lods()
+        let root_error=if geometry.root_node() as usize<hierarchy.len(){hierarchy.get_unchecked_borrowed(geometry.root_node() as usize).geometric_error()}else{0_f32}
+        let maximum_candidates=clusters.len()*maximum_instances
+        let stream_words=64_usize+clusters.len()*16_usize+hierarchy.len()*12_usize+maximum_instances*28_usize+maximum_candidates*4_usize+clusters.len()+6134_usize+10_usize
+        let initial_pages_uploaded=resources.available
         let safe_texture_width = if texture_width > 0_u32 {
             texture_width
         } else {
@@ -570,7 +759,7 @@ impl for GpuVirtualGeometry {
         let texture_bytes =(safe_texture_width as u64) *(safe_texture_height as u64) * 4_u64
         let texture_staging = device.create_buffer(texture_bytes, buffer_transfer_source(), true)
         let texture = device.create_texture_2d(safe_texture_width, safe_texture_height, 1_u32,
-            format_rgba8_unorm(), texture_sampled() | texture_transfer_destination(),)
+            if skin.is_some(){format_rgba8_srgb()}else{format_rgba8_unorm()}, texture_sampled() | texture_transfer_destination(),)
         let texture_encoder = device.create_encoder()
         let texture_uploaded = texture_pixels.len() ==
         (safe_texture_width as usize) *(safe_texture_height as usize) &&
@@ -583,56 +772,99 @@ impl for GpuVirtualGeometry {
         texture_encoder.submit_and_wait()
         texture_encoder.destroy()
         texture_staging.destroy()
+        let normal_upload = TextureUpload::begin_linear(device, TextureImage {
+                1, 1, vec![4294934656_u32]
+            }
+            ,
+        )
+        let normal_texture = match normal_upload {
+            Option::Some(upload) => {
+                upload.wait()
+                upload.finish()
+            }
+            Option::None => GpuTexture::unavailable()
+        }
         let sampler = device.create_repeat_sampler()
         let mut entries = Vec[BindGroupLayoutEntry]::new()
         entries.push(BindGroupLayoutEntry::storage(0_u32,
                 shader_stage_compute() | shader_stage_mesh(),))
-        entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_mesh()))
+        entries.push(BindGroupLayoutEntry::storage(1_u32, shader_stage_mesh() | shader_stage_compute()))
         entries.push(BindGroupLayoutEntry::storage(2_u32, shader_stage_mesh()))
         entries.push(BindGroupLayoutEntry::storage(3_u32, shader_stage_fragment()))
         entries.push(BindGroupLayoutEntry::storage(4_u32, shader_stage_fragment()))
         entries.push(BindGroupLayoutEntry::storage(5_u32, shader_stage_fragment()))
         entries.push(BindGroupLayoutEntry::texture_sampler(6_u32, shader_stage_fragment()))
+        entries.push(BindGroupLayoutEntry::texture_sampler(7_u32, shader_stage_fragment()))
+        entries.push(BindGroupLayoutEntry::texture_sampler(11_u32, shader_stage_fragment()))
+        entries.push(BindGroupLayoutEntry::storage(8_u32, shader_stage_fragment()))
+        entries.push(BindGroupLayoutEntry::storage(9_u32, shader_stage_mesh()))
+        entries.push(BindGroupLayoutEntry::storage(10_u32, shader_stage_compute() | shader_stage_mesh()))
+        if skin.is_some(){for binding in 12_usize..18_usize{let stages=if binding==12_usize{shader_stage_mesh()}elif binding==13_usize{shader_stage_compute()|shader_stage_mesh()}else{shader_stage_compute()} entries.push(BindGroupLayoutEntry::storage(binding as u32,stages))}}
         let layout = device.create_bind_group_layout(entries)
         let frame_count = target.frames_in_flight() as usize
+        let lod_history = device.create_buffer((maximum_instances * 16_usize) as u64, buffer_storage(), true)
+        let mut empty_lod_history = Vec[u32]::new()
+        for i in 0..maximum_instances * 4_usize {
+            empty_lod_history.push(0_u32)
+        }
+        lod_history.write_u32s(0, empty_lod_history)
         let mut streams = Vec[GpuBuffer]::new()
         let mut groups = Vec[BindGroup]::new()
+        let mut light_buffers = Vec[GpuBuffer]::new()
+        let mut temporal_buffers = Vec[GpuBuffer]::new()
         let mut slot_frames = Vec[u64]::new()
+        let mut metadata_versions = Vec[u64]::new()
+        let mut metadata_modes = Vec[u32]::new()
+        let mut metadata_primitives = Vec[u32]::new()
         let mut stream_resources = frame_count > 0_usize
+        let mut empty_lights = Vec[f32]::new()
+        while empty_lights.len() < 3140_usize {
+            empty_lights.push(0.0_f32)
+        }
         let mut frame_slot = 0_usize
         while frame_slot < frame_count {
             let stream = device.create_buffer((stream_words as u64) * 4_u64,
-                buffer_storage() | buffer_indirect(), true,)
+                buffer_storage() | buffer_indirect() | buffer_transfer_destination(), true,)
+            let light_buffer = device.create_buffer(12560_u64, buffer_storage(), true)
+            light_buffer.write_f32s(0_u64, empty_lights)
+            light_buffers.push(light_buffer)
+            let temporal_buffer = device.create_buffer((64_usize + maximum_instances * 80_usize) as u64, buffer_storage(), true)
+            temporal_buffers.push(temporal_buffer)
             let mut bindings = Vec[u32]::new()
             bindings.push(0_u32) bindings.push(1_u32) bindings.push(2_u32)
-            bindings.push(3_u32) bindings.push(4_u32) bindings.push(5_u32)
+            bindings.push(3_u32) bindings.push(4_u32) bindings.push(5_u32) bindings.push(8_u32) bindings.push(9_u32) bindings.push(10_u32)
             let mut buffers = Vec[GpuBuffer]::new()
             buffers.push(stream) buffers.push(vertices) buffers.push(triangles)
-            buffers.push(gi_scene) buffers.push(gi_surfaces) buffers.push(gi_history)
+            buffers.push(gi_scene) buffers.push(gi_surfaces) buffers.push(gi_history) buffers.push(light_buffer) buffers.push(temporal_buffer) buffers.push(lod_history)
             let mut offsets = Vec[u64]::new()
             offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
-            offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
+            offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64) offsets.push(0_u64)
             let mut ranges = Vec[u64]::new()
             ranges.push(stream.size()) ranges.push(vertices.size()) ranges.push(triangles.size())
-            ranges.push(gi_scene.size()) ranges.push(gi_surfaces.size()) ranges.push(gi_history.size())
-            let group = device.create_buffer_texture_bind_group_many(
-                layout, bindings, buffers, offsets, ranges, 6_u32, texture, sampler,)
+            ranges.push(gi_scene.size()) ranges.push(gi_surfaces.size()) ranges.push(gi_history.size()) ranges.push(light_buffer.size()) ranges.push(temporal_buffer.size()) ranges.push(lod_history.size())
+            match skin{Some(binding)=>{binding.append_bindings(bindings,buffers,offsets,ranges)}None=>{}}
+            let group = device.create_buffer_textures_bind_group_many(
+                layout, bindings, buffers, offsets, ranges, vec![6_u32, 7_u32, 11_u32],
+                vec![texture, normal_texture, texture], vec![sampler, sampler, sampler],)
             stream_resources = stream_resources &&
             stream.available() && group.available()
             streams.push(stream)
             groups.push(group)
             slot_frames.push(0_u64)
+            metadata_versions.push(0_u64)
+            metadata_modes.push(0_u32)
+            metadata_primitives.push(0_u32)
             frame_slot += 1_usize
         }
         let cull_shader = device.create_shader_module(
-            virtual_scene_cull_spirv(), shader_stage_compute(),)
+            if skin.is_some(){animation_spirv(3_u32)}else{virtual_scene_cull_spirv()}, shader_stage_compute(),)
         let cull_pipeline = device.create_compute_pipeline(cull_shader, layout)
         let post_cull_shader = device.create_shader_module(
-            virtual_scene_post_cull_spirv(), shader_stage_compute(),)
+            if skin.is_some(){animation_spirv(4_u32)}else{virtual_scene_post_cull_spirv()}, shader_stage_compute(),)
         let post_cull_pipeline = device.create_compute_pipeline(
             post_cull_shader, layout,)
         let mesh_shader = device.create_shader_module(
-            virtual_scene_mesh_spirv(), shader_stage_mesh(),)
+            if skin.is_some(){animation_spirv(5_u32)}else{virtual_scene_mesh_spirv()}, shader_stage_mesh(),)
         let fragment_shader = device.create_shader_module(
             virtual_scene_fragment_spirv(), shader_stage_fragment(),)
         // The barycentric shader is optional. The regular diagnostic fragment
@@ -651,11 +883,18 @@ impl for GpuVirtualGeometry {
             .with_depth_write(false)
             .with_additive_blending()
             .with_color_load(false),)
-        let available = geometry.valid() && clusters.len() > 0_usize &&
+        let request_shader=if skin.is_some(){device.create_shader_module(animation_spirv(2_u32),shader_stage_compute())}else{ShaderModule::unavailable()}
+        let cache_dispatch_shader=if skin.is_some(){device.create_shader_module(animation_spirv(8_u32),shader_stage_compute())}else{ShaderModule::unavailable()}
+        let request_pipeline=if skin.is_some(){device.create_compute_pipeline(request_shader,layout)}else{ComputePipeline::unavailable()}
+        let cache_dispatch_pipeline=if skin.is_some(){device.create_compute_pipeline(cache_dispatch_shader,layout)}else{ComputePipeline::unavailable()}
+        let dispatch_shader = device.create_shader_module(virtual_scene_dispatch_spirv(), shader_stage_compute())
+        let dispatch_pipeline = device.create_compute_pipeline(dispatch_shader, layout)
+        let skin_available=match skin{Some(binding)=>binding.matches(clusters.len(),hierarchy.len(),maximum_instances) && request_shader.available() && request_pipeline.available() && cache_dispatch_shader.available() && cache_dispatch_pipeline.available() None=>true}
+        let available = skin_available && dispatch_shader.available() && dispatch_pipeline.available() && geometry.valid() && clusters.len() > 0_usize &&
         maximum_instances > 0_usize && maximum_candidates <= 4294967295_usize &&
         geometry_page_archive_available(page_archive) &&
         stream_resources && vertices.available() && triangles.available() &&
-        texture_uploaded && texture.available() && sampler.available() &&
+        texture_uploaded && texture.available() && normal_texture.available() && sampler.available() &&
         page_staging_vertices.available() && page_staging_triangles.available() &&
         initial_pages_uploaded &&
         layout.available() && cull_shader.available() &&
@@ -669,29 +908,136 @@ impl for GpuVirtualGeometry {
             " root_error=" + Debug::fmt(root_error) +
             " archive=" + Debug::fmt(geometry_page_archive_available(page_archive)) +
             " texture=" + Debug::fmt(safe_texture_width) + "x" + Debug::fmt(safe_texture_height))
-        ret GpuVirtualGeometry < H > {
-            page_cache, page_archive, layout, groups, cull_shader, cull_pipeline,
-            post_cull_shader, post_cull_pipeline,
-            mesh_shader, fragment_shader, triangle_debug_shader,
-            render_pipeline, triangle_debug_pipeline, overdraw_pipeline,
-            streams, texture, sampler, vertices, triangles,
-            page_staging_vertices, page_staging_triangles,
-            clusters, hierarchy, cluster_lods, lod_roots, cluster_slots,
-            cluster_resident, 0_u64, slot_frames, 0_usize, 0_u64,
-            maximum_lod, object_radius, maximum_instances,
-            0_u32, 0_u32, 0_u32, 0_u32, 0_u32,
-            0_u32, 0_u32, 0_u32, available
+        ret GpuVirtualGeometry<H> {
+            resources,
+            skin,
+            layout,
+            groups,
+            light_buffers,
+            Vec[f32]::new(),
+            temporal_buffers,
+            lod_history,
+            Mat4::identity(),
+            0_u32,
+            "",
+            "",
+            Vec[Vec[u32]]::new(),
+            cull_shader,
+            cull_pipeline,
+            post_cull_shader,
+            post_cull_pipeline,
+            dispatch_shader,
+            dispatch_pipeline,
+            mesh_shader,
+            fragment_shader,
+            triangle_debug_shader,
+            render_pipeline,
+            triangle_debug_pipeline,
+            overdraw_pipeline,
+            streams,
+            texture,
+            normal_texture,
+            texture,
+            false,
+            sampler,
+            vec![gi_scene, gi_surfaces, gi_history],
+            false,
+            Vec[LodCurvePoint]::new(),
+            slot_frames,
+            metadata_versions,
+            metadata_modes,
+            metadata_primitives,
+            0_usize,
+            0_u64,
+            1.0_f32,
+            true,
+            0.0_f32,
+            0.1_f32,
+            maximum_instances,
+            0_u32,
+            0_u32,
+            0_u32,
+            0_u32,
+            0_u32,
+            0_u32,
+            0_u32,
+            0_u32,
+            available,
+            owns_resources,
+            Vec[GpuCompletion]::new(),
+            GpuCompletion::unavailable(),
+            request_shader,
+            request_pipeline,
+            cache_dispatch_shader,
+            cache_dispatch_pipeline,
+            0_u64,
+            false,
+            false,
+            Vec[RetiredVirtualPipelines]::new()
         }
     }
 }
 
+/// Creates independent replacement sets; callers retire old sets after consumer fences.
+pub fn gpu_virtual_geometry_texture_groups(self: GpuVirtualGeometry&, device: GraphicsDevice,
+    texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler,) -> Vec[BindGroup] {
+    let mut groups = Vec[BindGroup]::new()
+    let mut slot = 0_usize
+    for stream in self.streams {
+        let mut buffers = vec![stream, self.resources.vertices, self.resources.triangles]
+        for buffer in self.gi_buffers {
+            buffers.push(buffer)
+        }
+        let mut bindings = Vec[u32]::new()
+        let mut offsets = Vec[u64]::new()
+        let mut ranges = Vec[u64]::new()
+        for index in 0..buffers.len() {
+            bindings.push(index as u32) offsets.push(0)
+            ranges.push(buffers.get(index).unwrap_or(GpuBuffer::unavailable()).size())
+        }
+        let light_buffer = self.light_buffers.get(slot).unwrap_or(GpuBuffer::unavailable())
+        bindings.push(8_u32) buffers.push(light_buffer) offsets.push(0_u64) ranges.push(light_buffer.size())
+        let temporal_buffer = self.temporal_buffers.get(slot).unwrap_or(GpuBuffer::unavailable())
+        bindings.push(9_u32) buffers.push(temporal_buffer) offsets.push(0_u64) ranges.push(temporal_buffer.size())
+        bindings.push(10_u32) buffers.push(self.lod_history) offsets.push(0_u64) ranges.push(self.lod_history.size())
+        let selected = if texture.available() {
+            texture
+        } else {
+            self.texture
+        }
+        let selected_normal = if normal.available() {
+            normal
+        } else {
+            self.normal_texture
+        }
+        match self.skin{Some(binding)=>{binding.append_bindings(bindings,buffers,offsets,ranges)}None=>{}}
+        let group = device.create_buffer_textures_bind_group_many(
+            self.layout, bindings, buffers, offsets, ranges, vec![6_u32, 7_u32, 11_u32],
+            vec![selected, selected_normal, self.shelter_texture], vec![sampler, sampler, sampler],)
+        if !group.available() {
+            group.destroy()
+            for previous in groups {
+                previous.destroy()
+            }
+            ret Vec[BindGroup]::new()
+        }
+        groups.push(group)
+        slot += 1_usize
+    }
+    ret groups
+}
+
+pub fn gpu_virtual_geometry_replace_texture_groups(self: mut GpuVirtualGeometry&, groups: Vec[BindGroup]) -> Vec[BindGroup] {
+    let previous = self.groups self.groups = groups ret previous
+}
+
 pub fn gpu_virtual_geometry_available(
-    self: GpuVirtualGeometry &,) -> bool {
+    self: GpuVirtualGeometry&,) -> bool {
     ret self.available
 }
 
 pub fn gpu_virtual_geometry_error(
-    self: GpuVirtualGeometry &,) -> str {
+    self: GpuVirtualGeometry&,) -> str {
     if !self.layout.available() {
         ret self.layout.error()
     }
@@ -713,22 +1059,22 @@ pub fn gpu_virtual_geometry_error(
     if !self.overdraw_pipeline.available() {
         ret self.overdraw_pipeline.error()
     }
-    if !self.vertices.available() {
-        ret self.vertices.error()
+    if !self.resources.vertices.available() {
+        ret self.resources.vertices.error()
     }
-    if !self.triangles.available() {
-        ret self.triangles.error()
+    if !self.resources.triangles.available() {
+        ret self.resources.triangles.error()
     }
     ret "Virtual geometry resource initialization failed"
 }
 
 pub fn gpu_virtual_geometry_pipeline(
-    self: GpuVirtualGeometry &,) -> RenderPipeline {
+    self: GpuVirtualGeometry&,) -> RenderPipeline {
     ret self.render_pipeline
 }
 
 pub fn gpu_virtual_geometry_pipeline_for_mode(
-    self: GpuVirtualGeometry &, view_mode: u32,) -> RenderPipeline {
+    self: GpuVirtualGeometry&, view_mode: u32,) -> RenderPipeline {
     ret if view_mode == 3_u32 && self.triangle_debug_pipeline.available() {
         self.triangle_debug_pipeline
     } elif view_mode == 10_u32 {
@@ -739,84 +1085,84 @@ pub fn gpu_virtual_geometry_pipeline_for_mode(
 }
 
 pub fn gpu_virtual_geometry_triangle_debug_available(
-    self: GpuVirtualGeometry &,) -> bool {
+    self: GpuVirtualGeometry&,) -> bool {
     ret self.triangle_debug_pipeline.available()
 }
 
 pub fn gpu_virtual_geometry_resident_pages(
-    self: GpuVirtualGeometry &,) -> usize {
+    self: GpuVirtualGeometry&,) -> usize {
     ret geometry_page_pool_resident_count(
-        self.page_cache,)
+        self.resources.page_cache,)
 }
 
 pub fn gpu_virtual_geometry_page_capacity(
-    self: GpuVirtualGeometry &,) -> usize {
+    self: GpuVirtualGeometry&,) -> usize {
     ret geometry_page_pool_capacity(
-        self.page_cache,)
+        self.resources.page_cache,)
 }
 
 /// Fixed GPU upload-ring footprint. This remains independent of source mesh
 /// size; detailed source pages live in host/archive memory until requested.
 pub fn gpu_virtual_geometry_staging_bytes(
-    self: GpuVirtualGeometry &,) -> u64 {
-    ret self.page_staging_vertices.size() +
-    self.page_staging_triangles.size()
+    self: GpuVirtualGeometry&,) -> u64 {
+    ret self.resources.page_staging_vertices.size() +
+    self.resources.page_staging_triangles.size()
 }
 
 pub fn gpu_virtual_geometry_archive_bytes(
-    self: GpuVirtualGeometry &,) -> usize {
-    ret geometry_page_archive_bytes(self.page_archive)
+    self: GpuVirtualGeometry&,) -> usize {
+    ret geometry_page_archive_bytes(self.resources.page_archive)
 }
 
 pub fn gpu_virtual_geometry_traversal_instances(
-    self: GpuVirtualGeometry &,) -> u32 {
+    self: GpuVirtualGeometry&,) -> u32 {
     ret self.active_traversal_instances
 }
 
 pub fn gpu_virtual_geometry_cluster_count(
-    self: GpuVirtualGeometry &,) -> usize {
-    ret self.clusters.len()
+    self: GpuVirtualGeometry&,) -> usize {
+    ret self.resources.clusters.len()
 }
 
 pub fn gpu_virtual_geometry_triangle_count(
-    self: GpuVirtualGeometry &,) -> usize {
+    self: GpuVirtualGeometry&,) -> usize {
     let mut triangles = 0_usize
-    for cluster in self.clusters {
+    for cluster in self.resources.clusters {
         triangles += cluster.triangle_count()
     }
     ret triangles
 }
 
 pub fn gpu_virtual_geometry_maximum_lod(
-    self: GpuVirtualGeometry &,) -> u32 {
-    ret self.maximum_lod
+    self: GpuVirtualGeometry&,) -> u32 {
+    ret self.resources.maximum_lod
 }
 
 /// LOD selected by the completed GPU traversal, including residency fallback.
 pub fn gpu_virtual_geometry_selected_lod(
-    self: GpuVirtualGeometry &,) -> u32 {
-    let maximum_candidates = self.clusters.len() * self.maximum_instances
-    let feedback_base = 64_usize + self.clusters.len() * 16_usize +
-    self.hierarchy.len() * 12_usize +
-    self.maximum_instances * 24_usize + maximum_candidates * 4_usize
-    let indirect_base = feedback_base + self.clusters.len() +
+    self: GpuVirtualGeometry&,) -> u32 {
+    let maximum_candidates = self.resources.clusters.len() * self.maximum_instances
+    let feedback_base = 64_usize + self.resources.clusters.len() * 16_usize +
+    self.resources.hierarchy.len() * 12_usize +
+    self.maximum_instances * 28_usize + maximum_candidates * 4_usize
+    let indirect_base = feedback_base + self.resources.clusters.len() +
     3067_usize * 2_usize
     let stream = __borrowed_gpu_buffer_at(self.streams, self.active_slot)
     if !stream.available() {
-        ret self.maximum_lod
+        ret self.resources.maximum_lod
     }
     ret stream.read_u32((indirect_base as u64) * 4_u64 + 24_u64,)
 }
 
 pub fn gpu_virtual_geometry_selected_triangle_count(
-    self: GpuVirtualGeometry &,) -> usize {
-    let maximum_candidates = self.clusters.len() * self.maximum_instances
-    let hierarchy_base = 64_usize + self.clusters.len() * 16_usize
-    let instance_base = hierarchy_base + self.hierarchy.len() * 12_usize
-    let visible_base = instance_base + self.maximum_instances * 24_usize
-    let feedback_base = instance_base + self.maximum_instances * 24_usize +
+    self: GpuVirtualGeometry&,) -> usize {
+    let maximum_candidates = self.resources.clusters.len() * self.maximum_instances
+    let hierarchy_base = 64_usize + self.resources.clusters.len() * 16_usize
+    let instance_base = hierarchy_base + self.resources.hierarchy.len() * 12_usize
+    let visible_base = instance_base + self.maximum_instances * 28_usize
+    let feedback_base = instance_base + self.maximum_instances * 28_usize +
     maximum_candidates * 4_usize
-    let indirect_base = feedback_base + self.clusters.len() + 3067_usize * 2_usize
+    let indirect_base = feedback_base + self.resources.clusters.len() + 3067_usize * 2_usize
     let stream = __borrowed_gpu_buffer_at(self.streams, self.active_slot)
     if !stream.available() {
         ret 0_usize
@@ -827,22 +1173,42 @@ pub fn gpu_virtual_geometry_selected_triangle_count(
     while index < visible_count && index < maximum_candidates as u32 {
         let cluster_index = stream.read_u32(
             ((visible_base +(index as usize) * 2_usize) as u64) * 4_u64,)
-        if cluster_index as usize < self.clusters.len() {
+        if cluster_index as usize < self.resources.clusters.len() {
             triangles += __borrowed_cluster_word(
-                self.clusters, cluster_index as usize, 3_usize,)
+                self.resources.clusters, cluster_index as usize, 3_usize,)
         }
         index += 1_u32
     }
     ret triangles
 }
 
+/// Average requested ratio for this asset's instances, as evaluated by the GPU.
+pub fn gpu_virtual_geometry_target_ratio(self: GpuVirtualGeometry&) -> f32 {
+    if self.active_traversal_instances == 0 {
+        ret 0.0_f32
+    }
+    let mut sum = 0.0_f32
+    let count = self.active_traversal_instances as usize
+    for index in 0_usize..count {
+        sum += self.lod_history.read_f32((index as u64) * 16_u64 + 8_u64)
+    }
+    ret sum /(self.active_traversal_instances as f32)
+}
+pub fn gpu_virtual_geometry_minimum_ratio(self: GpuVirtualGeometry&) -> f32 {
+    ret if self.resources.lod_budget.source_triangles > 0 {
+        (self.resources.lod_budget.minimum_triangles as f32) /(self.resources.lod_budget.source_triangles as f32)
+    } else {
+        1.0_f32
+    }
+}
+
 pub fn gpu_virtual_geometry_candidate_count(
-    self: GpuVirtualGeometry &,) -> u32 {
+    self: GpuVirtualGeometry&,) -> u32 {
     ret self.active_candidates
 }
 
 pub fn gpu_virtual_geometry_post_candidate_count(
-    self: GpuVirtualGeometry &,) -> u32 {
+    self: GpuVirtualGeometry&,) -> u32 {
     let stream = __borrowed_gpu_buffer_at(self.streams, self.active_slot)
     if !stream.available() {
         ret 0_u32
@@ -851,7 +1217,7 @@ pub fn gpu_virtual_geometry_post_candidate_count(
 }
 
 pub fn gpu_virtual_geometry_main_visible_count(
-    self: GpuVirtualGeometry &,) -> u32 {
+    self: GpuVirtualGeometry&,) -> u32 {
     let stream = __borrowed_gpu_buffer_at(self.streams, self.active_slot)
     if !stream.available() {
         ret 0_u32
@@ -860,7 +1226,7 @@ pub fn gpu_virtual_geometry_main_visible_count(
 }
 
 pub fn gpu_virtual_geometry_post_visible_count(
-    self: GpuVirtualGeometry &,) -> u32 {
+    self: GpuVirtualGeometry&,) -> u32 {
     let stream = __borrowed_gpu_buffer_at(self.streams, self.active_slot)
     if !stream.available() {
         ret 0_u32
@@ -872,12 +1238,12 @@ pub fn gpu_virtual_geometry_post_visible_count(
 /// telemetry mirror. The returned words are Main-visible, Post-visible and
 /// Post-candidate maxima respectively.
 pub fn gpu_virtual_geometry_occlusion_counts(
-    self: GpuVirtualGeometry &,) -> Vec[u32] {
-    let maximum_candidates = self.clusters.len() * self.maximum_instances
-    let feedback_base = 64_usize + self.clusters.len() * 16_usize +
-    self.hierarchy.len() * 12_usize +
-    self.maximum_instances * 24_usize + maximum_candidates * 4_usize
-    let indirect_base = feedback_base + self.clusters.len() +
+    self: GpuVirtualGeometry&,) -> Vec[u32] {
+    let maximum_candidates = self.resources.clusters.len() * self.maximum_instances
+    let feedback_base = 64_usize + self.resources.clusters.len() * 16_usize +
+    self.resources.hierarchy.len() * 12_usize +
+    self.maximum_instances * 28_usize + maximum_candidates * 4_usize
+    let indirect_base = feedback_base + self.resources.clusters.len() +
     3067_usize * 2_usize
     let mut main_visible = 0_u32
     let mut post_visible = 0_u32
@@ -910,12 +1276,12 @@ pub fn gpu_virtual_geometry_occlusion_counts(
 }
 
 pub fn gpu_virtual_geometry_record_error(
-    self: GpuVirtualGeometry &,) -> u32 {
+    self: GpuVirtualGeometry&,) -> u32 {
     ret self.last_record_error
 }
 
 pub fn gpu_virtual_geometry_set_view_mode(
-    self: GpuVirtualGeometry &, view_mode: u32, primitive_id: u32,) ->() {
+    self: mut GpuVirtualGeometry&, view_mode: u32, primitive_id: u32,) ->() {
     self.view_mode = if view_mode <= 11_u32 {
         view_mode
     } else {
@@ -926,7 +1292,7 @@ pub fn gpu_virtual_geometry_set_view_mode(
 }
 
 pub fn gpu_virtual_geometry_apply_view_mode(
-    self: GpuVirtualGeometry &, view_mode: u32,) -> bool {
+    self: GpuVirtualGeometry&, view_mode: u32,) -> bool {
     let stream = match self.streams.get(self.active_slot) {
         Option::Some(value) => value
         Option::None => GpuBuffer::unavailable()
@@ -941,7 +1307,7 @@ pub fn gpu_virtual_geometry_apply_view_mode(
 }
 
 pub fn gpu_virtual_geometry_record(
-    self: GpuVirtualGeometry &, frame: RenderFrame,
+    self: mut GpuVirtualGeometry&, frame: RenderFrame,
     view_projection: Mat4, camera: Vec3,
     instances: Vec[VirtualGeometryInstance],
     maximum_distance: f32, light_direction: Vec3,
@@ -954,7 +1320,7 @@ pub fn gpu_virtual_geometry_record(
 }
 
 pub fn gpu_virtual_geometry_record_debug(
-    self: GpuVirtualGeometry &, frame: RenderFrame,
+    self: mut GpuVirtualGeometry&, frame: RenderFrame,
     view_projection: Mat4, camera: Vec3,
     instances: Vec[VirtualGeometryInstance],
     maximum_distance: f32, light_direction: Vec3,
@@ -968,10 +1334,27 @@ pub fn gpu_virtual_geometry_record_debug(
             " instances=" + Debug::fmt(instances.len()))
         ret false
     }
+    collect_virtual_pipelines(self.retired_pipelines)
+    if !reconcile_virtual_page_uploads(self.resources,frame){ret false}
+    // Retain before recording even the first streaming transfer. Partial failures
+    // may still be submitted by a caller destroying its frame wrapper.
+    if !retain_virtual_geometry_use(self.uses,frame) || !retain_virtual_geometry_use(self.resources.uses,frame){ret false}
+    if self.record_completion.available(){
+        if self.record_completion.status()==GpuCompletionStatus::Cancelled{
+            for i in 0_usize..self.slot_frames.len(){__borrowed_u64_set(self.slot_frames,i,0_u64) __borrowed_u64_set(self.metadata_versions,i,0_u64)}
+            self.skin_has_frame=false
+        }
+        self.record_completion.destroy()
+    }
+    self.record_completion=frame.completion()
     let slot = frame.slot() as usize
     let stream = match self.streams.get(slot) {
         Option::Some(value) => value
         Option::None => GpuBuffer::unavailable()
+    }
+    let light_buffer = self.light_buffers.get(slot).unwrap_or(GpuBuffer::unavailable())
+    if self.light_values.len() == 3140_usize {
+        light_buffer.write_f32s(0_u64, self.light_values)
     }
     let group = match self.groups.get(slot) {
         Option::Some(value) => value
@@ -986,98 +1369,85 @@ pub fn gpu_virtual_geometry_record_debug(
         Option::Some(value) => value
         Option::None => 0_u64
     }
-    let candidate_count = self.clusters.len() * instances.len()
+    let candidate_count = self.resources.clusters.len() * instances.len()
     if candidate_count == 0_usize || candidate_count > 4294967295_usize {
         println("VG record fail 3 candidates=" + Debug::fmt(candidate_count))
         ret false
     }
-    let maximum_candidates = self.clusters.len() * self.maximum_instances
-    let feedback_base = 64_usize + self.clusters.len() * 16_usize +
-    self.hierarchy.len() * 12_usize +
-    self.maximum_instances * 24_usize + maximum_candidates * 4_usize
-    let hiz_base = feedback_base + self.clusters.len()
+    let maximum_candidates = self.resources.clusters.len() * self.maximum_instances
+    let feedback_base = 64_usize + self.resources.clusters.len() * 16_usize +
+    self.resources.hierarchy.len() * 12_usize +
+    self.maximum_instances * 28_usize + maximum_candidates * 4_usize
+    let hiz_base = feedback_base + self.resources.clusters.len()
     let indirect_base = hiz_base + 3067_usize * 2_usize
     let mut streaming_uploaded = true
-    if slot_frame > 0_u64 {
+    if slot_frame > 0_u64 && geometry_page_pool_capacity(self.resources.page_cache) < self.resources.clusters.len() {
+        // Fully resident meshes cannot evict: feedback/LRU scans are unnecessary.
         // Bound uploads per frame to avoid camera-motion stalls. Visible
         // resident pages are still touched so the fixed pool evicts cold
         // detail instead of cycling by original upload order.
         let mut uploaded_pages = 0_usize
         let mut page = 0_usize
-        while page < self.clusters.len() {
+        while page < self.resources.clusters.len() {
             let feedback_priority = stream.read_u32(
                 ((feedback_base + page) as u64) * 4_u64,)
-            let already_resident = match self.cluster_resident.get(page) {
+            let already_resident = match self.resources.cluster_resident.get(page) {
                 Option::Some(value) => value
                 Option::None => false
             }
             if feedback_priority != 0_u32 &&
             (already_resident || uploaded_pages < 8_usize) {
-                let lod = match self.cluster_lods.get(page) {
+                let lod = match self.resources.cluster_lods.get(page) {
                     Option::Some(value) => value
-                    Option::None => self.maximum_lod
+                    Option::None => self.resources.maximum_lod
                 }
-                let priority = if lod == self.maximum_lod {
+                let priority = if lod == self.resources.maximum_lod {
                     4294967295_u32
                 } else {
                     feedback_priority
                 }
                 let allocation = geometry_page_pool_request(
-                    self.page_cache,
-                    1_u64, page as u32, self.frame_index, priority,)
+                    self.resources.page_cache,
+                    1_u64, page as u32, self.resources.frame_index, priority,)
+                if allocation.evicted() ||(allocation.resident() && !already_resident) {
+                    self.resources.residency_version += 1_u64
+                }
                 if allocation.evicted() &&
                 allocation.evicted_asset() == 1_u64 {
-                    __borrowed_bool_set(self.cluster_resident,
+                    __borrowed_bool_set(self.resources.cluster_resident,
                         allocation.evicted_page() as usize, false,)
                 }
                 if allocation.resident() {
-                    __borrowed_u32_set(self.cluster_slots, page,
+                    __borrowed_u32_set(self.resources.cluster_slots, page,
                         allocation.slot(),)
-                    __borrowed_bool_set(self.cluster_resident, page, true)
+                    __borrowed_bool_set(self.resources.cluster_resident, page, true)
                 }
                 if allocation.resident() && !already_resident {
                     let vertex_offset = __borrowed_cluster_word(
-                        self.clusters, page, 0_usize,) as u64
+                        self.resources.clusters, page, 0_usize,) as u64
                     let vertex_count = __borrowed_cluster_word(
-                        self.clusters, page, 1_usize,) as u64
+                        self.resources.clusters, page, 1_usize,) as u64
                     let triangle_offset = __borrowed_cluster_word(
-                        self.clusters, page, 2_usize,) as u64
+                        self.resources.clusters, page, 2_usize,) as u64
                     let triangle_count = __borrowed_cluster_word(
-                        self.clusters, page, 3_usize,) as u64
+                        self.resources.clusters, page, 3_usize,) as u64
                     let prefetched = geometry_page_archive_prefetch(
-                        self.page_archive,
+                        self.resources.page_archive,
                         (vertex_offset as usize) * 11_usize,
                         (vertex_count as usize) * 11_usize,
                         triangle_offset as usize,
                         (triangle_count as usize) * 3_usize,)
                     let staged_vertices = geometry_page_archive_vertices(
-                        self.page_archive,
+                        self.resources.page_archive,
                         (vertex_offset as usize) * 11_usize,
                         (vertex_count as usize) * 11_usize,)
                     let staged_triangles = geometry_page_archive_triangles(
-                        self.page_archive, triangle_offset as usize,
+                        self.resources.page_archive, triangle_offset as usize,
                         (triangle_count as usize) * 3_usize,)
-                    let staging_vertex_offset =
-                    (uploaded_pages as u64) * 64_u64 * 11_u64 * 4_u64
-                    let staging_triangle_offset =
-                    (uploaded_pages as u64) * 126_u64 * 3_u64 * 4_u64
-                    let staged = prefetched &&
-                    self.page_staging_vertices.write_f32s(
-                        staging_vertex_offset, staged_vertices,) &&
-                    self.page_staging_triangles.write_u32s(
-                        staging_triangle_offset, staged_triangles,)
-                    let page_uploaded = staged && frame.copy_buffer(
-                        self.page_staging_vertices, self.vertices,
-                        staging_vertex_offset,
-                        (allocation.slot() as u64) *
-                        64_u64 * 11_u64 * 4_u64,
-                        vertex_count * 11_u64 * 4_u64,) &&
-                    frame.copy_buffer(
-                        self.page_staging_triangles, self.triangles,
-                        staging_triangle_offset,
-                        (allocation.slot() as u64) *
-                        126_u64 * 3_u64 * 4_u64,
-                        triangle_count * 3_u64 * 4_u64,)
+                    if !self.resources.page_producer.available(){self.resources.page_producer=frame.completion()}
+                    self.resources.pending_pages.push(page as u32)
+                    let page_uploaded=prefetched && frame.update_f32s(self.resources.vertices,(allocation.slot() as u64)*64_u64*11_u64*4_u64,staged_vertices) && frame.update_u32s(self.resources.triangles,(allocation.slot() as u64)*126_u64*3_u64*4_u64,staged_triangles)
+                    if !page_uploaded{__borrowed_bool_set(self.resources.cluster_resident,page,false) self.resources.residency_version+=1_u64}
                     streaming_uploaded = page_uploaded && streaming_uploaded
                     if page_uploaded {
                         uploaded_pages += 1_usize
@@ -1091,31 +1461,35 @@ pub fn gpu_virtual_geometry_record_debug(
         println("VG record fail 4")
         ret false
     }
+    if self.skin.is_some(){
+        let mut binding=match self.skin{Some(binding)=>binding None=>{ret false}}
+        let logical=binding.frame()
+        if !self.skin_has_frame || logical!=self.skin_frame{self.skin_view_history=self.skin_has_frame && logical==self.skin_frame+1_u64 self.skin_frame=logical self.skin_has_frame=true}
+        if binding.record_bounds(frame,self.skin_view_history).is_err(){ret false}
+    }
     let next_slot_frame = slot_frame + 1_u64
     let current_hiz =(next_slot_frame & 1_u64) as usize
-    let mut resident_lod_mask = 0_u32
-    let mut mask_lod = 0_u32
-    while mask_lod <= self.maximum_lod && mask_lod < 24_u32 {
-        let mut complete = true
+    if self.resources.resident_mask_version != self.resources.residency_version {
+        let mut missing = 0_u32
         let mut mask_cluster = 0_usize
-        while complete && mask_cluster < self.clusters.len() {
-            let cluster_lod = match self.cluster_lods.get(mask_cluster) {
-                Option::Some(value) => value
-                Option::None => self.maximum_lod
-            }
-            if cluster_lod == mask_lod {
-                complete = match self.cluster_resident.get(mask_cluster) {
-                    Option::Some(value) => value
-                    Option::None => false
+        while mask_cluster < self.resources.clusters.len() {
+            if !self.resources.cluster_resident.get(mask_cluster).unwrap_or(false) {
+                let lod = self.resources.cluster_lods.get(mask_cluster).unwrap_or(self.resources.maximum_lod)
+                if lod < 24_u32 {
+                    missing = missing |(1_u32 << lod)
                 }
             }
             mask_cluster += 1_usize
         }
-        if complete {
-            resident_lod_mask = resident_lod_mask |(1_u32 << mask_lod)
+        let levels = if self.resources.maximum_lod >= 23_u32 {
+            16777215_u32
+        } else {
+            (1_u32 <<(self.resources.maximum_lod + 1_u32)) - 1_u32
         }
-        mask_lod += 1_u32
+        self.resources.resident_mask = levels &(16777215_u32 ^ missing)
+        self.resources.resident_mask_version = self.resources.residency_version
     }
+    let resident_lod_mask = self.resources.resident_mask
     let mut values = Vec[f32]::new()
     for value in view_projection.values() {
         values.push(value)
@@ -1135,16 +1509,48 @@ pub fn gpu_virtual_geometry_record_debug(
     values.push(indirect_ambient.z())
     values.push(current_hiz as f32)
     values.push(viewport_height)
-    values.push(self.maximum_lod as f32)
-    values.push(self.object_radius)
+    values.push(self.resources.maximum_lod as f32)
+    values.push(self.resources.object_radius)
     values.push(self.maximum_instances as f32)
     let mut root_lod = 0_usize
     while root_lod < 24_usize {
         values.push(if root_lod == 1_usize {
-                // Target projected geometric error in viewport pixels.
-                1.0_f32
-            } elif root_lod < self.lod_roots.len() {
-                match self.lod_roots.get(root_lod) {
+                // Per-asset projected geometric error in viewport pixels.
+                if self.autolod_enabled {
+                    self.target_pixel_error
+                } else {
+                    - 1.0_f32
+                }
+            } elif root_lod == 2_usize {
+                (self.lod_curve.len() + if self.lod_smooth {
+                        16_usize
+                    } else {
+                        0_usize
+                    }
+                ) as f32
+            } elif root_lod >= 3_usize && root_lod < 19_usize {
+                let point = self.lod_curve.get((root_lod - 3) / 2).unwrap_or(LodCurvePoint {
+                        0.0_f32, 1.0_f32
+                    }
+                    ,
+                )
+                if (root_lod - 3) % 2 == 0 {
+                    point.distance
+                } else {
+                    point.triangle_ratio
+                }
+            } elif root_lod == 19_usize {
+                self.resources.object_center.x()
+            } elif root_lod == 20_usize {
+                self.resources.object_center.y()
+            } elif root_lod == 21_usize {
+                self.resources.object_center.z()
+            } elif root_lod == 22_usize {
+                self.lod_focal_y
+            } elif root_lod == 23_usize {
+                self.lod_near
+            } elif root_lod < self.resources.lod_roots.len() {
+                match self.resources.lod_roots.get(root_lod) {
                     Option::Some(value) => value as f32
                     Option::None => 4294967295.0_f32
                 }
@@ -1154,69 +1560,88 @@ pub fn gpu_virtual_geometry_record_debug(
         )
         root_lod += 1_usize
     }
-    let mut cluster_index = 0_usize
-    for cluster in self.clusters {
-        values.push(cluster.center().x())
-        values.push(cluster.center().y())
-        values.push(cluster.center().z())
-        values.push(cluster.radius())
-        values.push(cluster.cone_axis().x())
-        values.push(cluster.cone_axis().y())
-        values.push(cluster.cone_axis().z())
-        // Cone rejection is only enabled after the builder can prove a
-        // conservative cutoff for every primitive in a cluster.
-        values.push( - 2.0_f32)
-        values.push((cluster.triangle_count() * 3_usize) as f32)
-        let physical_slot = match self.cluster_slots.get(cluster_index) {
-            Option::Some(value) => value
-            Option::None => 0_u32
-        }
-        values.push((physical_slot as f32) * 378.0_f32)
-        values.push((physical_slot as f32) * 64.0_f32)
-        values.push(match self.cluster_lods.get(cluster_index) {
-                Option::Some(value) => value as f32
-                Option::None => 0.0_f32
-            }
-        )
-        values.push(if match self.cluster_resident.get(cluster_index) {
+    let header_uploaded = stream.write_f32s(16_u64, values)
+    let metadata_stale = self.metadata_versions.get(slot).unwrap_or(0_u64) != self.resources.residency_version ||
+    self.metadata_modes.get(slot).unwrap_or(0_u32) != view_mode ||
+    self.metadata_primitives.get(slot).unwrap_or(0_u32) != primitive_id
+    if metadata_stale {
+        values.clear()
+        let mut cluster_index = 0_usize
+        for cluster in self.resources.clusters {
+            values.push(cluster.center().x())
+            values.push(cluster.center().y())
+            values.push(cluster.center().z())
+            values.push(cluster.radius())
+            values.push(cluster.cone_axis().x())
+            values.push(cluster.cone_axis().y())
+            values.push(cluster.cone_axis().z())
+            // Cone rejection is only enabled after the builder can prove a
+            // conservative cutoff for every primitive in a cluster.
+            values.push( - 2.0_f32)
+            values.push((cluster.triangle_count() * 3_usize) as f32)
+            let physical_slot = match self.resources.cluster_slots.get(cluster_index) {
                 Option::Some(value) => value
-                Option::None => false
+                Option::None => 0_u32
             }
-            {
-                1.0_f32
-            } else {
-                0.0_f32
-            }
-        )
-        values.push(primitive_id as f32)
-        values.push(view_mode as f32)
-        values.push(0.0_f32)
-        cluster_index += 1_usize
+            values.push((physical_slot as f32) * 378.0_f32)
+            values.push((physical_slot as f32) * 64.0_f32)
+            values.push(match self.resources.cluster_lods.get(cluster_index) {
+                    Option::Some(value) => value as f32
+                    Option::None => 0.0_f32
+                }
+            )
+            values.push(if match self.resources.cluster_resident.get(cluster_index) {
+                    Option::Some(value) => value
+                    Option::None => false
+                }
+                {
+                    1.0_f32
+                } else {
+                    0.0_f32
+                }
+            )
+            values.push(primitive_id as f32)
+            values.push(view_mode as f32)
+            values.push(if self.skin.is_some(){cluster.vertex_count() as f32}else{0_f32})
+            cluster_index += 1_usize
+        }
+        let mut node_index = 0_usize
+        for node in self.resources.hierarchy {
+            values.push(node.center().x())
+            values.push(node.center().y())
+            values.push(node.center().z())
+            values.push(node.radius())
+            values.push(node.first_cluster() as f32)
+            values.push(node.cluster_count() as f32)
+            values.push(if node.leaf() {
+                    - 1.0_f32
+                } else {
+                    node.left_child() as f32
+                }
+            )
+            // A parent may have only a left child when a level has an odd node
+            // count. UINT_MAX cannot be cast to f32: it rounds to 2^32 and the
+            // shader then treats it as a real child, blocking close-up refinement.
+            values.push(if node.right_child() == 4294967295_u32 {
+                    - 1.0_f32
+                } else {
+                    node.right_child() as f32
+                }
+            )
+            values.push(node.level() as f32)
+            values.push(node.geometric_error())
+            values.push(self.resources.lod_budget.refinement_ratios.get(node_index).unwrap_or(2.0_f32))
+            values.push(self.resources.lod_budget.source_triangles as f32)
+            node_index += 1_usize
+        }
+        if !stream.write_f32s(256_u64, values) {
+            ret false
+        }
+        __borrowed_u64_set(self.metadata_versions, slot, self.resources.residency_version)
+        __borrowed_u32_set(self.metadata_modes, slot, view_mode)
+        __borrowed_u32_set(self.metadata_primitives, slot, primitive_id)
     }
-    for node in self.hierarchy {
-        values.push(node.center().x())
-        values.push(node.center().y())
-        values.push(node.center().z())
-        values.push(node.radius())
-        values.push(node.first_cluster() as f32)
-        values.push(node.cluster_count() as f32)
-        values.push(if node.leaf() {
-                - 1.0_f32
-            } else {
-                node.left_child() as f32
-            }
-        )
-        values.push(if node.leaf() {
-                - 1.0_f32
-            } else {
-                node.right_child() as f32
-            }
-        )
-        values.push(node.level() as f32)
-        values.push(node.geometric_error())
-        values.push(0.0_f32)
-        values.push(0.0_f32)
-    }
+    values.clear()
     for instance in instances {
         for value in instance.model.values() {
             values.push(value)
@@ -1234,59 +1659,68 @@ pub fn gpu_virtual_geometry_record_debug(
             }
         )
         values.push(view_mode as f32)
+        values.push(instance.normal_scale)
+        values.push(if instance.normal_flip_y {
+                - 1.0_f32
+            } else {
+                1.0_f32
+            }
+        )
+        values.push(0.0_f32) values.push(0.0_f32)
     }
-    let uploaded = stream.write_u32(0_u64, self.clusters.len() as u32) &&
+    if self.aa_signature == 5_u32 {
+        let mut temporal_values = self.previous_view_projection.values()
+        for instance in instances {
+            for value in instance.previous_model.values() {
+                temporal_values.push(value)
+            }
+            temporal_values.push(if instance.previous_valid {
+                    1.0_f32
+                } else {
+                    0.0_f32
+                }
+            )
+            temporal_values.push(0.0_f32) temporal_values.push(0.0_f32) temporal_values.push(0.0_f32)
+        }
+        let buffer = self.temporal_buffers.get(slot).unwrap_or(GpuBuffer::unavailable())
+        if !buffer.write_f32s(0, temporal_values) {
+            ret false
+        }
+    }
+    let uploaded = stream.write_u32(0_u64, self.resources.clusters.len() as u32) &&
     stream.write_u32(4_u64, instances.len() as u32) &&
-    stream.write_u32(8_u64, self.hierarchy.len() as u32) &&
+    stream.write_u32(8_u64, self.resources.hierarchy.len() as u32) &&
     stream.write_u32(12_u64, view_mode) &&
-    stream.write_f32s(16_u64, values)
-    let mut reset_feedback = Vec[u32]::new()
-    let mut reset_index = 0_usize
-    while reset_index < self.clusters.len() {
-        reset_feedback.push(0_u32)
-        reset_index += 1_usize
-    }
-    let feedback_reset = stream.write_u32s(
-        (feedback_base as u64) * 4_u64, reset_feedback,)
-    let indirect_reset = stream.write_u32(
-        (indirect_base as u64) * 4_u64, 0_u32,) &&
+    header_uploaded && stream.write_f32s(((64_usize + self.resources.clusters.len() * 16_usize + self.resources.hierarchy.len() * 12_usize) as u64) * 4_u64, values)
+    let feedback_reset = frame.fill_buffer(stream,(feedback_base as u64) * 4_u64,(self.resources.clusters.len() as u64) * 4_u64, 0_u32)
+    let indirect_reset = frame.fill_buffer(stream,(indirect_base as u64) * 4_u64, 4_u64, 0_u32) &&
+    frame.fill_buffer(stream,(indirect_base as u64) * 4_u64 + 12_u64, 16_u64, 0_u32) &&
     stream.write_u32((indirect_base as u64) * 4_u64 + 4_u64, 1_u32) &&
-    stream.write_u32((indirect_base as u64) * 4_u64 + 8_u64, 1_u32) &&
-    stream.write_u32((indirect_base as u64) * 4_u64 + 12_u64, 0_u32) &&
-    stream.write_u32((indirect_base as u64) * 4_u64 + 16_u64, 0_u32) &&
-    stream.write_u32((indirect_base as u64) * 4_u64 + 20_u64, 0_u32) &&
-    stream.write_u32((indirect_base as u64) * 4_u64 + 24_u64, 0_u32)
-    let mut reset_hiz = Vec[u32]::new()
-    let mut hiz_index = 0_usize
-    while hiz_index < 3067_usize {
-        reset_hiz.push(4294967295_u32)
-        hiz_index += 1_usize
-    }
-    let hiz_reset = stream.write_u32s(
-        ((hiz_base + current_hiz * 3067_usize) as u64) * 4_u64,
-        reset_hiz,)
-    let previous_reset = if slot_frame == 0_u64 {
-        stream.write_u32s(
-            ((hiz_base +(1_usize - current_hiz) * 3067_usize) as u64) * 4_u64,
-            reset_hiz,)
-    } else {
-        true
-    }
-    let main_recorded = uploaded && feedback_reset && indirect_reset &&
+    stream.write_u32((indirect_base as u64) * 4_u64 + 8_u64, 1_u32)
+    let hiz_reset = frame.fill_buffer(stream,((hiz_base + current_hiz * 3067_usize) as u64) * 4_u64, 12268_u64, 4294967295_u32)
+    let previous_reset = slot_frame != 0_u64 || frame.fill_buffer(stream,((hiz_base +(1_usize - current_hiz) * 3067_usize) as u64) * 4_u64, 12268_u64, 4294967295_u32)
+    let resets_ordered = frame.transfer_storage_barrier()
+    let history_ordered = frame.compute_barrier()
+    frame.timing_mark(2_u32, true)
+    let main_recorded = resets_ordered && history_ordered && uploaded && feedback_reset && indirect_reset &&
     hiz_reset &&
     previous_reset && frame.dispatch_compute(
         self.cull_pipeline, group,
         ((instances.len() + 63_usize) / 64_usize) as u32,
         1_u32, 1_u32,) && frame.compute_barrier()
-    let recorded = main_recorded && frame.dispatch_compute(
-        self.post_cull_pipeline, group,
-        ((maximum_candidates + 63_usize) / 64_usize) as u32,
-        1_u32, 1_u32,) && frame.compute_barrier()
+    frame.timing_mark(2_u32, false)
+    frame.timing_mark(3_u32, true)
+    let recorded = main_recorded && frame.dispatch_compute(self.dispatch_pipeline, group, 1_u32, 1_u32, 1_u32) &&
+    frame.compute_barrier() && frame.dispatch_compute_indirect(self.post_cull_pipeline, group,
+        stream,((indirect_base + 7_usize) as u64) * 4_u64,) && frame.compute_barrier()
+    frame.timing_mark(3_u32, false)
+    let mut recorded=recorded
+    if recorded && self.skin.is_some(){let mut binding=match self.skin{Some(binding)=>binding None=>{ret false}} recorded=binding.record_selected(frame,group,self.cache_dispatch_pipeline,self.request_pipeline)}
     if !recorded {
         println("VG record fail 5 main=" + Debug::fmt(main_recorded))
         self.last_record_error = 5_u32
     } else {
-        self.frame_index = self.frame_index + 1_u64
+        self.resources.frame_index = self.resources.frame_index + 1_u64
         __borrowed_u64_set(self.slot_frames, slot, next_slot_frame)
         self.active_slot = slot
         self.active_indirect_offset =(indirect_base as u64) * 4_u64
@@ -1299,7 +1733,12 @@ pub fn gpu_virtual_geometry_record_debug(
 }
 
 pub fn gpu_virtual_geometry_draw(
-    self: GpuVirtualGeometry &, pass: RenderPassEncoder,) -> bool {
+    self: GpuVirtualGeometry&, pass: RenderPassEncoder,) -> bool {
+    let completion=pass.completion()
+    let same=self.record_completion.same_submission(completion)
+    if completion.available(){completion.destroy()}
+    if !same{ret false}
+
     let group = match self.groups.get(self.active_slot) {
         Option::Some(value) => value
         Option::None => BindGroup::unavailable()
@@ -1328,17 +1767,22 @@ pub fn gpu_virtual_geometry_draw(
 }
 
 pub fn gpu_virtual_geometry_draw_slot(
-    self: GpuVirtualGeometry &, pass: RenderPassEncoder,
+    self: GpuVirtualGeometry&, pass: RenderPassEncoder,
     slot: usize, view_mode: u32,) -> bool {
+    let completion=pass.completion()
+    let same=self.record_completion.same_submission(completion)
+    if completion.available(){completion.destroy()}
+    if !same{ret false}
+
     let group = match self.groups.get(slot) {
         Option::Some(value) => value
         Option::None => BindGroup::unavailable()
     }
-    let maximum_candidates = self.clusters.len() * self.maximum_instances
-    let feedback_base = 64_usize + self.clusters.len() * 16_usize +
-    self.hierarchy.len() * 12_usize +
-    self.maximum_instances * 24_usize + maximum_candidates * 4_usize
-    let indirect_base = feedback_base + self.clusters.len() +
+    let maximum_candidates = self.resources.clusters.len() * self.maximum_instances
+    let feedback_base = 64_usize + self.resources.clusters.len() * 16_usize +
+    self.resources.hierarchy.len() * 12_usize +
+    self.maximum_instances * 28_usize + maximum_candidates * 4_usize
+    let indirect_base = feedback_base + self.resources.clusters.len() +
     3067_usize * 2_usize
     let pipeline = if view_mode == 3_u32 && self.triangle_debug_pipeline.available() {
         self.triangle_debug_pipeline
@@ -1360,12 +1804,12 @@ pub fn gpu_virtual_geometry_draw_slot(
 }
 
 pub fn gpu_virtual_geometry_visible_count_slot(
-    self: GpuVirtualGeometry &, slot: usize,) -> u32 {
-    let maximum_candidates = self.clusters.len() * self.maximum_instances
-    let feedback_base = 64_usize + self.clusters.len() * 16_usize +
-    self.hierarchy.len() * 12_usize +
-    self.maximum_instances * 24_usize + maximum_candidates * 4_usize
-    let indirect_base = feedback_base + self.clusters.len() +
+    self: GpuVirtualGeometry&, slot: usize,) -> u32 {
+    let maximum_candidates = self.resources.clusters.len() * self.maximum_instances
+    let feedback_base = 64_usize + self.resources.clusters.len() * 16_usize +
+    self.resources.hierarchy.len() * 12_usize +
+    self.maximum_instances * 28_usize + maximum_candidates * 4_usize
+    let indirect_base = feedback_base + self.resources.clusters.len() +
     3067_usize * 2_usize
     match self.streams.get(slot) {
         Option::Some(stream) => {
@@ -1377,40 +1821,41 @@ pub fn gpu_virtual_geometry_visible_count_slot(
     }
 }
 
-pub fn gpu_virtual_geometry_destroy(
-    self: GpuVirtualGeometry &,) -> bool {
-    let render_pipeline = self.render_pipeline.destroy()
-    let triangle_debug_pipeline = self.triangle_debug_pipeline.destroy()
-    let overdraw_pipeline = self.overdraw_pipeline.destroy()
-    let fragment_shader = self.fragment_shader.destroy()
-    let triangle_debug_shader = self.triangle_debug_shader.destroy()
-    let mesh_shader = self.mesh_shader.destroy()
-    let post_cull_pipeline = self.post_cull_pipeline.destroy()
-    let post_cull_shader = self.post_cull_shader.destroy()
-    let cull_pipeline = self.cull_pipeline.destroy()
-    let cull_shader = self.cull_shader.destroy()
-    // Bind groups and per-frame streams are device-owned. The enclosing
-    // renderer destroys that device immediately after all virtual meshes.
-    // Iterating these nested retained vectors from a heap entry would
-    // duplicate their owner during teardown on current Encore.
-    let groups = true
-    let layout = self.layout.destroy()
-    let sampler = self.sampler.destroy()
-    let texture = self.texture.destroy()
-    let triangles = self.triangles.destroy()
-    let vertices = self.vertices.destroy()
-    let page_source_triangles = self.page_staging_triangles.destroy()
-    let page_source_vertices = self.page_staging_vertices.destroy()
-    let streams = true
-    let page_pool = geometry_page_pool_destroy(
-        self.page_cache,)
-    let page_archive = geometry_page_archive_destroy(self.page_archive)
-    ret overdraw_pipeline && render_pipeline && triangle_debug_pipeline &&
-    fragment_shader && triangle_debug_shader && mesh_shader &&
-    post_cull_pipeline && post_cull_shader &&
-    cull_pipeline && cull_shader && groups && layout && sampler && texture &&
-    triangles && vertices && page_source_triangles &&
-    page_source_vertices && streams && page_pool && page_archive
+pub fn gpu_virtual_geometry_destroy(self: GpuVirtualGeometry&) -> bool {
+    for token in self.uses{if !token.ready(){ret false}}
+    if self.owns_resources{for token in self.resources.uses{if !token.ready(){ret false}}}
+    // All retired pipelines use subsets of these view submissions.
+    for entry in self.retired_pipelines{for token in entry.uses{token.destroy()} entry.solid.destroy() entry.triangles.destroy() entry.overdraw.destroy()}
+    for token in self.uses{token.destroy()}
+    if self.record_completion.available(){self.record_completion.destroy()}
+    self.render_pipeline.destroy() self.triangle_debug_pipeline.destroy() self.overdraw_pipeline.destroy()
+    self.mesh_shader.destroy() self.fragment_shader.destroy() self.triangle_debug_shader.destroy()
+    self.dispatch_pipeline.destroy() self.dispatch_shader.destroy() self.post_cull_pipeline.destroy() self.post_cull_shader.destroy() self.cull_pipeline.destroy() self.cull_shader.destroy()
+    if self.request_pipeline.available(){self.request_pipeline.destroy()} if self.request_shader.available(){self.request_shader.destroy()}
+    if self.cache_dispatch_pipeline.available(){self.cache_dispatch_pipeline.destroy()} if self.cache_dispatch_shader.available(){self.cache_dispatch_shader.destroy()}
+    for i in 0_usize..self.groups.len(){self.groups.get_unchecked_borrowed(i).destroy()}
+    for i in 0_usize..self.streams.len(){self.streams.get_unchecked_borrowed(i).destroy()}
+    for i in 0_usize..self.light_buffers.len(){self.light_buffers.get_unchecked_borrowed(i).destroy()}
+    for i in 0_usize..self.temporal_buffers.len(){self.temporal_buffers.get_unchecked_borrowed(i).destroy()}
+    self.lod_history.destroy() self.layout.destroy() self.sampler.destroy() self.texture.destroy() self.normal_texture.destroy()
+    if self.owns_resources{ret destroy_virtual_geometry_resources(self.resources)} ret true
+}
+/// Call once, after all forked views have successfully retired. The asset owner
+/// holds this explicit shared resource reference; views never guess its lifetime.
+pub fn destroy_virtual_geometry_resources(resources: VirtualGeometryResources&) -> bool {
+    for token in resources.uses{if !token.ready(){ret false}}
+    for token in resources.uses{token.destroy()}
+    if resources.page_producer.available(){resources.page_producer.destroy()}
+    resources.vertices.destroy() resources.triangles.destroy() resources.page_staging_vertices.destroy() resources.page_staging_triangles.destroy()
+    geometry_page_pool_destroy(resources.page_cache) geometry_page_archive_destroy(resources.page_archive) ret true
+}
+fn retain_virtual_geometry_use(uses: mut Vec[GpuCompletion],frame: RenderFrame) -> bool {
+    let mut count=0_usize
+    for i in 0_usize..uses.len(){let token=uses.get_unchecked_borrowed(i) if token.ready(){token.destroy()}else{uses.set(count,token) count+=1_usize}}
+    while uses.len()>count{uses.pop()}
+    let token=frame.completion() if !token.available(){ret false}
+    for old in uses{if old.same_submission(token){token.destroy() ret true}}
+    uses.push(token) ret true
 }
 
 pub struct GpuClusterCullResult {
@@ -1598,3 +2043,96 @@ pub fn gpu_cull_clusters(device: GraphicsDevice,
     }
 }
 // GPU-driven virtual geometry, cluster culling, and page residency.
+
+impl for GpuVirtualGeometry {
+    /// Called only after the previous scene producer has completed.
+    pub fn set_graph_shaders(self: mut Self&, key: str, shaders: Vec[Vec[u32]]) ->() {
+        if self.graph_key == key {
+            ret()
+        }
+        self.graph_key = key self.graph_shaders = shaders
+    }
+    pub fn configure_anti_aliasing(self: mut Self&, device: GraphicsDevice, target: Swapchain, samples: u32, temporal: bool, previous: Mat4) -> bool {
+        self.previous_view_projection = previous
+        let signature = if temporal {
+            5_u32
+        } else {
+            samples
+        }
+        if signature == self.aa_signature && self.graph_key == self.graph_applied {
+            ret true
+        }
+        let mesh = device.create_shader_module(if self.skin.is_some(){animation_spirv(if temporal{7_u32}else{6_u32})}elif temporal {
+                aa_temporal_mesh()
+            } else {
+                aa_linear_mesh()
+            }
+            , shader_stage_mesh(),)
+        let fragment = device.create_shader_module(if self.graph_shaders.len() == 6 {
+                self.graph_shaders.get(if temporal {
+                        3
+                    } else {
+                        2
+                    }
+                ).unwrap_or(Vec[u32]::new())
+            } elif temporal {
+                aa_temporal_virtual_fragment()
+            } else {
+                aa_linear_virtual_fragment()
+            }
+            , shader_stage_fragment(),)
+        let triangle = device.create_shader_module(if self.graph_shaders.len() == 6 {
+                self.graph_shaders.get(if temporal {
+                        5
+                    } else {
+                        4
+                    }
+                ).unwrap_or(Vec[u32]::new())
+            } elif temporal {
+                aa_temporal_virtual_triangle()
+            } else {
+                aa_linear_virtual_triangle()
+            }
+            , shader_stage_fragment(),)
+        let solid = device.create_mesh_pipeline_with_bind_group(target, mesh, fragment, self.layout)
+        let triangles = device.create_mesh_pipeline_with_bind_group(target, mesh, triangle, self.layout)
+        let overdraw = device.create_mesh_pipeline_with_options(target, mesh, fragment, self.layout, RenderPipelineOptions::depth().with_depth_test(false).with_depth_write(false).with_additive_blending())
+        if !solid.available() || !overdraw.available() {
+            solid.destroy() triangles.destroy() overdraw.destroy() mesh.destroy() fragment.destroy() triangle.destroy() ret false
+        }
+        retire_virtual_pipelines(self)
+        self.mesh_shader.destroy() self.fragment_shader.destroy() self.triangle_debug_shader.destroy()
+        self.render_pipeline = solid self.triangle_debug_pipeline = triangles self.overdraw_pipeline = overdraw
+        self.mesh_shader = mesh self.fragment_shader = fragment self.triangle_debug_shader = triangle self.aa_signature = signature self.graph_applied = self.graph_key
+        ret true
+    }
+}
+
+impl for GpuVirtualGeometry {
+    pub fn shared_resources(self: Self&) -> VirtualGeometryResources<H> {ret self.resources}
+    pub fn fork_view(self: mut Self&,device: GraphicsDevice,target: Swapchain,gi_scene: GpuBuffer,gi_surfaces: GpuBuffer,gi_history: GpuBuffer,texture_pixels: Vec[u32],texture_width: u32,texture_height: u32) -> GpuVirtualGeometry<H> {
+        self.owns_resources=false
+        let mut view=Self::create_textured_view(device,target,self.resources.data,Vec[f32]::new(),self.maximum_instances,gi_scene,gi_surfaces,gi_history,texture_pixels,texture_width,texture_height,Option[VirtualGeometryResources<H>]::Some(self.resources),self.skin)
+        view.lod_curve=self.lod_curve view.lod_smooth=self.lod_smooth view.autolod_enabled=self.autolod_enabled view.target_pixel_error=self.target_pixel_error
+        view.lod_focal_y=self.lod_focal_y view.lod_near=self.lod_near view.graph_key=self.graph_key view.graph_shaders=self.graph_shaders
+        ret view
+    }
+    pub fn create_skinned(device: GraphicsDevice,target: Swapchain,geometry: VirtualGeometry,packed_vertices: Vec[f32],maximum_instances: usize,gi_scene: GpuBuffer,gi_surfaces: GpuBuffer,gi_history: GpuBuffer,texture_pixels: Vec[u32],texture_width: u32,texture_height: u32,skin: SkinGpuSection<H>) -> GpuVirtualGeometry<H> {
+        ret Self::create_textured_view(device,target,geometry,packed_vertices,maximum_instances,gi_scene,gi_surfaces,gi_history,texture_pixels,texture_width,texture_height,Option[VirtualGeometryResources<H>]::None,Option[SkinGpuSection<H>]::Some(skin))
+    }
+}
+
+impl for GpuVirtualGeometry {
+    /// A dedicated view uses the same selected-vertex cache and VG stream for
+    /// selection depth/silhouette. Called once before this view is submitted.
+    pub fn configure_selection(self: mut Self&,device: GraphicsDevice,target: Swapchain) -> bool {
+        if self.aa_signature==4294967295_u32 {ret true}
+        let fragment=device.create_shader_module(animation_spirv(9_u32),shader_stage_fragment())
+        let pipeline=device.create_mesh_pipeline_with_bind_group(target,self.mesh_shader,fragment,self.layout)
+        if !fragment.available() || !pipeline.available(){pipeline.destroy() fragment.destroy() ret false}
+        retire_virtual_pipelines(self)
+        self.triangle_debug_pipeline=RenderPipeline::unavailable() self.overdraw_pipeline=RenderPipeline::unavailable()
+        self.fragment_shader.destroy()
+        self.render_pipeline=pipeline self.fragment_shader=fragment self.aa_signature=4294967295_u32 ret true
+    }
+}

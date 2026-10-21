@@ -1,0 +1,86 @@
+//! In-place pose blending. Inputs may be shared; only the explicit output mutates.
+import core::result::Result
+import core::vec::Vec
+import mod::math::{animation_clamp, animation_finite, PoseRotation, PoseVector}
+import mod::model::Skeleton
+import mod::pose::AnimationPose
+
+pub struct BoneMask {
+    skeleton: str
+    weights: Vec[f32]
+}
+
+impl for BoneMask {
+    pub fn branch(skeleton: Skeleton, root: u32, weight: f32) -> Result[Self, str] {
+        if root as usize >= skeleton.bones.len() || !animation_finite(weight) {
+            ret Result::Err("Invalid bone mask root or weight")
+        }
+        let mut weights = Vec[f32]::with_capacity(skeleton.bones.len())
+        for i in 0_usize..skeleton.bones.len() {
+            let parent = skeleton.bones.get_unchecked_borrowed(i).parent
+            let inherited = if parent >= 0_i32 {
+                weights.get_unchecked_borrowed(parent as usize)
+            } else {
+                0_f32
+            }
+            weights.push(if i == root as usize {
+                    animation_clamp(weight, 0_f32, 1_f32)
+                } else {
+                    inherited
+                }
+            )
+        }
+        ret Result::Ok(Self { skeleton.identity, weights })
+    }
+}
+pub fn blend_poses(a: AnimationPose, b: AnimationPose, weight: f32, mask: BoneMask, output: mut AnimationPose) -> Result[AnimationPose, str] {
+    if !blend_layout(a, b, output) || mask.skeleton != a.skeleton || mask.weights.len() != a.translations.len() || !animation_finite(weight) {
+        ret Result::Err("Blend pose layout or weight mismatch")
+    }
+    let mut out = output let t = animation_clamp(weight, 0_f32, 1_f32)
+    for i in 0_usize..a.translations.len() {
+        let m = mask.weights.get_unchecked_borrowed(i)
+        if !animation_finite(m) {
+            ret Result::Err("Invalid bone mask weight")
+        }
+        out.set_local(i, a.local(i).blend(b.local(i), t * animation_clamp(m, 0_f32, 1_f32)))
+    }
+    for i in 0_usize..a.morphs.len() {
+        out.morphs.set(i, a.morphs.get_unchecked_borrowed(i) *(1_f32 - t) + b.morphs.get_unchecked_borrowed(i) * t)
+    }
+    ret Result::Ok(out)
+}
+fn blend_layout(a: AnimationPose, b: AnimationPose, out: AnimationPose) -> bool {
+    ret a.skeleton == b.skeleton && a.skeleton == out.skeleton && a.translations.len() == b.translations.len() && a.translations.len() == out.translations.len() && a.rotations.len() == a.translations.len() && b.rotations.len() == a.translations.len() && out.rotations.len() == a.translations.len() && a.scales.len() == a.translations.len() && b.scales.len() == a.translations.len() && out.scales.len() == a.translations.len() && a.morphs.len() == b.morphs.len() && a.morphs.len() == out.morphs.len()
+}
+/// Local-space additive delta relative to an explicit reference pose.
+/// Rotational deltas compose on the base; scale uses multiplicative ratios.
+pub fn additive_poses(base: AnimationPose, layer: AnimationPose, reference: AnimationPose, weight: f32, mask: BoneMask, output: mut AnimationPose) -> Result[AnimationPose, str] {
+    if !blend_layout(base, layer, output) || !blend_layout(base, reference, output) || mask.skeleton != base.skeleton || mask.weights.len() != base.translations.len() || !animation_finite(weight) {
+        ret Result::Err("Additive pose layout mismatch")
+    }
+    let mut out = output let t = animation_clamp(weight, 0_f32, 1_f32)
+    for i in 0_usize..base.translations.len() {
+        let m = mask.weights.get_unchecked_borrowed(i)
+        if !animation_finite(m) {
+            ret Result::Err("Invalid additive mask")
+        }
+        let w = t * animation_clamp(m, 0_f32, 1_f32)
+        let a = base.local(i) let b = layer.local(i) let r = reference.local(i)
+        if !r.valid() {
+            ret Result::Err("Invalid additive reference")
+        }
+        let mut value = a
+        value.translation = a.translation.add(b.translation.sub(r.translation).scaled(w))
+        value.rotation = a.rotation.mul(PoseRotation::identity().slerp(r.rotation.inverse().mul(b.rotation), w))
+        value.scale = a.scale.mul(PoseVector::one().lerp(PoseVector {
+                    b.scale.x / r.scale.x, b.scale.y / r.scale.y, b.scale.z / r.scale.z
+                }
+                , w,))
+        out.set_local(i, value)
+    }
+    for i in 0_usize..base.morphs.len() {
+        out.morphs.set(i, base.morphs.get_unchecked_borrowed(i) +(layer.morphs.get_unchecked_borrowed(i) - reference.morphs.get_unchecked_borrowed(i)) * t)
+    }
+    ret Result::Ok(out)
+}

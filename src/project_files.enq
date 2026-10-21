@@ -1,0 +1,9 @@
+//! Asset-source metadata shared by project loading and the Content Browser.
+//! Paths are project-relative and native discovery rejects symlink traversal.
+extern fn graphene_content_stat(root: str, relative: str) -> u64
+#attr(safe)
+pub fn project_file_info(root: str, relative: str) -> u64 {
+    unsafe {
+        ret graphene_content_stat(root, relative)
+    }
+}

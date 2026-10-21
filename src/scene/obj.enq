@@ -17,21 +17,23 @@ fn obj_trim(value: str) -> str {
     while end > start && obj_space(value.byte_at(end - 1_usize)) {
         end = end - 1_usize
     }
-    ret value.slice(start, end - start)
+    ret value.slice_bytes(start, end - start)
 }
 
 fn obj_lines(source: str) -> Vec[str] {
+    // The scanner tracks bytes. Character slices rescan the UTF-8 prefix for
+    // every line and make large mesh imports quadratic in file size.
     let mut out = Vec[str]::new()
     let mut start = 0_usize
     let mut index = 0_usize
     while index < source.byte_len() {
         if source.byte_at(index) == 10_u8 {
-            out.push(obj_trim(source.slice(start, index - start))) start = index + 1_usize
+            out.push(obj_trim(source.slice_bytes(start, index - start))) start = index + 1_usize
         }
         index = index + 1_usize
     }
     if start < source.byte_len() {
-        out.push(obj_trim(source.slice(start, source.byte_len() - start)))
+        out.push(obj_trim(source.slice_bytes(start, source.byte_len() - start)))
     }
     ret out
 }
@@ -48,7 +50,7 @@ fn obj_words(line: str) -> Vec[str] {
             index = index + 1_usize
         }
         if index > start {
-            out.push(line.slice(start, index - start))
+            out.push(line.slice_bytes(start, index - start))
         }
     }
     ret out
@@ -148,7 +150,7 @@ fn obj_vertex_index(reference: str, count: usize) -> Option[usize] {
     while end < reference.byte_len() && reference.byte_at(end) != 47_u8 {
         end = end + 1_usize
     }
-    match obj_i32(reference.slice(0_usize, end)) {
+    match obj_i32(reference.slice_bytes(0_usize, end)) {
         Option::Some(raw) => {
             if raw > 0_i32 && raw as usize <= count {
                 ret Option[usize]::Some(raw as usize - 1_usize)
@@ -176,7 +178,7 @@ fn obj_texture_index(reference: str, count: usize) -> Option[usize] {
     while end < reference.byte_len() && reference.byte_at(end) != 47_u8 {
         end += 1_usize
     }
-    match obj_i32(reference.slice(start, end - start)) {
+    match obj_i32(reference.slice_bytes(start, end - start)) {
         Option::Some(raw) => {
             if raw > 0_i32 && raw as usize <= count {
                 ret Option[usize]::Some(raw as usize - 1_usize)
@@ -191,7 +193,7 @@ fn obj_texture_index(reference: str, count: usize) -> Option[usize] {
     ret Option[usize]::None
 }
 
-fn obj_push_vertex(values: Vec[f32], position: Vec3, normal: Vec3, color: Vec3, uv: Vec3) -> Vec[f32] {
+fn obj_push_vertex(values: mut Vec[f32], position: Vec3, normal: Vec3, color: Vec3, uv: Vec3) -> Vec[f32] {
     let mut out = values
     out.push(position.x()) out.push(position.y()) out.push(position.z())
     out.push(normal.x()) out.push(normal.y()) out.push(normal.z())

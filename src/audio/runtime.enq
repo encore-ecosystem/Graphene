@@ -1,0 +1,609 @@
+//! Shared editor/game adapter. Playback never mutates authored scene transforms.
+import audio::{AudioConfig, AudioEngine, AudioError, AudioStats, Bus, Sound, SoundState, Voice, VoiceState, Spatialization, Position, Listener}
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+import mod::asset::{load_sound, waveform}
+import mod::model::{AudioSource, AudioSettings}
+import refrain::native_asset::NativeSound
+import refrain::scene::component::SceneComponent
+import refrain::scene::world::Scene
+import std::os::{cwd, env, file_exists, read_file}
+import std::path::Path
+import std::thread::JoinHandle
+
+extern fn encore_os_executable_path() -> str
+#attr(safe)
+pub fn audio_sdk_path() -> str {
+    let requested = env("GRAPHENE_AUDIO_HRTF_LIBRARY").unwrap_or("")
+    if requested != "" {
+        ret requested
+    }
+    let executable = encore_os_executable_path()
+    let nearby = Path::new(executable).parent().unwrap_or(Path::new(".")).join("lib/libphonon.so").as_str()
+    if file_exists(nearby) {
+        ret nearby
+    }
+    // Local companion checkout; distributions ship lib/libphonon.so instead.
+    ret Path::new(cwd()).join("../Audio/native/third_party/steamaudio/libphonon.so").resolve().as_str()
+}
+pub struct SoundReady {
+    project: str
+    path: str
+    offset: u64
+    bytes: u64
+    peaks: Vec[f32]
+    error: str
+    generation: u64
+}
+fn prepare_sound(project: str, path: str, generation: u64) -> sending SoundReady {
+    ret match load_sound(project, path) {
+        Ok(h) => SoundReady {
+            project, path, h.offset, h.bytes, waveform(project, path), "", generation
+        }
+        Err(error) => SoundReady { project, path, 0_u64, 0_u64, Vec[f32]::new(), error, generation }
+    }
+}
+struct LoadedSound {
+    path: str
+    sound: Option[Sound]
+    peaks: Vec[f32]
+    failed: bool
+    ready: bool
+}
+struct ActorVoice {
+    actor: u64
+    voice: Voice
+    source: AudioSource
+    position: Vec3
+}
+fn point(v: Vec3) -> Position {
+    ret Position::new(v.x(), v.y(), v.z())
+}
+fn changed(a: AudioSource, b: AudioSource) -> bool {
+    ret a.asset != b.asset || a.bus != b.bus || a.spatial != b.spatial
+}
+fn source_values(voice: Voice, c: AudioSource) ->() {
+    voice.values(c.gain, c.pitch, c.looped) voice.distance(c.minimum, c.maximum, c.rolloff)
+}
+pub struct SceneAudio {
+    engine: Option[AudioEngine]
+    buses: Vec[Bus]
+    preview_bus: Option[Bus]
+    project: str
+    settings: AudioSettings
+    sounds: Vec[LoadedSound]
+    queue: Vec[str]
+    worker: Option[JoinHandle[SoundReady]]
+    voices: Vec[ActorVoice]
+    playing: bool
+    scene_preview: bool
+    preview_path: str
+    preview_voice: Option[Voice]
+    preview_paused: bool
+    preview_started: bool
+    listener_position: Vec3
+    listener_valid: bool
+    message: str
+    hrtf_available: bool
+    attempted: bool
+    generation: u64
+}
+
+impl for SceneAudio {
+    pub fn new() -> Self {
+        ret Self {
+            Option::None, Vec[Bus]::new(), Option::None, "", AudioSettings::defaults(), Vec[LoadedSound]::new(), Vec[str]::new(), Option::None, Vec[ActorVoice]::new(), false, false, "", Option::None, false, false, Vec3::zero(), false, "", false, false, 1_u64
+        }
+    }
+    pub fn close(self: mut Self) ->() {
+        match self.engine {
+            Some(engine) => {
+                engine.close()
+            }
+            None => {
+            }
+        }
+        self.engine = Option[AudioEngine]::None self.buses.clear() self.preview_bus = Option[Bus]::None self.sounds.clear() self.queue.clear() self.voices.clear() self.preview_voice = Option[Voice]::None self.preview_path = "" self.preview_started = false self.preview_paused = false self.scene_preview = false self.playing = false self.listener_valid = false self.attempted = false
+    }
+    pub fn configure(self: mut Self, project: str, settings: AudioSettings) ->() {
+        self.close() self.generation += 1_u64 self.project = project self.settings = settings self.message = ""
+    }
+    pub fn busy(self: Self) -> bool {
+        if self.worker.is_some() || self.queue.len() > 0 ||(self.preview_path != "" && !self.preview_started) {
+            ret true
+        }
+        for entry in self.sounds {
+            match entry.sound {
+                Some(sound) => {
+                    match sound.state() {
+                        SoundState::Loading => {
+                            ret true
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret false
+    }
+    pub fn initialize(self: mut Self) -> bool {
+        if self.engine.is_some() {
+            ret true
+        }
+        if self.attempted {
+            ret false
+        }
+        self.attempted = true
+        let mut cfg = AudioConfig::defaults() cfg.max_voices = self.settings.max_voices cfg.hrtf = self.settings.headphones cfg.hrtf_library = audio_sdk_path()
+        cfg.device = read_file(self.project + "/.graphene/audio-device.txt")
+        let mut opened: Result[AudioEngine, AudioError] = AudioEngine::open(cfg)
+        self.hrtf_available = cfg.hrtf
+        match opened {
+            Err(error) => {
+                self.message = error.message()
+                if cfg.hrtf {
+                    cfg.hrtf = false
+                    self.hrtf_available = false
+                    opened = AudioEngine::open(cfg)
+                }
+            }
+            _ => {
+            }
+        }
+        let engine: AudioEngine = match opened {
+            Ok(engine) => engine
+            Err(error) => {
+                self.message = error.message()
+                ret false
+            }
+        }
+        self.engine = Option[AudioEngine]::Some(engine)
+        let master = match engine.bus(Bus::root()) {
+            Ok(bus) => bus Err(error) => {
+                self.message = error.message() self.close() ret false
+            }
+        }
+        self.buses.push(master)
+        for _i in 0_usize..3_usize {
+            match engine.bus(master) {
+                Ok(bus) => {
+                    self.buses.push(bus)
+                }
+                Err(error) => {
+                    self.message = error.message() self.close() ret false
+                }
+            }
+        }
+        self.preview_bus = match engine.bus(master) {
+            Ok(bus) => Option[Bus]::Some(bus) Err(_) => Option[Bus]::None
+        }
+        self.apply_mix()
+        ret true
+    }
+    pub fn apply_mix(self: Self) ->() {
+        for i in 0_usize..self.buses.len() {
+            match self.buses.get(i) {
+                Some(bus) => {
+                    bus.values(self.settings.gains.get(i).unwrap_or(1), self.settings.mutes.get(i).unwrap_or(false))
+                }
+                None => {
+                }
+            }
+        }
+    }
+    fn bus(self: Self, name: str) -> Bus {
+        ret self.buses.get(if name == "Music" {
+                1_usize
+            } elif name == "UI" {
+                3_usize
+            } else {
+                2_usize
+            }
+        ).unwrap_or(Bus::root())
+    }
+    fn request(self: mut Self, path: str) ->() {
+        if path == "" {
+            ret()
+        }
+        for asset in self.sounds {
+            if asset.path == path {
+                ret()
+            }
+        }
+        for pending in self.queue {
+            if pending == path {
+                ret()
+            }
+        }
+        self.queue.push(path) self.sounds.push(LoadedSound {
+                path, Option::None, Vec[f32]::new(), false, false
+            }
+            ,
+        )
+    }
+    fn sound(self: Self, path: str) -> Option[Sound] {
+        for entry in self.sounds {
+            if entry.path == path {
+                match entry.sound {
+                    Some(sound) => {
+                        match sound.state() {
+                            SoundState::Ready => {
+                                ret Option[Sound]::Some(sound)
+                            }
+                            _ => {
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+        ret Option[Sound]::None
+    }
+    pub fn poll(self: mut Self) -> bool {
+        let mut dirty = false
+        let ready = match self.worker {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if ready {
+            let result = match self.worker {
+                Some(worker) => worker.join() None => {
+                    ret false
+                }
+            }
+            self.worker = Option[JoinHandle[SoundReady]]::None
+            if result.project == self.project && result.generation == self.generation {
+                let mut loaded = Option[Sound]::None
+                if result.error == "" {
+                    match self.engine {
+                        Some(engine) => {
+                            match engine.load_range(self.project + "/" + result.path, result.offset, result.bytes, result.bytes > 2097152_u64) {
+                                Ok(sound) => {
+                                    loaded = Option[Sound]::Some(sound)
+                                }
+                                Err(error) => {
+                                    self.message = error.message()
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                } else {
+                    self.message = result.error
+                }
+                for i in 0_usize..self.sounds.len() {
+                    let mut entry = self.sounds.get(i).unwrap_or(LoadedSound {
+                            "", Option::None, Vec[f32]::new(), true, false
+                        }
+                        ,
+                    ) if entry.path == result.path {
+                        entry.sound = loaded entry.peaks = result.peaks entry.failed = loaded.is_none() self.sounds.set(i, entry)
+                    }
+                }
+                dirty = true
+            }
+        }
+        if self.worker.is_none() && self.queue.len() > 0 {
+            let path = self.queue.get(0).unwrap_or("")
+            let mut rest = Vec[str]::new() for i in 1_usize..self.queue.len() {
+                rest.push(self.queue.get(i).unwrap_or(""))
+            }
+            self.queue = rest
+            self.worker = Option[JoinHandle[SoundReady]]::Some(spawn prepare_sound(self.project, path, self.generation))
+        }
+        for i in 0_usize..self.sounds.len() {
+            let mut entry = self.sounds.get(i).unwrap_or(LoadedSound {
+                    "", Option::None, Vec[f32]::new(), true, false
+                }
+                ,
+            )
+            match entry.sound {
+                Some(sound) => {
+                    match sound.state() {
+                        SoundState::Ready => {
+                            if !entry.ready {
+                                entry.ready = true self.sounds.set(i, entry) dirty = true
+                            }
+                        }
+                        SoundState::Failed => {
+                            if !entry.failed {
+                                entry.failed = true self.message = "Unable to decode " + entry.path self.sounds.set(i, entry) dirty = true
+                            }
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        if self.preview_path != "" && !self.preview_started {
+            match self.sound(self.preview_path) {
+                Some(sound) => {
+                    match self.engine {
+                        Some(engine) => {
+                            match engine.voice(sound, self.preview_bus.unwrap_or(Bus::root()), Spatialization::TwoD) {
+                                Ok(voice) => {
+                                    voice.play() self.preview_voice = Option[Voice]::Some(voice) self.preview_started = true self.preview_paused = false self.message = "" dirty = true
+                                }
+                                Err(error) => {
+                                    self.message = error.message() self.preview_started = true dirty = true
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                None => {
+                    for entry in self.sounds {
+                        if entry.path == self.preview_path && entry.failed {
+                            self.preview_started = true
+                        }
+                    }
+                }
+            }
+        }
+        ret dirty
+    }
+    pub fn preview(self: mut Self, path: str) ->() {
+        self.stop_preview() if !self.initialize() {
+            ret()
+        }
+        self.preview_path = path self.preview_started = false self.request(path)
+    }
+    pub fn stop_preview(self: mut Self) ->() {
+        match self.preview_voice {
+            Some(voice) => {
+                voice.close()
+            }
+            None => {
+            }
+        }
+        self.preview_voice = Option[Voice]::None self.preview_path = "" self.preview_started = false self.preview_paused = false
+    }
+    pub fn pause_preview(self: mut Self) ->() {
+        match self.preview_voice {
+            Some(voice) => {
+                if self.preview_paused {
+                    voice.resume()
+                } else {
+                    voice.pause()
+                }
+                self.preview_paused = !self.preview_paused
+            }
+            None => {
+            }
+        }
+    }
+    pub fn seek_preview(self: Self, fraction: f32) ->() {
+        match self.preview_voice {
+            Some(voice) => {
+                match self.sound(self.preview_path) {
+                    Some(sound) => {
+                        let t = if fraction < 0 {
+                            0.0_f32
+                        } elif fraction > 1 {
+                            1.0_f32
+                        } else {
+                            fraction
+                        }
+                        voice.seek(((sound.frames() as f32) * t) as u64)
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+    }
+    pub fn set_scene_preview(self: mut Self, enabled: bool) ->() {
+        self.scene_preview = enabled
+    }
+    pub fn update(self: mut Self, scene: Scene, position: Vec3, forward: Vec3, up: Vec3, dt: f32, playing: bool) ->() {
+        let active = playing || self.scene_preview
+        if !active || playing != self.playing {
+            for item in self.voices {
+                item.voice.close()
+            }
+            self.voices.clear() self.listener_valid = false
+        }
+        if playing && !self.playing {
+            self.stop_preview() self.scene_preview = false
+        }
+        self.playing = playing
+        if !active {
+            ret()
+        }
+        let mut any = false
+        let mut requested = 0_u32
+        for actor in scene.entities() {
+            match actor.component() {
+                Audio(c) => {
+                    if c.asset != "" &&(c.autoplay || !playing) && requested < self.settings.max_voices {
+                        any = true self.request(c.asset) requested += 1
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        if !any || !self.initialize() {
+            ret()
+        }
+        let velocity = if self.listener_valid && dt > 0 && dt < 0.1_f32 && position.sub(self.listener_position).length() < 20 {
+            position.sub(self.listener_position).scale(1 / dt)
+        } else {
+            Vec3::zero()
+        }
+        self.listener_position = position self.listener_valid = true
+        match self.engine {
+            Some(engine) => {
+                engine.listener(Listener {
+                        point(position), point(forward), point(up), point(velocity)
+                    }
+                    ,
+                )
+            }
+            None => {
+            }
+        }
+        let mut retained = Vec[ActorVoice]::new()
+        for live in self.voices {
+            let keep = match scene.get(live.actor) {
+                Some(actor) => {
+                    match actor.component() {
+                        Audio(c) => !changed(c, live.source) && scene.world_visible(actor.id()) &&(c.autoplay || !playing) _ => false
+                    }
+                }
+                None => false
+            }
+            if keep {
+                retained.push(live)
+            } else {
+                live.voice.close()
+            }
+        }
+        self.voices = retained
+        for actor in scene.entities() {
+            match actor.component() {
+                Audio(c) => {
+                    if !scene.world_visible(actor.id()) || c.asset == "" ||(playing && !c.autoplay) {
+                        continue
+                    }
+                    let position = scene.world_position(actor.id()).unwrap_or(actor.transform().position())
+                    let mut found = false
+                    for i in 0_usize..self.voices.len() {
+                        let mut live = self.voices.get(i).unwrap_or(ActorVoice {
+                                0_u64, Voice {
+                                    0_usize
+                                }
+                                , c, position
+                            }
+                            ,
+                        )
+                        if live.actor == actor.id() {
+                            let velocity = if dt > 0 && dt < 0.1_f32 && position.sub(live.position).length() < 20 {
+                                position.sub(live.position).scale(1 / dt)
+                            } else {
+                                Vec3::zero()
+                            }
+                            live.voice.position(point(position), point(velocity)) source_values(live.voice, c) live.source = c live.position = position self.voices.set(i, live) found = true
+                        }
+                    }
+                    if !found && self.voices.len() <(self.settings.max_voices as usize) {
+                        match self.sound(c.asset) {
+                            Some(sound) => {
+                                match self.engine {
+                                    Some(engine) => {
+                                        let mode = if !c.spatial {
+                                            Spatialization::TwoD
+                                        } elif self.settings.headphones {
+                                            Spatialization::Hrtf
+                                        } else {
+                                            Spatialization::Panning
+                                        }
+                                        match engine.voice(sound, self.bus(c.bus), mode) {
+                                            Ok(voice) => {
+                                                source_values(voice, c) voice.position(point(position), Position::zero()) voice.play() self.voices.push(ActorVoice {
+                                                        actor.id(), voice, c, position
+                                                    }
+                                                    ,
+                                                )
+                                            }
+                                            Err(error) => {
+                                                self.message = error.message()
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    let world = scene.world_matrix(actor.id())
+                    match world {
+                        Some(matrix) => {
+                            let direction = matrix.transform_point(Vec3::new(0, 0, - 1)).sub(matrix.transform_point(Vec3::zero())).normalized() for live in self.voices {
+                                if live.actor == actor.id() {
+                                    live.voice.direction(point(direction), c.inner_angle * 0.017453292_f32, c.outer_angle * 0.017453292_f32, c.outer_gain)
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    pub fn stats(self: Self) -> AudioStats {
+        ret match self.engine {
+            Some(engine) => engine.stats() None => AudioStats {
+                0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, false
+            }
+        }
+    }
+    pub fn inspect(self: mut Self, path: str) ->() {
+        if self.initialize() {
+            self.request(path)
+        }
+    }
+    pub fn peaks(self: Self, path: str) -> Vec[f32] {
+        for entry in self.sounds {
+            if entry.path == path {
+                ret entry.peaks
+            }
+        }
+        ret Vec[f32]::new()
+    }
+    pub fn frames(self: Self, path: str) -> u64 {
+        ret match self.sound(path) {
+            Some(sound) => sound.frames() None => 0_u64
+        }
+    }
+    pub fn preview_frames(self: Self) -> u64 {
+        ret self.frames(self.preview_path)
+    }
+    pub fn preview_cursor(self: Self) -> u64 {
+        ret match self.preview_voice {
+            Some(voice) => voice.cursor() None => 0_u64
+        }
+    }
+    pub fn preview_running(self: Self) -> bool {
+        ret match self.preview_voice {
+            Some(voice) => {
+                match voice.state() {
+                    VoiceState::Playing => true _ => false
+                }
+            }
+            None => false
+        }
+    }
+    pub fn bus_peak(self: Self, index: usize) -> f32 {
+        ret match self.buses.get(index) {
+            Some(bus) => {
+                let a = bus.peak(0_u32) let b = bus.peak(1_u32) if a > b {
+                    a
+                } else {
+                    b
+                }
+            }
+            None => 0.0_f32
+        }
+    }
+}

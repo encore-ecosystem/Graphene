@@ -1,0 +1,122 @@
+//! Weather changes never mutate authored scene state.
+import core::option::Option
+import graphene::environment::codec::{environment_json, environment_parse, environment_identity}
+import graphene::environment::preset::{parse_weather_preset, parse_weather_sequence}
+import graphene::environment::system::WeatherVolume
+import graphene::{Scene, SceneAsset, SceneActor, SceneComponent, EnvironmentComponent, WeatherSample, EnvironmentSystem, Transform}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let controller = scene.create_entity("Weather", Transform::identity())
+    let mut c = EnvironmentComponent::new("weather-controller")
+    c.time_hours = 23.9_f32 c.day_duration = 24 c.preview = true
+    scene.set_component(controller, SceneComponent::Environment(c))
+    let sky = scene.create_entity("Sky", Transform::identity())
+    let mut a = EnvironmentComponent::new("sky-atmosphere") a.controller = controller
+    scene.set_component(sky, SceneComponent::Environment(a))
+    let revision = scene.revision()
+    let mut system = EnvironmentSystem::new() system.configure(scene) system.set_active(true)
+    system.tick(1)
+    let frame = system.frame(Vec3::zero())
+    if !frame.enabled || frame.time_hours < 0.89_f32 || frame.time_hours > 0.91_f32 || scene.revision() != revision {
+        ret 1
+    }
+    if !system.transition_to(WeatherSample::preset("storm"), 2) {
+        ret 2
+    }
+    system.tick(1)
+    let halfway = system.sample(Vec3::zero())
+    if halfway.rain < 0.39_f32 || halfway.rain > 0.41_f32 || halfway.wetness != 0 || halfway.snow_coverage != 0 {
+        ret 3
+    }
+    let before = halfway.rain
+    system.transition_to(WeatherSample::clear(), 2)
+    if system.sample(Vec3::zero()).rain != before {
+        ret 4
+    }
+    system.tick(2)
+    if system.sample(Vec3::zero()).rain > 0.001_f32 {
+        ret 5
+    }
+    system.set_active(false)
+    if system.frame(Vec3::zero()).time_hours != c.time_hours || system.sample(Vec3::zero()).wetness != 0 {
+        ret 6
+    }
+    let volume = WeatherVolume {
+        8, 0, Vec3::zero(), vec![Vec3::new(10, 0, 0), Vec3::new(0, 10, 0), Vec3::new(0, 0, 10)], 2, WeatherSample::preset("snow")
+    }
+    if volume.weight(Vec3::zero()) != 1 || volume.weight(Vec3::new(12, 0, 0)) != 0 || volume.weight(Vec3::new(9, 0, 0)) < 0.49_f32 || volume.weight(Vec3::new(9, 0, 0)) > 0.51_f32 {
+        ret 7
+    }
+    match environment_parse("sky-atmosphere", environment_json(a)) {
+        Some(parsed) => {
+            if parsed.controller != controller || parsed.style != "realistic" {
+                ret 8
+            }
+        }
+        None => {
+            ret 9
+        }
+    }
+    let mut asset = SceneAsset::new()
+    asset.add(SceneActor::new("Sky", "sky-atmosphere", Transform::identity()).with_identity(sky).with_component(SceneComponent::Environment(a)))
+    match SceneAsset::parse(asset.stringify()) {
+        Some(parsed) => {
+            if parsed.len() != 1 || parsed.version() != 6 {
+                ret 10
+            }
+        }
+        None => {
+            ret 11
+        }
+    }
+    if environment_identity("18446744073709551615").unwrap_or(0) != 18446744073709551615_u64 || environment_identity("18446744073709551616").is_some() || environment_identity("-1").is_some() {
+        ret 14
+    }
+    let sheared = WeatherVolume {
+        9, 0, Vec3::zero(), vec![Vec3::new(10, 0, 0), Vec3::new(5, 10, 0), Vec3::new(0, 0, 10)], 0, WeatherSample::preset("rain")
+    }
+    if sheared.weight(Vec3::new(14, 9, 0)) != 1 || sheared.weight(Vec3::new(15, 9, 0)) != 0 {
+        ret 15
+    }
+    let rain = "{\"cloudiness\":1,\"rain\":0.8,\"snow\":0,\"fog\":0.34,\"wind\":[8,0,3],\"temperature\":9}"
+    let clear = "{\"cloudiness\":0.28,\"rain\":0,\"temperature\":18}"
+    let preset = "{\"format\":\"graphene-weather-preset\",\"version\":1,\"name\":\"Rain\",\"weather\":" + rain + "}"
+    match parse_weather_preset(preset) {
+        Some(p) => {
+            if p.weather.rain != 0.8_f32 {
+                ret 16
+            }
+        }
+        None => {
+            ret 17
+        }
+    }
+    let sequence = "{\"format\":\"graphene-weather-sequence\",\"version\":1,\"duration\":10,\"loop\":true,\"keys\":[{\"time\":0,\"weather\":" + clear + "},{\"time\":10,\"weather\":" + rain + "}]}"
+    match parse_weather_sequence(sequence) {
+        Some(sequence) => {
+            if sequence.sample(5).unwrap_or(WeatherSample::clear()).rain < 0.39_f32 || sequence.sample(5).unwrap_or(WeatherSample::clear()).rain > 0.41_f32 || sequence.sample(10).unwrap_or(WeatherSample::clear()).rain != 0 {
+                ret 18
+            }
+        }
+        None => {
+            ret 19
+        }
+    }
+    c.mode = "random" c.day_duration = 1000 c.seed = 123
+    scene.set_component(controller, SceneComponent::Environment(c))
+    let mut first = EnvironmentSystem::new() let mut second = EnvironmentSystem::new()
+    first.configure(scene) second.configure(scene) first.set_active(true) second.set_active(true)
+    for i in 0..150 {
+        first.tick(1) second.tick(1)
+    }
+    let f = first.frame(Vec3::zero()) let s = second.frame(Vec3::zero())
+    if f.weather.rain != s.weather.rain || f.weather.snow != s.weather.snow || f.lightning != s.lightning {
+        ret 12
+    }
+    if scene.revision() == revision {
+        ret 13
+    }
+    ret 0
+}

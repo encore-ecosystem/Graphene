@@ -1,0 +1,173 @@
+//! CPU-only graph crowd benchmark. Report timings; do not interpret them as FPS.
+import core::option::Option
+import core::vec::Vec
+import graphene::animation::blend::BoneMask
+import graphene::animation::graph::{AnimationGraph, AnimationNode, AnimationParameter, PoseOperation}
+import graphene::animation::math::{PoseVector, PoseMatrix, LocalTransform, animation_abs}
+import graphene::animation::model::{Skeleton, SkeletonBone, SkeletonSocket, SkeletalMesh, SkinVertex, SkinInfluence, SkinSection, MorphTarget, AnimationValue, AnimationKey, AnimationClip, AnimationTrack, AnimationNotify, TrackPath, KeyInterpolation}
+import graphene::animation::runtime::{AnimationWorld, AnimationInstanceId}
+import std::io::println
+import std::time::perf_counter_ns
+fn near(a: f32, b: f32) -> bool {
+    ret animation_abs(a - b) < 0.0001_f32
+}
+fn value(x: f32, y: f32, z: f32, w: f32) -> AnimationValue {
+    ret AnimationValue { x, y, z, w }
+}
+fn key(time: f32, v: AnimationValue) -> AnimationKey {
+    ret AnimationKey {
+        time, v, AnimationValue::zero(), AnimationValue::zero()
+    }
+}
+fn crowd_check(count: usize, mode: u32) -> u32 {
+    let mut bones = Vec[SkeletonBone]::new() let mut inverses = Vec[PoseMatrix]::new()
+    for i in 0_usize..19_usize {
+        bones.push(SkeletonBone {
+                "Bone" + i.fmt(), if i == 0_usize {
+                    - 1_i32
+                } else {
+                    (i - 1_usize) as i32
+                }
+                , LocalTransform::identity()
+            }
+            ,
+        ) inverses.push(PoseMatrix::identity())
+    }
+    let rig = Skeleton { 1_u32, "crowd-rig", "Rig", bones, Vec[SkeletonSocket]::new() }
+    let vertex = SkinVertex {
+        PoseVector::zero(), PoseVector { 0_f32, 0_f32, 1_f32 }, value(1_f32, 0_f32, 0_f32, 1_f32), AnimationValue::zero(), vec![SkinInfluence {
+                0_u32, 1_f32
+            }
+        ]
+    }
+    let mesh = SkeletalMesh {
+        1_u32, "crowd", rig.identity, "Mesh", vec![vertex], vec![0_u32, 0_u32, 0_u32], inverses, vec![SkinSection {
+                "Default", 0_u32, 3_u32, "Material"
+            }
+        ], Vec[MorphTarget]::new()
+    }
+    let clip = AnimationClip {
+        1_u32, "move", rig.identity, "Move", 2_f32, vec![AnimationTrack {
+                0_u32, TrackPath::Translation, KeyInterpolation::Linear, vec![key(0_f32, AnimationValue::zero()), key(2_f32, value(4_f32, 0_f32, 0_f32, 0_f32))]
+            }
+        ], vec![AnimationNotify {
+                0.5_f32, "step", ""
+            }
+        ]
+    }
+    let mut weights = Vec[f32]::new() for _i in 0_usize..19_usize {
+        weights.push(1_f32)
+    }
+    let graph = AnimationGraph {
+        1_u32, rig.identity, vec![AnimationParameter {
+                "Weight", 0.5_f32, 0_f32, 1_f32
+            }
+        ], vec![BoneMask {
+                rig.identity, weights
+            }
+        ], vec![AnimationNode {
+                1_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                2_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+            , AnimationNode {
+                3_u64, PoseOperation::Blend, vec![1_u64, 2_u64], 0_u32, 0_f32, Option[u32]::Some(0_u32), 0_u32
+            }
+        ], 3_u64
+    }
+    let mut world = AnimationWorld::new() let owner = match world.register_library(rig, mesh, vec![clip]) {
+        Ok(v) => v Err(_) => {
+            ret 1_u32
+        }
+    }
+    let program = match world.register_graph(owner, graph) {
+        Ok(v) => v Err(_) => {
+            ret 2_u32
+        }
+    }
+    let mut ids = Vec[AnimationInstanceId]::new()
+    for i in 0_usize..count {
+        let id = match world.instantiate_registered(owner, 0_u32) {
+            Ok(v) => v Err(_) => {
+                ret 3_u32
+            }
+        }
+        if mode != 1_u32 {
+            if world.bind_registered_graph(id, program).is_err() || world.parameter(id, "Weight",((i % 11_usize) as f32) / 10_f32).is_err() || world.node_clock(id, 2_u64, 1_f32,((i % 17_usize) as f64) * 0.025_f64, true, true).is_err() {
+                ret 4_u32
+            }
+        }
+        if mode == 2_u32 && world.playback(id, 0_f32, false).is_err() {
+            ret 4_u32
+        }
+        if mode == 3_u32 && world.animation_lod(id, 8_u32).is_err() {
+            ret 4_u32
+        }
+        ids.push(id)
+    }
+    let mut elapsed = 0_u64
+    for frame in 1_usize..61_usize {
+        let start = perf_counter_ns() let stats = match world.advance(frame as u64, 1_f64 / 60_f64) {
+            Ok(v) => v Err(_) => {
+                ret 5_u32
+            }
+        }
+        if frame > 10_usize {
+            elapsed += perf_counter_ns() - start
+        }
+        let expected = if mode == 2_u32 {
+            if frame == 1_usize {
+                count as u32
+            } else {
+                0_u32
+            }
+        } elif mode == 3_u32 {
+            if (frame - 1_usize) % 8_usize == 0_usize {
+                count as u32
+            } else {
+                0_u32
+            }
+        } else {
+            count as u32
+        }
+        if stats.failed != 0_u32 || stats.sampled != expected {
+            ret 6_u32
+        }
+    }
+    let first = ids.get_unchecked_borrowed(0_usize) let last = ids.get_unchecked_borrowed(count - 1_usize)
+    if mode != 2_u32 &&(world.time(first).unwrap_or( - 1_f64) < 0.99_f64 || world.time(last).unwrap_or( - 1_f64) < 0.99_f64) {
+        ret 7_u32
+    }
+    let snapshot = match world.snapshot(last) {
+        Ok(v) => v Err(_) => {
+            ret 8_u32
+        }
+    }
+    let last_pose = match world.model(snapshot) {
+        Ok(v) => v Err(_) => {
+            ret 8_u32
+        }
+    }
+    let final_weight =(((count - 1_usize) % 11_usize) as f32) / 10_f32 let offset =(((count - 1_usize) % 17_usize) as f32) * 0.025_f32
+    if mode == 0_u32 && !near(last_pose.get_unchecked_borrowed(0_usize).translation().x, 2_f32 + 2_f32 * offset * final_weight) {
+        ret 9_u32
+    }
+    println("CPU World variant=" + mode.fmt() + ", actors=" + count.fmt() + ", bones=19, nodes=" + if mode == 1_u32 {
+            "1"
+        } else {
+            "3"
+        }
+        + ", warm mean ns=" +(elapsed / 50_u64).fmt())
+    ret 0_u32
+}
+fn main() -> u32 {
+    for mode in vec![1_u32, 2_u32, 3_u32, 0_u32] {
+        for count in vec![100_usize, 1000_usize] {
+            let result = crowd_check(count, mode) if result != 0_u32 {
+                ret result
+            }
+        }
+    }
+    ret 0_u32
+}

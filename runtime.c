@@ -1,5 +1,5 @@
-/* Graphene-specific native integrations live here. Vulkan is supplied by
- * Luma's vulkan_native workspace package. */
+/* Graphene-specific native integrations. Window/GPU ownership belongs to
+ * SDL/gpu; Vulkan resources are supplied by the standalone vulkan refrain. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -222,4 +222,152 @@ float graphene_physics_floor_velocity(float position, float velocity,
     return velocity + gravity * delta_seconds;
 }
 
-#include "workspace/automation_native.inc"
+#include "native/automation/bridge.inc"
+#include "native/blueprint/host.inc"
+
+/* Content Browser boundaries: project-relative assets only, no symlink traversal,
+ * no replacement on rename, and a bounded binary thumbnail payload. */
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+#endif
+extern encore_str encore_str_from_buffer(const void *, size_t);
+
+static char *graphene_content_path(encore_str root, encore_str relative, bool missing_leaf) {
+    char *base = graphene_c_string(root), *part = graphene_c_string(relative);
+    if (!base || !part) { free(base); free(part); return NULL; }
+    size_t a = strlen(base), b = strlen(part);
+    bool allowed = !strncmp(part, "Content/", 8) || !strcmp(part, "Content") ||
+        !strncmp(part, "game/src/", 9) || !strcmp(part, "game/src") ||
+        !strncmp(part, ".graphene/Trash/", 16);
+    if (!allowed || !a || !b || a + b + 2 > 8192 || strchr(part, '\\') || strchr(part, ':') ||
+        (relative.object && strlen(part) != relative.object->len)) { free(base); free(part); return NULL; }
+    char *path = malloc(a + b + 2);
+    if (!path) { free(base); free(part); return NULL; }
+    memcpy(path, base, a); path[a] = '/'; memcpy(path + a + 1, part, b + 1);
+    size_t start = 0;
+    for (size_t i = 0; i <= b; ++i) if (part[i] == '/' || part[i] == 0) {
+        size_t n = i - start;
+        if (!n || (n == 1 && part[start] == '.') || (n == 2 && part[start] == '.' && part[start + 1] == '.')) goto fail;
+        char saved = path[a + 1 + i]; path[a + 1 + i] = 0;
+#if defined(_WIN32)
+        DWORD flags = GetFileAttributesA(path);
+        if (flags == INVALID_FILE_ATTRIBUTES) {
+            if (!(missing_leaf && i == b)) goto fail;
+        } else if (flags & FILE_ATTRIBUTE_REPARSE_POINT) goto fail;
+#else
+        struct stat st;
+        if (lstat(path, &st) != 0) {
+            if (!(missing_leaf && i == b && errno == ENOENT)) goto fail;
+        } else if (S_ISLNK(st.st_mode)) goto fail;
+#endif
+        path[a + 1 + i] = saved; start = i + 1;
+    }
+    free(base); free(part); return path;
+fail:
+    free(base); free(part); free(path); return NULL;
+}
+uint64_t graphene_content_stat(encore_str root, encore_str relative) {
+    char *path = graphene_content_path(root, relative, false);
+    if (!path) return 0;
+    uint64_t result = 0;
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA st;
+    if (GetFileAttributesExA(path, GetFileExInfoStandard, &st)) {
+        uint64_t bytes = ((uint64_t)st.nFileSizeHigh << 32) | st.nFileSizeLow;
+        result = st.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? 2 : (bytes << 2) | 1;
+    }
+#else
+    struct stat st;
+    if (lstat(path, &st) == 0) result = S_ISDIR(st.st_mode) ? 2 : S_ISREG(st.st_mode) ? ((uint64_t)st.st_size << 2) | 1 : 0;
+#endif
+    free(path); return result;
+}
+bool graphene_content_move(encore_str root, encore_str source, encore_str destination) {
+    char *from = graphene_content_path(root, source, false);
+    char *to = graphene_content_path(root, destination, true);
+    bool ok = false;
+    if (from && to && source.object && destination.object &&
+        source.object->len > 8 && destination.object->len > 8 &&
+        strncmp(source.object->data, "game/", 5) && strncmp(destination.object->data, "game/", 5)) {
+#if defined(_WIN32)
+        ok = MoveFileA(from, to) != 0;
+#elif defined(__linux__) && defined(SYS_renameat2)
+        ok = syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, 1u) == 0;
+#endif
+    }
+    free(from); free(to); return ok;
+}
+encore_str graphene_content_pixels(uintptr_t address, size_t count) {
+    if (!address || count < 2 || count > 65538) return graphene_string("");
+    return encore_str_from_buffer((const void *)address, count * sizeof(uint32_t));
+}
+
+/* Asset containers use explicit little-endian words, independent of host ABI. */
+encore_str graphene_asset_bytes(const uint8_t *data, size_t size) {
+    if ((!data && size) || size > 268435456) return graphene_string("");
+    return encore_str_from_buffer(data, size);
+}
+encore_str graphene_asset_pixel_bytes(const uint32_t *data, size_t count) {
+    if ((!data && count) || count > 67108864) return graphene_string("");
+    uint8_t *bytes = malloc(count * 4);
+    if (!bytes) return graphene_string("");
+    for (size_t i = 0; i < count; ++i) {
+        bytes[i*4] = (uint8_t)data[i]; bytes[i*4+1] = (uint8_t)(data[i] >> 8);
+        bytes[i*4+2] = (uint8_t)(data[i] >> 16); bytes[i*4+3] = (uint8_t)(data[i] >> 24);
+    }
+    encore_str result = encore_str_from_buffer(bytes, count * 4);
+    free(bytes); return result;
+}
+encore_str graphene_asset_source_stamp(encore_str input) {
+    char *path = graphene_c_string(input);
+    if (!path) return graphene_string("");
+    char stamp[192]; stamp[0] = 0;
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA st;
+    if (GetFileAttributesExA(path, GetFileExInfoStandard, &st) && !(st.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        snprintf(stamp, sizeof(stamp), "%lu:%lu:%lu:%lu", (unsigned long)st.nFileSizeHigh, (unsigned long)st.nFileSizeLow,
+            (unsigned long)st.ftLastWriteTime.dwHighDateTime, (unsigned long)st.ftLastWriteTime.dwLowDateTime);
+#else
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+#if defined(__APPLE__)
+        snprintf(stamp, sizeof(stamp), "%llu:%lld:%lld:%ld:%lld:%ld", (unsigned long long)st.st_ino, (long long)st.st_size,
+            (long long)st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec, (long long)st.st_ctimespec.tv_sec, st.st_ctimespec.tv_nsec);
+#else
+        snprintf(stamp, sizeof(stamp), "%llu:%lld:%lld:%ld:%lld:%ld", (unsigned long long)st.st_ino, (long long)st.st_size,
+            (long long)st.st_mtim.tv_sec, st.st_mtim.tv_nsec, (long long)st.st_ctim.tv_sec, st.st_ctim.tv_nsec);
+#endif
+    }
+#endif
+    free(path); return graphene_string(stamp);
+}
+
+#include "native/model_import.c"
+#include "native/animation_import.c"
+#include "native/animation_shaders.c"
+#include "native/audio_asset.c"
+#include "native/hdr_import.c"
+
+#include "native/smaa_tables.c"
+
+#include "native/aa_shader_data.c"
+#include "native/builtin_shader_data.c"
+#include "native/environment_shader_data.c"
+
+#include "native/profiling/frame_profiler.inc"
+
+/* Profiler pairs recording workers and queue owner by native frame ID. */
+
+/* Parallel frame completion and rejected-present retirement, revision 2. */
+
+/* Shared GI uploads use owned queue-ordered update packets; page staging is per-slot. */
+
+/* Async timing pairs wait for CPU packet completion; overlapping thread work is not summed. */
+
+#include "native/vfx/bridge.c"
+#include "native/json_number.c"

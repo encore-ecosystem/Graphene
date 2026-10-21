@@ -1,0 +1,190 @@
+import core::option::Option
+import mod::animation::blend::BoneMask
+import mod::animation::graph::{AnimationGraph, AnimationNode, AnimationParameter, PoseOperation}
+//! End-to-end cooked file -> background load -> scene tick -> two shared VG views.
+import core::vec::Vec
+import linalg::{Vec3, Mat4}
+import mod::animation::character::{CharacterAsset, import_character, save_character}
+import mod::animation::component::SkeletalMeshComponent
+import mod::animation::material::{AnimationSourceMaterial, AnimationSourceImage}
+import mod::animation::model::AnimationValue
+import mod::animation::scene::SceneAnimation
+import mod::animation::scene_gpu::{SceneCharacters, CharacterRenderView}
+import mod::rhi::*
+import mod::scene::camera::PerspectiveCamera
+import mod::scene::component::SceneComponent
+import mod::scene::light::DirectionalLight
+import mod::scene::transform::Transform
+import mod::scene::world::Scene
+import std::io::println
+import std::time::perf_counter_ns
+extern fn usleep(time: u32) -> i32
+#attr(safe)
+fn pause() ->() {
+    usleep(1000_u32)
+}
+fn main() -> u32 {
+    let root = "FIXTURE_ROOT/scene-gpu-test-" + perf_counter_ns().fmt()
+    let original = match import_character(root, "FIXTURE_ROOT/fixtures/rig.glb", "Original") {
+        Ok(a) => a Err(e) => {
+            println(e) ret 1_u32
+        }
+    }
+    let m = original.materials.get_unchecked_borrowed(0_usize)
+    let material = AnimationSourceMaterial {
+        m.name, AnimationValue { 0_f32, 1_f32, 0_f32, 1_f32 }, 0_f32, 0.5_f32, 1_f32, true, false, 0_u32, 0.5_f32, m.base_image, m.normal_image
+    }
+    let asset = CharacterAsset {
+        original.version, original.identity, original.name, original.skeleton, original.geometry, original.clips, vec![material], original.default_clip, original.warnings
+    }
+    if save_character(root + "/Content/Characters/Original.gcharacter", "offline", "", asset).is_err() {
+        ret 2_u32
+    }
+    let instance = GraphicsInstance::create() let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 3_u32
+        }
+    }
+    let device = instance.create_device_with_features(adapter, DeviceFeatures::mesh_shader(), DeviceFeatures::none())
+    if !device.available() {
+        ret 4_u32
+    }
+    let a = device.create_shared_offscreen_target(256_u32, 256_u32) let b = device.create_shared_offscreen_target(256_u32, 256_u32)
+    let mask = device.create_shared_offscreen_target(256_u32, 256_u32) let silhouette = device.create_shared_offscreen_target(256_u32, 256_u32)
+    let gi_scene = device.create_buffer(32_u64, buffer_storage(), true) let gi_surfaces = device.create_buffer(48_u64, buffer_storage(), true) let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
+    gi_scene.write_f32(0_u64, 0_f32) gi_history.write_f32(12_u64, 0_f32)
+    let mut scene = Scene::new() let mut c = SkeletalMeshComponent::defaults() c.asset = "Content/Characters/Original.gcharacter"
+    let actor = scene.create_entity("Animated", Transform::identity().with_position(Vec3::new( - 0.5_f32, - 0.5_f32, - 3_f32))) scene.set_component(actor, SceneComponent::SkeletalMesh(c))
+    let mut animation = SceneAnimation::new() animation.configure(root) animation.sync(scene, false)
+    let started = perf_counter_ns()
+    while animation.actor_count() == 0_usize && perf_counter_ns() - started < 10000000000_u64 {
+        if animation.tick(0_f32).is_err() {
+            ret 5_u32
+        }
+        pause()
+    }
+    if animation.actor_count() != 1_usize {
+        println(animation.message()) ret 6_u32
+    }
+    let graph = AnimationGraph {
+        1_u32, asset.skeleton.identity, Vec[AnimationParameter]::new(), Vec[BoneMask]::new(), vec![AnimationNode {
+                101_u64, PoseOperation::Clip, Vec[u64]::new(), 0_u32, 0_f32, Option[u32]::None, 0_u32
+            }
+        ], 101_u64
+    }
+    if animation.bind_graph(actor, graph).is_err() {
+        ret 20_u32
+    }
+    let mut renderer = SceneCharacters::create(device) renderer.configure(root)
+    let camera = PerspectiveCamera::new(Vec3::zero(), Vec3::new(0_f32, 0_f32, - 1_f32), 1.4_f32, 0.1_f32, 100_f32)
+    let light = DirectionalLight::new(Vec3::new(0_f32, - 1_f32, 0_f32), Vec3::new(1_f32, 1_f32, 1_f32), 1_f32)
+    let mut sums = Vec[u64]::new()
+    for logical in 0_usize..3_usize {
+        if animation.tick(if logical == 0_usize {
+                0_f32
+            } else {
+                0.25_f32
+            }
+        ).is_err() {
+            ret 7_u32
+        }
+        for view in 0_usize..2_usize {
+            let target = if view == 0_usize {
+                a
+            } else {
+                b
+            }
+            let frame = target.acquire_frame()
+            let settings = CharacterRenderView {
+                target, camera, 256_u32, 256_u32, 1_u32, false, Mat4::identity(), light, Vec3::zero(), Vec[f32]::new(), 0_u32, GpuTexture::unavailable()
+            }
+            if !renderer.prepare(animation, frame, settings, view != 0_usize, gi_scene, gi_surfaces, gi_history) {
+                println(renderer.message()) ret 8_u32
+            }
+            let pass = frame.begin_render_pass(renderer.pipeline(view != 0_usize, 0_u32), 0_f32, 0_f32, 0_f32, 1_f32)
+            if !renderer.draw(pass, frame.slot(), view != 0_usize, 0_u32) || !pass.end() || !frame.present() || !frame.destroy() {
+                ret 9_u32
+            }
+        }
+        for kind in 0_usize..2_usize {
+            let target = if kind == 0_usize {
+                mask
+            } else {
+                silhouette
+            }
+            let frame = target.acquire_frame()
+            let settings = CharacterRenderView {
+                target, camera, 256_u32, 256_u32, 1_u32, false, Mat4::identity(), light, Vec3::zero(), Vec[f32]::new(), 0_u32, GpuTexture::unavailable()
+            }
+            if !renderer.prepare_selection(animation, frame, settings, vec![actor], kind != 0_usize, gi_scene, gi_surfaces, gi_history) {
+                println(renderer.message()) ret 14_u32
+            }
+            let pass = frame.begin_render_pass(renderer.selection_pipeline(kind != 0_usize), 0_f32, 1_f32, 1_f32, 1_f32)
+            if !renderer.draw_selection(pass, frame.slot(), kind != 0_usize) || !pass.end() || !frame.present() || !frame.destroy() || !target.wait_readback() {
+                ret 15_u32
+            }
+            if selected_pixels(target) < 100_u64 {
+                ret 16_u32
+            }
+            capture(target, "FIXTURE_ROOT/scene-mask-" + kind.fmt() + "-" + logical.fmt() + ".ppm")
+        }
+        if !a.wait_readback() || !b.wait_readback() {
+            ret 10_u32
+        }
+        let sum = capture(a, "FIXTURE_ROOT/scene-a-" + logical.fmt() + ".ppm")
+        if sum < 1000_u64 || capture(b, "FIXTURE_ROOT/scene-b-" + logical.fmt() + ".ppm") < 1000_u64 {
+            ret 11_u32
+        }
+        sums.push(sum)
+    }
+    if sums.get_unchecked_borrowed(0_usize) == sums.get_unchecked_borrowed(2_usize) {
+        ret 12_u32
+    }
+    if !renderer.destroy() {
+        ret 13_u32
+    }
+    a.destroy() b.destroy() mask.destroy() silhouette.destroy() gi_scene.destroy() gi_surfaces.destroy() gi_history.destroy() device.destroy() instance.destroy()
+    ret 0_u32
+}
+import std::os::write_file
+extern fn encore_vk_target_readback(target: usize, attachment: u32, destination: usize, capacity: usize) -> usize
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+#attr(safe)
+fn capture(target: Swapchain, path: str) -> u64 {
+    let mut bytes = Vec[u8]::with_capacity(262144_usize) for _i in 0_usize..262144_usize {
+        bytes.push(0_u8)
+    }
+    let pointer = bytes.as_ptr() unsafe ehir {
+        address: usize = pcast pointer: u8 *, usize
+    }
+    if encore_vk_target_readback(target.handle(), 0_u32, address, bytes.len()) != bytes.len() {
+        ret 0_u64
+    }
+    let mut rgb = Vec[u8]::new() let mut sum = 0_u64
+    for i in 0_usize..65536_usize {
+        for c in vec![2_usize, 1_usize, 0_usize] {
+            let value = bytes.get_unchecked_borrowed(i * 4_usize + c) rgb.push(value) sum +=(value as u64) *(i as u64 + 1_u64)
+        }
+    }
+    write_file(path, "P6\n256 256\n255\n" + graphene_asset_bytes(rgb.as_ptr(), rgb.len()))
+    ret sum
+}
+
+#attr(safe)
+fn selected_pixels(target: Swapchain) -> u64 {
+    let mut bytes = Vec[u8]::with_capacity(262144_usize) for _i in 0_usize..262144_usize {
+        bytes.push(0_u8)
+    }
+    let pointer = bytes.as_ptr() unsafe ehir {
+        address: usize = pcast pointer: u8 *, usize
+    }
+    if encore_vk_target_readback(target.handle(), 0_u32, address, bytes.len()) != bytes.len() {
+        ret 0_u64
+    }
+    let mut count = 0_u64 for i in 0_usize..65536_usize {
+        if bytes.get_unchecked_borrowed(i * 4_usize + 2_usize) > 128_u8 {
+            count += 1_u64
+        }
+    }
+    ret count
+}

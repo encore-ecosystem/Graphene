@@ -1,0 +1,847 @@
+//! Scene-frame animation service. Frame tokens cannot resolve stale/reused slots.
+//! Multiple views read one evaluated pose; drawing never advances playback.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import mod::controller::{AnimationController, ControllerFrame, ControllerEvent}
+import mod::graph::{AnimationGraph, AnimationProgram, compile_animation_graph}
+import mod::math::{PoseMatrix, animation_clamp}
+import mod::model::{Skeleton, SkeletalMesh, AnimationClip, AnimationTrack, AnimationNotify}
+import mod::player::{ClipPlayer, AnimationEvent}
+import mod::pose::{AnimationPose, model_pose, skin_palette}
+import mod::root_motion::{RootMotionDelta, extract_root_motion, root_motion_pose, remove_root_motion}
+import mod::sample::sample_clip
+
+pub struct AnimationLibraryId {
+    slot: u32
+    generation: u32
+}
+pub struct AnimationGraphId {
+    slot: u32
+    generation: u32
+}
+struct RegisteredGraph {
+    owner: AnimationLibraryId
+    program: AnimationProgram
+}
+struct AnimationGraphSlot {
+    generation: u32
+    value: Option[RegisteredGraph<H>]
+}
+struct AnimationLibrary {
+    skeleton: Skeleton
+    mesh: SkeletalMesh
+    clips: Vec[AnimationClip]
+}
+struct AnimationLibrarySlot {
+    generation: u32
+    value: Option[AnimationLibrary<H>]
+}
+pub struct AnimationInstanceId {
+    slot: u32
+    generation: u32
+}
+pub struct PoseSnapshot {
+    instance: AnimationInstanceId
+    frame: u64
+}
+pub struct AnimationStats {
+    instances: u32
+    sampled: u32
+    throttled: u32
+    bones: u64
+    events: u64
+    failed: u32
+}
+struct MorphOverride {
+    target: u32
+    weight: f32
+}
+struct AnimationInstance {
+    skeleton: Skeleton
+    mesh: SkeletalMesh
+    clips: Vec[AnimationClip]
+    clip: u32
+    player: ClipPlayer
+    pose: AnimationPose
+    model: Vec[PoseMatrix]
+    palette: Vec[PoseMatrix]
+    root_bone: Option[u32]
+    root_delta: RootMotionDelta
+    events: Vec[AnimationEvent]
+    cadence: u32
+    sample_frame: u64
+    sample_time: f32
+    sampled: bool
+    scratch_pose: AnimationPose
+    scratch_model: Vec[PoseMatrix]
+    scratch_palette: Vec[PoseMatrix]
+    work_events: Vec[AnimationEvent]
+    overrides: Vec[MorphOverride]
+    history: bool
+    owner: Option[AnimationLibraryId]
+    controller: Option[AnimationController<H>]
+    // Retain the immutable owner record, including after registry removal.
+    library_lease: AnimationLibrary<H>
+    graph_lease: Option[RegisteredGraph<H>]
+}
+// Inline wrapper avoids Vec[wide heap handle] stride defect (Encore #147).
+struct AnimationSlot {
+    generation: u32
+    value: Option[AnimationInstance<H>]
+}
+pub struct AnimationFailure {
+    instance: AnimationInstanceId
+    message: str
+}
+pub struct AnimationWorld {
+    slots: Vec[AnimationSlot]
+    frame: u64
+    begun: bool
+    stats: AnimationStats
+    failures: Vec[AnimationFailure]
+    libraries: Vec[AnimationLibrarySlot]
+    graphs: Vec[AnimationGraphSlot]
+}
+
+impl for AnimationWorld {
+    pub fn new() -> Self {
+        ret Self {
+            Vec[AnimationSlot]::new(), 0_u64, false, AnimationStats {
+                0_u32, 0_u32, 0_u32, 0_u64, 0_u64, 0_u32
+            }
+            , Vec[AnimationFailure]::new(), Vec[AnimationLibrarySlot]::new(), Vec[AnimationGraphSlot]::new()
+        }
+    }
+    pub fn instantiate(self: mut Self, skeleton: Skeleton, mesh: SkeletalMesh, clips: Vec[AnimationClip], clip: u32) -> Result[AnimationInstanceId, str] {
+        skeleton.validate()? mesh.validate(skeleton)?
+        for asset in clips {
+            asset.validate(skeleton, mesh.morphs.len())?
+        }
+        ret self.allocate_instance(skeleton, mesh, clips, clip, Option[AnimationLibraryId]::None, Option[AnimationLibrary<H>]::None)
+    }
+    fn allocate_instance(self: mut Self, skeleton: Skeleton, mesh: SkeletalMesh, source_clips: Vec[AnimationClip], clip: u32, owner: Option[AnimationLibraryId], library: Option[AnimationLibrary<H>]) -> Result[AnimationInstanceId, str] {
+        let clips = if source_clips.len() == 0_usize {
+            vec![AnimationClip {
+                    1_u32, "bind-pose:" + skeleton.identity, skeleton.identity, "Bind Pose", 0_f32, Vec[AnimationTrack]::new(), Vec[AnimationNotify]::new()
+                }
+            ]
+        } else {
+            source_clips
+        }
+        if clip as usize >= clips.len() {
+            ret Result::Err("Animation clip is missing")
+        }
+        let mut pose = AnimationPose::rest(skeleton, mesh.morphs.len()) pose.reset(skeleton, mesh)?
+        let mut model = Vec[PoseMatrix]::new() model = model_pose(skeleton, pose, model)?
+        let mut palette = Vec[PoseMatrix]::new() palette = skin_palette(model, mesh, palette)?
+        let lease = match library {
+            Some(v) => v None => AnimationLibrary<H>{ skeleton, mesh, clips }
+        }
+        let mut instance = AnimationInstance<H> {
+            skeleton, mesh, clips, clip, ClipPlayer::new(), pose, model, palette, Option[u32]::None, RootMotionDelta::identity(), Vec[AnimationEvent]::new(), 1_u32, 0_u64, 0_f32, false, AnimationPose::rest(skeleton, mesh.morphs.len()), Vec[PoseMatrix]::new(), Vec[PoseMatrix]::new(), Vec[AnimationEvent]::with_capacity(16_usize), Vec[MorphOverride]::new(), false, owner, Option[AnimationController<H>]::None, lease, Option[RegisteredGraph<H>]::None
+        }
+        for i in 0_usize..self.slots.len() {
+            let mut slot = self.slots.get_unchecked_borrowed(i) if slot.value.is_none() && slot.generation < 4294967295_u32 {
+                slot.value = Option[AnimationInstance<H>]::Some(instance) self.slots.set(i, slot) ret Result::Ok(AnimationInstanceId {
+                        i as u32, slot.generation
+                    }
+                    ,
+                )
+            }
+        }
+        if self.slots.len() >= 1000000_usize {
+            ret Result::Err("Animation instance limit exceeded")
+        }
+        let id = AnimationInstanceId { self.slots.len() as u32, 1_u32 }
+        self.slots.push(AnimationSlot { 1_u32, Option[AnimationInstance<H>]::Some(instance) }) ret Result::Ok(id)
+    }
+    pub fn contains(self: Self, id: AnimationInstanceId) -> bool {
+        if id.slot as usize >= self.slots.len() {
+            ret false
+        }
+        let slot = self.slots.get_unchecked_borrowed(id.slot as usize) ret slot.generation == id.generation && slot.value.is_some()
+    }
+    pub fn remove(self: mut Self, id: AnimationInstanceId) -> bool {
+        if !self.contains(id) {
+            ret false
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        slot.value = Option[AnimationInstance<H>]::None
+        // Retire exhausted generations permanently; never resurrect old handles.
+        if slot.generation < 4294967295_u32 {
+            slot.generation += 1_u32
+        }
+        self.slots.set(id.slot as usize, slot) ret true
+    }
+    pub fn play(self: mut Self, id: AnimationInstanceId, clip: u32, looping: bool) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        if clip as usize >= instance.clips.len() {
+            ret Result::Err("Animation clip is missing")
+        }
+        instance.controller = Option[AnimationController<H>]::None instance.graph_lease = Option[RegisteredGraph<H>]::None instance.history = false
+        instance.clip = clip instance.player = ClipPlayer::new() instance.player.looping = looping instance.sampled = false instance.events = Vec[AnimationEvent]::new() instance.root_delta = RootMotionDelta::identity()
+        ret Result::Ok(true)
+    }
+    pub fn playback(self: mut Self, id: AnimationInstanceId, speed: f32, playing: bool) -> Result[bool, str] {
+        if !self.contains(id) || !(speed >= - 100_f32 && speed <= 100_f32) {
+            ret Result::Err("Invalid animation playback")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        match instance.controller {
+            Some(controller) => {
+                controller.playback(speed, playing)?
+            }
+            None => {
+            }
+        }
+        instance.player.speed = speed instance.player.playing = playing ret Result::Ok(true)
+    }
+    pub fn animation_lod(self: mut Self, id: AnimationInstanceId, cadence: u32) -> Result[bool, str] {
+        if !self.contains(id) || cadence < 1_u32 || cadence > 64_u32 {
+            ret Result::Err("Invalid animation LOD cadence")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        instance.cadence = cadence ret Result::Ok(true)
+    }
+    pub fn root_motion(self: mut Self, id: AnimationInstanceId, bone: Option[u32]) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        match bone {
+            Some(index) => {
+                if index as usize >= instance.skeleton.bones.len() {
+                    ret Result::Err("Invalid root-motion bone")
+                }
+            }
+            None => {
+            }
+        }
+        match instance.controller {
+            Some(controller) => {
+                controller.root_motion(bone)?
+            }
+            None => {
+            }
+        }
+        instance.history = false instance.root_bone = bone instance.root_delta = RootMotionDelta::identity() instance.sampled = false ret Result::Ok(true)
+    }
+    /// Explicit editor seek: no notifies and no root-motion side effects.
+    pub fn seek(self: mut Self, id: AnimationInstanceId, time: f64) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        match instance.controller {
+            Some(controller) => {
+                controller.seek(time)? instance.player.time = time
+            }
+            None => {
+                instance.player.seek(time, instance.clips.get_unchecked_borrowed(instance.clip as usize).duration)?
+            }
+        }
+        instance.history = false
+        instance.events = Vec[AnimationEvent]::new() instance.root_delta = RootMotionDelta::identity() instance.sampled = false ret Result::Ok(true)
+    }
+    pub fn advance(self: mut Self, frame: u64, delta: f64) -> Result[AnimationStats, str] {
+        if self.begun && frame == self.frame {
+            ret Result::Ok(self.stats)
+        }
+        if self.begun && frame < self.frame {
+            ret Result::Err("Animation frame moved backwards")
+        }
+        if !(delta >= 0_f64 && delta <= 86400_f64) {
+            ret Result::Err("Invalid animation frame delta")
+        }
+        self.failures.clear()
+        let mut stats = AnimationStats { 0_u32, 0_u32, 0_u32, 0_u64, 0_u64, 0_u32 }
+        for i in 0_usize..self.slots.len() {
+            let mut slot = self.slots.get_unchecked_borrowed(i)
+            if slot.value.is_some() {
+                let mut instance = match slot.value {
+                    Some(v) => v None => {
+                        continue
+                    }
+                }
+                stats.instances += 1_u32
+                let count = instance.events.len()
+                // Keep shared asset owners rooted for the whole tick. Without
+                // these local handles, repeated reads of shared graph fields
+                // cause expensive ownership traversal as the crowd grows.
+                let _library = instance.library_lease let _graph = instance.graph_lease
+                match instance.tick(frame, delta) {
+                    Ok(sampled) => {
+                        if sampled {
+                            stats.sampled += 1_u32 stats.bones += instance.skeleton.bones.len() as u64
+                        } else {
+                            stats.throttled += 1_u32
+                        }
+                        stats.events +=(instance.events.len() - count) as u64
+                    }
+                    Err(message) => {
+                        instance.history = false stats.failed += 1_u32 self.failures.push(AnimationFailure {
+                                AnimationInstanceId {
+                                    i as u32, slot.generation
+                                }
+                                , message
+                            }
+                            ,
+                        )
+                    }
+                }
+            }
+        }
+        self.frame = frame self.begun = true self.stats = stats ret Result::Ok(stats)
+    }
+    pub fn snapshot(self: Self, id: AnimationInstanceId) -> Result[PoseSnapshot, str] {
+        if !self.begun || !self.contains(id) {
+            ret Result::Err("No current animation snapshot")
+        }
+        ret Result::Ok(PoseSnapshot { id, self.frame })
+    }
+    /// Frame-scoped read view. Persisting across advance requires copying the
+    /// matrices into the renderer's completion-tracked frame resource.
+    pub fn palette(self: Self, snapshot: PoseSnapshot) -> Result[Vec[PoseMatrix], str] {
+        if snapshot.frame != self.frame || !self.contains(snapshot.instance) {
+            ret Result::Err("Stale animation snapshot")
+        }
+        let slot = self.slots.get_unchecked_borrowed(snapshot.instance.slot as usize)
+        let instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        ret Result::Ok(instance.palette)
+    }
+    pub fn failures(self: Self) -> Vec[AnimationFailure] {
+        ret self.failures
+    }
+    /// Recycle the consumer's previous event buffer instead of allocating.
+    pub fn drain_events(self: mut Self, id: AnimationInstanceId, storage: mut Vec[AnimationEvent]) -> Result[Vec[AnimationEvent], str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        let mut out = storage out.clear()
+        let events = instance.events instance.events = out ret Result::Ok(events)
+    }
+    pub fn take_events(self: mut Self, id: AnimationInstanceId) -> Result[Vec[AnimationEvent], str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        let events = instance.events instance.events = Vec[AnimationEvent]::new() ret Result::Ok(events)
+    }
+    pub fn take_root_motion(self: mut Self, id: AnimationInstanceId) -> Result[RootMotionDelta, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        let delta = instance.root_delta instance.root_delta = RootMotionDelta::identity() ret Result::Ok(delta)
+    }
+}
+
+impl for AnimationInstance {
+    /// Publish clock, pose and events together. Failed sampling keeps the last
+    /// good pose and cannot cause other instances to tick a frame twice.
+    pub fn tick(self: mut Self&, frame: u64, delta: f64) -> Result[bool, str] {
+        if self.controller.is_some() {
+            let mut controller = match self.controller {
+                Some(v) => v None => {
+                    ret Result::Err("Missing graph controller")
+                }
+            }
+            ret self.tick_graph(controller, frame, delta)
+        }
+        let clip = self.clips.get_unchecked_borrowed(self.clip as usize)
+        let mut player = self.player
+        let step = player.advance_into(clip, delta, 65536_usize, self.work_events)?
+        self.work_events = step.events
+        if step.events.len() > 65536_usize - self.events.len() {
+            ret Result::Err("Unconsumed animation events exceed budget")
+        }
+        let mut motion = RootMotionDelta::identity()
+        match self.root_bone {
+            Some(bone) => {
+                motion = extract_root_motion(clip, self.skeleton, bone, step.previous, step.current, player.looping)?
+            }
+            None => {
+            }
+        }
+        let valid_history = self.sampled
+        let sample = !self.sampled ||(step.sample_time != self.sample_time && frame - self.sample_frame >= self.cadence as u64)
+        if sample {
+            self.scratch_pose.reset(self.skeleton, self.mesh)?
+            self.scratch_pose = sample_clip(clip, step.sample_time, self.scratch_pose)?
+            for value in self.overrides {
+                self.scratch_pose.morphs.set(value.target as usize, value.weight)
+            }
+            self.scratch_model = model_pose(self.skeleton, self.scratch_pose, self.scratch_model)?
+            match self.root_bone {
+                Some(bone) => {
+                    remove_root_motion(self.skeleton, self.scratch_pose, self.scratch_model, bone, root_motion_pose(clip, self.skeleton, bone, 0_f32))
+                }
+                None => {
+                }
+            }
+            self.scratch_palette = skin_palette(self.scratch_model, self.mesh, self.scratch_palette)?
+            let mut old_pose = self.pose let mut old_model = self.model let mut old_palette = self.palette
+            self.pose = self.scratch_pose self.model = self.scratch_model self.palette = self.scratch_palette
+            self.scratch_pose = old_pose self.scratch_model = old_model self.scratch_palette = old_palette
+            self.sample_frame = frame self.sample_time = step.sample_time self.sampled = true
+        }
+        self.history = valid_history
+        self.player = player self.root_delta = self.root_delta.mul(motion)
+        for event in step.events {
+            self.events.push(event)
+        }
+        ret Result::Ok(sample)
+    }
+}
+
+impl for AnimationInstanceId {
+    pub fn key(self: Self) -> u64 {
+        ret((self.generation as u64) << 32_u64) |(self.slot as u64)
+    }
+}
+
+impl for AnimationWorld {
+    pub fn model(self: Self, snapshot: PoseSnapshot) -> Result[Vec[PoseMatrix], str] {
+        if snapshot.frame != self.frame || !self.contains(snapshot.instance) {
+            ret Result::Err("Stale animation snapshot")
+        }
+        let slot = self.slots.get_unchecked_borrowed(snapshot.instance.slot as usize)
+        let instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        ret Result::Ok(instance.model)
+    }
+    pub fn morphs(self: Self, snapshot: PoseSnapshot) -> Result[Vec[f32], str] {
+        if snapshot.frame != self.frame || !self.contains(snapshot.instance) {
+            ret Result::Err("Stale animation snapshot")
+        }
+        let slot = self.slots.get_unchecked_borrowed(snapshot.instance.slot as usize)
+        let instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        ret Result::Ok(instance.pose.morphs)
+    }
+}
+
+impl for AnimationWorld {
+    pub fn history_valid(self: Self, snapshot: PoseSnapshot) -> Result[bool, str] {
+        if snapshot.frame != self.frame || !self.contains(snapshot.instance) {
+            ret Result::Err("Stale animation snapshot")
+        }
+        let slot = self.slots.get_unchecked_borrowed(snapshot.instance.slot as usize)
+        let instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        ret Result::Ok(instance.history)
+    }
+    pub fn set_morph(self: mut Self, id: AnimationInstanceId, name: str, weight: f32) -> Result[bool, str] {
+        if !self.contains(id) || !(weight >= - 1000000_f32 && weight <= 1000000_f32) {
+            ret Result::Err("Invalid morph control")
+        }
+        let mut slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        for i in 0_usize..instance.mesh.morphs.len() {
+            let morph = instance.mesh.morphs.get_unchecked_borrowed(i)
+            if morph.name == name {
+                let clamped = animation_clamp(weight, morph.minimum, morph.maximum)
+                for j in 0_usize..instance.overrides.len() {
+                    if instance.overrides.get_unchecked_borrowed(j).target == i as u32 {
+                        instance.overrides.set(j, MorphOverride {
+                                i as u32, clamped
+                            }
+                            ,
+                        ) instance.sampled = false ret Result::Ok(true)
+                    }
+                }
+                instance.overrides.push(MorphOverride { i as u32, clamped }) instance.sampled = false ret Result::Ok(true)
+            }
+        }
+        ret Result::Err("Morph control was not found")
+    }
+}
+
+impl for AnimationWorld {
+    /// Register once per immutable asset revision; instances share its data.
+    pub fn register_library(self: mut Self, skeleton: Skeleton, mesh: SkeletalMesh, clips: Vec[AnimationClip]) -> Result[AnimationLibraryId, str] {
+        skeleton.validate()? mesh.validate(skeleton)?
+        for clip in clips {
+            clip.validate(skeleton, mesh.morphs.len())?
+        }
+        let library = AnimationLibrary<H>{ skeleton, mesh, clips }
+        for i in 0_usize..self.libraries.len() {
+            let mut slot = self.libraries.get_unchecked_borrowed(i) if slot.value.is_none() && slot.generation < 4294967295_u32 {
+                slot.value = Option[AnimationLibrary<H>]::Some(library) self.libraries.set(i, slot) ret Result::Ok(AnimationLibraryId {
+                        i as u32, slot.generation
+                    }
+                    ,
+                )
+            }
+        }
+        if self.libraries.len() >= 65536_usize {
+            ret Result::Err("Animation library limit exceeded")
+        }
+        let id = AnimationLibraryId { self.libraries.len() as u32, 1_u32 }
+        self.libraries.push(AnimationLibrarySlot {
+                1_u32, Option[AnimationLibrary<H>]::Some(library)
+            }
+            ,
+        ) ret Result::Ok(id)
+    }
+    pub fn contains_library(self: Self, id: AnimationLibraryId) -> bool {
+        if id.slot as usize >= self.libraries.len() {
+            ret false
+        }
+        let slot = self.libraries.get_unchecked_borrowed(id.slot as usize) ret slot.generation == id.generation && slot.value.is_some()
+    }
+    pub fn unregister_library(self: mut Self, id: AnimationLibraryId) -> bool {
+        if !self.contains_library(id) {
+            ret false
+        }
+        let mut slot = self.libraries.get_unchecked_borrowed(id.slot as usize)
+        slot.value = Option[AnimationLibrary<H>]::None if slot.generation < 4294967295_u32 {
+            slot.generation += 1_u32
+        }
+        self.libraries.set(id.slot as usize, slot)
+        for i in 0_usize..self.graphs.len() {
+            let mut graph = self.graphs.get_unchecked_borrowed(i)
+            match graph.value {
+                Some(value) => {
+                    if value.owner.slot == id.slot && value.owner.generation == id.generation {
+                        graph.value = Option[RegisteredGraph<H>]::None if graph.generation < 4294967295_u32 {
+                            graph.generation += 1_u32
+                        }
+                        self.graphs.set(i, graph)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret true
+    }
+    /// A removed library cannot create new actors; existing actors retain their
+    /// last good immutable records until explicitly replaced or removed.
+    pub fn instantiate_registered(self: mut Self, id: AnimationLibraryId, clip: u32) -> Result[AnimationInstanceId, str] {
+        if !self.contains_library(id) {
+            ret Result::Err("Stale animation library")
+        }
+        let slot = self.libraries.get_unchecked_borrowed(id.slot as usize)
+        let library = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation library")
+            }
+        }
+        ret self.allocate_instance(library.skeleton, library.mesh, library.clips, clip, Option[AnimationLibraryId]::Some(id), Option[AnimationLibrary<H>]::Some(library))
+    }
+}
+
+impl for AnimationWorld {
+    pub fn time(self: Self, id: AnimationInstanceId) -> Result[f64, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let instance = match slot.value {
+            Some(i) => i None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        ret Result::Ok(instance.player.time)
+    }
+}
+
+impl for AnimationWorld {
+    /// Removing overrides resumes the authored morph channels on the next frame.
+    pub fn clear_morphs(self: mut Self, id: AnimationInstanceId) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        if instance.overrides.len() > 0_usize {
+            instance.overrides.clear() instance.sampled = false
+        }
+        ret Result::Ok(true)
+    }
+}
+
+impl for AnimationWorld {
+    /// Validate the whole override set before replacing any live control.
+    pub fn set_morphs(self: mut Self, id: AnimationInstanceId, names: Vec[str], weights: Vec[f32]) -> Result[bool, str] {
+        if !self.contains(id) || names.len() != weights.len() || names.len() > 1024_usize {
+            ret Result::Err("Invalid morph control set")
+        }
+        let slot = self.slots.get_unchecked_borrowed(id.slot as usize)
+        let mut instance = match slot.value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        let mut controls = Vec[MorphOverride]::with_capacity(names.len())
+        for i in 0_usize..names.len() {
+            let name = names.get_unchecked_borrowed(i) let weight = weights.get_unchecked_borrowed(i)
+            if !(weight >= - 1000000_f32 && weight <= 1000000_f32) {
+                ret Result::Err("Invalid morph control")
+            }
+            for j in 0_usize..i {
+                if names.get_unchecked_borrowed(j) == name {
+                    ret Result::Err("Duplicate morph control")
+                }
+            }
+            let mut found = false
+            for target in 0_usize..instance.mesh.morphs.len() {
+                let morph = instance.mesh.morphs.get_unchecked_borrowed(target)
+                if morph.name == name {
+                    controls.push(MorphOverride {
+                            target as u32, animation_clamp(weight, morph.minimum, morph.maximum)
+                        }
+                        ,
+                    ) found = true break
+                }
+            }
+            if !found {
+                ret Result::Err("Morph control was not found: " + name)
+            }
+        }
+        instance.overrides = controls instance.sampled = false ret Result::Ok(true)
+    }
+}
+
+impl for AnimationWorld {
+    /// Compile once for this exact immutable library generation.
+    pub fn register_graph(self: mut Self, owner: AnimationLibraryId, graph: AnimationGraph) -> Result[AnimationGraphId, str] {
+        if !self.contains_library(owner) {
+            ret Result::Err("Stale animation graph library")
+        }
+        let library = match self.libraries.get_unchecked_borrowed(owner.slot as usize).value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation library")
+            }
+        }
+        let program = compile_animation_graph(graph, library.skeleton, library.clips, library.mesh.morphs.len())?
+        let record = RegisteredGraph<H>{ owner, program }
+        for i in 0_usize..self.graphs.len() {
+            let mut slot = self.graphs.get_unchecked_borrowed(i) if slot.value.is_none() && slot.generation < 4294967295_u32 {
+                slot.value = Option[RegisteredGraph<H>]::Some(record) self.graphs.set(i, slot) ret Result::Ok(AnimationGraphId {
+                        i as u32, slot.generation
+                    }
+                    ,
+                )
+            }
+        }
+        if self.graphs.len() >= 65536_usize {
+            ret Result::Err("Animation graph limit exceeded")
+        }
+        let id = AnimationGraphId { self.graphs.len() as u32, 1_u32 } self.graphs.push(AnimationGraphSlot {
+                1_u32, Option[RegisteredGraph<H>]::Some(record)
+            }
+            ,
+        ) ret Result::Ok(id)
+    }
+    pub fn contains_graph(self: Self, id: AnimationGraphId) -> bool {
+        if id.slot as usize >= self.graphs.len() {
+            ret false
+        }
+        let slot = self.graphs.get_unchecked_borrowed(id.slot as usize) ret slot.generation == id.generation && slot.value.is_some()
+    }
+    pub fn unregister_graph(self: mut Self, id: AnimationGraphId) -> bool {
+        if !self.contains_graph(id) {
+            ret false
+        }
+        let mut slot = self.graphs.get_unchecked_borrowed(id.slot as usize) slot.value = Option[RegisteredGraph<H>]::None if slot.generation < 4294967295_u32 {
+            slot.generation += 1_u32
+        }
+        self.graphs.set(id.slot as usize, slot) ret true
+    }
+    pub fn bind_registered_graph(self: mut Self, id: AnimationInstanceId, graph: AnimationGraphId) -> Result[bool, str] {
+        if !self.contains(id) || !self.contains_graph(graph) {
+            ret Result::Err("Stale animation instance or graph")
+        }
+        let mut instance = match self.slots.get_unchecked_borrowed(id.slot as usize).value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        let record = match self.graphs.get_unchecked_borrowed(graph.slot as usize).value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation graph")
+            }
+        }
+        match instance.owner {
+            Some(owner) => {
+                if owner.slot != record.owner.slot || owner.generation != record.owner.generation {
+                    ret Result::Err("Animation graph library generation mismatch")
+                }
+            }
+            None => {
+                ret Result::Err("Instance has no registered library")
+            }
+        }
+        ret instance.install_graph(record.program, record)
+    }
+    pub fn bind_graph(self: mut Self, id: AnimationInstanceId, graph: AnimationGraph) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut instance = match self.slots.get_unchecked_borrowed(id.slot as usize).value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        let program = compile_animation_graph(graph, instance.skeleton, instance.clips, instance.mesh.morphs.len())?
+        // This private owner sentinel never enters the public registry.
+        ret instance.install_graph(program, RegisteredGraph<H> {
+                AnimationLibraryId { 0_u32, 0_u32 }, program
+            }
+            ,
+        )
+    }
+    pub fn parameter(self: mut Self, id: AnimationInstanceId, name: str, value: f32) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let instance = match self.slots.get_unchecked_borrowed(id.slot as usize).value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        match instance.controller {
+            Some(controller) => {
+                ret controller.parameter(name, value)
+            }
+            None => {
+                ret Result::Err("Instance has no animation graph")
+            }
+        }
+    }
+    pub fn node_clock(self: mut Self, id: AnimationInstanceId, node: u64, rate: f32, offset: f64, looping: bool, notify: bool) -> Result[bool, str] {
+        if !self.contains(id) {
+            ret Result::Err("Stale animation instance")
+        }
+        let mut instance = match self.slots.get_unchecked_borrowed(id.slot as usize).value {
+            Some(v) => v None => {
+                ret Result::Err("Missing animation instance")
+            }
+        }
+        match instance.controller {
+            Some(controller) => {
+                controller.configure_clock(node, rate, offset, looping, notify)? instance.sampled = false instance.history = false ret Result::Ok(true)
+            }
+            None => {
+                ret Result::Err("Instance has no animation graph")
+            }
+        }
+    }
+}
+
+impl for AnimationInstance {
+    pub fn install_graph(self: mut Self&, program: AnimationProgram, lease: RegisteredGraph<H>) -> Result[bool, str] {
+        let mut controller = AnimationController::new(program, self.skeleton, self.mesh)?
+        controller.playback(self.player.speed, self.player.playing)? controller.root_motion(self.root_bone)? controller.seek(self.player.time)?
+        self.controller = Option[AnimationController<H>]::Some(controller) self.graph_lease = Option[RegisteredGraph<H>]::Some(lease) self.events.clear() self.root_delta = RootMotionDelta::identity() self.sampled = false self.history = false ret Result::Ok(true)
+    }
+    pub fn tick_graph(self: mut Self&, controller: mut AnimationController<H>, frame: u64, delta: f64) -> Result[bool, str] {
+        let sample = !self.sampled || frame - self.sample_frame >= self.cadence as u64
+        controller.prepare(frame, delta, sample, 65536_usize - self.events.len())?
+        let result = self.publish_graph(controller, frame)
+        if result.is_err() {
+            controller.discard()
+        }
+        ret result
+    }
+    pub fn publish_graph(self: mut Self&, controller: mut AnimationController<H>, frame: u64) -> Result[bool, str] {
+        let pending: ControllerFrame = controller.pending_frame()? let sample = pending.sampled || !self.sampled
+        let motion = controller.pending_root()? let events: Vec[ControllerEvent] = controller.pending_events()?
+        if sample {
+            self.scratch_pose.copy_from(controller.pending_pose()?)?
+            for value in self.overrides {
+                self.scratch_pose.morphs.set(value.target as usize, value.weight)
+            }
+            self.scratch_model = model_pose(self.skeleton, self.scratch_pose, self.scratch_model)?
+            match self.root_bone {
+                Some(bone) => {
+                    remove_root_motion(self.skeleton, self.scratch_pose, self.scratch_model, bone, controller.reference())
+                }
+                None => {
+                }
+            }
+            self.scratch_palette = skin_palette(self.scratch_model, self.mesh, self.scratch_palette)?
+        }
+        controller.commit()?
+        self.history = self.sampled
+        if sample {
+            let pose = self.pose let model = self.model let palette = self.palette
+            self.pose = self.scratch_pose self.model = self.scratch_model self.palette = self.scratch_palette
+            self.scratch_pose = pose self.scratch_model = model self.scratch_palette = palette
+            self.sample_frame = frame self.sampled = true
+        }
+        self.player.time = pending.time self.root_delta = self.root_delta.mul(motion)
+        for item in events {
+            let mut event = item.event event.node = Option[u64]::Some(item.node) self.events.push(event)
+        }
+        ret Result::Ok(sample)
+    }
+}

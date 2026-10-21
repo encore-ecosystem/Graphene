@@ -1,0 +1,97 @@
+//! Shared JSON scalar/vector codec, independent of scene and Blueprint documents.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import json::Json
+import linalg::Vec3
+
+extern fn graphene_json_number(source: str) -> f32
+/// Round once to f32; repeated JSON/history snapshots must preserve every bit.
+#attr(safe)
+pub fn parse_number(source: str) -> Option[f32] {
+    let mut value = 0_f32 unsafe {
+        value = graphene_json_number(source)
+    }
+    if !(value >= - 340282346638528859811704183484516925440_f32 && value <= 340282346638528859811704183484516925440_f32) {
+        ret Option[f32]::None
+    }
+    ret Option[f32]::Some(value)
+}
+
+fn json_number(value: f32) -> Json {
+    ret Json::Number(Debug::fmt(value))
+}
+
+pub fn vec3_json(value: Vec3) -> Json {
+    let mut values = Vec[Json]::new()
+    values.push(json_number(value.x())) values.push(json_number(value.y())) values.push(json_number(value.z()))
+    ret Json::Array(values)
+}
+
+fn json_f32(value: Json) -> Option[f32] {
+    match value.as_number() {
+        Option::Some(number) => {
+            ret parse_number(number)
+        }
+        Option::None => {
+            ret Option[f32]::None
+        }
+    }
+}
+
+pub fn json_vec3(value: Json) -> Option[Vec3] {
+    match value.as_array() {
+        Option::Some(values) => {
+            if values.len() != 3_usize {
+                ret Option[Vec3]::None
+            }
+            let mut x = 0.0_f32 let mut y = 0.0_f32 let mut z = 0.0_f32
+            let mut valid_x = false let mut valid_y = false let mut valid_z = false
+            match values.get(0_usize) {
+                Option::Some(item) => {
+                    match json_f32(item) {
+                        Option::Some(number) => {
+                            x = number valid_x = true
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+            match values.get(1_usize) {
+                Option::Some(item) => {
+                    match json_f32(item) {
+                        Option::Some(number) => {
+                            y = number valid_y = true
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+            match values.get(2_usize) {
+                Option::Some(item) => {
+                    match json_f32(item) {
+                        Option::Some(number) => {
+                            z = number valid_z = true
+                        }
+                        Option::None => {
+                        }
+                    }
+                }
+                Option::None => {
+                }
+            }
+            if valid_x && valid_y && valid_z {
+                ret Option[Vec3]::Some(Vec3::new(x, y, z))
+            }
+        }
+        Option::None => {
+        }
+    }
+    ret Option[Vec3]::None
+}

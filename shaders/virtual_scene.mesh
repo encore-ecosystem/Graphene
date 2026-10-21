@@ -1,5 +1,7 @@
 #version 460
 #extension GL_EXT_mesh_shader : require
+#extension GL_GOOGLE_include_directive : require
+#include "animation/vg.glsl"
 
 layout(local_size_x = 32) in;
 layout(triangles, max_vertices = 64, max_primitives = 126) out;
@@ -18,6 +20,7 @@ layout(location = 0) out vec3 world_normal[];
 layout(location = 1) out vec3 color[];
 layout(location = 2) flat out vec4 material_base_color[];
 layout(location = 3) flat out vec4 material_surface[];
+layout(location = 12) flat out vec4 material_texture[];
 layout(location = 4) flat out vec4 light_direction[];
 layout(location = 5) flat out vec4 light_color_intensity[];
 layout(location = 6) flat out vec4 indirect_ambient[];
@@ -29,6 +32,14 @@ layout(location = 9) flat out uvec4 virtual_debug[];
 layout(location = 10) perprimitiveEXT out uint triangle_debug[];
 layout(location = 11) out vec2 texture_uv[];
 
+#ifdef GRAPHENE_TEMPORAL
+layout(location=13) out vec4 current_clip[];
+layout(location=14) out vec4 previous_clip[];
+layout(location=15) flat out float temporal_valid[];
+layout(set=0,binding=10,std430) readonly buffer LodHistory { uvec4 values[]; } lod_history;
+struct PreviousInstance { mat4 model; vec4 valid; };
+layout(set=0,binding=9,std430) readonly buffer PreviousView { mat4 view_projection; PreviousInstance instances[]; } previous;
+#endif
 shared uint vertexCount;
 
 float valuef(uint index) {
@@ -50,7 +61,7 @@ void main() {
     uint maximumCandidates = clusterCount * maximumInstances;
     uint hierarchyCount = scene.values[2];
     uint feedbackBase = 64 + clusterCount * 16 + hierarchyCount * 12 +
-        maximumInstances * 24 + maximumCandidates * 4;
+        maximumInstances * 28 + maximumCandidates * 4;
     uint hizBase = feedbackBase + clusterCount;
     uint indirectBase = hizBase + 3067u * 2u;
     uint visibleCount = min(scene.values[indirectBase],
@@ -64,7 +75,7 @@ void main() {
     }
 
     uint outputBase = 64 + clusterCount * 16 + hierarchyCount * 12 +
-        maximumInstances * 24 +
+        maximumInstances * 28 +
         visibleIndex * 2;
     uint clusterIndex = scene.values[outputBase];
     uint packedInstance = scene.values[outputBase + 1];
@@ -73,7 +84,7 @@ void main() {
     uint selectedLod = (packedInstance >> 26u) & 0x3fu;
     uint clusterBase = 64 + clusterIndex * 16;
     uint instanceBase = 64 + clusterCount * 16 +
-        hierarchyCount * 12 + instanceIndex * 24;
+        hierarchyCount * 12 + instanceIndex * 28;
     uint indexCount = uint(valuef(clusterBase + 8));
     uint triangleCount = indexCount / 3;
     uint firstIndex = uint(valuef(clusterBase + 9));
@@ -97,12 +108,16 @@ void main() {
 
     mat4 viewProjection = matrixAt(4);
     mat4 model = matrixAt(instanceBase);
+    mat3 modelBasis = mat3(model);
+    mat3 normalBasis = abs(determinant(modelBasis)) > 1e-10 ? transpose(inverse(modelBasis)) : mat3(1.0);
     vec4 baseColor = vec4(valuef(instanceBase + 16),
         valuef(instanceBase + 17), valuef(instanceBase + 18),
         valuef(instanceBase + 19));
     vec4 surface = vec4(valuef(instanceBase + 20),
         valuef(instanceBase + 21), valuef(instanceBase + 22),
         valuef(instanceBase + 23));
+    vec4 detail = vec4(valuef(instanceBase + 24), valuef(instanceBase + 25),
+        valuef(instanceBase + 26), valuef(instanceBase + 27));
 
     for (uint vertex = gl_LocalInvocationIndex;
         vertex < vertexCount && vertex < 64; vertex += 32) {
@@ -111,17 +126,40 @@ void main() {
             vertices.values[base + 1], vertices.values[base + 2]);
         vec3 normal = vec3(vertices.values[base + 3],
             vertices.values[base + 4], vertices.values[base + 5]);
+#ifdef GRAPHENE_SKINNED
+        uint sourceVertex=uint(vertices.values[base+6]);
+        SkinDeformedVertex animated=skin_cache.values[instanceIndex*skin_config.geometry.x+sourceVertex];
+        position=animated.position.xyz;normal=animated.normal.xyz;
+#endif
         vec4 transformedPosition = model * vec4(position, 1.0);
         gl_MeshVerticesEXT[vertex].gl_Position =
             viewProjection * transformedPosition;
+#ifdef GRAPHENE_TEMPORAL
+        current_clip[vertex] = viewProjection * transformedPosition;
+#ifdef GRAPHENE_SKINNED
+        previous_clip[vertex] = previous.view_projection * previous.instances[instanceIndex].model * vec4(animated.previous_position.xyz,1);
+#else
+        previous_clip[vertex] = previous.view_projection * previous.instances[instanceIndex].model * vec4(position,1);
+#endif
+        float valid_history = previous.instances[instanceIndex].valid.x * float(lod_history.values[instanceIndex].x==lod_history.values[instanceIndex].y);
+#ifdef GRAPHENE_SKINNED
+        valid_history *= animated.previous_position.w*float(skin_config.instances[instanceIndex].y);
+#endif
+        temporal_valid[vertex]=valid_history;
+#endif
         world_position[vertex] = transformedPosition.xyz;
-        world_normal[vertex] = normalize(mat3(model) * normal);
+        world_normal[vertex] = normalize(normalBasis * normal);
+#ifdef GRAPHENE_SKINNED
+        color[vertex]=vec3(1);
+#else
         color[vertex] = vec3(vertices.values[base + 6],
             vertices.values[base + 7], vertices.values[base + 8]);
+#endif
         texture_uv[vertex] = vec2(vertices.values[base + 9],
             vertices.values[base + 10]);
         material_base_color[vertex] = baseColor;
         material_surface[vertex] = surface;
+        material_texture[vertex] = detail;
         light_direction[vertex] = vec4(valuef(24), valuef(25),
             valuef(26), valuef(27));
         light_color_intensity[vertex] = vec4(valuef(28), valuef(29),

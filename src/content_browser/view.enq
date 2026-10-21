@@ -1,0 +1,485 @@
+//! Dense asset navigation, virtualized views and editor-owned popup surfaces.
+import core::option::Option
+import core::vec::Vec
+import luma::{Widget, Style, Rect, Size, SvgDocument, IconManager, horizontal, vertical, VirtualGrid, anchored_popup_bounds}
+import mod::files::{content_kind_name, content_parent, content_leaf}
+import mod::model::content_contains
+import mod::model::{ContentBrowser, ContentAsset}
+
+pub struct ContentIcons {
+    back: SvgDocument
+    forward: SvgDocument
+    up: SvgDocument
+    refresh: SvgDocument
+    folder: SvgDocument
+    file: SvgDocument
+    mesh: SvgDocument
+    material: SvgDocument
+    texture: SvgDocument
+    blueprint: SvgDocument
+    script: SvgDocument
+    scene: SvgDocument
+    add: SvgDocument
+    upload: SvgDocument
+    grid: SvgDocument list: SvgDocument star: SvgDocument search: SvgDocument close: SvgDocument
+    settings: SvgDocument chevron: SvgDocument expanded: SvgDocument details: SvgDocument sound: SvgDocument
+}
+
+impl for ContentIcons {
+    pub fn load(manager: IconManager) -> Self {
+        ret Self {
+            manager.document("arrow-left"), manager.document("arrow-right"), manager.document("arrow-up"), manager.document("refresh-cw"),
+            manager.document("folder"), manager.document("file"), manager.document("box"), manager.document("palette"), manager.document("image"),
+            manager.document("workflow"), manager.document("file-code"), manager.document("map"), manager.document("plus"), manager.document("upload"),
+            manager.document("grid-3x3"), manager.document("list"), manager.document("star"), manager.document("search"), manager.document("x"),
+            manager.document("settings-2"), manager.document("chevron-right"), manager.document("chevron-down"), manager.document("panel-right"), manager.document("audio-waveform")
+        }
+    }
+    pub fn asset(self: Self, kind: str) -> SvgDocument {
+        ret match kind {
+            "particle-system"=>self.blueprint "sound" => self.sound
+            "character"=>self.mesh "skeletal-mesh"=>self.mesh "skeleton"=>self.blueprint "animation-clip"=>self.blueprint "folder" => self.folder "mesh" => self.mesh "material" => self.material "material-graph" => self.material
+            "texture" => self.texture "blueprint" => self.blueprint "script" => self.script "scene" => self.scene _ => self.file
+        }
+    }
+}
+fn classes(base: str, active: bool) -> str {
+    ret base + if active {
+        " state-active"
+    } else {
+        ""
+    }
+}
+fn icon_button(id: str, title: str, icon: SvgDocument, active: bool, disabled: bool) -> Widget {
+    ret Widget::icon_button(id, "", icon).with_classes(classes("cb-icon", active)).with_attribute("aria-label", title).with_attribute("title", title).with_disabled(disabled)
+}
+fn text_button(id: str, text: str, active: bool) -> Widget {
+    ret Widget::button(id, text).with_classes(classes("cb-button", active))
+}
+fn source_button(browser: ContentBrowser, path: str, text: str, icon: SvgDocument) -> Widget {
+    ret Widget::icon_button("cb-source-" + path, text, icon).with_classes(classes("cb-source", browser.directory == path)).with_attribute("aria-label", text)
+}
+fn tree_children(browser: ContentBrowser, root: str, depth: usize, icons: ContentIcons) -> Widget {
+    let mut group = Widget::panel("").with_classes("cb-tree-children").with_direction(vertical())
+    let mut folders = Vec[ContentAsset]::new()
+    for asset in browser.entries {
+        if asset.kind == "folder" && asset.parent() == root {
+            folders.push(asset)
+        }
+    }
+    folders = mod::model::content_sorted(folders, "name", false)
+    for folder in folders {
+        let expanded = content_contains(browser.expanded, folder.path)
+        let mut row = Widget::panel("").with_classes("cb-tree-row").with_direction(horizontal())
+        row.push(Widget::panel("").with_classes("cb-tree-indent").with_flex((depth * 10) as f32, 0))
+        let mut children = false for entry in browser.entries {
+            if entry.kind == "folder" && entry.parent() == folder.path {
+                children = true
+            }
+        }
+        row.push(icon_button("cb-expand-" + folder.path, "Expand folder", if expanded {
+                    icons.expanded
+                } else {
+                    icons.chevron
+                }
+                , false, !children,).with_added_classes("cb-disclosure"))
+        row.push(source_button(browser, folder.path, folder.name, icons.folder)) group.push(row)
+        if expanded && depth < 16 {
+            group.push(tree_children(browser, folder.path, depth + 1, icons))
+        }
+    }
+    ret group
+}
+fn sources(browser: ContentBrowser, icons: ContentIcons) -> Widget {
+    let mut panel = Widget::panel("cb-sources").with_classes("cb-sources").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+    panel.push(Widget::label("SOURCES").with_classes("cb-section-label"))
+    panel.push(source_button(browser, "@all", "All Assets", icons.grid))
+    panel.push(source_button(browser, "@favorites", "Favorites", icons.star))
+    panel.push(source_button(browser, "Content", "Content", icons.folder))
+    panel.push(tree_children(browser, "Content", 1, icons))
+    panel.push(source_button(browser, "@engine", "Built-in", icons.mesh))
+    panel.push(tree_children(browser, "@engine", 1, icons))
+    panel.push(source_button(browser, "game/src", "Source", icons.script))
+    panel.push(tree_children(browser, "game/src", 1, icons))
+    if browser.searches.len() > 0 {
+        panel.push(Widget::label("SAVED SEARCHES").with_classes("cb-section-label"))
+        let mut index = 0_usize for search in browser.searches {
+            panel.push(Widget::icon_button("cb-search-" + index.fmt(), search.name, icons.search).with_classes("cb-source")) index += 1
+        }
+    }
+    ret panel
+}
+pub fn content_size(bytes: u64) -> str {
+    ret if bytes >= 1048576 {
+        (bytes / 1048576).fmt() + " MB"
+    } elif bytes >= 1024 {
+        (bytes / 1024).fmt() + " KB"
+    } elif bytes > 0 {
+        bytes.fmt() + " B"
+    } else {
+        "—"
+    }
+}
+fn tile(browser: ContentBrowser, asset: ContentAsset, icons: ContentIcons) -> Widget {
+    let selected = content_contains(browser.selection, asset.path)
+    let mut cell = Widget::button("cb-item-" + asset.path, "").with_classes(classes("cb-cell cb-kind-" + asset.kind, selected)).with_direction(vertical())
+    .with_attribute("role", "option").with_attribute("aria-label", asset.name + ", " + content_kind_name(asset.kind) + ", " + asset.path)
+    .with_attribute("aria-selected", if selected {
+            "true"
+        } else {
+            "false"
+        }
+        ,
+    )
+    .with_computed_style(Style::default().with_width(browser.size as f32).with_height(browser.stride() - 6))
+    let thumbnail = browser.thumbnail_payload(asset.path)
+    let height =(browser.size as f32 - 8) * 0.75_f32
+    if thumbnail != "" {
+        cell.push(Widget::image("", thumbnail).with_classes("cb-thumbnail").with_computed_style(Style::default().with_height(height)))
+    } else {
+        cell.push(Widget::icon("", icons.asset(asset.kind)).with_classes("cb-thumbnail cb-placeholder").with_computed_style(Style::default().with_height(height)))
+    }
+    cell.push(Widget::label(asset.name).with_classes("cb-asset-name"))
+    cell.push(Widget::label((if content_contains(browser.favorites, asset.path) {
+                    "★ "
+                } else {
+                    ""
+                }
+            ) + content_kind_name(asset.kind)).with_classes("cb-asset-type"))
+    ret cell
+}
+fn list_item(browser: ContentBrowser, asset: ContentAsset, icons: ContentIcons) -> Widget {
+    let selected = content_contains(browser.selection, asset.path)
+    let mut row = Widget::button("cb-item-" + asset.path, "").with_classes(classes("cb-list-row cb-kind-" + asset.kind, selected)).with_direction(horizontal()).with_attribute("role", "option")
+    .with_attribute("aria-label", asset.name + ", " + asset.path).with_attribute("aria-selected", if selected {
+            "true"
+        } else {
+            "false"
+        }
+        ,
+    )
+    row.push(Widget::icon("", icons.asset(asset.kind)).with_classes("cb-list-icon"))
+    row.push(Widget::label((if content_contains(browser.favorites, asset.path) {
+                    "★ "
+                } else {
+                    ""
+                }
+            ) + asset.name).with_classes("cb-list-name"))
+    row.push(Widget::label(content_kind_name(asset.kind)).with_classes("cb-list-type"))
+    row.push(Widget::label(content_size(asset.bytes)).with_classes("cb-list-size"))
+    row.push(Widget::label(asset.parent()).with_classes("cb-list-path"))
+    ret row
+}
+pub fn content_widget(browser: ContentBrowser, icons: ContentIcons, editable: bool) -> Widget {
+    let mut panel = Widget::panel("content-browser").with_classes("cb-browser").with_direction(vertical())
+    let mut toolbar = Widget::panel("cb-toolbar").with_classes("cb-toolbar").with_direction(horizontal())
+    toolbar.push(Widget::icon_button("cb-add", "Add", icons.add).with_classes("cb-add").with_disabled(!editable).with_attribute("aria-haspopup", "menu"))
+    toolbar.push(Widget::icon_button("cb-import", "Import", icons.upload).with_classes("cb-button cb-import").with_disabled(!editable || browser.import_worker.is_some()))
+    toolbar.push(icon_button("cb-back", "Back (Alt+Left)", icons.back, false, browser.history_index == 0))
+    toolbar.push(icon_button("cb-forward", "Forward (Alt+Right)", icons.forward, false, browser.history_index + 1 >= browser.history.len()))
+    toolbar.push(icon_button("cb-up", "Parent folder (Backspace)", icons.up, false, browser.directory == "@all" || browser.directory == "@favorites"))
+    let mut breadcrumbs = Widget::panel("cb-breadcrumbs").with_classes("cb-breadcrumbs").with_direction(horizontal())
+    if browser.directory == "@all" || browser.directory == "@favorites" || browser.directory == "@engine" {
+        breadcrumbs.push(text_button("cb-source-" + browser.directory, if browser.directory == "@all" {
+                    "All Assets"
+                } elif browser.directory == "@favorites" {
+                    "Favorites"
+                } else {
+                    "Built-in"
+                }
+                , false,))
+    } else {
+        let mut part = "" let mut path = ""
+        for index in 0..browser.directory.char_len() {
+            let c = browser.directory.slice(index, 1)
+            if c == "/" {
+                path = if path == "" {
+                    part
+                } else {
+                    path + "/" + part
+                }
+                breadcrumbs.push(text_button("cb-source-" + path, part, false)) breadcrumbs.push(Widget::icon("", icons.chevron).with_classes("cb-crumb-chevron")) part = ""
+            } else {
+                part = part + c
+            }
+        }
+        breadcrumbs.push(text_button("cb-source-" + browser.directory, part, true))
+    }
+    toolbar.push(breadcrumbs)
+    toolbar.push(icon_button("cb-refresh", "Refresh (F5)", icons.refresh, browser.scan.is_some(), false))
+    toolbar.push(icon_button("cb-sources-toggle", "Show sources", icons.folder, browser.sources, false))
+    toolbar.push(icon_button("cb-view-grid", "Grid view", icons.grid, browser.view == "grid", false))
+    toolbar.push(icon_button("cb-view-list", "List view", icons.list, browser.view == "list", false))
+    toolbar.push(text_button("cb-size-minus", "−", false).with_added_classes("cb-size-button").with_disabled(browser.view != "grid" || browser.size == 72))
+    toolbar.push(text_button("cb-size-plus", "+", false).with_added_classes("cb-size-button").with_disabled(browser.view != "grid" || browser.size == 160))
+    toolbar.push(icon_button("cb-details-toggle", "Asset details", icons.details, browser.inspector, false))
+    panel.push(toolbar)
+    let mut search = Widget::panel("cb-search-bar").with_classes("cb-search-bar").with_direction(horizontal())
+    search.push(Widget::icon("", icons.search).with_classes("cb-list-icon"))
+    search.push(Widget::input("cb-query", if browser.query.value() == "" && !browser.query_focused { "Search assets · t:mesh, path:Textures, -draft" } else { browser.query.value() }).with_classes("cb-query" + if browser.query.value() == "" && !browser.query_focused { " placeholder" } else { "" }).with_attribute("placeholder", "Search assets · t:mesh, path:Textures, -draft")
+        .with_attribute("aria-label", "Search project assets").with_focus(browser.query_focused).with_cursor(browser.query.cursor()).with_selection(browser.query.selection_start(), browser.query.selection_end()))
+    search.push(icon_button("cb-clear", "Clear search and filters", icons.close, false, browser.query.value() == "" && browser.types.len() == 0))
+    search.push(icon_button("cb-save-search", "Save current search", icons.star, false, browser.query.value() == ""))
+    for kind in vec!["mesh", "material", "texture", "sound", "particle-system", "blueprint", "script"] {
+        search.push(text_button("cb-filter-" + kind, if kind == "mesh" {
+                    "Meshes"
+                } elif kind == "material" {
+                    "Materials"
+                } elif kind == "texture" {
+                    "Textures"
+                } elif kind == "sound" {
+                    "Sounds"
+                } elif kind == "blueprint" {
+                    "Blueprints"
+                } else {
+                    "Scripts"
+                }
+                , content_contains(browser.types, kind),).with_added_classes("cb-filter"))
+    }
+    search.push(text_button("cb-sort", "Sort", browser.popup == "sort")) panel.push(search)
+    let mut body = Widget::panel("cb-body").with_classes("cb-body").with_direction(horizontal())
+    if browser.sources {
+        body.push(sources(browser, icons))
+    }
+    let mut items = Widget::panel("cb-items").with_classes("cb-items").with_direction(vertical()).with_attribute("data-luma-scrollable", "true").with_attribute("role", "listbox").with_attribute("aria-label", "Assets").with_attribute("aria-multiselectable", "true")
+    .with_computed_style(Style::default().with_scroll(0, browser.scroll))
+    if browser.visible.len() == 0 {
+        let mut empty = Widget::panel("cb-empty").with_classes("cb-empty").with_direction(vertical())
+        empty.push(Widget::icon("", if browser.scan.is_some() {
+                    icons.refresh
+                } else {
+                    icons.search
+                }
+                ,
+            ).with_classes("cb-empty-icon"))
+        empty.push(Widget::label(if browser.scan.is_some() {
+                    "Reading project assets…"
+                } else {
+                    "No matching assets"
+                }
+            ).with_classes("cb-empty-title"))
+        empty.push(Widget::label(if browser.query.value() != "" || browser.types.len() > 0 {
+                    "Clear the search or choose another asset type."
+                } else {
+                    "Import an asset or create a folder to get started."
+                }
+            ).with_classes("cb-empty-description"))
+        items.push(empty)
+    } else {
+        let window = browser.window()
+        if window.before() > 0 {
+            items.push(Widget::panel("").with_classes("cb-virtual-spacer").with_geometry_basis(window.before()))
+        }
+        if browser.view == "list" {
+            let first = window.start() let end = window.end()
+            for index in first..end {
+                match browser.visible.get(index) {
+                    Some(asset) => items.push(list_item(browser, asset, icons)) None => {
+                    }
+                }
+            }
+        } else {
+            let mut index = window.start()
+            while index < window.end() {
+                let mut row = Widget::panel("").with_classes("cb-grid-row").with_direction(horizontal()).with_geometry_basis(browser.stride())
+                for _ in 0..browser.columns() {
+                    if index < window.end() {
+                        match browser.visible.get(index) {
+                            Some(asset) => row.push(tile(browser, asset, icons)) None => {
+                            }
+                        }
+                        index += 1
+                    }
+                }
+                items.push(row)
+            }
+        }
+        if window.after() > 0 {
+            items.push(Widget::panel("").with_classes("cb-virtual-spacer").with_geometry_basis(window.after()))
+        }
+    }
+    body.push(items)
+    if browser.inspector {
+        body.push(content_asset_info(browser, icons, false))
+    }
+    panel.push(body)
+    let mut footer = Widget::panel("cb-footer").with_classes("cb-footer").with_direction(horizontal())
+    footer.push(Widget::label(browser.visible.len().fmt() + " items  ·  " + browser.selection.len().fmt() + " selected").with_classes("cb-count"))
+    footer.push(Widget::label(if browser.message != "" {
+                browser.message
+            } elif browser.primary != "" {
+                browser.primary
+            } else {
+                "Ctrl+F search  ·  Enter open  ·  Ctrl+D duplicate  ·  Ctrl+Z file undo"
+            }
+        ).with_classes("cb-status"))
+    footer.push(text_button("cb-recursive", "Subfolders", browser.recursive).with_added_classes("cb-footer-button"))
+    panel.push(footer) ret panel
+}
+pub fn content_asset_info(browser: ContentBrowser, icons: ContentIcons, dock: bool) -> Widget {
+    let mut info = Widget::panel(if dock {
+            "details-panel"
+        } else {
+            "cb-inspector"
+        }
+    ).with_classes(if dock {
+            "g-inspector cb-asset-inspector"
+        } else {
+            "cb-inspector"
+        }
+    ).with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+    match browser.find(browser.primary) {
+        Some(asset) => {
+            info.push(Widget::label(asset.name).with_classes("cb-info-title"))
+            let thumbnail = browser.thumbnail_payload(asset.path)
+            if thumbnail != "" {
+                info.push(Widget::image("", thumbnail).with_classes("cb-info-preview"))
+            } else {
+                info.push(Widget::icon("", icons.asset(asset.kind)).with_classes("cb-info-preview"))
+            }
+            info.push(Widget::label(content_kind_name(asset.kind) + "  ·  " + content_size(asset.bytes)).with_classes("cb-info-meta"))
+            info.push(Widget::label(asset.path).with_classes("cb-info-path"))
+            info.push(text_button("cb-open", "Open", false)) info.push(text_button("cb-copy-path", "Copy Path", false))
+            info.push(text_button("cb-find", "Show in Folder", false)) info.push(text_button("cb-favorite", if content_contains(browser.favorites, asset.path) {
+                        "Remove Favorite"
+                    } else {
+                        "Add Favorite"
+                    }
+                    , false,))
+            if asset.builtin() || !asset.mutable() {
+                info.push(Widget::label("Read-only source").with_classes("cb-info-meta"))
+            }
+        }
+        None => {
+            info.push(Widget::label("Select an asset").with_classes("cb-info-meta"))
+        }
+    }
+    ret info
+}
+fn popup_action(id: str, text: str, icons: SvgDocument, active: bool, disabled: bool) -> Widget {
+    ret Widget::icon_button(id, text, icons).with_classes(classes("cb-popup-action", active)).with_disabled(disabled).with_attribute("role", "menuitem")
+}
+pub fn content_popup(browser: ContentBrowser, icons: ContentIcons, screen: Rect, editable: bool) -> Widget {
+    let modal = browser.popup=="particle" || browser.popup == "folder" || browser.popup == "material" || browser.popup == "blueprint" || browser.popup == "rename" || browser.popup == "move" || browser.popup == "delete" || browser.popup == "preview"
+    let mut popup = Widget::panel("cb-popup").with_classes(if modal {
+            "cb-dialog interactive-overlay"
+        } else {
+            "cb-popup interactive-overlay"
+        }
+    ).with_direction(vertical()).with_attribute("role", if modal {
+            "dialog"
+        } else {
+            "menu"
+        }
+        ,
+    )
+    let mut size = Size::new(224, 210)
+    if browser.popup == "add" {
+        size = Size::new(224, 136)
+        popup.push(popup_action("cb-new-folder", "New Folder", icons.folder, false, !editable))
+        popup.push(popup_action("cb-new-material", "Material Graph", icons.material, false, !editable))
+        popup.push(popup_action("cb-new-blueprint", "Blueprint", icons.blueprint, false, !editable))
+        popup.push(popup_action("cb-new-particle","Particle System",icons.material,false,!editable))
+    } elif browser.popup == "sort" {
+        size = Size::new(224, 132)
+        for mode in vec!["name", "type", "size"] {
+            popup.push(popup_action("cb-sort-" + mode, if mode == "name" {
+                        "Name"
+                    } elif mode == "type" {
+                        "Asset Type"
+                    } else {
+                        "File Size"
+                    }
+                    , icons.list, browser.sort == mode, false,))
+        }
+        popup.push(popup_action("cb-sort-direction", "Descending", icons.up, browser.descending, false))
+    } elif browser.popup == "context" {
+        size = Size::new(224, 322)
+        let asset = browser.find(browser.primary).unwrap_or(ContentAsset::new("", "", "", 0))
+        popup.push(popup_action("cb-open", "Open", icons.file, false, asset.path == ""))
+        popup.push(popup_action("cb-find", "Show in Folder", icons.folder, false, asset.path == ""))
+        popup.push(popup_action("cb-favorite", "Toggle Favorite", icons.star, content_contains(browser.favorites, browser.primary), false))
+        popup.push(popup_action("cb-copy-path", "Copy Path", icons.file, false, asset.path == ""))
+        popup.push(popup_action("cb-duplicate", "Duplicate  ·  Ctrl+D", icons.add, false, !editable || !asset.mutable() || asset.kind == "folder"))
+        popup.push(popup_action("cb-rename", "Rename  ·  F2", icons.script, false, !editable || !asset.mutable() || browser.selection.len() != 1))
+        popup.push(popup_action("cb-move", "Move to Folder  ·  Ctrl+M", icons.folder, false, !editable || !asset.mutable()))
+        popup.push(popup_action("cb-delete", "Move to Trash  ·  Delete", icons.close, false, !editable || !asset.mutable()))
+        popup.push(popup_action("cb-file-undo", "Undo File Operation", icons.back, false, !editable || browser.undo.len() == 0))
+        popup.push(popup_action("cb-file-redo", "Redo File Operation", icons.forward, false, !editable || browser.redo.len() == 0))
+        popup.push(popup_action("cb-refresh", "Refresh", icons.refresh, false, false))
+    } elif modal {
+        size = Size::new(if browser.popup == "preview" {
+                660.0_f32
+            } else {
+                360.0_f32
+            }
+            , if browser.popup == "preview" {
+                420.0_f32
+            } else {
+                182.0_f32
+            }
+            ,
+        )
+        popup.push(Widget::label(if browser.popup == "preview" {
+                    content_leaf(browser.primary)
+                } elif browser.popup == "delete" {
+                    "Move assets to Trash?"
+                } elif browser.popup == "move" {
+                    "Move to Folder"
+                } elif browser.popup == "rename" {
+                    "Rename Asset"
+                } else {
+                    "New " + browser.popup
+                }
+            ).with_classes("cb-dialog-title"))
+        if browser.popup == "preview" {
+            popup.push(Widget::textarea("cb-preview-text", browser.preview).with_classes("cb-preview-text").with_attribute("readonly", "true"))
+            popup.push(Widget::label("Read-only preview  ·  Ctrl+C copies the contents").with_classes("cb-info-meta"))
+        } elif browser.popup == "delete" {
+            popup.push(Widget::label(browser.selection.len().fmt() + " selected assets. Referenced assets are protected. Ctrl+Z restores deleted files.").with_classes("cb-dialog-description"))
+        } else {
+            popup.push(Widget::input("cb-name", browser.name.value()).with_classes("cb-name").with_focus(browser.focus_id == "cb-name").with_cursor(browser.name.cursor()).with_selection(browser.name.selection_start(), browser.name.selection_end()).with_attribute("aria-label", "Asset name"))
+            popup.push(Widget::label(if browser.popup == "move" {
+                        "Destination, for example: Content/Props"
+                    } elif browser.popup == "rename" {
+                        "The file extension is preserved."
+                    } else {
+                        "Created in the current Content folder."
+                    }
+                ).with_classes("cb-info-meta"))
+        }
+        popup.push(Widget::label(browser.error).with_classes("cb-error"))
+        let mut actions = Widget::panel("").with_classes("cb-dialog-actions").with_direction(horizontal())
+        actions.push(Widget::spacer(1)) actions.push(text_button("cb-cancel", if browser.popup == "preview" {
+                    "Close"
+                } else {
+                    "Cancel"
+                }
+                , false,).with_focus(browser.focus_id == "cb-cancel"))
+        if browser.popup != "preview" {
+            actions.push(text_button("cb-confirm", if browser.popup == "delete" {
+                        "Move to Trash"
+                    } else {
+                        "Apply"
+                    }
+                    , true,).with_disabled(!editable).with_focus(browser.focus_id == "cb-confirm"))
+        }
+        popup.push(actions)
+    }
+    let width = if size.width() > screen.width() - 16 {
+        screen.width() - 16
+    } else {
+        size.width()
+    }
+    let height = if size.height() > screen.height() - 16 {
+        screen.height() - 16
+    } else {
+        size.height()
+    }
+    let bounds = if modal {
+        Rect::new((screen.width() - width) * 0.5_f32,(screen.height() - height) * 0.5_f32, width, height)
+    } else {
+        anchored_popup_bounds(Rect::new(browser.popup_x, browser.popup_y, 0, 0), Size::new(width, height), screen)
+    }
+    ret popup.with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_height(bounds.height()))
+}

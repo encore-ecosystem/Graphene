@@ -1,0 +1,129 @@
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+import linalg::Vec3
+import mod::model::*
+import refrain::scene::json_value::{vec3_json, json_vec3}
+
+fn required[T](value: Option[T]) -> Result[T, str] {
+    match value {
+        Some(v) => {
+            ret Result::Ok(v)
+        }
+        None => {
+            ret Result::Err("Missing or invalid material field")
+        }
+    }
+}
+fn text(value: Json, key: str) -> Result[str, str] {
+    ret required(required(value.get(key))?.as_str())
+}
+fn integer(value: Json, key: str) -> Result[u64, str] {
+    let source = required(required(value.get(key))?.as_number())?
+    if source.byte_len() == 0 || source.byte_len() > 16 {
+        ret Result::Err("Invalid material graph")
+    }
+    let mut result = 0_u64
+    for index in 0..source.byte_len() {
+        let byte = source.byte_at(index)
+        if byte < 48 || byte > 57 {
+            ret Result::Err("Invalid material graph")
+        }
+        result = result * 10 +(byte - 48) as u64
+    }
+    ret Result::Ok(result)
+}
+pub fn material_graph_stringify(graph: MaterialGraph, semantic: bool) -> str {
+    let mut nodes = Vec[Json]::new() let mut links = Vec[Json]::new()
+    for node in graph.nodes {
+        let mut fields = vec![field("id", Json::Number(Debug::fmt(node.id))), field("operation", Json::String(node.operation)),
+            field("kind", Json::String(node.kind)), field("value", vec3_json(node.value))]
+        if !semantic {
+            fields.push(field("position", vec3_json(Vec3::new(node.x, node.y, 0))))
+        }
+        nodes.push(Json::Object(fields))
+    }
+    for link in graph.links {
+        links.push(Json::Object(vec![field("source", Json::Number(Debug::fmt(link.source.node))), field("output", Json::String(link.source.pin)),
+                    field("target", Json::Number(Debug::fmt(link.target.node))), field("input", Json::String(link.target.pin))],))
+    }
+    ret stringify(Json::Object(vec![field("format", Json::String("graphene-material-graph")), field("version", Json::Number("2")), field("domain", Json::String(graph.domain.key())),
+                field("name", Json::String(if semantic {
+                            ""
+                        } else {
+                            graph.name
+                        }
+                    )), field("nodes", Json::Array(nodes)), field("links", Json::Array(links))],))
+}
+pub fn material_graph_parse(source: str) -> Option[MaterialGraph] {
+    match decode(source) {
+        Ok(graph) => {
+            ret Option::Some(graph)
+        }
+        Err(_) => {
+            ret Option::None
+        }
+    }
+}
+fn decode(source: str) -> Result[MaterialGraph, str] {
+    let root = match parse(source) {
+        Ok(root) => root Err(_) => {
+            ret Result::Err("Invalid material graph")
+        }
+    }
+    if text(root, "format")? != "graphene-material-graph" ||(integer(root, "version")? != 1 && integer(root, "version")? != 2) {
+        ret Result::Err("Invalid material graph")
+    }
+    let domain = match root.get("domain") {
+        Some(value) => required(MaterialDomain::parse(required(value.as_str())?))? None => MaterialDomain::Surface
+    }
+    let values = required(required(root.get("nodes"))?.as_array())?
+    let edges = required(required(root.get("links"))?.as_array())?
+    if values.len() == 0 || values.len() > 4096 || edges.len() > 16384 {
+        ret Result::Err("Invalid material graph")
+    }
+    let mut nodes = Vec[MaterialNode]::new() let mut links = Vec[MaterialLink]::new()
+    for value in values {
+        let id = integer(value, "id")?
+        if id == 0 {
+            ret Result::Err("Invalid material graph")
+        }
+        for previous in nodes {
+            if previous.id == id {
+                ret Result::Err("Invalid material graph")
+            }
+        }
+        let position = match value.get("position") {
+            Some(p) => required(json_vec3(p))? None => Vec3::zero()
+        }
+        nodes.push(MaterialNode {
+                id, text(value, "operation")?, text(value, "kind")?, required(json_vec3(required(value.get("value"))?))?, position.x(), position.y()
+            }
+            ,
+        )
+    }
+    let mut outputs = 0_usize
+    for node in nodes {
+        if material_is_output(node) {
+            outputs += 1
+        }
+    }
+    if outputs != 1 {
+        ret Result::Err("A material must have exactly one output")
+    }
+    for value in edges {
+        links.push(MaterialLink {
+                MaterialEndpoint {
+                    integer(value, "source")?, text(value, "output")?
+                }
+                , MaterialEndpoint {
+                    integer(value, "target")?, text(value, "input")?
+                }
+            }
+            ,
+        )
+    }
+    ret Result::Ok(MaterialGraph { text(root, "name")?, domain, nodes, links })
+}

@@ -1,0 +1,107 @@
+//! Exercise the graph's real input controller and ordinary Luma layout.
+import graphene::blueprint::*
+import graphene::blueprint::editor::BlueprintEditor
+import graphene::blueprint::visual::grid_paint
+import graphene::command_bus::{EditorState, GrapheneCommand}
+import graphene::scene::world::Scene
+import luma::{CanvasView, DisplayCommand, Event, Rect, Style, StyleSheet, layout_widget, event_pointer_down, event_pointer_up}
+import std::os::read_file
+import std::io::println
+
+fn main() -> u32 {
+    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let mut state = EditorState::new(Scene::new())
+    if !state.execute(GrapheneCommand::OpenBlueprint(rotator_blueprint())).success() {
+        ret 1
+    }
+    let mut editor = BlueprintEditor::new()
+    editor.refresh(state.blueprint_asset(), sheet)
+    let tree = layout_widget(sheet.apply(editor.widget(state, false), "", "", ""), Rect::new(0, 0, 1200, 700))
+    let bounds = match tree.find_bounds("blueprint-canvas") {
+        Some(bounds) => bounds None => {
+            ret 2
+        }
+    }
+    if bounds.width() < 600 || bounds.height() < 400 {
+        ret 3
+    }
+    if tree.find_bounds("bp-save").unwrap_or(Rect::new(0, 0, 0, 0)).width() < 70 { ret 20 }
+    if tree.find_bounds("bp-place").unwrap_or(Rect::new(0, 0, 0, 0)).width() < 120 { ret 21 }
+    let down = Event {
+        event_pointer_down(), bounds.x() + 70, bounds.y() + 80, 0, 0, 1, 0, 0, 0, 0, "", 0
+    }
+    if !editor.input(state, down, "blueprint-canvas", bounds, sheet) {
+        ret 4
+    }
+    let geometry_before = editor.geometry_rebuilds()
+    if !editor.input(state, Event::pointer_move(bounds.x() + 100, bounds.y() + 100, 30, 20, 1), "blueprint-canvas", bounds, sheet) {
+        ret 5
+    }
+    let up = Event {
+        event_pointer_up(), bounds.x() + 100, bounds.y() + 100, 0, 0, 0, 0, 0, 0, 0, "", 0
+    }
+    if !editor.input(state, up, "blueprint-canvas", bounds, sheet) {
+        ret 6
+    }
+    let geometry_after = editor.geometry_rebuilds()
+    if geometry_after.0 - geometry_before.0 != 1 || geometry_after.1 - geometry_before.1 != 2 { ret 11 }
+    let node = state.blueprint_asset().node(1).unwrap_or(BlueprintNode::new(0, "", BlueprintType::Exec))
+    if node.x != 70 || node.y != 80 {
+        ret 7
+    }
+    if !editor.input(state, Event::key_down(122, 192), "", bounds, sheet) {
+        ret 8
+    }
+    if state.blueprint_asset().node(1).unwrap_or(node).x != 40 {
+        ret 9
+    }
+    if editor.canvas().visible_count(editor.view(), bounds) == 0 {
+        ret 10
+    }
+    let constant = Event { event_pointer_down(), bounds.x() + 325, bounds.y() + 368, 0, 0, 1, 0, 0, 0, 0, "", 0 }
+    let release = Event { event_pointer_up(), bounds.x() + 325, bounds.y() + 368, 0, 0, 0, 0, 0, 0, 0, "", 0 }
+    let _selected = editor.input(state, constant, "blueprint-canvas", bounds, sheet)
+    let _released = editor.input(state, release, "blueprint-canvas", bounds, sheet)
+    let _field = editor.input(state, down, "bp-value", bounds, sheet)
+    let _all = editor.input(state, Event::key_down(97, 192), "", bounds, sheet)
+    let _typed = editor.input(state, Event::text_input("3.5"), "", bounds, sheet)
+    let _enter = editor.input(state, Event::key_down(13, 0), "", bounds, sheet)
+    match state.blueprint_asset().node(4) { Some(value) => { match value.value { F32(value) => { if value != 3.5 { ret 12 } } _ => { ret 13 } } } None => { ret 14 } }
+    let _field_again = editor.input(state, down, "bp-value", bounds, sheet)
+    let _all_again = editor.input(state, Event::key_down(97, 192), "", bounds, sheet)
+    let _invalid = editor.input(state, Event::text_input("not a number"), "", bounds, sheet)
+    let _reject = editor.input(state, Event::key_down(13, 0), "", bounds, sheet)
+    if editor.message() == "" { ret 15 }
+    let _cancel = editor.input(state, Event::key_down(27, 0), "", bounds, sheet)
+    if editor.widget(state, false).find("bp-value").unwrap_or(luma::Widget::label("")).text() != "3.5" { ret 22 }
+    let _undo_value = editor.input(state, Event::key_down(122, 192), "", bounds, sheet)
+    if editor.widget(state, false).find("bp-value").unwrap_or(luma::Widget::label("")).text() != "0" { ret 23 }
+    let _redo_value = editor.input(state, Event::key_down(122, 195), "", bounds, sheet)
+    if editor.widget(state, false).find("bp-value").unwrap_or(luma::Widget::label("")).text() != "3.5" { ret 24 }
+    let _focus_compile = editor.input(state, down, "bp-value", bounds, sheet)
+    let _compile = editor.input(state, Event::key_down(1073741888, 0), "", bounds, sheet)
+    if editor.take_request() != "bp-compile" { ret 25 }
+    let _unfocus_compile = editor.input(state, Event::key_down(27, 0), "", bounds, sheet)
+    let _menu = editor.input(state, Event::key_down(32, 0), "", bounds, sheet)
+    let _search = editor.input(state, Event::text_input("MuLTipLY"), "", bounds, sheet)
+    if !editor.popup_open() { ret 16 }
+    let popup = layout_widget(sheet.apply(editor.popup(1200, 700, state, tree), "", "", ""), Rect::new(0, 0, 1200, 700))
+    if popup.find_bounds("bp-add-multiply").is_none() { ret 17 }
+    let count = state.blueprint_asset().nodes.len()
+    let _add = editor.input(state, Event::key_down(13, 0), "", bounds, sheet)
+    if editor.popup_open() || state.blueprint_asset().nodes.len() != count + 1 { ret 18 }
+    let _undo_add = editor.input(state, Event::key_down(122, 192), "", bounds, sheet)
+    if state.blueprint_asset().nodes.len() != count { ret 19 }
+    let grid_view = CanvasView::new().pan(-7, -9).zoom_at(2, 0, 0)
+    let grid = grid_paint(grid_view, Rect::new(0, 0, 400, 300), Style::default())
+    match grid.commands().get(0) { Some(command) => { match command {
+        Line(line) => { if line.x0() != 24 || line.x1() != 24 || line.width() != 0.5 {
+            println(f"grid first line: {line.x0()}, {line.x1()}, width {line.width()}, scale {grid_view.scale()}")
+            ret 26
+        } }
+        _ => { ret 27 }
+    } } None => { ret 28 } }
+    let far = grid_paint(CanvasView::new().zoom_at(0.001, 0, 0), Rect::new(0, 0, 400, 300), Style::default())
+    if far.len() == 0 || far.len() > 100 { ret 29 }
+    ret 0
+}

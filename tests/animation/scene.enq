@@ -1,0 +1,264 @@
+import core::result::Result
+import core::vec::Vec
+import graphene::animation::character::{CharacterAsset, import_character, load_character, save_character}
+import graphene::animation::component::{SkeletalMeshComponent, CharacterMorphChoice, CharacterMorphControl}
+import graphene::animation::cook::CookedSkeletalMesh
+import graphene::animation::deform::{DeformedVertex, deform_vertex}
+import graphene::animation::math::PoseMatrix
+import graphene::animation::model::SkeletalMesh
+import graphene::animation::picking::{AnimationPick, pick_animation}
+import graphene::animation::runtime::{AnimationWorld, PoseSnapshot, AnimationInstanceId}
+import graphene::animation::scene::{SceneAnimation, SceneCharacterLibrary, SceneAnimatedActor, SceneAnimatedActorSlot}
+import graphene::scene::asset::{SceneAsset, SceneActor}
+import graphene::scene::component::SceneComponent
+import graphene::scene::transform::Transform
+import graphene::scene::world::Scene
+import linalg::Vec3
+import std::io::println
+import std::os::{mkdir_all, read_file, write_file}
+import std::time::perf_counter_ns
+extern fn usleep(time: u32) -> i32
+#attr(safe)
+fn pause() ->() {
+    usleep(1000_u32)
+}
+fn main() -> u32 {
+    let root = "FIXTURE_ROOT/scene-test-" + perf_counter_ns().fmt() mkdir_all(root)
+    let asset = match import_character(root, "FIXTURE_ROOT/fixtures/rig.glb", "Original") {
+        Ok(a) => a Err(e) => {
+            println(e) ret 1_u32
+        }
+    }
+    let mut scene = Scene::new()
+    let mut c = SkeletalMeshComponent::defaults() c.asset = "Content/Characters/Original.gcharacter" c.start_time = 0.5_f32 c.speed = 0_f32
+    let actor = scene.create_entity("Original", Transform::identity())
+    scene.set_component(actor, SceneComponent::SkeletalMesh(c))
+    let mut authored = SceneAsset::new() authored.add(SceneActor::new("Original", "skeletal-mesh", Transform::identity()).with_identity(actor).with_component(SceneComponent::SkeletalMesh(c)))
+    let decoded = match SceneAsset::parse(authored.stringify()) {
+        Some(a) => a None => {
+            ret 2_u32
+        }
+    }
+    match decoded.actor_by_id(actor) {
+        Some(a) => {
+            match a.component() {
+                SkeletalMesh(value) => {
+                    if value.start_time != 0.5_f32 || value.asset != c.asset {
+                        ret 3_u32
+                    }
+                }
+                _ => {
+                    ret 4_u32
+                }
+            }
+        }
+        None => {
+            ret 5_u32
+        }
+    }
+    let mut animation = SceneAnimation::new() animation.configure(root) animation.sync(scene, false)
+    let begin = perf_counter_ns()
+    while animation.actor_count() == 0_usize && perf_counter_ns() - begin < 10000000000_u64 {
+        if animation.tick(0_f32).is_err() {
+            ret 6_u32
+        }
+        pause()
+    }
+    if animation.actor_count() != 1_usize || animation.libraries() != 1_usize {
+        println(animation.message()) ret 7_u32
+    }
+    let slots = animation.actors(0_usize)
+    let instance = match slots.get_unchecked_borrowed(0_usize).value {
+        Some(a) => a.instance None => {
+            ret 8_u32
+        }
+    }
+    let world = animation.runtime()
+    let snapshot = match world.snapshot(instance) {
+        Ok(s) => s Err(_) => {
+            ret 9_u32
+        }
+    }
+    let matrices = match world.model(snapshot) {
+        Ok(m) => m Err(_) => {
+            ret 10_u32
+        }
+    }
+    if matrices.get_unchecked_borrowed(0_usize).m03 != 1_f32 {
+        ret 11_u32
+    }
+    c.speed = 1_f32 scene.set_component(actor, SceneComponent::SkeletalMesh(c)) animation.sync(scene, false)
+    if animation.tick(0.25_f32).is_err() {
+        ret 12_u32
+    }
+    let next = animation.runtime() let next_snapshot = match next.snapshot(instance) {
+        Ok(s) => s Err(_) => {
+            ret 13_u32
+        }
+    }
+    let matrices = match next.model(next_snapshot) {
+        Ok(m) => m Err(_) => {
+            ret 14_u32
+        }
+    }
+    if matrices.get_unchecked_borrowed(0_usize).m03 != 1.5_f32 {
+        ret 15_u32
+    }
+    let mesh = animation.library(0_usize).asset.geometry.mesh
+    let palette = match next.palette(next_snapshot) {
+        Ok(p) => p Err(_) => {
+            ret 28_u32
+        }
+    }
+    let morphs = match next.morphs(next_snapshot) {
+        Ok(p) => p Err(_) => {
+            ret 29_u32
+        }
+    }
+    let mut center = Vec3::zero()
+    for i in 0_usize..3_usize {
+        let vertex = match deform_vertex(mesh, i, palette, morphs) {
+            Ok(v) => v Err(_) => {
+                ret 30_u32
+            }
+        }
+        center = center.add(Vec3::new(vertex.position.x, vertex.position.y, vertex.position.z).scale(1_f32 / 3_f32))
+    }
+    match pick_animation(animation, center.add(Vec3::new(0_f32, 0_f32, 3_f32)), Vec3::new(0_f32, 0_f32, - 1_f32)) {
+        Some(hit) => {
+            if hit.entity != actor {
+                ret 18_u32
+            }
+        }
+        None => {
+            ret 19_u32
+        }
+    }
+    if pick_animation(animation, Vec3::new( - 10_f32, 0_f32, 3_f32), Vec3::new(0_f32, 0_f32, - 1_f32)).is_some() {
+        ret 20_u32
+    }
+    let choices = animation.morph_choices(actor)
+    if choices.len() != 1_usize {
+        ret 31_u32
+    }
+    let morph_name = choices.get_unchecked_borrowed(0_usize).name
+    c.morphs = vec![CharacterMorphControl { morph_name, 0.8_f32 }]
+    scene.set_component(actor, SceneComponent::SkeletalMesh(c)) animation.sync(scene, false)
+    if animation.tick(0_f32).is_err() || animation.runtime().time(instance).unwrap_or( - 1_f64) != 0.75_f64 {
+        ret 32_u32
+    }
+    let controlled = match animation.runtime().snapshot(instance) {
+        Ok(v) => v Err(_) => {
+            ret 33_u32
+        }
+    }
+    let weights = match animation.runtime().morphs(controlled) {
+        Ok(v) => v Err(_) => {
+            ret 34_u32
+        }
+    }
+    if weights.get_unchecked_borrowed(0_usize) != 0.8_f32 {
+        ret 35_u32
+    }
+    let mut invalid = SkeletalMeshComponent::defaults() invalid.asset = c.asset invalid.start_time = c.start_time invalid.morphs = vec![CharacterMorphControl {
+            "Missing", 1_f32
+        }
+    ]
+    scene.set_component(actor, SceneComponent::SkeletalMesh(invalid)) animation.sync(scene, false)
+    if animation.tick(0_f32).is_err() {
+        ret 36_u32
+    }
+    let retained = match animation.runtime().snapshot(instance) {
+        Ok(v) => v Err(_) => {
+            ret 37_u32
+        }
+    }
+    let weights = match animation.runtime().morphs(retained) {
+        Ok(v) => v Err(_) => {
+            ret 38_u32
+        }
+    }
+    if weights.get_unchecked_borrowed(0_usize) != 0.8_f32 || animation.diagnostic(actor) == "" {
+        ret 39_u32
+    }
+    scene.set_component(actor, SceneComponent::SkeletalMesh(c)) animation.sync(scene, false)
+    if animation.tick(0_f32).is_err() || animation.diagnostic(actor) != "" {
+        ret 40_u32
+    }
+    let generation = animation.library(0_usize).generation
+    animation.reload(c.asset)
+    let reloading = perf_counter_ns()
+    while animation.loading() && perf_counter_ns() - reloading < 10000000000_u64 {
+        if animation.tick(0_f32).is_err() {
+            ret 21_u32
+        }
+        pause()
+    }
+    if animation.loading() || animation.library(0_usize).generation == generation || animation.runtime().contains(instance) {
+        println(animation.message()) ret 22_u32
+    }
+    let current = match animation.actors(0_usize).get_unchecked_borrowed(0_usize).value {
+        Some(a) => a.instance None => {
+            ret 23_u32
+        }
+    }
+    if animation.runtime().time(current).unwrap_or( - 1_f64) != 0.75_f64 {
+        ret 24_u32
+    }
+    // A valid cooked replacement with a renamed live morph must be rejected
+    // before the library/GPU generation changes, retaining the old instance.
+    let candidate_path = root + "/" + c.asset let original = read_file(candidate_path)
+    let mut candidate = match load_character(candidate_path, "") {
+        Ok(v) => v Err(_) => {
+            ret 41_u32
+        }
+    }
+    let mut renamed = candidate.geometry.mesh.morphs.get_unchecked_borrowed(0_usize) renamed.name = "RenamedMorph" candidate.geometry.mesh.morphs.set(0_usize, renamed)
+    if save_character(candidate_path, "fixture", "candidate", candidate).is_err() {
+        ret 42_u32
+    }
+    let retained_generation = animation.library(0_usize).generation animation.reload(c.asset)
+    let started = perf_counter_ns()
+    while animation.loading() && perf_counter_ns() - started < 10000000000_u64 {
+        if animation.tick(0_f32).is_err() {
+            ret 43_u32
+        }
+        pause()
+    }
+    write_file(candidate_path, original)
+    if animation.loading() || animation.library(0_usize).generation != retained_generation || !animation.runtime().contains(current) || animation.diagnostic(actor) == "" {
+        ret 44_u32
+    }
+    let live = match animation.actors(0_usize).get_unchecked_borrowed(0_usize).value {
+        Some(v) => v None => {
+            ret 45_u32
+        }
+    }
+    if live.library_generation != retained_generation || animation.runtime().time(current).unwrap_or( - 1_f64) != 0.75_f64 {
+        ret 46_u32
+    }
+    let path = root + "/" + c.asset let good = read_file(path)
+    if write_file(path, "broken") != 0_i32 {
+        ret 25_u32
+    }
+    let generation = animation.library(0_usize).generation animation.reload(c.asset)
+    let reloading = perf_counter_ns()
+    while animation.loading() && perf_counter_ns() - reloading < 10000000000_u64 {
+        if animation.tick(0_f32).is_err() {
+            ret 26_u32
+        }
+        pause()
+    }
+    if animation.loading() || animation.library(0_usize).generation != generation || animation.actor_count() != 1_usize || !animation.runtime().contains(current) {
+        ret 27_u32
+    }
+    write_file(path, good)
+    scene.remove(actor) animation.sync(scene, false)
+    if animation.tick(0_f32).is_err() || animation.actor_count() != 0_usize || animation.runtime().contains(instance) {
+        ret 16_u32
+    }
+    animation.configure(root + "/different") if animation.libraries() != 0_usize {
+        ret 17_u32
+    }
+    ret 0_u32
+}

@@ -355,7 +355,7 @@ impl for RenderGraph {
     }
 }
 
-fn acquire_alias_slot(slots: Vec[AliasSlot], kind: u32, size: u64,
+fn acquire_alias_slot(slots: mut Vec[AliasSlot], kind: u32, size: u64,
     first: usize, last: usize,) ->(Vec[AliasSlot], usize) {
     let mut result = slots
     let mut index = 0_usize

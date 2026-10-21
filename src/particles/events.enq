@@ -1,0 +1,100 @@
+//! Typed CPU/GPU event wire and bounded, named delivery channels.
+import core::result::Result
+import core::vec::Vec
+import linalg::Vec3
+pub enum ParticleEventKind {
+    Spawn
+    Death
+    Collision
+    User
+}
+pub struct ParticleEvent {
+    kind: ParticleEventKind
+    particle: u64
+    time: f32
+    value: f32
+    position: Vec3
+    velocity: Vec3
+    seed: u32
+}
+fn vfx_event_word(words: Vec[f32], index: usize) -> f32 {
+    ret words.get(index).unwrap_or(0)
+}
+fn vfx_event_half(words: Vec[f32], index: usize) -> Result[u32, str] {
+    let word = vfx_event_word(words, index)
+    if !(word >= 0 && word <= 65535) {
+        ret Result::Err("Invalid event identity component")
+    }
+    let half = word as u32
+    if half as f32 != word {
+        ret Result::Err("Non-integral event identity component")
+    }
+    ret Result::Ok(half)
+}
+pub fn decode_particle_events(words: Vec[f32]) -> Result[Vec[ParticleEvent], str] {
+    if words.len() % 16_usize != 0_usize || words.len() > 65536_usize {
+        ret Result::Err("Invalid particle event packet size")
+    }
+    for word in words {
+        if !(word - word == 0) {
+            ret Result::Err("Non-finite particle event")
+        }
+    }
+    let mut events = Vec[ParticleEvent]::with_capacity(words.len() / 16_usize)
+    for row in 0_usize..words.len() / 16_usize {
+        let base = row * 16_usize
+        let tag = vfx_event_word(words, base)
+        let kind = if tag == 1 {
+            ParticleEventKind::Spawn
+        } elif tag == 2 {
+            ParticleEventKind::Death
+        } elif tag == 3 {
+            ParticleEventKind::Collision
+        } elif tag == 4 {
+            ParticleEventKind::User
+        } else {
+            ret Result::Err("Unknown particle event kind")
+        }
+        let a = vfx_event_half(words, base + 1_usize)? let b = vfx_event_half(words, base + 13_usize)? let c = vfx_event_half(words, base + 14_usize)? let d = vfx_event_half(words, base + 15_usize)?
+        let seed_low = vfx_event_half(words, base + 7_usize)? let seed_high = vfx_event_half(words, base + 11_usize)?
+        events.push(ParticleEvent {
+                kind,(a as u64) |((b as u64) << 16_u64) |((c as u64) << 32_u64) |((d as u64) << 48_u64), vfx_event_word(words, base + 2_usize), vfx_event_word(words, base + 3_usize), Vec3::new(vfx_event_word(words, base + 4_usize), vfx_event_word(words, base + 5_usize), vfx_event_word(words, base + 6_usize)), Vec3::new(vfx_event_word(words, base + 8_usize), vfx_event_word(words, base + 9_usize), vfx_event_word(words, base + 10_usize)), seed_low |(seed_high << 16_u32)
+            }
+            ,
+        )
+    }
+    ret Result::Ok(events)
+}
+pub struct ParticleEventChannel {
+    name: str
+    capacity: usize
+    pending: Vec[ParticleEvent]
+    dropped: u64
+}
+
+impl for ParticleEventChannel {
+    pub fn create(name: str, capacity: usize) -> Result[Self, str] {
+        if name == "" || capacity == 0_usize || capacity > 65536_usize {
+            ret Result::Err("Invalid event channel name or capacity")
+        }
+        ret Result::Ok(Self { name, capacity, Vec[ParticleEvent]::new(), 0_u64 })
+    }
+    pub fn publish(self: mut Self, events: Vec[ParticleEvent]) ->() {
+        for event in events {
+            if self.pending.len() < self.capacity {
+                self.pending.push(event)
+            } else {
+                self.dropped += 1_u64
+            }
+        }
+    }
+    pub fn drain(self: mut Self) -> Vec[ParticleEvent] {
+        let events = self.pending self.pending = Vec[ParticleEvent]::new() ret events
+    }
+    pub fn dropped(self: Self) -> u64 {
+        ret self.dropped
+    }
+    pub fn name(self: Self) -> str {
+        ret self.name
+    }
+}

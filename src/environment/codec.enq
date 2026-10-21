@@ -1,0 +1,156 @@
+//! Versioned environment components. Reject malformed values rather than silently resetting them.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+import json::{Json, field}
+import linalg::Vec3
+import mod::model::{EnvironmentComponent, WeatherSample}
+import refrain::scene::json_value::{parse_number, vec3_json, json_vec3}
+
+fn num(value: f32) -> Json {
+    ret Json::Number(Debug::fmt(value))
+}
+pub fn environment_json(value: EnvironmentComponent) -> Json {
+    let w = value.weather
+    ret Json::Object(vec![field("version", Json::Number("1")), field("sun", Json::Number(Debug::fmt(value.sun))), field("moon", Json::Number(Debug::fmt(value.moon))),
+            field("controller", Json::Number(Debug::fmt(value.controller))), field("material", Json::String(value.material)), field("panorama", Json::String(value.panorama)),
+            field("style", Json::String(value.style)), field("quality", Json::Number(Debug::fmt(value.quality))), field("time", num(value.time_hours)), field("dayDuration", num(value.day_duration)),
+            field("preview", Json::Bool(value.preview)), field("density", num(value.density)), field("altitude", num(value.altitude)), field("thickness", num(value.thickness)),
+            field("intensity", num(value.intensity)), field("turbidity", num(value.turbidity)), field("blendDistance", num(value.blend_distance)), field("priority", num(value.priority)),
+            field("seed", Json::Number(Debug::fmt(value.seed))), field("mode", Json::String(value.mode)), field("sequence", Json::String(value.sequence)), field("transition", num(value.transition)),
+            field("cloudiness", num(w.cloudiness)), field("rain", num(w.rain)), field("snow", num(w.snow)), field("fog", num(w.fog)), field("wind", vec3_json(w.wind)),
+            field("temperature", num(w.temperature)), field("wetness", num(w.wetness)), field("snowCoverage", num(w.snow_coverage)), field("storm", num(w.storm))],)
+}
+fn scalar(root: Json, key: str, fallback: f32) -> f32 {
+    match root.get(key) {
+        Some(item) => {
+            ret parse_number(item.as_number().unwrap_or("")).unwrap_or(fallback)
+        }
+        None => {
+        }
+    }
+    ret fallback
+}
+fn text(root: Json, key: str, fallback: str) -> str {
+    match root.get(key) {
+        Some(item) => {
+            ret item.as_str().unwrap_or(fallback)
+        }
+        None => {
+        }
+    }
+    ret fallback
+}
+pub fn environment_identity(source: str) -> Option[u64] {
+    if source.byte_len() == 0 || source.byte_len() > 20 {
+        ret Option[u64]::None
+    }
+    let mut value = 0_u64
+    for index in 0..source.byte_len() {
+        let byte = source.byte_at(index)
+        if byte < 48 || byte > 57 {
+            ret Option[u64]::None
+        }
+        let digit =(byte - 48) as u64
+        if value > 1844674407370955161_u64 ||(value == 1844674407370955161_u64 && digit > 5) {
+            ret Option[u64]::None
+        }
+        value = value * 10 + digit
+    }
+    ret Option[u64]::Some(value)
+}
+fn identity(root: Json, key: str) -> Option[u64] {
+    ret environment_identity(root.get(key).unwrap_or(Json::Number("0")).as_number().unwrap_or(""))
+}
+pub fn environment_parse(kind: str, root: Json) -> Option[EnvironmentComponent] {
+    if root.get("version").unwrap_or(Json::Number("1")).as_number().unwrap_or("") != "1" {
+        ret Option[EnvironmentComponent]::None
+    }
+    for key in vec!["quality", "time", "dayDuration", "density", "altitude", "thickness", "intensity", "turbidity", "blendDistance", "priority", "transition", "cloudiness", "rain", "snow", "fog", "temperature", "wetness", "snowCoverage", "storm"] {
+        match root.get(key) {
+            Some(item) => {
+                if parse_number(item.as_number().unwrap_or("")).is_none() {
+                    ret Option[EnvironmentComponent]::None
+                }
+            }
+            None => {
+            }
+        }
+    }
+    for key in vec!["material", "panorama", "style", "mode", "sequence"] {
+        match root.get(key) {
+            Some(item) => {
+                if item.as_str().is_none() {
+                    ret Option[EnvironmentComponent]::None
+                }
+            }
+            None => {
+            }
+        }
+    }
+    let mut c = EnvironmentComponent::new(kind)
+    c.sequence = text(root, "sequence", "")
+    c.sun = match identity(root, "sun") {
+        Some(value) => value None => {
+            ret Option[EnvironmentComponent]::None
+        }
+    }
+    c.moon = match identity(root, "moon") {
+        Some(value) => value None => {
+            ret Option[EnvironmentComponent]::None
+        }
+    }
+    c.controller = match identity(root, "controller") {
+        Some(value) => value None => {
+            ret Option[EnvironmentComponent]::None
+        }
+    }
+    let seed = match environment_identity(root.get("seed").unwrap_or(Json::Number("1")).as_number().unwrap_or("")) {
+        Some(value) => value None => {
+            ret Option[EnvironmentComponent]::None
+        }
+    }
+    if seed > 4294967295_u64 {
+        ret Option[EnvironmentComponent]::None
+    }
+    c.seed = seed as u32
+    let q = scalar(root, "quality", 1)
+    if q != 0 && q != 1 && q != 2 {
+        ret Option[EnvironmentComponent]::None
+    }
+    c.quality = q as u32 c.material = text(root, "material", "") c.panorama = text(root, "panorama", "") c.style = text(root, "style", "realistic")
+    c.mode = text(root, "mode", "manual") c.time_hours = scalar(root, "time", c.time_hours) c.day_duration = scalar(root, "dayDuration", c.day_duration)
+    c.density = scalar(root, "density", c.density) c.altitude = scalar(root, "altitude", c.altitude) c.thickness = scalar(root, "thickness", c.thickness)
+    c.intensity = scalar(root, "intensity", c.intensity) c.turbidity = scalar(root, "turbidity", c.turbidity) c.blend_distance = scalar(root, "blendDistance", c.blend_distance)
+    c.priority = scalar(root, "priority", c.priority) c.transition = scalar(root, "transition", c.transition)
+    match root.get("preview") {
+        Some(item) => {
+            c.preview = match item.as_bool() {
+                Some(value) => value None => {
+                    ret Option[EnvironmentComponent]::None
+                }
+            }
+        }
+        None => {
+        }
+    }
+    let mut w = c.weather
+    w.cloudiness = scalar(root, "cloudiness", w.cloudiness) w.rain = scalar(root, "rain", w.rain) w.snow = scalar(root, "snow", w.snow) w.fog = scalar(root, "fog", w.fog)
+    w.temperature = scalar(root, "temperature", w.temperature) w.wetness = scalar(root, "wetness", w.wetness) w.snow_coverage = scalar(root, "snowCoverage", w.snow_coverage) w.storm = scalar(root, "storm", w.storm)
+    match root.get("wind") {
+        Some(item) => {
+            w.wind = match json_vec3(item) {
+                Some(value) => value None => {
+                    ret Option[EnvironmentComponent]::None
+                }
+            }
+        }
+        None => {
+        }
+    }
+    c.weather = w
+    if !c.valid() {
+        ret Option[EnvironmentComponent]::None
+    }
+    ret Option[EnvironmentComponent]::Some(c)
+}

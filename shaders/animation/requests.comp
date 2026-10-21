@@ -1,0 +1,35 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define GRAPHENE_SKINNED
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer SceneStream {uint values[];} scene;
+layout(set=0,binding=1,std430) readonly buffer PackedVertices {float values[];} vertices;
+#include "vg.glsl"
+layout(set=0,binding=15,std430) buffer Tags {uint values[];} tags;
+// First three words are VkDispatchIndirectCommand, then count and overflow.
+layout(set=0,binding=16,std430) buffer Dispatch {uint x,y,z,count,overflow;} dispatch;
+struct Request {uvec4 current,previous;};
+layout(set=0,binding=17,std430) writeonly buffer Requests {Request values[];} requests;
+void main() {
+    uint clusters=scene.values[0],hierarchy=scene.values[2],instances=scene.values[1],capacity=skin_config.scene.x*clusters;
+    uint visible_base=64u+clusters*16u+hierarchy*12u+skin_config.scene.x*28u;
+    uint indirect_base=visible_base+capacity*4u+clusters+6134u;
+    uint visible=gl_WorkGroupID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x;
+    if(visible>=min(scene.values[indirect_base],clusters*instances))return;
+    uint cluster=scene.values[visible_base+visible*2u],instance=scene.values[visible_base+visible*2u+1u]&0x0007ffffu;
+    if(cluster>=clusters || instance>=skin_config.scene.w)return;
+    uint meta=64u+cluster*16u,offset=uint(uintBitsToFloat(scene.values[meta+10u]));
+    // Every physical page reserves 64 vertices; the cluster's actual vertex
+    // count is written to metadata word 15 by the skeletal VG binding.
+    uint count=uint(uintBitsToFloat(scene.values[meta+15u]));
+    if(gl_LocalInvocationIndex>=min(count,64u))return;
+    uint vertex=uint(vertices.values[(offset+gl_LocalInvocationIndex)*11u+6u]);
+    if(vertex>=skin_config.geometry.x)return;
+    uint cache_index=instance*skin_config.geometry.x+vertex;
+    if(atomicExchange(tags.values[cache_index],skin_config.geometry.w)==skin_config.geometry.w)return;
+    uint request=atomicAdd(dispatch.count,1u);
+    uint maximum=skin_config.geometry.x*skin_config.scene.x;
+    if(request>=maximum){atomicAdd(dispatch.overflow,1u);return;}
+    requests.values[request]=Request(uvec4(vertex,instance*skin_config.geometry.y,instance*skin_config.geometry.z,cache_index),uvec4(instance*skin_config.geometry.y,skin_config.instances[instance].x,0,0));
+    atomicMax(dispatch.x,(request+64u)/64u);
+}
