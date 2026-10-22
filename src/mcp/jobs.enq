@@ -1,0 +1,156 @@
+//! Asynchronous asset imports and retained job completion records.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, stringify}
+import mod::editor::{mcp_ok, mcp_failed}
+import mod::protocol::*
+import refrain::animation::character::import_character
+import refrain::audio::asset::{sound_source_supported, import_sound}
+import refrain::command_bus::{EditorState, GrapheneCommand, AssetImportCommand, OperationCompletionCommand}
+import refrain::content_browser::ContentBrowser
+import refrain::content_browser::files::content_kind
+import refrain::project_assets::import_mesh_asset
+import refrain::texture_asset::load_material_texture
+import std::path::Path
+import std::thread::JoinHandle
+import std::time::perf_counter_ns
+
+pub struct McpJob {
+    id: str
+    kind: str
+    revision: u64
+    status: str
+    message: str
+}
+pub struct McpJobs {
+    entries: Vec[McpJob]
+    importer: Option[JoinHandle[str]]
+    project: str
+}
+
+impl for McpJobs {
+    pub fn new() -> Self {
+        ret Self { Vec[McpJob]::new(), Option[JoinHandle[str]]::None, "" }
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.importer.is_some()
+    }
+    pub fn record(self: mut Self, kind: str, revision: u64) -> str {
+        let id = "mcp-" + perf_counter_ns().fmt()
+        if self.entries.len() >= 64 {
+            let mut retained = Vec[McpJob]::new()
+            for i in 1_usize..self.entries.len() {
+                retained.push(self.entries.get_unchecked_borrowed(i))
+            }
+            self.entries = retained
+        }
+        self.entries.push(McpJob { id, kind, revision, "running", "" }) ret id
+    }
+    pub fn poll(self: mut Self, state: mut EditorState, browser: mut ContentBrowser, project: str) -> bool {
+        let mut changed = false
+        let ready = match self.importer {
+            Some(worker) => worker.is_finished() None => false
+        }
+        if ready {
+            let result = match self.importer {
+                Some(worker) => mcp_json(worker.join()) None => Json::Null
+            }
+            self.importer = Option[JoinHandle[str]]::None
+            if project == self.project {
+                let ok = result.get("ok").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false)
+                let _completed = state.execute(GrapheneCommand::CompleteImport(OperationCompletionCommand::new(ok, mcp_string(result, "message"))))
+                if ok {
+                    browser.refresh() browser.mesh_refresh = true
+                }
+                changed = true
+            }
+        }
+        for i in 0_usize..self.entries.len() {
+            let entry = self.entries.get_unchecked_borrowed(i)
+            if entry.status != "running" {
+                continue
+            }
+            let mut status = "running" let mut message = entry.message
+            for event in state.events_after(entry.revision) {
+                let kind = event.kind()
+                if (entry.kind == "project.save" && kind == "project.saved") ||(entry.kind == "build.start" && kind == "build.succeeded") ||(entry.kind == "editor.import" && kind == "asset.imported") {
+                    status = "succeeded"
+                }
+                if (entry.kind == "project.save" && kind == "project.save-failed") ||(entry.kind == "build.start" && kind == "build.failed") ||(entry.kind == "editor.import" && kind == "asset.import-failed") {
+                    status = "failed"
+                }
+            }
+            match state.task() {
+                Some(task) => {
+                    if status != "running" && task.state() == status {
+                        message = task.message()
+                    }
+                }
+                None => {
+                }
+            }
+            self.entries.set(i, McpJob { entry.id, entry.kind, entry.revision, status, message })
+        }
+        ret changed
+    }
+    pub fn status(self: Self, id: str) -> Json {
+        for entry in self.entries {
+            if entry.id == id {
+                ret Json::Object(vec![field("ok", Json::Bool(true)), field("jobId", Json::String(entry.id)), field("kind", Json::String(entry.kind)), field("status", Json::String(entry.status)), field("message", Json::String(entry.message))])
+            }
+        }
+        ret mcp_failed("Job was not found in this editor instance")
+    }
+    pub fn import_asset(self: mut Self, state: mut EditorState, project: str, params: Json) -> Json {
+        if self.importer.is_some() || state.simulation_mode() != "" || state.building() {
+            ret mcp_failed("Stop simulation/build and wait for the current import")
+        }
+        let source = mcp_string(params, "source") let kind = mcp_string(params, "kind")
+        let requested = state.execute(GrapheneCommand::RequestImportAsset(AssetImportCommand::new(source)))
+        if !requested.success() {
+            ret mcp_failed(requested.message())
+        }
+        let id = self.record("editor.import", state.revision())
+        self.project = project self.importer = Option[JoinHandle[str]]::Some(spawn import_worker(project, source, kind))
+        ret Json::Object(vec![field("ok", Json::Bool(true)), field("jobId", Json::String(id)), field("status", Json::String("running"))])
+    }
+    pub fn close(self: mut Self) ->() {
+        match self.importer {
+            Some(worker) => {
+                let _joined = worker.join()
+            }
+            None => {
+            }
+        }
+        self.importer = Option[JoinHandle[str]]::None
+    }
+}
+fn import_worker(project: str, source: str, kind: str) -> str {
+    let mut result = mcp_failed("Unsupported import")
+    if kind == "character" {
+        let name = Path::new(source).stem().unwrap_or("")
+        result = match import_character(project, source, name) {
+            Result::Ok(_) => mcp_ok("Content/Characters/" + name + ".gcharacter") Result::Err(error) => mcp_failed(error)
+        }
+    } elif kind == "sound" ||((kind == "" || kind == "auto") && sound_source_supported(source)) {
+        let imported = import_sound(project, source)
+        result = if imported.error == "" {
+            mcp_ok(imported.path)
+        } else {
+            mcp_failed(imported.error)
+        }
+    } elif kind == "texture" ||((kind == "" || kind == "auto") && content_kind(source) == "texture") {
+        let imported = load_material_texture(project, source, true)
+        result = if imported.error == "" {
+            mcp_ok(imported.path)
+        } else {
+            mcp_failed(imported.error)
+        }
+    } else {
+        result = match import_mesh_asset(project, source) {
+            Result::Ok(asset) => mcp_ok(asset.project_path()) Result::Err(error) => mcp_failed(error)
+        }
+    }
+    ret stringify(result)
+}

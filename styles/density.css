@@ -1,0 +1,103 @@
+/* Editor density: 26px properties, 24px controls, 34px toolbars. */
+.editor-toolbar, .bp-toolbar { flex: 0 0 34px; min-height: 34px; padding: 4px 8px; gap: 4px; background: var(--graphene-surface); }
+.toolbar-icon, .toolbar-button { height: 24px; min-height: 24px; padding: 3px 6px; font-size: 12px; }
+.toolbar-icon { flex: 0 0 24px; width: 24px; }
+.g-toolbar-action-group { padding: 0; border: 0; gap: 4px; }
+.workspace-tabs { flex: 0 0 20px; padding: 0 8px; border: 0; }
+.workspace-tabs .g-pane-heading { font-size: 11px; }
+.viewport-bar { flex: 0 0 34px; min-height: 34px; padding: 4px; gap: 4px; overflow-x: auto; }
+.viewport-tool { height: 24px; min-height: 24px; padding: 3px; }
+.g-segmented-group { flex: 0 0 108px; min-width: 108px; padding: 0; border: 0; gap: 2px; }
+.viewport-tool.active, .viewport-tool.active:hover, .control.active, .control.active:hover, .g-snap-option.state-active, .g-snap-option.state-active:hover { background: #28556f; border-color: var(--graphene-accent); color: #f3f8fc; }
+.g-hierarchy, .g-inspector, .g-material-inspector, .g-autolod-asset-inspector { padding: 8px; gap: 4px; background: var(--graphene-surface); }
+.g-hierarchy, .g-inspector, .g-material-inspector, .g-autolod-asset-inspector, .cb-asset-inspector { min-height: 0; overflow-y: auto; }
+.g-hierarchy > *, .g-inspector > *, .g-material-inspector > *, .g-autolod-asset-inspector > *, .cb-asset-inspector > * { flex-shrink: 0; }
+.g-inspector-2, .g-material-inspector-2 { flex: 0 0 32px; min-height: 32px; padding: 4px; border: 0; background: var(--graphene-raised); }
+.g-inspector-3, .g-material-inspector-3 { flex: 0 0 24px; width: 24px; padding: 4px; }
+.g-inspector-4 { height: 24px; font-size: 12px; padding: 3px 6px; }
+.g-inspector-5 { font-size: 9px; }
+.g-property-content { padding: 0; gap: 0; flex-direction: column; }
+.luma-property-section { padding: 0; gap: 4px; flex: 0 0 auto; }
+.luma-property-heading { flex: 0 0 24px; min-height: 24px; height: 24px; padding: 3px 6px; font-size: 11px; background: var(--graphene-raised); color: var(--graphene-text-strong); border: 0; border-radius: 2px; text-align: left; }
+.luma-property-heading:hover { background: var(--graphene-control-hover); }
+.luma-property-row, .g-material-scalar-control { flex: 0 0 26px; min-height: 26px; padding: 0; gap: 8px; background: transparent; border: 0; align-items: center; }
+.luma-property-label, .g-material-scalar-control-2 { flex: 0 0 88px; font-size: 12px; color: var(--graphene-muted); }
+.luma-property-control { flex: 1 1 0px; min-width: 0; min-height: 24px; height: 24px; }
+.g-transform-property { flex: 0 0 26px; min-height: 26px; padding: 1px 0; gap: 4px; align-items: center; }
+.g-transform-property-label { flex: 0 0 54px; font-size: 11px; }
+.g-property-value { flex: 1 1 0px; min-width: 0; max-width: 10000px; height: 24px; padding: 2px 3px; gap: 3px; background: var(--graphene-bg); }
+.g-transform-axis-badge { flex: 0 0 12px; min-width: 12px; font-size: 10px; background: transparent; }
+.g-transform-value-input { font-size: 10px; min-width: 0; background: transparent; }
+.g-property-menu { flex: 0 0 20px; min-width: 20px; width: 20px; min-height: 24px; height: 24px; padding: 3px; border: 0; border-radius: 2px; background: var(--graphene-control); color: var(--graphene-text); cursor: pointer; }
+.g-property-menu:hover { background: var(--graphene-control-hover); }
+.g-property-menu:active { background: var(--graphene-raised); }
+.g-property-menu:focus, .luma-property-heading:focus, .g-material-color-button:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-material-scalar-control-3, .g-material-scalar-control-5 { flex: 0 0 24px; width: 24px; min-height: 24px; padding: 3px; }
+.g-material-scalar-control-4 { flex: 1 1 0px; height: 24px; font-size: 12px; background: var(--graphene-bg); }
+.g-texture-controls { flex-direction: row; padding: 0; gap: 4px; }
+.g-texture-choose { flex: 1 1 0px; min-width: 0; min-height: 24px; height: 24px; padding: 3px 5px; gap: 4px; font-size: 11px; background: var(--graphene-bg); color: var(--graphene-text); border: 1px solid var(--graphene-border); border-radius: 2px; overflow: hidden; }
+.g-texture-choose:hover { border-color: var(--graphene-border-hover); }
+.g-material-color-button, .g-material-color-button:hover { height: 24px; padding: 3px 6px; background: var(--material-color); color: white; border: 1px solid var(--graphene-border-hover); border-radius: 2px; font-size: 11px; text-shadow: 0 1px 2px black; }
+.g-local-popup { position: absolute; z-index: 125; padding: 8px; gap: 4px; background: var(--graphene-surface); color: var(--graphene-text); border: 1px solid var(--graphene-border-hover); border-radius: 4px; box-shadow: 0 8px 24px #00000066; overflow-y: auto; }
+.g-popup-caption { flex: 0 0 20px; font-size: 11px; color: var(--graphene-muted); }
+.g-local-palette { flex: 0 0 26px; min-height: 26px; padding: 0; gap: 4px; }
+.g-local-palette .g-material-swatch { flex: 1 1 0px; height: 26px; min-width: 0; }
+.g-local-popup .g-axis-stepper { flex: 0 0 24px; height: 24px; }
+.g-local-popup .g-viewport-speed-strip, .g-local-popup .g-viewport-skybox-strip, .g-local-popup .g-snap-strip { flex: 0 0 auto; min-height: 28px; flex-wrap: wrap; padding: 0; gap: 4px; background: transparent; }
+.g-local-popup .g-viewport-speed-strip-2, .g-local-popup .g-viewport-skybox-strip-2 { flex: 0 0 100%; font-size: 11px; }
+.g-local-popup .control, .g-local-popup .g-snap-option { min-width: 32px; height: 24px; font-size: 11px; }
+.g-content-browser { padding: 4px 8px; gap: 4px; background: var(--graphene-surface); }
+.g-content-browser-3 { flex: 0 0 26px; min-height: 26px; padding: 0; gap: 4px; }
+.g-content-browser-3 button { min-height: 24px; height: 24px; padding: 3px 6px; font-size: 12px; border-radius: 2px; background: var(--graphene-control); color: var(--graphene-text); }
+.g-actor-row, .g-collection-row { min-height: 24px; font-size: 12px; }
+.bp-sidebar { padding: 8px; gap: 4px; background: var(--graphene-surface); }
+.bp-button, .mg-button { flex-basis: 24px; min-height: 24px; height: 24px; padding: 3px 6px; gap: 4px; border-radius: 2px; font-size: 12px; }
+.bp-toolbar .bp-button { height: 24px; min-height: 24px; padding: 3px 6px; }
+.bp-input { flex-basis: 24px; height: 24px; min-height: 24px; padding: 3px 6px; font-size: 12px; border-radius: 2px; background: var(--graphene-bg); }
+.bp-field-label { font-size: 11px; }
+.bp-section-label, .bp-section-row { flex-basis: 24px; min-height: 24px; padding: 4px; font-size: 11px; }
+.bp-transform-row { flex: 0 0 26px; height: 26px; gap: 4px; }
+.bp-axis { flex-direction: row; align-items: center; gap: 3px; }
+.bp-axis .bp-muted { flex: 0 0 12px; font-size: 10px; }
+.bp-axis .bp-input { flex: 1 1 0px; min-width: 0; height: 24px; }
+.mg-color-button { height: 24px; min-height: 24px; flex-basis: 24px; }
+.mg-preview { flex: 0 1 184px; height: 184px; min-height: 100px; }
+.mg-properties { gap: 4px; }
+.bp-selected:hover { background: #28556f; border-color: var(--graphene-accent); }
+button:disabled { cursor: default; }
+.g-local-popup .g-axis-stepper { width: 100%; min-width: 0; max-width: 10000px; flex-basis: 24px; }
+.g-local-popup .g-axis-stepper-label { flex-basis: 24px; }
+.g-local-popup .g-axis-step-button { flex: 1 1 0px; }
+.luma-property-control.bp-fields { min-height: 24px; height: 24px; gap: 0; }
+.luma-property-row .luma-property-label { flex-basis: 72px; font-size: 11px; }
+.bp-sidebar .luma-property-label { flex-basis: 48px; font-size: 11px; }
+.bp-sidebar .luma-property-control { min-width: 0; }
+.bp-reference-popup .bp-button { height: 24px; }
+.toolbar-icon, .toolbar-button, .viewport-tool, .selector-control, .g-property-menu, .luma-property-heading, .popup-action, .bp-button, .g-material-swatch { cursor: pointer; }
+.toolbar-icon:disabled, .toolbar-button:disabled, .viewport-tool:disabled, .g-property-menu:disabled, .popup-action:disabled, .bp-button:disabled { cursor: default; opacity: 0.42; }
+.g-project-dialog-body { gap: 8px; padding: 12px; background: var(--graphene-surface); }
+.g-project-browser-view-3 { height: 26px; min-height: 26px; border-radius: 2px; font-size: 12px; }
+.g-console-input, .g-console-output { font-size: 12px; }
+.g-material-swatch:hover, .g-material-swatch:active, .g-material-swatch:focus { background: var(--material-color); }
+.g-material-swatch:focus { outline: 2px solid var(--graphene-focus); outline-offset: -2px; }
+.g-material-swatch:active { border-color: var(--graphene-focus); }
+.luma-property-section { flex-direction: column; flex-shrink: 0; min-height: 24px; }
+.luma-property-content { flex-direction: column; flex: 1 1 0px; min-width: 0; min-height: 0; gap: 0; padding: 0; }
+.g-property-content > .popup-action, .g-property-content > .control { flex: 0 0 26px; min-height: 24px; height: 24px; padding: 3px 6px; }
+.g-property-content .g-detail-row { flex: 0 0 26px; min-height: 26px; }
+.luma-property-control.bp-fields > .bp-transform-row { flex-basis: 24px; height: 24px; }
+.luma-property-row > .mg-color-button { flex: 1 1 0px; min-width: 0; }
+.g-local-popup .g-viewport-skybox-strip, .g-local-popup .g-viewport-speed-strip { flex: 0 0 48px; min-height: 48px; }
+.g-local-popup .g-viewport-skybox-strip-2, .g-local-popup .g-viewport-speed-strip-2 { flex: 0 0 244px; min-height: 20px; }
+.g-local-popup .g-viewport-skybox-strip > .control { flex: 0 0 76px; width: 76px; min-width: 0; padding: 3px; }
+.g-local-popup .g-viewport-speed-strip > .control { flex: 0 0 44px; width: 44px; min-width: 0; padding: 3px; }
+.g-local-popup .g-snap-strip { flex: 0 0 52px; min-height: 52px; }
+.g-local-popup .g-snap-option { flex: 0 0 52px; min-width: 0; height: 24px; padding: 3px; }
+.g-transform-property-label { flex-basis: 48px; }
+.g-transform-axis-badge { flex-basis: 10px; min-width: 10px; font-size: 9px; }
+.g-property-value { padding: 2px; }
+.g-local-popup .g-viewport-speed-strip { flex: 0 0 76px; min-height: 76px; }
+.g-local-popup .g-viewport-speed-strip > .control { flex-basis: 76px; width: 76px; }
+.g-local-popup .popup-action { font-size: 12px; min-height: 24px; height: 26px; padding: 3px 6px; }
+.g-local-popup .g-axis-step-button { max-width: 10000px; padding: 3px; }
+.bp-sidebar #bp-value-row .luma-property-label { flex-basis: 64px; }

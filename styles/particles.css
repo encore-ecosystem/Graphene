@@ -1,0 +1,14 @@
+/* VFX authoring follows the existing Blueprint/Material editor tokens. */
+.vfx-editor { flex: 1 1 0px; height: 100%; min-height: 0; min-width: 0; }
+.vfx-stack { flex: 0 0 196px; min-width: 164px; min-height: 0; padding: 8px; gap: 4px; background: var(--graphene-surface); overflow-y: auto; }
+.vfx-sidebar { flex: 0 0 320px; min-width: 280px; min-height: 0; padding: 8px; gap: 6px; }
+.vfx-preview { flex: 0 0 190px; height: 190px; min-height: 120px; background: var(--graphene-bg); border: 1px solid #303943; border-radius: 4px; cursor: grab; }
+.vfx-preview:active { cursor: grabbing; }
+.vfx-button { min-height: 26px; padding: 4px 8px; }
+#vfx-toolbar .vfx-button { flex: 0 0 auto; width: auto; min-width: 60px; height: 26px; }
+#vfx-backends, #vfx-channels { flex: 0 0 28px; min-height: 28px; gap: 4px; }
+#vfx-backends .vfx-button, #vfx-channels .vfx-button { flex: 1 1 0px; min-width: 0; }
+.vfx-sidebar .luma-property-label { flex-basis: 100px; }
+.vfx-sidebar .luma-property-control .bp-input { flex: 1 1 0px; min-width: 0; }
+.vfx-timeline { flex: 0 0 20px; height: 20px; min-height: 20px; }
+.vfx-curve { flex: 0 0 170px; height: 170px; min-height: 170px; }

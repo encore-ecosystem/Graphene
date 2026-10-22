@@ -1,0 +1,76 @@
+.g-code-panel {
+    overflow: hidden;
+    flex-direction: column;
+    flex: 1 1 0px;
+}
+
+.g-code-tabs {
+    gap: 6px;
+    flex-direction: row;
+    flex: 0 1 28px;
+}
+
+.g-code-body {
+    background: #0d0d0f;
+    border-width: 1px;
+    border-style: solid;
+    gap: 0px;
+    overflow: hidden;
+    flex-direction: row;
+    flex: 1 1 0px;
+}
+
+.g-code-body.state-focused {
+    border-color: #1f74aa;
+}
+
+.g-code-body:not(.state-focused) {
+    border-color: #2b2c31;
+}
+
+.g-code-gutter {
+    background: #121215;
+    color: #5c6068;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #26272c;
+    padding: 9px 5px;
+    font-family: "Roboto Mono";
+    font-size: 11px;
+    text-align: right;
+    overflow: hidden;
+    pointer-events: none;
+    flex: 0 1 34px;
+}
+
+.g-code-editor {
+    background: #0d0d0f;
+    color: #d6d7dc;
+    border-width: 0px;
+    border-style: solid;
+    border-color: #000000;
+    border-radius: 0px;
+    padding: 9px;
+    font-family: "Roboto Mono";
+    font-size: 11px;
+    flex: 1 1 0px;
+}
+
+.g-code-status {
+    background: #131316;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #292a2f;
+    padding: 2px 6px;
+    gap: 10px;
+    flex-direction: row;
+    flex: 0 1 20px;
+}
+
+.g-code-position {
+    color: #8e9198;
+    font-family: "Roboto Mono";
+    font-size: 9px;
+    pointer-events: none;
+    flex: 0 1 92px;
+}

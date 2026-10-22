@@ -1,0 +1,264 @@
+//! Embedded Streamable HTTP endpoint. Blaze owns HTTP parsing and I/O.
+import blaze::routing::post
+import blaze::{AppFactory, AsyncHandler, Request, Response, Router, ServerConfig, ShutdownToken, serve}
+import core::future::{Context, Future, Poll}
+import core::option::Option
+import core::result::Result
+import json::Json
+import mod::protocol::{mcp_immediate, mcp_json, mcp_string, mcp_error, mcp_failure}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
+extern fn luma_waker_wake(handle: usize) -> bool
+extern fn graphene_mcp_mailbox_create() -> usize
+extern fn graphene_mcp_mailbox_submit(handle: usize, request: str) -> u64
+extern fn graphene_mcp_mailbox_next(handle: usize) -> u64
+extern fn graphene_mcp_mailbox_request(handle: usize, ticket: u64) -> str
+extern fn graphene_mcp_mailbox_respond(handle: usize, ticket: u64, response: str) -> bool
+extern fn graphene_mcp_mailbox_take(handle: usize, ticket: u64) -> str
+extern fn graphene_mcp_mailbox_abandon(handle: usize, ticket: u64) ->()
+extern fn graphene_mcp_mailbox_close(handle: usize) ->()
+extern fn graphene_mcp_mailbox_error(handle: usize, error: str) ->()
+extern fn graphene_mcp_mailbox_status(handle: usize) -> str
+extern fn graphene_mcp_mailbox_destroy(handle: usize) ->()
+
+/// Bounded request queue shared using owned native bytes, never Encore graphs.
+pub struct McpMailbox {
+    handle: usize
+}
+
+impl for McpMailbox {
+    pub fn new() -> Self {
+        unsafe {
+            ret Self { graphene_mcp_mailbox_create() }
+        }
+    }
+    pub fn next(self: Self) -> u64 {
+        unsafe {
+            ret graphene_mcp_mailbox_next(self.handle)
+        }
+    }
+    pub fn request(self: Self, ticket: u64) -> str {
+        unsafe {
+            ret graphene_mcp_mailbox_request(self.handle, ticket)
+        }
+    }
+    pub fn respond(self: Self, ticket: u64, source: str) -> bool {
+        let response = if source.byte_len() > 32_usize * 1024 * 1024 {
+            mcp_failure(self.request(ticket), "Response exceeds 32 MiB; request a smaller page or image")
+        } else {
+            source
+        }
+        unsafe {
+            ret graphene_mcp_mailbox_respond(self.handle, ticket, response)
+        }
+    }
+    pub fn status(self: Self) -> str {
+        unsafe {
+            ret graphene_mcp_mailbox_status(self.handle)
+        }
+    }
+}
+
+/// Application-owned server lifetime. Stop and join before destroying the window.
+pub struct McpHttpServer {
+    mailbox: McpMailbox
+    shutdown: Option[ShutdownToken]
+    worker: Option[JoinHandle[bool]]
+    port: usize
+}
+
+impl for McpHttpServer {
+    pub fn new() -> Self {
+        ret Self {
+            McpMailbox { 0 }, Option[ShutdownToken]::None, Option[JoinHandle[bool]]::None, 8765
+        }
+    }
+    pub fn start(self: mut Self, port: usize, token: str, waker: usize) -> bool {
+        self.stop()
+        if port == 0 || port > 65535 || token == "" {
+            ret false
+        }
+        let mailbox = McpMailbox::new()
+        if mailbox.handle == 0 {
+            ret false
+        }
+        let shutdown = ShutdownToken::new()
+        let worker_token = match shutdown.duplicate() {
+            Result::Ok(value) => value Result::Err(_) => {
+                shutdown.close() unsafe {
+                    graphene_mcp_mailbox_destroy(mailbox.handle)
+                }
+                ret false
+            }
+        }
+        self.port = port self.mailbox = mailbox self.shutdown = Option[ShutdownToken]::Some(shutdown)
+        self.worker = Option[JoinHandle[bool]]::Some(spawn run_server(mailbox.handle, port, token, waker, worker_token))
+        ret true
+    }
+    pub fn enabled(self: Self) -> bool {
+        ret self.worker.is_some()
+    }
+    pub fn mailbox(self: Self) -> McpMailbox {
+        ret self.mailbox
+    }
+    pub fn error(self: Self) -> str {
+        ret if self.enabled() {
+            self.mailbox.status()
+        } else {
+            ""
+        }
+    }
+    pub fn endpoint(self: Self) -> str {
+        ret "http://127.0.0.1:" + self.port.fmt() + "/mcp"
+    }
+    pub fn stop(self: mut Self) ->() {
+        unsafe {
+            graphene_mcp_mailbox_close(self.mailbox.handle)
+        }
+        match self.shutdown {
+            Some(token) => token.trigger() None => {
+            }
+        }
+        match self.worker {
+            Some(worker) => {
+                let _stopped = worker.join()
+            }
+            None => {
+            }
+        }
+        match self.shutdown {
+            Some(token) => token.close() None => {
+            }
+        }
+        unsafe {
+            graphene_mcp_mailbox_destroy(self.mailbox.handle)
+        }
+        self.mailbox = McpMailbox { 0 } self.worker = Option[JoinHandle[bool]]::None self.shutdown = Option[ShutdownToken]::None
+    }
+}
+
+struct McpApp {
+    mailbox: usize
+    token: str
+    origin: str
+    waker: usize
+}
+enum McpRoute {
+    Request
+    Unsupported
+}
+struct McpHttpFuture {
+    mailbox: usize
+    ticket: u64
+    started: u64
+    source: str
+    response: Option[Response]
+}
+
+impl Future[Response] for McpHttpFuture {
+    fn poll(self: Self, context_value: Context) -> Poll[Self, Response] {
+        match self.response {
+            Some(response) => {
+                ret Poll[Self, Response]::Ready(response)
+            }
+            None => {
+            }
+        }
+        let result = unsafe {
+            graphene_mcp_mailbox_take(self.mailbox, self.ticket)
+        }
+        if result != "" {
+            ret Poll[Self, Response]::Ready(Response::json_text(result).with_header("Cache-Control", "no-store"))
+        }
+        if perf_counter_ms() - self.started >= 30000_u64 {
+            unsafe {
+                graphene_mcp_mailbox_abandon(self.mailbox, self.ticket)
+            }
+            ret Poll[Self, Response]::Ready(Response::json_text(mcp_failure(self.source, "Editor operation timed out; inspect current state before retrying a mutation")))
+        }
+        ret Poll[Self, Response]::Pending(self)
+    }
+}
+fn immediate(response: Response) -> McpHttpFuture {
+    ret McpHttpFuture {
+        0, 0, 0, "", Option[Response]::Some(response)
+    }
+}
+
+impl AsyncHandler[McpRoute, McpHttpFuture] for McpApp {
+    fn handle(self: Self, route: McpRoute, request: Request) -> McpHttpFuture {
+        if request.header("authorization").unwrap_or("") != "Bearer " + self.token {
+            ret immediate(Response::status(401_u16).with_header("WWW-Authenticate", "Bearer"))
+        }
+        let origin = request.header("origin").unwrap_or("")
+        if origin != "" && origin != self.origin {
+            ret immediate(Response::status(403_u16))
+        }
+        if match route {
+            McpRoute::Unsupported => true McpRoute::Request => false
+        }
+        {
+            ret immediate(Response::status(405_u16).with_header("Allow", "POST"))
+        }
+        if !request.header("content-type").unwrap_or("").contains("application/json") {
+            ret immediate(Response::status(415_u16))
+        }
+        let accept = request.header("accept").unwrap_or("")
+        if !accept.contains("application/json") || !accept.contains("text/event-stream") {
+            ret immediate(Response::status(406_u16))
+        }
+        let version = request.header("mcp-protocol-version").unwrap_or("")
+        if version != "" && version != "2025-11-25" && version != "2025-06-18" {
+            ret immediate(Response::status(400_u16).with_body("Unsupported MCP protocol version"))
+        }
+        let source = request.body()
+        match mcp_immediate(source) {
+            Some(response) => {
+                ret immediate(if response == "" {
+                        Response::status(202_u16)
+                    } else {
+                        Response::json_text(response).with_header("Cache-Control", "no-store")
+                    }
+                )
+            }
+            None => {
+            }
+        }
+        let ticket = unsafe {
+            graphene_mcp_mailbox_submit(self.mailbox, source)
+        }
+        if ticket == 0 {
+            ret immediate(Response::status(503_u16).with_header("Retry-After", "1").with_header("Content-Type", "application/json").with_body(mcp_error(mcp_json(source).get("id").unwrap_or(Json::Null), - 32000_i32, "Editor command queue is full or stopping")))
+        }
+        unsafe {
+            let _woken = luma_waker_wake(self.waker)
+        }
+        ret McpHttpFuture {
+            self.mailbox, ticket, perf_counter_ms(), source, Option[Response]::None
+        }
+    }
+}
+
+impl AppFactory[McpRoute, McpApp] for McpApp {
+    fn build(self: Self) -> Router[McpRoute, McpApp] {
+        ret Router[McpRoute, McpApp]::new(self).route("/mcp", post(McpRoute::Request).get(McpRoute::Unsupported).delete(McpRoute::Unsupported).options(McpRoute::Unsupported))
+    }
+}
+fn run_server(mailbox: usize, port: usize, token: str, waker: usize, shutdown: ShutdownToken) -> bool {
+    let config = ServerConfig::new("127.0.0.1", port).with_workers(1).with_max_request_body(1024_usize * 1024).with_max_write_queue(32_usize * 1024 * 1024).with_shutdown_timeout_ms(100).with_idle_timeout_ms(35000)
+    match serve[McpRoute, McpHttpFuture, McpApp, McpApp](config, McpApp {
+            mailbox, token, "http://127.0.0.1:" + port.fmt(), waker
+        }
+        , shutdown,) {
+        Result::Ok(_) => {
+            ret true
+        }
+        Result::Err(error) => {
+            unsafe {
+                graphene_mcp_mailbox_error(mailbox, error.message())
+            }
+            ret false
+        }
+    }
+}

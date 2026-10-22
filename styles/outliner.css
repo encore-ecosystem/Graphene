@@ -1,0 +1,190 @@
+.g-actor-row.state-selected {
+    background: #1f4661;
+}
+
+.g-actor-row:not(.state-selected):hover {
+    background: #2a2b30;
+}
+
+.g-actor-row:not(.state-selected):not(:hover) {
+    background: #18181b;
+}
+
+.g-actor-row {
+    border-width: 0px;
+    border-style: solid;
+    border-color: #000000;
+    border-radius: 1px;
+    padding: 3px 4px;
+    gap: 4px;
+    overflow: hidden;
+    flex-direction: row;
+    flex: 0 1 28px;
+}
+
+.g-actor-selection-mark.state-selected {
+    background: #268fcf;
+}
+
+.g-actor-selection-mark:not(.state-selected).state-selected {
+    background: #1f4661;
+}
+
+.g-actor-row:hover .g-actor-selection-mark:not(.state-selected):not(.state-selected) {
+    background: #2a2b30;
+}
+
+.g-actor-row:not(:hover) .g-actor-selection-mark:not(.state-selected):not(.state-selected) {
+    background: #18181b;
+}
+
+.g-actor-selection-mark {
+    pointer-events: none;
+    flex: 0 1 2px;
+}
+
+.g-actor-indent {
+    pointer-events: none;
+}
+
+.g-actor-icon.state-selected {
+    color: #c5deed;
+}
+
+.g-actor-icon:not(.state-selected) {
+    color: #97b2c3;
+}
+
+.g-actor-icon {
+    padding: 2px;
+    pointer-events: none;
+    flex: 0 1 18px;
+}
+
+.g-actor-name.state-selected {
+    color: #ebeef1;
+}
+
+.g-actor-name:not(.state-selected) {
+    color: #caccd1;
+}
+
+.g-actor-name {
+    font-size: 10px;
+    overflow: hidden;
+    pointer-events: none;
+    flex: 1 1 0px;
+}
+
+.g-actor-kind {
+    color: #6f7279;
+    font-size: 7px;
+    overflow: hidden;
+    pointer-events: none;
+    flex: 0 1 32px;
+}
+
+.g-actor-visibility:hover {
+    background: #32343a;
+}
+
+.g-actor-visibility:not(:hover).state-selected {
+    background: #1f4661;
+}
+
+.g-actor-row:hover .g-actor-visibility:not(:hover):not(.state-selected) {
+    background: #2a2b30;
+}
+
+.g-actor-row:not(:hover) .g-actor-visibility:not(:hover):not(.state-selected) {
+    background: #18181b;
+}
+
+.g-actor-visibility.state-visible {
+    color: #94aab8;
+}
+
+.g-actor-visibility:not(.state-visible) {
+    color: #45474d;
+}
+
+.g-actor-visibility {
+    border-width: 0px;
+    border-style: solid;
+    border-color: #000000;
+    border-radius: 2px;
+    padding: 2px;
+    flex: 0 1 18px;
+}
+
+.g-actor-editor-badge {
+    color: #707279;
+    padding: 2px;
+    pointer-events: none;
+    flex: 0 1 18px;
+}
+
+.g-collection-row {
+    background: #151518;
+    padding: 3px 5px;
+    gap: 4px;
+    pointer-events: none;
+    flex-direction: row;
+    flex: 0 1 25px;
+}
+
+.g-collection-row-2 {
+    color: #7d8087;
+    padding: 2px;
+    pointer-events: none;
+    flex: 0 1 13px;
+}
+
+.g-collection-row-3 {
+    color: #b99042;
+    padding: 2px;
+    pointer-events: none;
+    flex: 0 1 17px;
+}
+
+.g-collection-row-4 {
+    color: #a9acb2;
+    font-size: 9px;
+    font-weight: 600;
+    pointer-events: none;
+    flex: 1 1 0px;
+}
+
+.g-hierarchy-2 {
+    gap: 4px;
+    flex-direction: row;
+    flex: 0 1 30px;
+}
+
+.g-hierarchy-5 {
+    color: #82858c;
+    font-size: 9px;
+    padding: 8px 6px;
+    pointer-events: none;
+    flex: 0 1 32px;
+}
+
+.g-viewport {
+    color: #5bc479;
+    padding: 2px;
+    pointer-events: none;
+    flex: 0 1 18px;
+}
+
+.g-viewport-2 {
+    background: #36373c;
+    pointer-events: none;
+    flex: 0 1 1px;
+}
+
+.g-viewport-3 {
+    background: #0c1016;
+    padding: 0px;
+    gap: 0px;
+    flex: 1 1 0px;
+}

@@ -1,0 +1,111 @@
+.g-pane-heading {
+    flex-direction: row;
+    align-items: center;
+    padding: 3px 6px;
+    gap: 6px;
+    pointer-events: none;
+}
+
+.g-pane-heading-icon {
+    flex: 0 0 16px;
+    color: var(--graphene-muted);
+    pointer-events: none;
+}
+
+.g-pane-heading-text {
+    color: #dcdee2;
+    font-size: 10px;
+    font-weight: 600;
+    min-width: 0px;
+    pointer-events: none;
+    flex: 1 1 0px;
+}
+
+.g-property-value {
+    background: #0e0e10;
+    border-width: 1px;
+    border-style: solid;
+    border-radius: 2px;
+    padding: 2px 4px;
+    gap: 4px;
+    flex-direction: row;
+    flex: 0 1 var(--transform-axis-width);
+    min-width: 64px;
+    max-width: var(--transform-axis-width);
+}
+
+.g-property-value.state-invalid-active {
+    border-color: #c04343;
+}
+
+.g-property-value:not(.state-invalid-active).state-active {
+    border-color: var(--graphene-accent);
+}
+
+.g-property-value:not(.state-invalid-active):not(.state-active) {
+    border-color: #303136;
+}
+
+.g-transform-axis-badge.state-axis-X {
+    background: #b23a3f;
+}
+
+.g-transform-axis-badge:not(.state-axis-X).state-axis-Y {
+    background: #439452;
+}
+
+.g-transform-axis-badge:not(.state-axis-X):not(.state-axis-Y) {
+    background: #3670b4;
+}
+
+.g-transform-axis-badge {
+    color: #f8f8f9;
+    border-radius: 2px;
+    text-align: center;
+    font-size: 9px;
+    font-weight: 700;
+    flex: 0 1 15px;
+}
+
+.g-transform-value-input {
+    background: #0e0e10;
+    border-width: 0px;
+    border-style: solid;
+    border-color: #000000;
+    border-radius: 0px;
+    padding: 0px;
+    font-family: "Roboto Mono";
+    font-size: 9px;
+    flex: 1 1 0px;
+}
+
+.g-transform-value-input.state-invalid-active {
+    color: #ef8b84;
+}
+
+.g-transform-value-input:not(.state-invalid-active) {
+    color: #d3d4d8;
+}
+
+.g-transform-property {
+    gap: 4px;
+    padding: 2px 0px;
+    flex-direction: row;
+    flex: 0 1 30px;
+}
+
+.g-transform-property-label {
+    color: #b5b7bc;
+    font-size: 10px;
+}
+
+.g-transform-tools-row {
+    gap: 4px;
+    padding: 2px 0px;
+    flex-direction: row;
+    flex: 0 1 32px;
+}
+
+.g-transform-label-spacer {
+    pointer-events: none;
+}

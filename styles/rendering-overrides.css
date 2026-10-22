@@ -1,0 +1,11 @@
+/* Compact rendering quality / frame generation groups. */
+.g-reconstruction-controls { flex: 0 0 218px; min-height: 218px; height: 218px; gap: 4px; }
+.g-reconstruction-options { flex: 0 0 26px; min-height: 26px; height: 26px; gap: 4px; }
+.g-reconstruction-chip { flex-grow: 1; min-width: 0px; padding: 4px 6px; }
+
+
+.g-reconstruction-chip:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-reconstruction-chip:active { background: var(--graphene-control-hover); }
+.g-reconstruction-chip.active:active { background: #285a78; }
+
+.g-perf-summary { height: 42px; min-height: 42px; flex: 0 0 42px; }

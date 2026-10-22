@@ -1,0 +1,327 @@
+.g-project-dialog {
+    background: #000000b0;
+    position: absolute;
+    left: 0px;
+    top: 0px;
+    z-index: 140;
+    flex-direction: column;
+}
+
+.g-project-dialog-body {
+    background: #1c1d21;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #4a4c53;
+    border-radius: 4px;
+    padding: 16px;
+    gap: 10px;
+    position: absolute;
+    z-index: 141;
+    box-shadow: 0px 12px 32px 0px #000000d2;
+    flex-direction: column;
+}
+
+.g-project-dialog-title {
+    color: #ebecef;
+    font-size: 16px;
+    font-weight: 600;
+    flex: 0 1 28px;
+}
+
+.g-project-dialog-description {
+    color: #9da0a7;
+    font-size: 10px;
+    flex: 0 1 20px;
+}
+
+.g-project-path-input {
+    background: #111215;
+    color: #e2e4e8;
+    border-width: 1px;
+    border-style: solid;
+    border-radius: 3px;
+    padding: 7px 9px;
+    font-size: 11px;
+    flex: 0 1 38px;
+}
+
+.g-project-path-input.state-focused {
+    border-color: var(--graphene-accent);
+}
+
+.g-project-path-input:not(.state-focused) {
+    border-color: var(--graphene-border-hover);
+}
+
+.g-project-dialog-error {
+    color: #da675e;
+    font-size: 10px;
+    flex: 0 1 20px;
+}
+
+.g-project-dialog-actions {
+    gap: 8px;
+    flex-direction: row;
+    flex: 0 1 32px;
+}
+
+.g-project-dialog-cancel {
+    background: var(--graphene-control);
+    color: #d2d4d9;
+    border-width: 1px;
+    border-style: solid;
+    border-color: var(--graphene-border-hover);
+    border-radius: 3px;
+    font-size: 10px;
+    flex: 0 1 88px;
+}
+
+.g-project-dialog-confirm {
+    background: var(--graphene-accent);
+    color: #ffffff;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #37a6e2;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    flex: 0 1 96px;
+}
+
+.g-unsaved-changes-dialog {
+    background: #000000b8;
+    position: absolute;
+    left: 0px;
+    top: 0px;
+    z-index: 140;
+    flex-direction: column;
+}
+
+.g-unsaved-changes-dialog-2 {
+    background: #1c1c20;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #4c4e55;
+    border-radius: 4px;
+    padding: 16px;
+    gap: 10px;
+    box-shadow: 0px 12px 32px 0px #000000d2;
+    flex-direction: column;
+}
+
+.g-unsaved-changes-dialog-3 {
+    color: #ebecef;
+    font-size: 16px;
+    font-weight: 600;
+    flex: 0 1 28px;
+}
+
+.g-unsaved-changes-dialog-4 {
+    color: #aeb1b8;
+    font-size: 11px;
+    pointer-events: none;
+    flex: 0 1 20px;
+}
+
+.g-unsaved-changes-dialog-5 {
+    color: #91949b;
+    font-size: 10px;
+    flex: 0 1 20px;
+}
+
+.g-unsaved-changes-dialog-6 {
+    gap: 7px;
+    flex-direction: row;
+    flex: 0 1 36px;
+}
+
+.g-unsaved-changes-dialog-7 {
+    background: #27282d;
+    color: #d3d5da;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #43454c;
+    border-radius: 3px;
+    flex: 0 1 88px;
+}
+
+.g-unsaved-changes-dialog-8 {
+    background: #2d2627;
+    color: #e0bcbc;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #5b3d3f;
+    border-radius: 3px;
+    flex: 0 1 104px;
+}
+
+.g-unsaved-changes-dialog-9 {
+    background: #1b70a4;
+    color: #f4f8fb;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #2f91c9;
+    border-radius: 3px;
+    padding: 4px 9px;
+    flex: 0 1 98px;
+}
+
+.g-unsaved-changes-dialog-10 {
+    background: #00000050;
+    flex-direction: row;
+}
+
+.g-approval-dialog {
+    background: #000000b8;
+    position: absolute;
+    left: 0px;
+    top: 0px;
+    z-index: 150;
+    flex-direction: column;
+}
+
+.g-approval-dialog-2 {
+    background: #1c1c20;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #4c4e55;
+    border-radius: 4px;
+    padding: 16px;
+    gap: 10px;
+    box-shadow: 0px 12px 32px 0px #000000d2;
+    flex-direction: column;
+}
+
+.g-approval-dialog-3 {
+    color: #ebecef;
+    font-size: 16px;
+    font-weight: 600;
+    flex: 0 1 28px;
+}
+
+.g-approval-dialog-4 {
+    color: #d4d6dc;
+    font-size: 12px;
+    flex: 0 1 24px;
+}
+
+.g-approval-dialog-5 {
+    color: #979aa2;
+    font-size: 10px;
+    flex: 0 1 20px;
+}
+
+.g-approval-dialog-6 {
+    gap: 7px;
+    flex-direction: row;
+    flex: 0 1 36px;
+}
+
+.g-approval-dialog-7 {
+    background: #2d2627;
+    color: #e0bcbc;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #5b3d3f;
+    border-radius: 3px;
+    flex: 0 1 90px;
+}
+
+.g-approval-dialog-8 {
+    background: #1b70a4;
+    color: #f4f8fb;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #2f91c9;
+    border-radius: 3px;
+    flex: 0 1 112px;
+}
+
+.g-approval-dialog-9 {
+    background: #00000000;
+    flex-direction: row;
+}
+
+.g-asset-import-dialog {
+    background: #000000b0;
+    position: absolute;
+    left: 0px;
+    top: 0px;
+    z-index: 140;
+    flex-direction: column;
+}
+
+.g-asset-import-dialog-2 {
+    background: #1c1d21;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #4a4c53;
+    border-radius: 4px;
+    padding: 12px;
+    gap: 8px;
+    position: absolute;
+    z-index: 141;
+    box-shadow: 0px 12px 32px 0px #000000d2;
+    flex-direction: column;
+}
+
+.g-asset-import-dialog-2:not(.state-view-width-820-0-f32) {
+    width: 780px;
+}
+
+.g-asset-import-dialog-2:not(.state-view-height-680-0-f32) {
+    height: 620px;
+}
+
+.g-asset-import-dialog-3 {
+    color: #ebecef;
+    font-size: 16px;
+    font-weight: 600;
+    flex: 0 1 28px;
+}
+
+.g-asset-import-dialog-4 {
+    color: #9da0a7;
+    font-size: 10px;
+    flex: 0 1 20px;
+}
+
+.g-asset-import-dialog-5 {
+    gap: 8px;
+    flex-direction: row;
+    flex: 0 1 34px;
+}
+
+.g-asset-import-dialog-6.state-error-picker-error {
+    color: #dc665e;
+}
+
+.g-asset-import-dialog-6:not(.state-error-picker-error) {
+    color: #91949b;
+}
+
+.g-asset-import-dialog-6 {
+    font-size: 9px;
+    flex: 1 1 0px;
+}
+
+.g-asset-import-dialog-7 {
+    background: var(--graphene-control);
+    color: #d2d4d9;
+    border-width: 1px;
+    border-style: solid;
+    border-color: var(--graphene-border-hover);
+    border-radius: 3px;
+    flex: 0 1 88px;
+}
+
+.g-asset-import-dialog-8 {
+    background: var(--graphene-accent);
+    color: #ffffff;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #37a6e2;
+    border-radius: 3px;
+    font-weight: 600;
+    flex: 0 1 96px;
+}

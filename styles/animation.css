@@ -1,0 +1,11 @@
+/* Character clip menu keeps the selected state visible beneath hover/focus. */
+.g-animation-clips { padding: 4px; gap: 0px; }
+.g-animation-clips .popup-action { flex: 0 0 28px; min-height: 28px; height: 28px; padding: 4px 8px; }
+.g-animation-clips .popup-action.state-active { background: var(--graphene-accent); color: var(--graphene-text-strong); }
+.g-animation-clips .popup-action.state-active:hover { background: var(--graphene-accent); color: var(--graphene-text-strong); border-color: var(--graphene-focus); }
+.g-animation-clips .popup-action:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+
+.g-animation-clip-selector { justify-content: space-between; }
+.g-animation-clip-label { flex: 1 1 0px; min-width: 0px; overflow: hidden; }
+
+.g-animation-clips .popup-action.state-keyboard-focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }

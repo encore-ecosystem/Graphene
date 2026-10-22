@@ -5,12 +5,14 @@ import core::result::Result
 import core::vec::Vec
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
-import mod::command_bus::{ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand, ActorVisibilityCommand, AddActorCommand, CommandResult, DuplicateActorCommand, GrapheneCommand, SimulationCommand}
+import mod::command_bus::{ActorCommand, ActorComponentCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand, ActorVisibilityCommand, AddActorCommand, CommandResult, DuplicateActorCommand, GrapheneCommand, SimulationCommand}
 import mod::editor_values::parse_editor_scalar
+import mod::scene::component::SceneComponent
 import mod::scene::transform::Transform
 
 pub struct CommandEnvelope {
-    id: str command: GrapheneCommand
+    id: str
+    command: GrapheneCommand
 }
 
 pub struct ProtocolError {
@@ -121,10 +123,10 @@ fn parse_u64(value: str) -> Option[u64] {
                 ret Option[u64]::None
             }
         }
-        let next = result * 10_u64 + value_digit
-        if next < result {
+        if result > 1844674407370955161_u64 ||(result == 1844674407370955161_u64 && value_digit > 5) {
             ret Option[u64]::None
         }
+        let next = result * 10_u64 + value_digit
         result = next
         index = index + 1_usize
     }
@@ -204,7 +206,76 @@ fn vector_field(value: Json, name: str) -> Option[Vec3] {
     ret Option[Vec3]::None
 }
 
+fn actor_asset(params: Json) -> str {
+    let kind = string_field(params, "kind").unwrap_or("")
+    if SceneComponent::for_kind(kind).kind() != "" {
+        ret "@" + kind
+    }
+    let asset = string_field(params, "asset").unwrap_or(kind)
+    if asset == "Cube" || asset == "cube" || asset == "@engine/Primitives/Cube" {
+        ret ""
+    }
+    if asset == "Sphere" || asset == "sphere" || asset == "@engine/Primitives/Sphere" {
+        ret "@sphere"
+    }
+    if asset == "Plane" || asset == "plane" || asset == "@engine/Primitives/Plane" {
+        ret "@plane"
+    }
+    ret asset
+}
+
+/// Decode a bounded transaction of existing scene mutation commands.
+pub fn decode_scene_batch(params: Json) -> Result[Vec[GrapheneCommand], ProtocolError] {
+    let items = match params.get("commands").unwrap_or(Json::Null).as_array() {
+        Some(items) => items None => {
+            ret Result::Err(ProtocolError::new("commands must be an array"))
+        }
+    }
+    if items.len() == 0 || items.len() > 128 {
+        ret Result::Err(ProtocolError::new("A batch requires 1..128 commands"))
+    }
+    let mut commands = Vec[GrapheneCommand]::new()
+    for item in items {
+        let method = string_field(item, "method").unwrap_or("")
+        if method != "scene.add" && method != "scene.duplicate" && method != "scene.delete" && method != "scene.set_parent" && method != "scene.rename" && method != "scene.set_visibility" && method != "scene.set_component" && method != "scene.set_transform" {
+            ret Result::Err(ProtocolError::new("Only scene edits can be batched"))
+        }
+        match decode_payload(method, item.get("params").unwrap_or(Json::Null)) {
+            Result::Ok(command) => commands.push(command) Result::Err(error) => {
+                ret Result::Err(error)
+            }
+        }
+    }
+    ret Result::Ok(commands)
+}
+
 fn decode_payload(method: str, params: Json) -> Result[GrapheneCommand, ProtocolError] {
+    if method == "scene.set_component" {
+        match actor_field(params) {
+            Some(actor) => {
+                let kind = string_field(params, "kind").unwrap_or("")
+                if kind == "" || SceneComponent::for_kind(kind).kind() != kind {
+                    ret Result[GrapheneCommand, ProtocolError]::Err(ProtocolError::new("Unknown component kind"))
+                }
+                match SceneComponent::from_json(kind, params.get("component").unwrap_or(Json::Null)) {
+                    Some(component) => {
+                        if component.valid() {
+                            ret Result[GrapheneCommand, ProtocolError]::Ok(GrapheneCommand::SetComponent(ActorComponentCommand {
+                                        actor, component
+                                    }
+                                    ,
+                                ))
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret Result[GrapheneCommand, ProtocolError]::Err(ProtocolError::new("Invalid actor or component"))
+    }
     if method == "scene.add" {
         match string_field(params, "name") {
             Option::Some(name) => {
@@ -212,7 +283,7 @@ fn decode_payload(method: str, params: Json) -> Result[GrapheneCommand, Protocol
                     Option::Some(transform) => {
                         if name != "" {
                             ret Result[GrapheneCommand, ProtocolError]::Ok(
-                                GrapheneCommand::AddActor(AddActorCommand::new(name, transform)))
+                                GrapheneCommand::AddActor(AddActorCommand::with_asset(name, transform, actor_asset(params)).with_component(SceneComponent::for_kind(string_field(params, "kind").unwrap_or("")))))
                         }
                     }
                     Option::None => {
@@ -506,5 +577,5 @@ pub fn encode_command_response(id: str, result: CommandResult) -> str {
 
 /// Machine-readable command registry used by console completion and MCP tools.
 pub fn command_registry_json() -> str {
-    ret "{\"version\":1,\"commands\":[\"scene.add\",\"scene.duplicate\",\"scene.delete\",\"scene.set_parent\",\"scene.rename\",\"scene.set_visibility\",\"scene.set_transform\",\"scene.select\",\"project.save\",\"build.start\",\"simulation.start\",\"simulation.stop\",\"history.undo\",\"history.redo\"]}"
+    ret "{\"version\":1,\"commands\":[\"scene.add\",\"scene.batch\",\"scene.set_component\",\"scene.duplicate\",\"scene.delete\",\"scene.set_parent\",\"scene.rename\",\"scene.set_visibility\",\"scene.set_transform\",\"scene.select\",\"project.save\",\"build.start\",\"simulation.start\",\"simulation.stop\",\"history.undo\",\"history.redo\"]}"
 }

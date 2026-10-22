@@ -1,0 +1,5 @@
+.g-mcp-settings { padding: 10px; gap: 5px; }
+.g-mcp-endpoint { height: 28px; min-height: 28px; font-size: 12px; color: var(--graphene-text-strong); padding: 5px 8px; background: var(--graphene-bg); border-radius: 2px; }
+.g-mcp-settings .cb-name:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-mcp-settings .popup-action:active { background: var(--graphene-control-hover); color: var(--graphene-text-strong); }
+.g-mcp-settings .popup-action.active:active { background: var(--graphene-accent); color: var(--graphene-text-strong); }

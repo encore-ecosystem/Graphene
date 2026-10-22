@@ -371,3 +371,5 @@ encore_str graphene_asset_source_stamp(encore_str input) {
 
 #include "native/vfx/bridge.c"
 #include "native/json_number.c"
+
+#include "native/mcp/mailbox.inc"

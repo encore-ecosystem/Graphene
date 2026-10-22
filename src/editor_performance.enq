@@ -1,6 +1,7 @@
 //! Session-only frame profiler controls and retained charts. Native fixed-size
 //! history keeps measurement allocation out of the editor's frame loop.
 import core::vec::Vec
+import json::{Json, field}
 import luma::{Widget, WidgetLayout, PreparedFrame, DisplayList, Color, Rect, Style, StyleSheet, Event, UiTimings, horizontal, vertical, event_pointer_down, event_key_down, key_left, key_right}
 import mod::performance::performance_counter_ns
 extern fn graphene_profiler_enable(device: usize, enabled: bool) ->()
@@ -200,7 +201,11 @@ impl for PerformancePanel {
         }
     }
     pub fn sync(self: mut Self, device: usize, opened: bool, drawable: bool) ->() {
-        let running = opened && drawable
+        self.sync_capture(device, opened, drawable, false)
+    }
+    /// Capture profiler samples without building a hidden panel's charts.
+    pub fn sync_capture(self: mut Self, device: usize, opened: bool, drawable: bool, capture: bool) ->() {
+        let running =(opened || capture) && drawable
         if self.running != running || self.opened != opened {
             unsafe {
                 graphene_profiler_enable(device, running)
@@ -642,4 +647,67 @@ impl for PerformancePanel {
         }
         ret composed
     }
+}
+
+/// Bounded profiler data for automation without opening the performance panel.
+pub fn profile_snapshot(limit: usize) -> Json {
+    let mut samples = Vec[Json]::new()
+    let count = value(0, 0) as usize
+    let actual = if limit > 120 {
+        120_usize
+    } else {
+        limit
+    }
+    let first = if count > actual {
+        count - actual
+    } else {
+        0_usize
+    }
+    for i in first..count {
+        samples.push(Json::Object(vec![field("frame", Json::Number(value(i, 2).fmt())), field("frameNs", Json::Number(value(i, 3).fmt())), field("cpuNs", Json::Number(value(i, 4).fmt())), field("gpuNs", Json::Number(value(i, 5).fmt())), field("waitNs", Json::Number(value(i, 6).fmt())), field("gpuState", Json::String(gpu_state(value(i, 7))))]))
+    }
+    let mut events = Vec[Json]::new()
+    for gpu in 0_usize..2_usize {
+        let event_count = selected(if gpu == 0 {
+                8_u32
+            } else {
+                9_u32
+            }
+        ) as usize
+        for i in 0_usize..event_count {
+            let label = event_value(gpu, i, 0)
+            events.push(Json::Object(vec![field("processor", Json::String(if gpu == 0 {
+                                    "cpu"
+                                } else {
+                                    "gpu"
+                                }
+                            )), field("name", Json::String(if gpu == 0 {
+                                    cpu_name(label)
+                                } else {
+                                    gpu_name(label)
+                                }
+                            )), field("startNs", Json::Number(event_value(gpu, i, 1).fmt())), field("durationNs", Json::Number(event_value(gpu, i, 2).fmt())), field("depth", Json::Number(event_value(gpu, i, 3).fmt()))]))
+        }
+    }
+    let average = unsafe {
+        graphene_profiler_stat(0)
+    }
+    let p95 = unsafe {
+        graphene_profiler_stat(1)
+    }
+    let bottleneck = unsafe {
+        graphene_profiler_bottleneck()
+    }
+    ret Json::Object(vec![field("ok", Json::Bool(true)), field("samples", Json::Array(samples)), field("events", Json::Array(events)), field("averageFrameNs", Json::Number(average.fmt())), field("p95FrameNs", Json::Number(p95.fmt())), field("bottleneck", Json::String(if bottleneck == 1 {
+                        "cpu"
+                    } elif bottleneck == 2 {
+                        "gpu"
+                    } elif bottleneck == 3 {
+                        "wait"
+                    } elif bottleneck == 4 {
+                        "balanced"
+                    } else {
+                        "insufficient-samples"
+                    }
+                ))])
 }

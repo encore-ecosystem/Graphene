@@ -145,6 +145,7 @@ pub struct CommandResult {
 }
 
 enum CommandEdit {
+    Group(Vec[CommandEdit])
     RemoveActors(Vec[u64])
     RestoreActors(Vec[ActorSnapshot])
     RemoveActor(ActorCommand)
@@ -771,6 +772,63 @@ impl for EditorState {
             index = index + 1_usize
         }
         ret event
+    }
+
+    /// Apply a bounded collection of scene edits as one undoable transaction.
+    /// A failed command rolls back preceding edits before returning to the host.
+    pub fn execute_batch(self: mut Self, commands: Vec[GrapheneCommand]) -> CommandResult {
+        if self.interactive.is_some() || self.simulation_mode != "" || self.building || commands.len() == 0 || commands.len() > 128 {
+            ret CommandResult::error(self.revision, "Batch edits require an idle editor and 1..128 commands")
+        }
+        for command in commands {
+            let allowed = match command {
+                GrapheneCommand::AddActor(_) => true GrapheneCommand::DuplicateActor(_) => true GrapheneCommand::DeleteActor(_) => true GrapheneCommand::SetParent(_) => true GrapheneCommand::Rename(_) => true GrapheneCommand::SetVisibility(_) => true GrapheneCommand::SetComponent(_) => true GrapheneCommand::SetTransform(_) => true GrapheneCommand::SetTransforms(_) => true _ => false
+            }
+            if !allowed {
+                ret CommandResult::error(self.revision, "Only scene edits can be batched")
+            }
+        }
+        let old_revision = self.revision let old_position = self.history_position let old_dirty = self.dirty
+        let old_selection = self.selection
+        let mut old_ids = Vec[u64]::new() for id in self.selection_ids {
+            old_ids.push(id)
+        }
+        let mut old_redo = Vec[CommandEdit]::new() for edit in self.redo {
+            old_redo.push(edit)
+        }
+        let mut old_events = Vec[GrapheneEvent]::new() for event in self.event_log {
+            old_events.push(event)
+        }
+        let mut old_assets = Vec[ActorAsset]::new() for asset in self.assets {
+            old_assets.push(asset)
+        }
+        let mut inverses = Vec[CommandEdit]::new()
+        let mut failure = ""
+        for command in commands {
+            let count = self.undo.len()
+            let result = self.execute(command)
+            if !result.success() {
+                failure = result.message() break
+            }
+            if self.undo.len() > count {
+                match self.undo.pop() {
+                    Some(edit) => inverses.push(edit) None => {
+                    }
+                }
+            }
+        }
+        if failure != "" {
+            let _restored = self.apply_edit(CommandEdit::Group(inverses))
+            self.selection = old_selection self.selection_ids = old_ids self.assets = old_assets
+        }
+        self.redo = old_redo self.event_log = old_events self.revision = old_revision self.history_position = old_position self.dirty = old_dirty
+        if failure != "" {
+            ret CommandResult::error(self.revision, failure)
+        }
+        if inverses.len() == 0 {
+            ret CommandResult::ok(self.revision, Vec[GrapheneEvent]::new())
+        }
+        ret self.commit(CommandEdit::Group(inverses), "scene.batch.changed", 0)
     }
 
     pub fn execute(self: mut Self, command: GrapheneCommand) -> CommandResult {
@@ -1567,6 +1625,19 @@ impl for EditorState {
 
     fn apply_edit(self: mut Self, edit: CommandEdit) -> Option[CommandEdit] {
         match edit {
+            Group(edits) => {
+                let mut inverse = Vec[CommandEdit]::new()
+                let mut index = edits.len()
+                while index > 0 {
+                    index -= 1
+                    match self.apply_edit(edits.get_unchecked_borrowed(index)) {
+                        Some(next) => inverse.push(next) None => {
+                            ret Option[CommandEdit]::None
+                        }
+                    }
+                }
+                ret Option[CommandEdit]::Some(CommandEdit::Group(inverse))
+            }
             RemoveActors(ids) => {
                 let mut snapshots = Vec[ActorSnapshot]::new()
                 for id in ids {

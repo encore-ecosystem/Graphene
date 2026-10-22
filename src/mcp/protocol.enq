@@ -1,0 +1,302 @@
+//! Transport-independent MCP protocol and authoritative tool registry.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, parse, stringify}
+
+pub fn mcp_registry() -> Json {
+    ret mcp_json("[{\"name\":\"get_editor_state\",\"method\":\"graphene.status\",\"description\":\"Current project, revision, dirty state, selection and jobs.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"list_actors\",\"method\":\"graphene.actors\",\"description\":\"Search actors. Page size at most 200; iterate nextOffset.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"query\":{\"type\":\"string\"}},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"get_actor\",\"method\":\"graphene.actor\",\"description\":\"Inspect one actor, transform, asset and typed component.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0}},\"required\":[\"actor\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"add_actor\",\"method\":\"scene.add\",\"description\":\"Add an actor using a builtin or imported asset.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"asset\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\"},\"position\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"rotation\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"scale\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3}},\"required\":[\"name\",\"position\",\"rotation\",\"scale\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"duplicate_actor\",\"method\":\"scene.duplicate\",\"description\":\"Duplicate an actor.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0},\"name\":{\"type\":\"string\"},\"position\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"rotation\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"scale\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3}},\"required\":[\"actor\",\"name\",\"position\",\"rotation\",\"scale\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"delete_actor\",\"method\":\"scene.delete\",\"description\":\"Delete an actor; recover with Undo.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0}},\"required\":[\"actor\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"rename_actor\",\"method\":\"scene.rename\",\"description\":\"Rename an actor.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0},\"name\":{\"type\":\"string\"}},\"required\":[\"actor\",\"name\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"set_actor_parent\",\"method\":\"scene.set_parent\",\"description\":\"Change parent, preserving world transform; null unparents.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0},\"parent\":{\"type\":[\"integer\",\"null\"]}},\"required\":[\"actor\",\"parent\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"set_actor_visibility\",\"method\":\"scene.set_visibility\",\"description\":\"Set actor visibility.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0},\"visible\":{\"type\":\"boolean\"}},\"required\":[\"actor\",\"visible\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"set_actor_transform\",\"method\":\"scene.set_transform\",\"description\":\"Set local transform; rotation in radians.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0},\"position\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"rotation\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"scale\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3}},\"required\":[\"actor\",\"position\",\"rotation\",\"scale\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"set_actor_component\",\"method\":\"scene.set_component\",\"description\":\"Set typed component data. Inspect get_actor first; kind selects existing component codec.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":\"integer\",\"minimum\":0},\"kind\":{\"type\":\"string\"},\"component\":{\"type\":\"object\"}},\"required\":[\"actor\",\"kind\",\"component\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"select_actor\",\"method\":\"scene.select\",\"description\":\"Select an actor; null clears selection.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"actor\":{\"type\":[\"integer\",\"null\"]}},\"required\":[\"actor\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"undo\",\"method\":\"history.undo\",\"description\":\"Undo the last scene edit.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"redo\",\"method\":\"history.redo\",\"description\":\"Redo the last scene edit.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"save_project\",\"method\":\"project.save\",\"description\":\"Save the project. Poll get_editor_state for completion.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"build_project\",\"method\":\"build.start\",\"description\":\"Build the project. Poll get_editor_state for completion and diagnostics.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"start_simulation\",\"method\":\"simulation.start\",\"description\":\"Start Play or simulation.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"mode\":{\"type\":\"string\",\"enum\":[\"play\",\"simulate\"]}},\"required\":[\"mode\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"stop_simulation\",\"method\":\"simulation.stop\",\"description\":\"Stop Play or simulation.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"get_ui\",\"method\":\"editor.ui\",\"description\":\"Inspect visible UI IDs, labels and logical bounds. Includes current layout revision.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"query\":{\"type\":\"string\"}},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"click_widget\",\"method\":\"editor.click\",\"description\":\"Click a visible widget through normal input routing; optional revision rejects stale layout.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"widget\":{\"type\":\"string\"},\"revision\":{\"type\":\"integer\",\"minimum\":0}},\"required\":[\"widget\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"send_input\",\"method\":\"editor.input\",\"description\":\"Queue up to 256 input events, one per editor iteration. Coordinates are logical pixels; SDL key codes and modifier bits.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"events\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"scroll\",\"key_down\",\"key_up\",\"text\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"buttons\":{\"type\":\"integer\",\"minimum\":0},\"key\":{\"type\":\"integer\",\"minimum\":0},\"modifiers\":{\"type\":\"integer\",\"minimum\":0},\"text\":{\"type\":\"string\"}},\"required\":[\"kind\"],\"additionalProperties\":false},\"minItems\":1,\"maxItems\":256}},\"required\":[\"events\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"capture_frame\",\"method\":\"editor.capture\",\"description\":\"Capture the composed editor window or viewport as PNG. Includes UI, gizmos and popups; only reads back on request.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"viewport\":{\"type\":\"boolean\"},\"maxWidth\":{\"type\":\"integer\",\"minimum\":64,\"maximum\":3840}},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"get_camera\",\"method\":\"editor.camera\",\"description\":\"Inspect the editor camera pose.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"set_camera\",\"method\":\"editor.set_camera\",\"description\":\"Set editor camera target and spherical pose; angles in radians.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"minItems\":3,\"maxItems\":3},\"yaw\":{\"type\":\"number\"},\"pitch\":{\"type\":\"number\"},\"distance\":{\"type\":\"number\"}},\"required\":[\"target\",\"yaw\",\"pitch\",\"distance\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"get_logs\",\"method\":\"editor.logs\",\"description\":\"Read bounded editor console and build output.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"query\":{\"type\":\"string\"}},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"get_performance\",\"method\":\"editor.performance\",\"description\":\"Read profiler CPU/GPU samples. Set enabled=true to collect independently of the panel, false to stop.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":120}},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"get_render_settings\",\"method\":\"editor.render_settings\",\"description\":\"Read requested and effective AA/upscaling settings and capabilities.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"set_render_settings\",\"method\":\"editor.set_render_settings\",\"description\":\"Validate, save and apply project rendering settings.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"settings\":{\"type\":\"object\"}},\"required\":[\"settings\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"get_lod_groups\",\"method\":\"editor.lod_groups\",\"description\":\"Read AutoLOD distance/triangle-ratio curves.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"set_lod_groups\",\"method\":\"editor.set_lod_groups\",\"description\":\"Validate, save and apply AutoLOD groups.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"groups\":{\"type\":\"object\"}},\"required\":[\"groups\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"list_assets\",\"method\":\"editor.assets\",\"description\":\"Search Content Browser assets; includes builtin assets.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"query\":{\"type\":\"string\"}},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"get_asset\",\"method\":\"editor.asset\",\"description\":\"Inspect a project JSON asset or native asset metadata. Graph documents are read-only.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"import_asset\",\"method\":\"editor.import\",\"description\":\"Import a supported model, texture, sound or character through editor import jobs.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"auto\",\"mesh\",\"texture\",\"sound\",\"character\"]}},\"required\":[\"source\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"create_asset\",\"method\":\"editor.create_asset\",\"description\":\"Create a folder, material graph, Blueprint or particle preset through Content Browser.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"folder\",\"material\",\"blueprint\",\"particle\"]},\"name\":{\"type\":\"string\"},\"directory\":{\"type\":\"string\"}},\"required\":[\"kind\",\"name\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"rename_asset\",\"method\":\"editor.rename_asset\",\"description\":\"Rename an unreferenced project asset using Content Browser validation.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"path\",\"name\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"move_asset\",\"method\":\"editor.move_asset\",\"description\":\"Move an unreferenced asset to a project Content folder.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"directory\":{\"type\":\"string\"}},\"required\":[\"path\",\"directory\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"delete_asset\",\"method\":\"editor.delete_asset\",\"description\":\"Move an unreferenced project asset into the existing Trash.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"asset_undo\",\"method\":\"editor.asset_undo\",\"description\":\"Undo the last Content Browser file operation.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"asset_redo\",\"method\":\"editor.asset_redo\",\"description\":\"Redo a Content Browser file operation.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"set_material\",\"method\":\"editor.set_material\",\"description\":\"Save a validated project material asset. Graph authoring is excluded.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"material\":{\"type\":\"object\"}},\"required\":[\"path\",\"material\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true,\"idempotentHint\":false,\"openWorldHint\":false}},{\"name\":\"get_graph\",\"method\":\"editor.graph\",\"description\":\"Read an existing Blueprint, material, animation or particle graph asset.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"get_job_status\",\"method\":\"editor.job\",\"description\":\"Read completion and errors for a job returned by import, save or build.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"jobId\":{\"type\":\"string\"}},\"required\":[\"jobId\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},{\"name\":\"edit_scene_batch\",\"method\":\"scene.batch\",\"description\":\"Apply 1..128 scene mutation envelopes atomically with one Undo entry; rolls back all changes on failure.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"commands\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":128,\"items\":{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\"},\"params\":{\"type\":\"object\"}},\"required\":[\"method\",\"params\"],\"additionalProperties\":false}}},\"required\":[\"commands\"],\"additionalProperties\":false}}]")
+}
+pub fn mcp_json(source: str) -> Json {
+    ret match parse(source) {
+        Result::Ok(value) => value Result::Err(_) => Json::Null
+    }
+}
+pub fn mcp_string(value: Json, key: str) -> str {
+    ret value.get(key).unwrap_or(Json::Null).as_str().unwrap_or("")
+}
+pub fn mcp_unsigned(value: Json) -> Option[u64] {
+    let text = match value.as_number() {
+        Some(text) => text None => {
+            ret Option[u64]::None
+        }
+    }
+    if text.byte_len() == 0 {
+        ret Option[u64]::None
+    }
+    let mut result = 0_u64
+    for i in 0..text.byte_len() {
+        let digit = text.get_byte(i).unwrap_or(255)
+        if digit < 48 || digit > 57 {
+            ret Option[u64]::None
+        }
+        if result > 1844674407370955161_u64 ||(result == 1844674407370955161_u64 && digit > 53) {
+            ret Option[u64]::None
+        }
+        result = result * 10 +(digit - 48) as u64
+    }
+    ret Option[u64]::Some(result)
+}
+pub fn mcp_reply(id: Json, result: Json) -> str {
+    ret stringify(Json::Object(vec![field("jsonrpc", Json::String("2.0")), field("id", id), field("result", result)]))
+}
+pub fn mcp_error(id: Json, code: i32, message: str) -> str {
+    ret stringify(Json::Object(vec![field("jsonrpc", Json::String("2.0")), field("id", id), field("error", Json::Object(vec![field("code", Json::Number(code.fmt())), field("message", Json::String(message))]))]))
+}
+pub fn mcp_tool_result(source: str, value: Json) -> str {
+    let root = mcp_json(source)
+    let failed = !value.get("ok").unwrap_or(Json::Bool(true)).as_bool().unwrap_or(false)
+    if mcp_string(root, "method") == "resources/read" {
+        if failed {
+            ret mcp_error(root.get("id").unwrap_or(Json::Null), - 32002_i32, stringify(value))
+        }
+        let uri = mcp_string(root.get("params").unwrap_or(Json::Null), "uri")
+        ret mcp_reply(root.get("id").unwrap_or(Json::Null), Json::Object(vec![field("contents", Json::Array(vec![Json::Object(vec![field("uri", Json::String(uri)), field("mimeType", Json::String("application/json")), field("text", Json::String(stringify(value)))])]))]))
+    }
+    ret mcp_reply(root.get("id").unwrap_or(Json::Null), Json::Object(vec![field("content", Json::Array(vec![Json::Object(vec![field("type", Json::String("text")), field("text", Json::String(stringify(value)))])])), field("structuredContent", value), field("isError", Json::Bool(failed))]))
+}
+pub fn mcp_failure(source: str, message: str) -> str {
+    ret mcp_tool_result(source, Json::Object(vec![field("ok", Json::Bool(false)), field("message", Json::String(message))]))
+}
+pub fn mcp_arguments(source: str) -> Json {
+    ret mcp_json(source).get("params").unwrap_or(Json::Null).get("arguments").unwrap_or(Json::Object(Vec[(str, Json)]::new()))
+}
+pub fn mcp_tool_definition(name: str) -> Json {
+    for item in mcp_registry().as_array().unwrap_or(Vec[Json]::new()) {
+        if mcp_string(item, "name") == name {
+            ret item
+        }
+    }
+    ret Json::Null
+}
+pub fn mcp_operation(source: str) -> str {
+    let root = mcp_json(source)
+    let params = root.get("params").unwrap_or(Json::Null)
+    if mcp_string(root, "method") == "resources/read" {
+        let uri = mcp_string(params, "uri")
+        if uri == "graphene://scene" {
+            ret "graphene.actors"
+        }
+        if uri == "graphene://editor" {
+            ret "graphene.status"
+        }
+        if uri == "graphene://ui" {
+            ret "editor.ui"
+        }
+        if uri == "graphene://rendering" {
+            ret "editor.render_settings"
+        }
+        if uri == "graphene://performance" {
+            ret "editor.performance"
+        }
+        ret ""
+    }
+    ret mcp_string(mcp_tool_definition(mcp_string(params, "name")), "method")
+}
+fn type_matches(kind: str, value: Json) -> bool {
+    ret match value {
+        Json::Object(_) => kind == "object"
+        Json::Array(_) => kind == "array"
+        Json::String(_) => kind == "string"
+        Json::Number(_) => kind == "number" ||(kind == "integer" && mcp_unsigned(value).is_some())
+        Json::Bool(_) => kind == "boolean"
+        Json::Null => kind == "null"
+    }
+}
+fn validate(schema: Json, value: Json, depth: u32) -> bool {
+    if depth > 16 {
+        ret false
+    }
+    let kind = schema.get("type").unwrap_or(Json::Null)
+    let mut accepted = false
+    match kind.as_array() {
+        Some(kinds) => {
+            for candidate in kinds {
+                accepted = accepted || type_matches(candidate.as_str().unwrap_or(""), value)
+            }
+        }
+        None => {
+            accepted = type_matches(kind.as_str().unwrap_or(""), value)
+        }
+    }
+    if !accepted {
+        ret false
+    }
+    match schema.get("enum").unwrap_or(Json::Null).as_array() {
+        Some(choices) => {
+            let mut found = false
+            for choice in choices {
+                found = found || stringify(choice) == stringify(value)
+            }
+            if !found {
+                ret false
+            }
+        }
+        None => {
+        }
+    }
+    match value {
+        Json::Object(fields) => {
+            for key in schema.get("required").unwrap_or(Json::Null).as_array().unwrap_or(Vec[Json]::new()) {
+                if value.get(key.as_str().unwrap_or("")).is_none() {
+                    ret false
+                }
+            }
+            let properties = schema.get("properties").unwrap_or(Json::Null)
+            for entry in fields {
+                match properties.get(entry.0) {
+                    Some(property) => {
+                        if !validate(property, entry.1, depth + 1) {
+                            ret false
+                        }
+                    }
+                    None => {
+                        if !schema.get("additionalProperties").unwrap_or(Json::Bool(true)).as_bool().unwrap_or(true) {
+                            ret false
+                        }
+                    }
+                }
+            }
+        }
+        Json::Array(items) => {
+            let minimum = mcp_unsigned(schema.get("minItems").unwrap_or(Json::Number("0"))).unwrap_or(0)
+            let maximum = mcp_unsigned(schema.get("maxItems").unwrap_or(Json::Number("4096"))).unwrap_or(4096)
+            if items.len() as u64 < minimum || items.len() as u64 > maximum {
+                ret false
+            }
+            match schema.get("items") {
+                Some(item_schema) => {
+                    for item in items {
+                        if !validate(item_schema, item, depth + 1) {
+                            ret false
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        Json::Number(_) => {
+            if kind.as_str().unwrap_or("") == "integer" {
+                let integer = mcp_unsigned(value).unwrap_or(0)
+                if integer < mcp_unsigned(schema.get("minimum").unwrap_or(Json::Number("0"))).unwrap_or(0) || integer > mcp_unsigned(schema.get("maximum").unwrap_or(Json::Number("18446744073709551615"))).unwrap_or(18446744073709551615_u64) {
+                    ret false
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    ret true
+}
+/// Returns a response for protocol requests, or None for an editor operation.
+pub fn mcp_immediate(source: str) -> Option[str] {
+    let root = match parse(source) {
+        Result::Ok(root) => root Result::Err(_) => {
+            ret Option[str]::Some(mcp_error(Json::Null, - 32700_i32, "Invalid JSON"))
+        }
+    }
+    let id = root.get("id").unwrap_or(Json::Null)
+    let method = mcp_string(root, "method")
+    let valid_id = match id {
+        Json::String(_) => true Json::Number(_) => true _ => false
+    }
+    if mcp_string(root, "jsonrpc") != "2.0" || method == "" ||(root.get("id").is_some() && !valid_id) {
+        ret Option[str]::Some(mcp_error(Json::Null, - 32600_i32, "Invalid JSON-RPC request"))
+    }
+    if root.get("id").is_none() {
+        // This stateless server does not issue client requests. Notifications
+        // have no JSON-RPC reply; HTTP supplies 202.
+        ret Option[str]::Some("")
+    }
+    if method == "initialize" {
+        let params = root.get("params").unwrap_or(Json::Null)
+        let requested = mcp_string(params, "protocolVersion")
+        let version = if requested == "2025-06-18" {
+            requested
+        } else {
+            "2025-11-25"
+        }
+        ret Option[str]::Some(mcp_reply(id, Json::Object(vec![field("protocolVersion", Json::String(version)), field("capabilities", mcp_json("{\"tools\":{},\"resources\":{}}")), field("serverInfo", mcp_json("{\"name\":\"graphene\",\"version\":\"0.2.0\"}")), field("instructions", Json::String("Inspect state and UI before changing them. Scene rotations are radians and UI coordinates are logical pixels. Iterate nextOffset for lists. Build/import/save are asynchronous; poll get_editor_state for completion. Capture frames to verify visible results."))])))
+    }
+    if method == "ping" {
+        ret Option[str]::Some(mcp_reply(id, Json::Object(Vec[(str, Json)]::new())))
+    }
+    if method == "tools/list" {
+        let mut tools = Vec[Json]::new()
+        for item in mcp_registry().as_array().unwrap_or(Vec[Json]::new()) {
+            let mut fields = Vec[(str, Json)]::new()
+            match item {
+                Json::Object(properties) => {
+                    for property in properties {
+                        if property.0 != "method" {
+                            fields.push(property)
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+            tools.push(Json::Object(fields))
+        }
+        ret Option[str]::Some(mcp_reply(id, Json::Object(vec![field("tools", Json::Array(tools))])))
+    }
+    if method == "resources/list" {
+        let mut resources = Vec[Json]::new()
+        for key in vec!["scene", "editor", "ui", "rendering", "performance"] {
+            resources.push(Json::Object(vec![field("uri", Json::String("graphene://" + key)), field("name", Json::String(key)), field("mimeType", Json::String("application/json"))]))
+        }
+        ret Option[str]::Some(mcp_reply(id, Json::Object(vec![field("resources", Json::Array(resources))])))
+    }
+    if method == "resources/templates/list" {
+        ret Option[str]::Some(mcp_reply(id, mcp_json("{\"resourceTemplates\":[]}")))
+    }
+    if method == "resources/read" {
+        if mcp_operation(source) == "" {
+            ret Option[str]::Some(mcp_error(id, - 32002_i32, "Resource was not found"))
+        }
+        ret Option[str]::None
+    }
+    if method == "tools/call" {
+        let params = root.get("params").unwrap_or(Json::Null)
+        let definition = mcp_tool_definition(mcp_string(params, "name"))
+        if mcp_string(definition, "method") == "" {
+            ret Option[str]::Some(mcp_error(id, - 32602_i32, "Unknown Graphene tool"))
+        }
+        if !validate(definition.get("inputSchema").unwrap_or(Json::Null), mcp_arguments(source), 0) {
+            ret Option[str]::Some(mcp_error(id, - 32602_i32, "Tool arguments do not match inputSchema"))
+        }
+        ret Option[str]::None
+    }
+    ret Option[str]::Some(mcp_error(id, - 32601_i32, "Method was not found"))
+}
+
+/// Replace one object field while preserving existing result data.
+pub fn mcp_with(value: Json, key: str, item: Json) -> Json {
+    let mut fields = Vec[(str, Json)]::new()
+    match value {
+        Json::Object(previous) => {
+            for entry in previous {
+                if entry.0 != key {
+                    fields.push(entry)
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    fields.push(field(key, item)) ret Json::Object(fields)
+}
+pub fn mcp_payload(response: str) -> Json {
+    let result = mcp_json(response).get("result").unwrap_or(Json::Null)
+    match result.get("structuredContent") {
+        Some(value) => {
+            ret value
+        }
+        None => {
+        }
+    }
+    let contents = result.get("contents").unwrap_or(Json::Null).as_array().unwrap_or(Vec[Json]::new())
+    ret mcp_json(mcp_string(contents.get(0).unwrap_or(Json::Null), "text"))
+}

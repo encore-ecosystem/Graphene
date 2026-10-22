@@ -1,0 +1,90 @@
+//! Actual-source regression entry point staged by check_gateway.py.
+import core::option::Option
+import core::vec::Vec
+import json::{Json, field, stringify}
+import mod::automation::AutomationServer
+import mod::command_bus::{EditorState, GrapheneCommand}
+import mod::mcp::protocol::{mcp_json, mcp_unsigned}
+import mod::mcp_gateway::GrapheneMcpGateway
+import mod::scene::transform::Transform
+import mod::scene::world::Scene
+import std::io::println
+fn call(gateway: mut GrapheneMcpGateway, name: str, arguments: Json) -> Json {
+    let source = stringify(Json::Object(vec![field("jsonrpc", Json::String("2.0")), field("id", Json::Number("1")), field("method", Json::String("tools/call")), field("params", Json::Object(vec![field("name", Json::String(name)), field("arguments", arguments)]))]))
+    ret mcp_json(gateway.handle(source))
+}
+fn args(source: str) -> Json {
+    ret mcp_json(source)
+}
+fn ok(value: Json) -> bool {
+    ret value.get("result").unwrap_or(Json::Null).get("isError").unwrap_or(Json::Bool(true)).as_bool().unwrap_or(true) == false
+}
+fn state(value: Json) -> Json {
+    ret value.get("result").unwrap_or(Json::Null).get("structuredContent").unwrap_or(Json::Null).get("state").unwrap_or(Json::Null)
+}
+fn name(gateway: mut GrapheneMcpGateway, id: u64) -> str {
+    let result = call(gateway, "get_actor", Json::Object(vec![field("actor", Json::Number(id.fmt()))]))
+    ret state(result).get("actors").unwrap_or(Json::Null).as_array().unwrap_or(Vec[Json]::new()).get(0).unwrap_or(Json::Null).get("name").unwrap_or(Json::Null).as_str().unwrap_or("")
+}
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    for i in 0_usize..1000_usize {
+        scene.create_entity("Sphere " + i.fmt(), Transform::identity())
+    }
+    let mut editor = EditorState::new(scene) editor.configure_project(true)
+    let mut gateway = GrapheneMcpGateway::new(AutomationServer::trusted(editor, "secret"), "secret")
+    let page = call(gateway, "list_actors", args("{\"offset\":990,\"limit\":10}"))
+    if !ok(page) || state(page).get("actors").unwrap_or(Json::Null).as_array().unwrap_or(Vec[Json]::new()).len() != 10 {
+        ret 1
+    }
+    if mcp_unsigned(state(page).get("total").unwrap_or(Json::Null)).unwrap_or(0) != 1000 {
+        ret 2
+    }
+    if !state(page).get("nextOffset").unwrap_or(Json::Null).is_null() {
+        ret 3
+    }
+    if ok(call(gateway, "get_actor", args("{\"actor\":1001}"))) {
+        ret 4
+    }
+    if !ok(call(gateway, "rename_actor", args("{\"actor\":1,\"name\":\"Player\"}"))) || name(gateway, 1) != "Player" {
+        ret 5
+    }
+    if !ok(call(gateway, "undo", args("{}"))) || name(gateway, 1) != "Sphere 0" {
+        ret 6
+    }
+    if !ok(call(gateway, "redo", args("{}"))) || name(gateway, 1) != "Player" {
+        ret 7
+    }
+    let batch = call(gateway, "edit_scene_batch", args("{\"commands\":[{\"method\":\"scene.rename\",\"params\":{\"actor\":1,\"name\":\"Batch A\"}},{\"method\":\"scene.rename\",\"params\":{\"actor\":2,\"name\":\"Batch B\"}}]}"))
+    if !ok(batch) || name(gateway, 1) != "Batch A" || name(gateway, 2) != "Batch B" {
+        ret 8
+    }
+    if !ok(call(gateway, "undo", args("{}"))) || name(gateway, 1) != "Player" || name(gateway, 2) != "Sphere 1" {
+        ret 9
+    }
+    let failed = call(gateway, "edit_scene_batch", args("{\"commands\":[{\"method\":\"scene.rename\",\"params\":{\"actor\":1,\"name\":\"Rollback\"}},{\"method\":\"scene.delete\",\"params\":{\"actor\":999999}}]}"))
+    if ok(failed) || name(gateway, 1) != "Player" {
+        ret 10
+    }
+    if !ok(call(gateway, "redo", args("{}"))) || name(gateway, 1) != "Batch A" || name(gateway, 2) != "Batch B" {
+        ret 11
+    }
+    if !ok(call(gateway, "add_actor", args("{\"name\":\"Sun\",\"kind\":\"directional-light\",\"position\":[0,0,0],\"rotation\":[0,0,0],\"scale\":[1,1,1]}"))) {
+        ret 12
+    }
+    if !ok(call(gateway, "set_actor_component", args("{\"actor\":1001,\"kind\":\"directional-light\",\"component\":{\"intensity\":2}}"))) {
+        ret 13
+    }
+    if !ok(call(gateway, "delete_actor", args("{\"actor\":1001}"))) {
+        ret 14
+    }
+    if !ok(call(gateway, "undo", args("{}"))) || name(gateway, 1001) != "Sun" {
+        ret 15
+    }
+    let regular = AutomationServer::new(gateway.into_api().state(), "regular")
+    let challenged = regular.updated("{\"id\":\"delete\",\"token\":\"regular\",\"method\":\"scene.delete\",\"params\":{\"actor\":1}}")
+    if !challenged.1.contains("approval_required") {
+        ret 16
+    }
+    println("MCP scene command regressions passed") ret 0
+}

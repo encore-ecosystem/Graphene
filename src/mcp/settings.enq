@@ -1,0 +1,145 @@
+//! Machine-local editor MCP preferences; capability tokens never enter projects.
+import core::option::Option
+import core::vec::Vec
+import json::{Json, field, stringify}
+import luma::{TextEditor, Event, Window, event_text_input, event_key_down, key_backspace, key_delete, key_left, key_right, key_home, key_end}
+import mod::protocol::{mcp_json, mcp_unsigned}
+import refrain::automation_transport::{automation_capability_token, automation_secure_file}
+import std::os::{file_exists, home_dir, mkdir_all, read_file, write_file_atomic}
+
+extern fn graphene_mcp_store_token(path: str, token: str) -> bool
+
+pub struct McpSettings {
+    enabled: bool
+    port: usize
+    status: str
+    token: str
+    port_editor: TextEditor
+}
+
+impl for McpSettings {
+    pub fn load() -> Self {
+        let source = if file_exists(home_dir() + "/.graphene/editor-settings.json") {
+            read_file(home_dir() + "/.graphene/editor-settings.json")
+        } else {
+            "{}"
+        }
+        let root = mcp_json(source).get("mcp").unwrap_or(Json::Null)
+        let port = mcp_unsigned(root.get("port").unwrap_or(Json::Number("8765"))).unwrap_or(8765) as usize
+        ret Self {
+            root.get("enabled").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false), if port > 0 && port <= 65535 {
+                port
+            } else {
+                8765
+            }
+            , "", "", TextEditor::new(port.fmt())
+        }
+    }
+    pub fn edit_port(self: mut Self, event: Event, window: Window) -> bool {
+        if event.kind() == event_text_input() {
+            let mut digits = true
+            for i in 0..event.text().byte_len() {
+                let byte = event.text().get_byte(i).unwrap_or(0) digits = digits && byte >= 48 && byte <= 57
+            }
+            if digits {
+                self.port_editor = self.port_editor.insert(event.text())
+            }
+            ret true
+        }
+        if event.kind() != event_key_down() {
+            ret false
+        }
+        let key = event.key() let shift = event.shift()
+        if event.control() && key == 97 {
+            self.port_editor = self.port_editor.select_all()
+        } elif event.control() && key == 118 {
+            let text = window.clipboard_text() if mcp_unsigned(Json::Number(text)).is_some() {
+                self.port_editor = self.port_editor.paste(text)
+            }
+        } elif key == key_backspace() {
+            self.port_editor = self.port_editor.backspace()
+        } elif key == key_delete() {
+            self.port_editor = self.port_editor.delete()
+        } elif key == key_left() {
+            self.port_editor = self.port_editor.move_left(shift)
+        } elif key == key_right() {
+            self.port_editor = self.port_editor.move_right(shift)
+        } elif key == key_home() {
+            self.port_editor = self.port_editor.move_home(shift)
+        } elif key == key_end() {
+            self.port_editor = self.port_editor.move_end(shift)
+        } else {
+            ret false
+        }
+        ret true
+    }
+    pub fn apply_port(self: mut Self) -> bool {
+        let port = mcp_unsigned(Json::Number(self.port_editor.value())).unwrap_or(0)
+        if port == 0 || port > 65535 {
+            self.status = "Port must be between 1 and 65535" ret false
+        }
+        let previous = self.port self.port = port as usize
+        if !self.save() {
+            self.port = previous ret false
+        }
+        self.status = "" ret true
+    }
+    pub fn endpoint(self: Self) -> str {
+        ret "http://127.0.0.1:" + self.port.fmt() + "/mcp"
+    }
+    pub fn ensure_token(self: mut Self) -> bool {
+        let directory = home_dir() + "/.graphene"
+        if mkdir_all(directory) != 0 {
+            self.status = "Unable to create editor settings directory" ret false
+        }
+        let path = directory + "/mcp-token"
+        let token = if file_exists(path) {
+            read_file(path)
+        } else {
+            automation_capability_token()
+        }
+        let mut valid = token.byte_len() == 64
+        for i in 0..token.byte_len() {
+            let byte = token.get_byte(i).unwrap_or(0)
+            valid = valid &&((byte >= 48 && byte <= 57) ||(byte >= 97 && byte <= 102))
+        }
+        if !valid {
+            self.status = "Invalid MCP token file" ret false
+        }
+        if !file_exists(path) && !unsafe {
+            graphene_mcp_store_token(path, token)
+        }
+        {
+            self.status = "Unable to save MCP token" ret false
+        }
+        if !automation_secure_file(path) {
+            self.status = "Unable to restrict MCP token permissions" ret false
+        }
+        self.token = token ret true
+    }
+    pub fn save(self: mut Self) -> bool {
+        let path = home_dir() + "/.graphene/editor-settings.json"
+        let mut fields = Vec[(str, Json)]::new()
+        let existing = if file_exists(path) {
+            mcp_json(read_file(path))
+        } else {
+            Json::Null
+        }
+        match existing {
+            Json::Object(properties) => {
+                for property in properties {
+                    if property.0 != "mcp" {
+                        fields.push(property)
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+        fields.push(field("mcp", Json::Object(vec![field("enabled", Json::Bool(self.enabled)), field("port", Json::Number(self.port.fmt()))])))
+        if mkdir_all(home_dir() + "/.graphene") != 0 || write_file_atomic(path, stringify(Json::Object(fields)) + "\n") != 0 {
+            self.status = "Unable to save MCP preferences" ret false
+        }
+        ret true
+    }
+}

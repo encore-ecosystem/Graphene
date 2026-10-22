@@ -1,0 +1,54 @@
+/* Frame profiler: compact, retained editor chrome with bounded chart paint. */
+.g-perf-panel { width:100%; height:100%; min-width:0px; min-height:0px; padding:6px; gap:4px; background:var(--graphene-surface); }
+.g-perf-toolbar { height:26px; min-height:26px; gap:5px; align-items:center; }
+.g-perf-button { height:24px; min-width:42px; padding:3px 8px; font-size:12px; background:var(--graphene-control); color:var(--graphene-text); border:1px solid var(--graphene-border); border-radius:3px; }
+.g-perf-button:hover { background:var(--graphene-control-hover); border-color:var(--graphene-border-hover); }
+.g-perf-button:active, .g-perf-button.is-active { background:#184b67; border-color:var(--graphene-accent); color:var(--graphene-text-strong); }
+.g-perf-button:focus { outline:1px solid var(--graphene-focus); }
+.g-perf-button:disabled { color:#62656b; background:var(--graphene-bg); }
+.g-perf-summary { height:22px; min-height:22px; gap:14px; align-items:center; }
+.g-perf-metric { color:var(--graphene-text-strong); font-size:12px; }
+.g-perf-body { flex:1; min-height:0px; gap:8px; }
+.g-perf-charts { flex:1; min-width:200px; min-height:0px; gap:3px; }
+.g-perf-history { flex:1; min-height:62px; background:var(--graphene-bg); border:1px solid var(--graphene-border); cursor:crosshair; }
+.g-perf-history:focus { border-color:var(--graphene-focus); }
+.g-perf-timeline { height:100px; min-height:100px; background:var(--graphene-bg); }
+.g-perf-table { width:350px; min-width:230px; min-height:0px; overflow-y:auto; gap:2px; }
+.g-perf-table-heading { height:20px; min-height:20px; color:var(--graphene-text-strong); font-size:12px; }
+.g-perf-row { height:18px; min-height:18px; font-size:11px; color:var(--graphene-text); }
+.g-perf-footer { height:18px; min-height:18px; font-size:11px; color:var(--graphene-muted); }
+.g-perf-muted { color:var(--graphene-muted); font-size:11px; }
+.g-perf-legend { color:var(--graphene-text); font-size:11px; }
+.g-perf-frame { color:#e8c366; }
+.g-perf-cpu { color:#65b9f0; }
+.g-perf-gpu { color:#71d7a0; }
+.g-perf-gpu-child { color:#489f78; }
+.g-perf-grid { color:#35383e; }
+.g-perf-budget { color:#a58a51; }
+.g-perf-text { color:var(--graphene-text-strong); }
+.g-perf-hud { background:#15191feb; }
+/* Explicit flex bases are required: toolkit panels grow by default. */
+.g-perf-toolbar { flex:0 0 26px; }
+.g-perf-toolbar > button { flex:0 0 48px; }
+.g-perf-toolbar > label { flex:0 0 45px; }
+.g-env-toolbar { flex:0 0 28px; height:28px; min-height:28px; gap:6px; align-items:center; min-width:0px; overflow-x:auto; }
+.g-env-toolbar > button { flex:0 0 96px; min-width:64px; }
+.g-env-button:checked { background:#184b67; border-color:var(--graphene-accent); color:var(--graphene-text-strong); }
+.g-env-button:checked:hover { background:#184b67; border-color:var(--graphene-accent); color:var(--graphene-text-strong); }
+.g-env-setup > button { flex-basis:128px; }
+.g-env-components > button { flex-basis:148px; }
+.g-env-toolbar > label { flex:0 0 112px; color:var(--graphene-muted); font-size:11px; }
+.g-perf-summary { flex:0 0 22px; }
+.g-perf-summary > .g-perf-metric { flex:1 1 0px; min-width:0px; }
+.g-perf-summary > .g-perf-muted { flex:0 0 210px; }
+.g-perf-body { flex:1 1 0px; }
+.g-perf-charts { flex:1 1 0px; }
+.g-perf-history { flex:1 1 0px; min-height:48px; }
+.g-perf-timeline { flex:0 0 92px; height:92px; min-height:92px; }
+.g-perf-table { flex:0 0 350px; }
+.g-perf-table > * { flex-shrink:0; }
+.g-perf-table > .g-perf-button { flex:0 0 24px; }
+.g-perf-table-heading { flex:0 0 20px; }
+.g-perf-row { flex:0 0 18px; }
+.g-perf-footer { flex:0 0 18px; }
+.g-perf-table-values { flex-grow:0; flex-shrink:0; min-height:0px; }

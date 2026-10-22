@@ -67,6 +67,11 @@ checksum = "99bd9f2e570d776c545866ebc4c93c864b125d043ec67b83988265a61108bd6a"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
+name = "blaze"
+ref = "path@../Blaze"
+version = "0.1.0-beta.2"
+
+[[packages]]
 name = "core"
 ref = "sys@core"
 version = "0.0.0"

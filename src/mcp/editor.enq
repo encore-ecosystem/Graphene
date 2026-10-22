@@ -1,0 +1,339 @@
+//! Editor-domain MCP helpers. Scene mutations remain in the command bus.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+import json::{Json, field, stringify}
+import linalg::Vec3
+import luma::{Event, CapturedFrame, Widget, WidgetLayout, Rect, TextEditor, inspect_ui, event_pointer_down, event_pointer_up, event_pointer_move, event_scroll}
+import mod::protocol::*
+import refrain::content_browser::ContentBrowser
+import refrain::content_browser::files::{content_stat, content_kind}
+import refrain::content_browser::operations::{content_create, content_rename, content_move_selection, content_delete, content_history}
+import refrain::editor_camera::EditorCameraState
+import refrain::material_asset::{material_asset_parse, save_material_asset_file}
+import refrain::render_settings::RenderSettings
+import refrain::scene::json_value::parse_number
+import std::os::read_file
+
+pub fn mcp_ok(message: str) -> Json {
+    ret Json::Object(vec![field("ok", Json::Bool(true)), field("message", Json::String(message))])
+}
+pub fn mcp_failed(message: str) -> Json {
+    ret Json::Object(vec![field("ok", Json::Bool(false)), field("message", Json::String(message))])
+}
+pub fn mcp_offset(params: Json) -> usize {
+    ret mcp_unsigned(params.get("offset").unwrap_or(Json::Number("0"))).unwrap_or(0) as usize
+}
+pub fn mcp_limit(params: Json) -> usize {
+    let value = mcp_unsigned(params.get("limit").unwrap_or(Json::Number("100"))).unwrap_or(100) as usize ret if value > 200 {
+        200_usize
+    } elif value == 0 {
+        1_usize
+    } else {
+        value
+    }
+}
+pub fn mcp_page(items: Vec[Json], total: usize, params: Json) -> Json {
+    let next = mcp_offset(params) + items.len()
+    ret Json::Object(vec![field("ok", Json::Bool(true)), field("items", Json::Array(items)), field("total", Json::Number(total.fmt())), field("nextOffset", if next < total {
+                    Json::Number(next.fmt())
+                } else {
+                    Json::Null
+                }
+                ,
+            )])
+}
+fn rect_json(bounds: Rect) -> Json {
+    ret Json::Array(vec![Json::Number(bounds.x().fmt()), Json::Number(bounds.y().fmt()), Json::Number(bounds.width().fmt()), Json::Number(bounds.height().fmt())])
+}
+pub fn mcp_ui(layout: WidgetLayout, params: Json, revision: u64, frame: u64, density: f32, focus: str, hover: str, pressed: str) -> Json {
+    let inspection = inspect_ui(layout, mcp_offset(params), mcp_limit(params), mcp_string(params, "query"))
+    let mut nodes = Vec[Json]::new()
+    for node in inspection.nodes {
+        let widget = if node.id == "" {
+            Option[Widget]::None
+        } else {
+            layout.find_widget(node.id)
+        }
+        let checked = match widget {
+            Some(widget) => widget.attribute("aria-checked").unwrap_or("") None => ""
+        }
+        nodes.push(Json::Object(vec![field("id", Json::String(node.id)), field("parent", Json::String(node.parent)), field("text", Json::String(node.text)), field("role", Json::String(node.role)), field("kind", Json::Number(node.kind.fmt())), field("bounds", rect_json(node.bounds)), field("disabled", Json::Bool(node.disabled)), field("focused", Json::Bool(node.id != "" && node.id == focus)), field("hovered", Json::Bool(node.id != "" && node.id == hover)), field("pressed", Json::Bool(node.id != "" && node.id == pressed)), field("checked", Json::String(checked))]))
+    }
+    ret Json::Object(vec![field("ok", Json::Bool(true)), field("revision", Json::Number(revision.fmt())), field("frame", Json::Number(frame.fmt())), field("pixelDensity", Json::Number(density.fmt())), field("page", mcp_page(nodes, inspection.total, params))])
+}
+pub fn mcp_scalar(value: Json) -> Option[f32] {
+    ret parse_number(value.as_number().unwrap_or(""))
+}
+pub fn mcp_vector(value: Json) -> Option[Vec3] {
+    let items = match value.as_array() {
+        Some(items) => items None => {
+            ret Option[Vec3]::None
+        }
+    }
+    if items.len() != 3 {
+        ret Option[Vec3]::None
+    }
+    let x = match mcp_scalar(items.get(0).unwrap_or(Json::Null)) {
+        Some(x) => x None => {
+            ret Option[Vec3]::None
+        }
+    }
+    let y = match mcp_scalar(items.get(1).unwrap_or(Json::Null)) {
+        Some(x) => x None => {
+            ret Option[Vec3]::None
+        }
+    }
+    let z = match mcp_scalar(items.get(2).unwrap_or(Json::Null)) {
+        Some(x) => x None => {
+            ret Option[Vec3]::None
+        }
+    }
+    ret Option[Vec3]::Some(Vec3::new(x, y, z))
+}
+fn scalar(params: Json, key: str) -> f32 {
+    ret mcp_scalar(params.get(key).unwrap_or(Json::Number("0"))).unwrap_or(0)
+}
+fn unsigned(params: Json, key: str) -> u32 {
+    ret mcp_unsigned(params.get(key).unwrap_or(Json::Number("0"))).unwrap_or(0) as u32
+}
+pub fn mcp_events(params: Json) -> Vec[Event] {
+    let mut events = Vec[Event]::new()
+    for item in params.get("events").unwrap_or(Json::Null).as_array().unwrap_or(Vec[Json]::new()) {
+        let kind = mcp_string(item, "kind")
+        if (kind == "move" || kind == "down" || kind == "up" || kind == "scroll") &&(item.get("x").is_none() || item.get("y").is_none()) {
+            ret Vec[Event]::new()
+        }
+        for key in vec!["x", "y", "dx", "dy"] {
+            match item.get(key) {
+                Some(value) => {
+                    if mcp_scalar(value).is_none() {
+                        ret Vec[Event]::new()
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        for key in vec!["key", "modifiers", "buttons"] {
+            if mcp_unsigned(item.get(key).unwrap_or(Json::Number("0"))).unwrap_or(0) > 4294967295_u64 {
+                ret Vec[Event]::new()
+            }
+        }
+        if kind == "text" && mcp_string(item, "text").char_len() > 4096 {
+            ret Vec[Event]::new()
+        }
+        if kind == "text" {
+            events.push(Event::text_input(mcp_string(item, "text")))
+        } elif kind == "key_down" {
+            events.push(Event::key_down(unsigned(item, "key"), unsigned(item, "modifiers")))
+        } elif kind == "key_up" {
+            events.push(Event::key_up(unsigned(item, "key"), unsigned(item, "modifiers")))
+        } elif kind == "move" {
+            events.push(Event {
+                    event_pointer_move(), scalar(item, "x"), scalar(item, "y"), scalar(item, "dx"), scalar(item, "dy"), unsigned(item, "buttons"), 0, unsigned(item, "modifiers"), 0, 0, "", 0
+                }
+                ,
+            )
+        } else {
+            events.push(Event {
+                    if kind == "down" {
+                        event_pointer_down()
+                    } elif kind == "up" {
+                        event_pointer_up()
+                    } else {
+                        event_scroll()
+                    }
+                    , scalar(item, "x"), scalar(item, "y"), 0, 0,
+                    if kind == "down" && item.get("buttons").is_none() {
+                        1_u32
+                    } else {
+                        unsigned(item, "buttons")
+                    }
+                    , if kind == "down" || kind == "up" {
+                        if item.get("key").is_some() {
+                            unsigned(item, "key")
+                        } elif unsigned(item, "buttons") == 4 {
+                            3_u32
+                        } elif unsigned(item, "buttons") == 2 {
+                            2_u32
+                        } else {
+                            1_u32
+                        }
+                    } else {
+                        0_u32
+                    }
+                    , unsigned(item, "modifiers"), scalar(item, "dx"), scalar(item, "dy"), "", 0
+                }
+                ,)
+        }
+    }
+    ret events
+}
+pub fn mcp_click(layout: WidgetLayout, id: str) -> Vec[Event] {
+    let mut events = Vec[Event]::new()
+    // Inspection applies visibility and clipping before choosing a hit point.
+    let inspection = inspect_ui(layout, 0, 200, id)
+    for node in inspection.nodes {
+        if node.id != id || node.disabled {
+            continue
+        }
+        let x = node.bounds.x() + node.bounds.width() * 0.5 let y = node.bounds.y() + node.bounds.height() * 0.5
+        if layout.hit(x, y) != id {
+            continue
+        }
+        events.push(Event::pointer_move(x, y, 0, 0, 0))
+        events.push(Event { event_pointer_down(), x, y, 0, 0, 1, 1, 0, 0, 0, "", 0 })
+        events.push(Event { event_pointer_up(), x, y, 0, 0, 0, 1, 0, 0, 0, "", 0 })
+        break
+    }
+    ret events
+}
+pub fn mcp_camera(camera: EditorCameraState) -> Json {
+    ret Json::Object(vec![field("ok", Json::Bool(true)), field("position", vec3(camera.position)), field("target", vec3(camera.target)), field("yaw", Json::Number(camera.yaw.fmt())), field("pitch", Json::Number(camera.pitch.fmt())), field("distance", Json::Number(camera.distance.fmt())), field("fov", Json::Number(camera.fov.fmt()))])
+}
+fn vec3(value: Vec3) -> Json {
+    ret Json::Array(vec![Json::Number(value.x().fmt()), Json::Number(value.y().fmt()), Json::Number(value.z().fmt())])
+}
+pub fn mcp_set_camera(camera: mut EditorCameraState, params: Json) -> Json {
+    let target = match mcp_vector(params.get("target").unwrap_or(Json::Null)) {
+        Some(value) => value None => {
+            ret mcp_failed("Invalid camera target")
+        }
+    }
+    let yaw = scalar(params, "yaw") let pitch = scalar(params, "pitch") let distance = scalar(params, "distance")
+    if !(pitch >= - 1.35_f32 && pitch <= 1.35_f32 && distance >= 0.01_f32 && distance <= 1000000_f32) {
+        ret mcp_failed("Camera pitch must be -1.35..1.35 radians; distance 0.01..1000000")
+    }
+    camera.target = target camera.yaw = yaw camera.pitch = pitch camera.distance = distance camera.position = target.add(Vec3::from_spherical(yaw, pitch).scale(distance))
+    ret mcp_camera(camera)
+}
+pub fn mcp_rendering(settings: RenderSettings) -> Json {
+    ret Json::Object(vec![field("anti_aliasing", Json::String(settings.anti_aliasing().key())), field("upscaling_quality", Json::String(settings.quality().key())), field("frame_generation", Json::String(settings.frame_generation().key())), field("frame_generation_multiplier", Json::Number(settings.multiplier().fmt())), field("upscaling_sharpness", Json::Number(settings.sharpness().fmt()))])
+}
+pub fn mcp_logs(console: str, build: str, params: Json) -> Json {
+    let mut entries = Vec[Json]::new() let mut total = 0_usize
+    let source = console + "\n" + build
+    let mut start = 0_usize
+    for i in 0_usize..(source.byte_len() + 1_usize) {
+        if i < source.byte_len() && source.get_byte(i).unwrap_or(0) != 10 {
+            continue
+        }
+        let line = source.slice_bytes(start, i - start) start = i + 1
+        if mcp_string(params, "query") != "" && !line.contains(mcp_string(params, "query")) {
+            continue
+        }
+        if total >= mcp_offset(params) && entries.len() < mcp_limit(params) {
+            entries.push(Json::Object(vec![field("line", Json::Number(total.fmt())), field("text", Json::String(if line.char_len() > 4096 {
+                                    line.slice(0, 4096)
+                                } else {
+                                    line
+                                }
+                            )), field("truncated", Json::Bool(line.char_len() > 4096))]))
+        }
+        total += 1
+    }
+    ret mcp_page(entries, total, params)
+}
+pub fn mcp_assets(browser: ContentBrowser, params: Json) -> Json {
+    let mut entries = Vec[Json]::new() let mut total = 0_usize
+    for asset in browser.entries {
+        let query = mcp_string(params, "query")
+        if query != "" && !asset.name.contains(query) && !asset.path.contains(query) && !asset.kind.contains(query) {
+            continue
+        }
+        if total >= mcp_offset(params) && entries.len() < mcp_limit(params) {
+            entries.push(Json::Object(vec![field("path", Json::String(asset.path)), field("name", Json::String(asset.name)), field("kind", Json::String(asset.kind)), field("bytes", Json::Number(asset.bytes.fmt())), field("mutable", Json::Bool(asset.mutable()))]))
+        }
+        total += 1
+    }
+    ret mcp_page(entries, total, params)
+}
+pub fn mcp_asset(browser: ContentBrowser, params: Json) -> Json {
+    let path = mcp_string(params, "path")
+    let asset = match browser.find(path) {
+        Some(asset) => asset None => {
+            ret mcp_failed("Asset was not found in the Content Browser index")
+        }
+    }
+    let mut fields = vec![field("ok", Json::Bool(true)), field("path", Json::String(asset.path)), field("kind", Json::String(asset.kind)), field("bytes", Json::Number(asset.bytes.fmt()))]
+    if !asset.builtin() && content_stat(browser.project, path) != 0 &&(content_stat(browser.project, path) >> 2) <= 4_u64 * 1024 * 1024 &&(asset.kind == "blueprint" || asset.kind == "material" || asset.kind == "material-graph" || asset.kind == "particle-system" || asset.kind == "scene" || asset.kind == "animation-graph") {
+        fields.push(field("document", mcp_json(read_file(browser.project + "/" + path))))
+    }
+    ret Json::Object(fields)
+}
+pub fn mcp_asset_edit(browser: mut ContentBrowser, operation: str, params: Json, live: Vec[str]) -> Json {
+    if !browser.editable {
+        ret mcp_failed("Content editing is unavailable during simulation or build")
+    }
+    let path = mcp_string(params, "path")
+    if operation != "editor.create_asset" && operation != "editor.asset_undo" && operation != "editor.asset_redo" && browser.find(path).is_none() {
+        ret mcp_failed("Asset was not found")
+    }
+    let old_primary = browser.primary let old_selection = browser.selection let old_directory = browser.directory let old_name = browser.name let old_popup = browser.popup
+    browser.error = ""
+    browser.primary = path browser.selection = vec![path]
+    if operation == "editor.create_asset" {
+        let directory = mcp_string(params, "directory")
+        browser.directory = if directory == "" {
+            "Content"
+        } else {
+            directory
+        }
+        if content_stat(browser.project, browser.directory) != 2 {
+            browser.error = "Choose an existing Content directory"
+        } else {
+            browser.popup = mcp_string(params, "kind") browser.name = TextEditor::new(mcp_string(params, "name")) content_create(browser)
+        }
+    } elif operation == "editor.rename_asset" {
+        browser.name = TextEditor::new(mcp_string(params, "name")) content_rename(browser, live)
+    } elif operation == "editor.move_asset" {
+        browser.name = TextEditor::new(mcp_string(params, "directory")) content_move_selection(browser, live)
+    } elif operation == "editor.delete_asset" {
+        content_delete(browser, live)
+    } elif operation == "editor.asset_undo" || operation == "editor.asset_redo" {
+        content_history(browser, operation == "editor.asset_redo", live)
+    }
+    let result = if browser.error != "" {
+        mcp_failed(browser.error)
+    } else {
+        mcp_ok(browser.message)
+    }
+    browser.primary = old_primary browser.selection = old_selection browser.directory = old_directory browser.name = old_name browser.popup = old_popup
+    ret result
+}
+pub fn mcp_set_material(browser: mut ContentBrowser, params: Json) -> Json {
+    if !browser.editable {
+        ret mcp_failed("Content editing is unavailable")
+    }
+    let path = mcp_string(params, "path")
+    let asset = match browser.find(path) {
+        Some(asset) => asset None => {
+            ret mcp_failed("Choose an existing project material asset")
+        }
+    }
+    if !asset.mutable() || asset.kind != "material" || content_stat(browser.project, path) == 0 {
+        ret mcp_failed("Choose a project material; graph authoring is read-only")
+    }
+    let material = match material_asset_parse(stringify(params.get("material").unwrap_or(Json::Null))) {
+        Some(value) => value None => {
+            ret mcp_failed("Invalid material data")
+        }
+    }
+    if !save_material_asset_file(browser.project + "/" + path, material) {
+        ret mcp_failed("Unable to save material")
+    }
+    browser.refresh() browser.mesh_refresh = true ret mcp_ok("Material saved")
+}
+
+extern fn graphene_mcp_base64(data: str) -> str
+pub fn mcp_image(source: str, capture: CapturedFrame, density: f32) -> str {
+    let data = unsafe {
+        graphene_mcp_base64(capture.png)
+    }
+    if data == "" {
+        ret mcp_failure(source, "Unable to encode captured frame")
+    }
+    let meta = Json::Object(vec![field("ok", Json::Bool(true)), field("frame", Json::Number(capture.frame.fmt())), field("width", Json::Number(capture.width.fmt())), field("height", Json::Number(capture.height.fmt())), field("pixelDensity", Json::Number(density.fmt()))])
+    ret mcp_reply(mcp_json(source).get("id").unwrap_or(Json::Null), Json::Object(vec![field("content", Json::Array(vec![Json::Object(vec![field("type", Json::String("image")), field("mimeType", Json::String("image/png")), field("data", Json::String(data))]), Json::Object(vec![field("type", Json::String("text")), field("text", Json::String(stringify(meta)))])])), field("structuredContent", meta), field("isError", Json::Bool(false))]))
+}

@@ -1,0 +1,66 @@
+.g-axis-step-button:hover.state-axis-X {
+    background: #702b31;
+}
+
+.g-axis-step-button:hover:not(.state-axis-X).state-axis-Y {
+    background: #2a5e35;
+}
+
+.g-axis-step-button:hover:not(.state-axis-X):not(.state-axis-Y) {
+    background: #274c78;
+}
+
+.g-axis-step-button:not(:hover) {
+    background: #1c1d21;
+    color: #aeb0b7;
+}
+
+.g-axis-step-button:hover {
+    color: #f5f6f8;
+}
+
+.g-axis-step-button {
+    border-width: 0px;
+    border-style: solid;
+    border-color: #000000;
+    border-radius: 1px;
+    padding: 5px;
+    flex: 0 1 24px;
+    min-width: 20px;
+    max-width: 24px;
+}
+
+.g-axis-stepper {
+    background: #141417;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #303137;
+    border-radius: 2px;
+    padding: 1px;
+    gap: 1px;
+    overflow: hidden;
+    flex-direction: row;
+    flex: 0 1 var(--transform-axis-width);
+    min-width: 64px;
+    max-width: var(--transform-axis-width);
+}
+
+.g-axis-stepper-label {
+    background: #18191d;
+    font-size: 9px;
+    font-weight: 700;
+    pointer-events: none;
+    flex: 0 0 14px;
+}
+
+.g-axis-stepper-label.state-axis-X {
+    color: #d2494e;
+}
+
+.g-axis-stepper-label:not(.state-axis-X).state-axis-Y {
+    color: #50ac5d;
+}
+
+.g-axis-stepper-label:not(.state-axis-X):not(.state-axis-Y) {
+    color: #4287d6;
+}

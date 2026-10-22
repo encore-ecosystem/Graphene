@@ -1,0 +1,97 @@
+.g-status-segment.state-emphasized {
+    background: #1e2d25;
+}
+
+.g-status-segment:not(.state-emphasized) {
+    background: #121215;
+}
+
+.g-status-segment {
+    border-width: 1px;
+    border-style: solid;
+    border-color: #2b2c31;
+    padding: 2px 5px;
+    gap: 4px;
+    pointer-events: none;
+    flex-direction: row;
+}
+
+.g-status-icon {
+    color: var(--tone);
+    padding: 2px;
+    pointer-events: none;
+    flex: 0 1 14px;
+}
+
+.g-status-text {
+    color: #adb0b6;
+    font-size: 9px;
+    pointer-events: none;
+    flex: 1 1 0px;
+}
+
+.g-log-line {
+    background: #111114;
+    padding: 2px 5px;
+    gap: 6px;
+    flex-direction: row;
+    flex: 0 1 22px;
+}
+
+.g-log-accent {
+    background: var(--tone);
+    pointer-events: none;
+    flex: 0 1 2px;
+}
+
+.g-log-category {
+    color: var(--tone);
+    font-family: "Roboto Mono";
+    font-size: 9px;
+    font-weight: 600;
+    flex: 0 1 48px;
+}
+
+.g-log-message {
+    color: #b6b8be;
+    font-family: "Roboto Mono";
+    font-size: 9px;
+    flex: 1 1 0px;
+}
+
+.g-console-tabs {
+    gap: 5px;
+    flex-direction: row;
+    flex: 0 1 28px;
+}
+
+.g-console-output {
+    background: #0e0e11;
+    color: #8eb097;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #2a2b30;
+    padding: 5px 7px;
+    font-family: "Roboto Mono";
+    font-size: 9px;
+    flex: 0 1 38px;
+}
+
+.g-console-input {
+    background: #0c0c0f;
+    color: #d0d2d7;
+    border-width: 1px;
+    border-style: solid;
+    padding: 5px 7px;
+    font-family: "Roboto Mono";
+    font-size: 10px;
+    flex: 0 1 30px;
+}
+
+.g-console-input.state-console-focused {
+    border-color: #1f74aa;
+}
+
+.g-console-input:not(.state-console-focused) {
+    border-color: #2d2e33;
+}

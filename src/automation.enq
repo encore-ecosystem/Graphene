@@ -6,13 +6,14 @@ import core::vec::Vec
 import json::{Json, field, parse, stringify}
 import mod::approval::ApprovalBroker
 import mod::command_bus::EditorState
-import mod::command_protocol::{command_registry_json, decode_command_request, encode_command_response}
+import mod::command_protocol::{command_registry_json, decode_scene_batch, decode_command_request, encode_command_response}
 
 pub struct AutomationServer {
     state: EditorState
     token: str
     scopes: AutomationScopes
     approvals: ApprovalBroker
+    trusted: bool
 }
 
 pub struct AutomationScopes {
@@ -25,19 +26,23 @@ pub struct AutomationScopes {
 impl for AutomationServer {
     pub fn new(state: EditorState, token: str) -> Self {
         ret Self {
-            state, token, AutomationScopes::all(), ApprovalBroker::new()
+            state, token, AutomationScopes::all(), ApprovalBroker::new(), false
         }
     }
     pub fn with_scopes(state: EditorState, token: str, scopes: AutomationScopes) -> Self {
         ret Self {
-            state, token, scopes, ApprovalBroker::new()
+            state, token, scopes, ApprovalBroker::new(), false
         }
     }
     pub fn with_security(state: EditorState, token: str, scopes: AutomationScopes,
         approvals: ApprovalBroker,) -> Self {
         ret Self {
-            state, token, scopes, approvals
+            state, token, scopes, approvals, false
         }
+    }
+    /// Embedded authenticated MCP commands have already crossed the trust boundary.
+    pub fn trusted(state: EditorState, token: str) -> Self {
+        ret Self { state, token, AutomationScopes::all(), ApprovalBroker::new(), true }
     }
     pub fn state(self: Self) -> EditorState {
         ret self.state
@@ -53,7 +58,7 @@ impl for AutomationServer {
     /// Carries the token, scopes and approval state into the returned session.
     pub fn updated(self: Self, source: str) ->(Self, str) {
         let mut session = Self {
-            self.state, self.token, self.scopes, self.approvals
+            self.state, self.token, self.scopes, self.approvals, self.trusted
         }
         let response = session.handle(source)
         ret(session, response)
@@ -82,7 +87,7 @@ impl for AutomationServer {
                     ret self.approval_status(id, approval_id)
                 }
                 let scope = required_scope(method)
-                if approval_required(method) {
+                if approval_required(method) && !self.trusted {
                     let approval = root.get("approval").unwrap_or(Json::String(""))
                     .as_str().unwrap_or("")
                     if !self.approvals.consume(approval, scope, method) {
@@ -93,14 +98,24 @@ impl for AutomationServer {
                 if method == "graphene.handshake" {
                     ret self.handshake(id)
                 }
-                if method == "graphene.snapshot" {
-                    ret self.snapshot(id)
+                if method == "graphene.snapshot" || method == "graphene.actors" || method == "graphene.actor" || method == "graphene.status" {
+                    ret self.snapshot(id, root.get("params").unwrap_or(Json::Null))
                 }
                 if method == "graphene.events" {
                     let after = parse_u64(root.get("params").unwrap_or(Json::Null)
                         .get("after").unwrap_or(Json::Number("0"))
                         .as_number().unwrap_or("0")).unwrap_or(0_u64)
                     ret self.events(id, after)
+                }
+                if method == "scene.batch" {
+                    match decode_scene_batch(root.get("params").unwrap_or(Json::Null)) {
+                        Result::Ok(commands) => {
+                            ret encode_command_response(id, self.state.execute_batch(commands))
+                        }
+                        Result::Err(error) => {
+                            ret automation_error(id, "invalid_request", error.message())
+                        }
+                    }
                 }
                 match decode_command_request(source) {
                     Result::Ok(envelope) => {
@@ -147,9 +162,34 @@ impl for AutomationServer {
         ret stringify(Json::Object(fields))
     }
 
-    fn snapshot(self: Self, id: str) -> str {
+    fn snapshot(self: Self, id: str, params: Json) -> str {
         let mut actors = Vec[Json]::new()
+        let paged = params.get("_paged").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false)
+        let offset = parse_u64(params.get("offset").unwrap_or(Json::Number("0")).as_number().unwrap_or("0")).unwrap_or(0) as usize
+        let requested_limit = parse_u64(params.get("limit").unwrap_or(Json::Number("100")).as_number().unwrap_or("100")).unwrap_or(100) as usize
+        let limit = if requested_limit > 200 {
+            200_usize
+        } else {
+            requested_limit
+        }
+        let query = params.get("query").unwrap_or(Json::String("")).as_str().unwrap_or("")
+        let actor_id = parse_u64(params.get("actor").unwrap_or(Json::Number("0")).as_number().unwrap_or("0")).unwrap_or(0)
+        let status_only = params.get("_status").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false)
+        let mut total = 0_usize
         for entity in self.state.scene().entities() {
+            if status_only {
+                continue
+            }
+            if actor_id > 0 && entity.id() != actor_id {
+                continue
+            }
+            if query != "" && !entity.name().contains(query) && !self.state.asset_name(entity.id()).contains(query) {
+                continue
+            }
+            total += 1
+            if paged &&(total <= offset || actors.len() >= limit) {
+                continue
+            }
             let transform = entity.transform()
             let mut actor = Vec[(str, Json)]::new()
             actor.push(field("id", Json::Number(entity.id().fmt())))
@@ -219,6 +259,18 @@ impl for AutomationServer {
         }
         state.push(field("selection_ids", Json::Array(selection_ids)))
         state.push(field("actors", Json::Array(actors)))
+        state.push(field("actorCount", Json::Number(self.state.scene().len().fmt())))
+        if paged {
+            state.push(field("total", Json::Number(total.fmt())))
+            state.push(field("offset", Json::Number(offset.fmt())))
+            state.push(field("nextOffset", if offset + limit < total {
+                        Json::Number((offset + limit).fmt())
+                    } else {
+                        Json::Null
+                    }
+                    ,
+                ))
+        }
         let mut response = Vec[(str, Json)]::new()
         response.push(field("id", Json::String(id)))
         response.push(field("ok", Json::Bool(true)))

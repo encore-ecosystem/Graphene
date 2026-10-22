@@ -1,0 +1,10 @@
+/* Color dialog inherits Graphene's dark surface and focus tokens. */
+.luma-color-dialog {
+  --luma-surface: var(--graphene-surface); --luma-canvas: var(--graphene-bg); --luma-text: var(--graphene-text);
+  --luma-muted: var(--graphene-muted); --luma-border: var(--graphene-border-hover);
+  --luma-surface-hover: var(--graphene-control-hover); --luma-surface-active: var(--graphene-raised);
+  --luma-accent: var(--graphene-accent); --luma-accent-hover: var(--graphene-accent-hover);
+  --luma-focus: var(--graphene-focus); --luma-danger: #e3979f;
+  font-family: "Roboto";
+}
+.mg-color-button { flex: 0 0 34px; min-height: 34px; cursor: pointer; }

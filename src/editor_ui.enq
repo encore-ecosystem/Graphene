@@ -2,11 +2,13 @@ import mod::content_browser::ContentBrowser
 import mod::editor_actor_details::ActorDetails
 import mod::editor_lod_groups::LodGroupEditor
 import mod::editor_mesh_details::MeshDetails
+import mod::mcp::settings::McpSettings
 import mod::render_settings::RenderSettings
 //! Session-only presentation state. It never enters scene history or layout files.
 import core::vec::Vec
 
 pub struct EditorUiState {
+    mcp: McpSettings
     render_settings: RenderSettings
     aa_sample_counts: u32
     reconstruction_capabilities: u32
@@ -24,7 +26,7 @@ pub struct EditorUiState {
 impl for EditorUiState {
     pub fn new() -> Self {
         ret Self {
-            RenderSettings::defaults(), 1_u32, 0_u32, "", ContentBrowser::new(), ActorDetails::new(), MeshDetails::new(), LodGroupEditor::new(), vec!["ui-section-autolod", "ui-section-component", "ui-section-transform", "ui-section-surface"], "", "", ""
+            McpSettings::load(), RenderSettings::defaults(), 1_u32, 0_u32, "", ContentBrowser::new(), ActorDetails::new(), MeshDetails::new(), LodGroupEditor::new(), vec!["ui-section-autolod", "ui-section-component", "ui-section-transform", "ui-section-surface"], "", "", ""
         }
     }
     pub fn expanded(self: Self, id: str) -> bool {
@@ -54,7 +56,7 @@ impl for EditorUiState {
     /// Nested menu entries disappear when their popup replaces the parent.
     /// Anchor lifetime and restored focus follow the persistent toolbar item.
     pub fn popup_anchor(self: Self) -> str {
-        ret if self.popup == "ui-project-settings" || self.popup == "ui-lod-groups" {
+        ret if self.popup == "ui-project-settings" || self.popup == "ui-lod-groups" || self.popup == "ui-editor-settings" {
             "menu-edit"
         } elif self.popup == "ui-anti-aliasing" {
             "ui-viewport-settings"

@@ -1,0 +1,403 @@
+.g-overlay-layer {
+    position: absolute;
+    left: 0px;
+    top: 0px;
+    z-index: 80;
+    pointer-events: none;
+}
+
+.interactive-overlay {
+    pointer-events: auto;
+}
+
+.g-editor-menu-bar {
+    color: #2a93d2;
+    padding: 2px;
+    flex: 0 1 18px;
+}
+
+.g-editor-menu-bar-2 {
+    color: #e8e9ec;
+    font-size: 10px;
+    font-weight: 700;
+    flex: 0 1 72px;
+}
+
+.g-editor-menu-bar-3 {
+    color: #898c93;
+    font-size: 10px;
+    flex: 0 1 280px;
+}
+
+.g-editor-toolbar {
+    background: #19191c;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #414248;
+    border-radius: 2px;
+    padding: 3px;
+    gap: 2px;
+    width: 92px;
+    height: 73px;
+    position: absolute;
+    top: 34px;
+    z-index: 95;
+    flex-direction: column;
+}
+
+.g-status-bar {
+    color: #a3a6ad;
+    font-size: 10px;
+    flex: 1 1 0px;
+}
+
+.tone-muted {
+    --tone: var(--graphene-muted);
+}
+
+.tone-info {
+    --tone: var(--graphene-accent);
+}
+
+.tone-success {
+    --tone: var(--graphene-success);
+}
+
+.tone-warning {
+    --tone: #d19d48;
+}
+
+.tone-danger {
+    --tone: var(--graphene-danger);
+}
+
+.loading-screen {
+    width: 100%;
+    height: 100%;
+    background: var(--graphene-bg);
+    flex-direction: column;
+    gap: 0px;
+    padding: 32px;
+    align-items: center;
+}
+
+.loading-card {
+    width: 80%;
+    max-width: 440px;
+    flex: 0 0 280px;
+    flex-direction: column;
+    align-items: center;
+    background: transparent;
+    gap: 12px;
+}
+
+.loading-logo {
+    flex: 0 0 64px;
+    width: 64px;
+    height: 64px;
+    color: var(--graphene-accent);
+}
+
+.loading-caption {
+    width: 100%;
+    flex: 0 0 24px;
+    color: var(--graphene-muted);
+    text-align: center;
+}
+
+.loading-project {
+    width: 100%;
+    flex: 0 0 32px;
+    color: var(--graphene-text);
+    text-align: center;
+    overflow: hidden;
+}
+
+.loading-progress {
+    flex: 0 0 3px;
+    width: 100%;
+    background: var(--graphene-border);
+    accent-color: var(--graphene-accent);
+    border: none;
+}
+
+.loading-brand {
+    width: 100%;
+    flex: 0 0 36px;
+    color: var(--graphene-text-strong);
+    font-size: 28px;
+    font-weight: 700;
+    text-align: center;
+}
+
+.loading-message {
+    width: 100%;
+    flex: 0 0 24px;
+    color: var(--graphene-muted);
+    font-size: 12px;
+    text-align: center;
+}
+
+.popup-action {
+    flex: 0 1 21px;
+}
+
+.project-browser {
+    flex-direction: column;
+}
+
+.project-browser-brand {
+    flex-direction: row;
+    flex: 0 1 72px;
+}
+
+.browser-footer {
+    flex-direction: row;
+    flex: 0 1 38px;
+}
+
+.selector-control {
+    flex-direction: row;
+}
+
+.g-viewport-speed-strip-3 {
+    flex: 0 1 76px;
+}
+
+.g-viewport-speed-strip-4 {
+    flex: 0 1 72px;
+}
+
+.g-viewport-speed-strip-5 {
+    flex: 0 1 72px;
+}
+
+.g-viewport-speed-strip-6 {
+    flex: 0 1 72px;
+}
+
+.g-viewport-speed-strip-7 {
+    flex: 0 1 72px;
+}
+
+.g-viewport-skybox-strip-3 {
+    flex: 0 1 94px;
+}
+
+.g-viewport-skybox-strip-4 {
+    flex: 0 1 78px;
+}
+
+.g-viewport-skybox-strip-5 {
+    flex: 0 1 72px;
+}
+
+.g-output-panel {
+    flex-direction: column;
+    flex: 0 1 300px;
+}
+
+.g-hierarchy {
+    flex-direction: column;
+    flex: 0 1 242px;
+}
+
+.g-hierarchy-3 {
+    flex: 0 1 30px;
+}
+
+.g-hierarchy-4 {
+    flex: 0 1 30px;
+}
+
+.viewport {
+    flex-direction: column;
+    flex: 1 1 0px;
+}
+
+.viewport-bar {
+    flex-direction: row;
+    flex: 0 1 30px;
+}
+
+.viewport-tool {
+    flex: 1 1 30px;
+}
+
+.viewport-status {
+    flex-direction: row;
+    flex: 0 1 22px;
+}
+
+.g-material-scalar-control-3 {
+    flex: 0 1 28px;
+}
+
+.g-material-scalar-control-5 {
+    flex: 0 1 28px;
+}
+
+.g-material-inspector {
+    flex-direction: column;
+    flex: 0 1 292px;
+}
+
+.g-autolod-asset-inspector {
+    flex-direction: column;
+    flex: 0 1 292px;
+}
+
+.g-inspector {
+    flex-direction: column;
+    flex: 0 1 292px;
+}
+
+.g-content-browser {
+    flex-direction: column;
+    flex: 0 1 270px;
+}
+
+.g-content-browser-4 {
+    flex: 0 1 54px;
+}
+
+.editor-menu-bar {
+    flex-direction: row;
+    flex: 0 1 25px;
+}
+
+.editor-toolbar {
+    flex-direction: row;
+    flex: 0 1 42px;
+}
+
+.toolbar-icon {
+    flex: 1 1 33px;
+}
+
+.toolbar-button {
+    flex: 0 1 88px;
+}
+
+.g-editor-toolbar-layout-8 {
+    flex-direction: column;
+    flex: 0 1 92px;
+}
+
+.g-editor-toolbar-layout-9 {
+    flex: 0 1 32px;
+}
+
+.workspace-tabs {
+    flex-direction: row;
+    flex: 0 1 28px;
+}
+
+.editor-status {
+    flex-direction: row;
+    flex: 0 1 23px;
+}
+
+.upper-workspace {
+    flex-direction: row;
+    flex: 4 1 0px;
+}
+
+.lower-workspace {
+    flex-direction: row;
+    flex: 0 0 280px;
+}
+
+.graphene-editor {
+    flex-direction: column;
+}
+
+.outliner-dock, .details-dock, .content-dock {
+    flex-direction: column;
+    padding: 0;
+    gap: 0;
+    min-width: 0px;
+    min-height: 0px;
+}
+.outliner-dock { flex: 0 0 242px; }
+.details-dock { flex: 0 0 292px; }
+.content-dock { flex: 1 1 0px; }
+.outliner-dock > *, .details-dock > *, .content-dock > * {
+    flex: 1 1 0px;
+    min-width: 0px;
+    min-height: 0px;
+}
+.dock-splitter {
+    flex: 0 0 8px;
+    padding: 0;
+    margin: 0;
+    min-width: 0px;
+    min-height: 0px;
+    position: relative;
+    z-index: 1;
+}
+.dock-splitter,
+.dock-splitter:hover,
+.dock-splitter:active,
+.dock-splitter:focus,
+.dock-splitter:focus-visible {
+    border: 0;
+    border-radius: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+}
+/* Hit targets overlap the seam instead of reserving a visible gutter. */
+.dock-splitter-column { cursor: col-resize; margin: 0 -4px; }
+.dock-splitter-row { cursor: row-resize; margin: -4px 0; }
+
+/* Shared geometry tokens; colors and typography stay on component selectors. */
+.size-68-grow-0 { flex: 0 1 68px; }
+.size-64-grow-0 { flex: 0 1 64px; }
+.size-430-grow-0 { flex: 0 1 430px; }
+.size-146-grow-0 { flex: 0 1 146px; }
+.size-72-grow-0 { flex: 0 1 72px; }
+.size-78-grow-0 { flex: 0 1 78px; }
+.size-112-grow-0 { flex: 0 1 112px; }
+
+.g-transform-property-label, .g-transform-label-spacer { flex: 0 0 var(--transform-label-width); }
+.g-axis-stepper-label { text-align: center; }
+.menu-item { flex: 0 1 40px; }
+.menu-item.wide-menu-item { flex-basis: 52px; }
+
+.editor-dock-workspace {
+    flex: 1 1 0px;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    gap: 0;
+    background: var(--graphene-bg);
+}
+.editor-dock-workspace .luma-dock-panel > * {
+    flex: 1 1 0px;
+    min-height: 0;
+}
+.editor-dock-workspace .luma-dock-tabs {
+    background: var(--graphene-surface);
+    border-bottom: 1px solid var(--graphene-border);
+}
+.editor-dock-workspace .luma-dock-tab {
+    background: var(--graphene-surface);
+    color: var(--graphene-muted);
+    border: 0;
+    outline: none;
+    box-shadow: none;
+    transition: none;
+}
+.editor-dock-workspace .luma-dock-tab:hover {
+    background: var(--graphene-control-hover);
+    color: var(--graphene-text-strong);
+}
+.editor-dock-workspace .luma-dock-tab.selected {
+    background: var(--graphene-raised);
+    color: var(--graphene-text-strong);
+}
+.editor-dock-preview {
+    background: rgba(32, 143, 207, 0.18);
+    border: 1px solid var(--graphene-accent-hover);
+}

@@ -1,0 +1,21 @@
+.g-audio-panel { padding: 10px; gap: 6px; overflow-y: auto; }
+.g-audio-panel > * { flex-grow: 0; flex-shrink: 0; }
+.g-audio-row { gap: 6px; min-height: 28px; align-items: center; }
+.g-audio-label { width: 72px; flex-shrink: 0; font-size: 11px; }
+.g-audio-button { width: 64px; height: 26px; flex-shrink: 0; }
+.g-audio-button:checked { background: var(--graphene-accent); color: var(--graphene-text-strong); }
+.g-audio-button:checked:hover { background: var(--graphene-accent); color: var(--graphene-text-strong); }
+.g-audio-path { color: var(--graphene-muted); font-size: 11px; height: 20px; }
+.g-audio-accent { color: var(--graphene-accent); }
+.g-audio-waveform { height: 54px; flex-shrink: 0; background: var(--graphene-raised); border-radius: 4px; cursor: crosshair; }
+.g-audio-bus { flex: 0 0 150px; width: 150px; min-height: 118px; gap: 5px; padding: 8px; border: 1px solid var(--graphene-border); border-radius: 4px; }
+.g-audio-bus > * { flex-grow: 0; flex-shrink: 0; }
+#audio-mixer { height: 118px; min-height: 118px; }
+.g-audio-fader { height: 20px; }
+.g-audio-meter { height: 4px; border-radius: 2px; background: var(--graphene-raised); }
+
+.g-audio-device { width: 160px; }
+.g-audio-step { width: 28px; }
+.g-audio-listen { width: 112px; }
+.g-audio-fader:focus { outline: 1px solid var(--graphene-focus); }
+.g-audio-button:checked:disabled { background: #184b67; color: var(--graphene-muted); }

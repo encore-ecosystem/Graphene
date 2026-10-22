@@ -24,8 +24,14 @@ import graphene::editor_gizmo_readout::gizmo_world_value
 import graphene::editor_gizmo_snap::{snap_step_label, snap_step_grid, snap_value_action, snap_tool_name}
 import graphene::editor_guides::{GizmoGuideStyle, gizmo_guides}
 import graphene::editor_layout::{load_editor_layout, save_editor_layout}
+import graphene::editor_performance::profile_snapshot
 import graphene::import_mesh_asset_as
 import graphene::material_graph::editor::MaterialEditor
+import graphene::mcp::editor::*
+import graphene::mcp::http::McpHttpServer
+import graphene::mcp::jobs::McpJobs
+import graphene::mcp::protocol::*
+import graphene::mcp_gateway::GrapheneMcpGateway
 import graphene::preview::SceneGpuBinding
 import graphene::runtime::InputSnapshot
 import graphene::{ActorCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, ApprovalBroker, ApprovalRequest, AssetImportCommand, AutomationListener, AutomationScopes, AutomationServer, DuplicateActorCommand, EditorCameraState, EditorState, FlightInput, ViewportInputState, GrapheneCommand, ImportedMeshAsset, OperationCompletionCommand, ProjectLoadedCommand, ProjectRequestCommand, SimulationCommand, MaterialId, MeshId, Renderable, Scene, SceneActor, SceneAsset, StandardMaterial, Transform, ViewportRenderer, add_actor_mesh_name, apply_editor_transform, resolve_editor_pointer_target, camera_wheel_dolly, performance_counter_ns, action_needs_confirmation, content_asset_matches, discover_obj_assets, guard_editor_action, guarded_action, import_mesh_asset, automation_capability_token, automation_secure_file, edit_default_material, editor_actors_from_scene, console_help, decode_console_command, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color, normalize_simulation_mode, outliner_actor_matches, plane_mesh, simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message, sphere_mesh}
@@ -501,7 +507,7 @@ fn menu_popup(menu: str, hovered: str, project_loaded: bool, project_dirty: bool
         }
     }
     let height = if menu == "menu-edit" {
-        128.0_f32
+        158.0_f32
     } else {
         if menu == "menu-file" {
             122.0_f32
@@ -554,6 +560,7 @@ fn menu_popup(menu: str, hovered: str, project_loaded: bool, project_dirty: bool
                 == 0_u32 || simulating, false,))
         popup.push(Widget::separator())
         popup.push(popup_action("ui-project-settings", "Project Settings", icons.settings, hovered, !project_loaded, false))
+        popup.push(popup_action("ui-editor-settings", "Editor Settings", icons.settings, hovered, false, false))
     } elif menu == "menu-window" {
         popup.push(popup_action("menu-outliner-action", "World Outliner", icons.panels, hovered, false,
                 show_outliner,))
@@ -2871,24 +2878,27 @@ fn set_scale(scales: mut Vec[Vec3], cube_index: u32, scale: Vec3) -> Vec[Vec3] {
     ret result
 }
 
-fn rebuild_viewport_actors(renderer: mut ViewportRenderer&, previous_count: u32, meshes: Vec[str],
+fn rebuild_viewport_actors(renderer: mut ViewportRenderer&, _previous_count: u32, meshes: Vec[str],
     visibilities: Vec[bool], positions: Vec[Vec3], rotations: Vec[Vec3], scales: Vec[Vec3], plane: MeshId,
     sphere: MeshId,
     imported: Vec[ImportedMeshAsset], uploaded: Vec[MeshId], selected_actor: u32, ids: Vec[u64], parents:
     Vec[Option[u64]],) ->() {
-    let mut remaining = previous_count
-    while remaining > 0_u32 {
-        renderer.remove_cube(1_u32) remaining = remaining - 1_u32
-    }
+    // Keep existing viewport slots. Removing every actor makes even a rename
+    // rebuild scene ownership and acceleration state once per deleted actor.
+    // sync_cubes grows/shrinks only the tail; all slot data is reassigned below.
     renderer.sync_cubes(positions.len() as u32)
     let mut index = 0_usize
     while index < positions.len() {
         let actor = index as u32 + 1_u32
         let mesh_name = mesh_name_at(meshes, actor)
         let mesh = resolve_actor_gpu_mesh(mesh_name, plane, sphere, imported, uploaded)
-        if mesh.valid() {
-            renderer.set_cube_mesh(actor, mesh)
-        }
+        renderer.set_cube_mesh(actor, if mesh.valid() {
+                mesh
+            } else {
+                renderer.default_cube_mesh()
+            }
+            ,
+        )
         renderer.set_cube_visible(actor, bool_at(visibilities, actor, true))
         index = index + 1_usize
     }
@@ -3917,7 +3927,33 @@ fn local_popup(ui: EditorUiState, layout: WidgetLayout, width: f32, height: f32,
         ret ui.lod_groups.widget_width(w).with_computed_style(Style::default().with_left((width - w) * 0.5_f32).with_top((height - h) * 0.5_f32).with_width(w).with_height(h))
     }
     let mut desired = Size::new(224, 178)
-    if owner == "ui-project-settings" || owner == "ui-anti-aliasing" {
+    if owner == "ui-editor-settings" {
+        desired = Size::new(420, 350)
+        popup = popup.with_added_classes("g-mcp-settings").with_attribute("role", "dialog").with_attribute("aria-label", "Editor Settings · MCP")
+        popup.push(Widget::label("Editor Settings · MCP").with_classes("g-popup-caption"))
+        popup.push(popup_action("mcp-toggle", "Enable MCP server", icons.visible, hovered, false, ui.mcp.enabled).with_attribute("role", "switch").with_attribute("aria-checked", if ui.mcp.enabled {
+                    "true"
+                } else {
+                    "false"
+                }
+                ,
+            ))
+        popup.push(Widget::label("Local HTTP port").with_classes("g-popup-caption"))
+        popup.push(Widget::input("mcp-port", ui.mcp.port_editor.value()).with_classes("cb-name").with_focus(ui.focused() == "mcp-port").with_cursor(ui.mcp.port_editor.cursor()).with_selection(ui.mcp.port_editor.selection_start(), ui.mcp.port_editor.selection_end()).with_attribute("aria-label", "MCP port").with_attribute("tabindex", "0"))
+        popup.push(popup_action("mcp-apply-port", "Apply port", icons.settings, hovered, false, false))
+        popup.push(Widget::label(ui.mcp.endpoint()).with_classes("g-mcp-endpoint"))
+        popup.push(popup_action("mcp-copy-endpoint", "Copy endpoint", icons.duplicate, hovered, false, false))
+        popup.push(popup_action("mcp-copy-token", "Copy access token", icons.duplicate, hovered, !ui.mcp.enabled || ui.mcp.token == "", false))
+        popup.push(Widget::label(if ui.mcp.status != "" {
+                    ui.mcp.status
+                } elif ui.mcp.enabled {
+                    "Server enabled · Local access"
+                } else {
+                    "Server disabled"
+                }
+            ).with_classes("g-aa-help").with_attribute("role", "status"))
+        popup.push(Widget::label("Changes are saved for this computer.").with_classes("g-aa-help"))
+    } elif owner == "ui-project-settings" || owner == "ui-anti-aliasing" {
         desired = if owner == "ui-project-settings" {
             Size::new(464, 644)
         } else {
@@ -4024,7 +4060,7 @@ fn local_popup(ui: EditorUiState, layout: WidgetLayout, width: f32, height: f32,
     if desired.height() > height - 16 {
         desired = Size::new(desired.width(), height - 16)
     }
-    let bounds = if owner == "ui-project-settings" {
+    let bounds = if owner == "ui-project-settings" || owner == "ui-editor-settings" {
         Rect::new((width - desired.width()) * 0.5,(height - desired.height()) * 0.5, desired.width(), desired.height())
     } else {
         anchored_popup_bounds(layout.find_bounds(ui.popup_anchor()).unwrap_or(Rect::new(8, 8, 0, 0)), desired, Rect::new(8, 8, width - 16, height - 16))
@@ -5490,7 +5526,77 @@ fn main() -> u32 {
     let mut environment_tick_ns = performance_counter_ns()
     let mut last_play_frame = Option[PreparedFrame]::None
     let mut saved_layout_revision = dock_workspace.revision()
+    let mcp_waker = window.waker()
+    let mut mcp_server = McpHttpServer::new()
+    let mut mcp_last_enabled = false
+    let mut mcp_last_port = ui.mcp.port
+    let mut mcp_input = luma::UiInputQueue::new()
+    let mut mcp_jobs = McpJobs::new()
+    let mut mcp_input_ticket = 0_u64
+    let mut mcp_input_request = ""
+    let mut mcp_input_frame = 0_u64
+    let mut mcp_input_started = 0_u64
+    let mut mcp_capture_ticket = 0_u64
+    let mut mcp_capture_request = ""
+    let mut mcp_capture_frame = 0_u64
+    let mut mcp_capture_started = 0_u64
+    let mut mcp_layout_revision = 0_u64
+    let mut mcp_profile_enabled = false
     while window.is_open() {
+        if (ui.mcp.enabled != mcp_last_enabled || ui.mcp.port != mcp_last_port) && mcp_input_ticket == 0 && mcp_capture_ticket == 0 {
+            mcp_server.stop()
+            mcp_capture_ticket = 0 mcp_input_ticket = 0 mcp_input = luma::UiInputQueue::new()
+            if ui.mcp.enabled && ui.mcp.ensure_token() {
+                if !mcp_server.start(ui.mcp.port, ui.mcp.token, mcp_waker.handle) {
+                    ui.mcp.status = "Unable to start MCP server"
+                } else {
+                    ui.mcp.status = ""
+                }
+            }
+            if !ui.mcp.enabled {
+                mcp_profile_enabled = false
+            }
+            mcp_last_enabled = ui.mcp.enabled mcp_last_port = ui.mcp.port
+        }
+        if mcp_jobs.poll(command_state, ui.browser, project_root) {
+            redraw_pending = true
+        }
+        if mcp_input_ticket > 0 && !mcp_input.pending() && window.presented_frames() > mcp_input_frame {
+            let _sent = mcp_server.mailbox().respond(mcp_input_ticket, mcp_tool_result(mcp_input_request, mcp_ok("Input processed")))
+            mcp_input_ticket = 0 mcp_input_request = ""
+        }
+        if mcp_input_ticket > 0 && performance_counter_ns() - mcp_input_started > 25000000000_u64 {
+            let _sent = mcp_server.mailbox().respond(mcp_input_ticket, mcp_failure(mcp_input_request, "Input did not reach a presented frame within 25 seconds; inspect state before retrying"))
+            mcp_input_ticket = 0 mcp_input_request = ""
+            mcp_input = luma::UiInputQueue::new()
+            let _released = mcp_input.append(vec![Event {
+                        event_focus_lost(), 0, 0, 0, 0, 0, 0, 0, 0, 0, "", 0
+                    }
+                ],)
+        }
+        if mcp_capture_ticket > 0 {
+            if window.presented_frames() > mcp_capture_frame {
+                let arguments = mcp_arguments(mcp_capture_request)
+                let crop = if arguments.get("viewport").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false) {
+                    Rect::new(viewport_pixel_x as f32, viewport_pixel_y as f32, render_width as f32, render_height as f32)
+                } else {
+                    Rect::new(0, 0, 0, 0)
+                }
+                let maximum = mcp_unsigned(arguments.get("maxWidth").unwrap_or(Json::Number("1280"))).unwrap_or(1280) as u32
+                let captured = window.capture_png(crop, maximum)
+                if captured.png != "" {
+                    let _sent = mcp_server.mailbox().respond(mcp_capture_ticket, mcp_image(mcp_capture_request, captured, window.pixel_density()))
+                    mcp_capture_ticket = 0 mcp_capture_request = ""
+                }
+            }
+            if mcp_capture_ticket > 0 && performance_counter_ns() - mcp_capture_started > 5000000000_u64 {
+                let _sent = mcp_server.mailbox().respond(mcp_capture_ticket, mcp_failure(mcp_capture_request, "No capturable composed frame became available within five seconds"))
+                mcp_capture_ticket = 0 mcp_capture_request = ""
+            }
+        }
+        if mcp_server.error() != "" && ui.mcp.status != mcp_server.error() {
+            ui.mcp.status = mcp_server.error() redraw_pending = true
+        }
         if viewport_renderer.is_playing() != simulation_mode_is_play(simulation_mode) {
             window.clear_external_vulkan_images() last_play_frame = Option[PreparedFrame]::None
         }
@@ -5530,7 +5636,7 @@ fn main() -> u32 {
         if audio_panel.project != project_root {
             audio_panel.configure(project_root) particle_editor.configure(project_root)
         }
-        performance_panel.sync(viewport_renderer.profiling_device(), dock_workspace.location(PanelId::new("performance")).is_some(), viewport_visible && window.frame_status() != 3)
+        performance_panel.sync_capture(viewport_renderer.profiling_device(), dock_workspace.location(PanelId::new("performance")).is_some(), viewport_visible && window.frame_status() != 3, mcp_profile_enabled)
         let profiler_active = performance_panel.running()
         viewport_renderer.set_environment_project(project_root)
         let environment_active = viewport_renderer.environment_animating(simulation_mode_is_play(simulation_mode))
@@ -5547,7 +5653,9 @@ fn main() -> u32 {
         } else {
             0_u64
         }
-        let mut event = if (simulating || profiler_active || environment_active) && !redraw_pending && viewport_visible {
+        let mut event = if mcp_input.pending() {
+            mcp_input.next().unwrap_or(Event::none())
+        } elif (simulating || profiler_active || environment_active) && !redraw_pending && viewport_visible {
             window.poll()
         } else {
             // SDL wakes this wait immediately for input. Navigation uses a
@@ -5580,6 +5688,16 @@ fn main() -> u32 {
         // work needs snapshots, hit-testing and retained-tree preparation.
         let automation_request = if automation_listener.available() {
             automation_listener.poll()
+        } else {
+            ""
+        }
+        let mcp_ticket = if automation_request == "" && mcp_capture_ticket == 0 && mcp_input_ticket == 0 {
+            mcp_server.mailbox().next()
+        } else {
+            0_u64
+        }
+        let mcp_request = if mcp_ticket > 0 {
+            mcp_server.mailbox().request(mcp_ticket)
         } else {
             ""
         }
@@ -5617,7 +5735,7 @@ fn main() -> u32 {
             }
         }
         let mesh_stats_due = show_details && ui.mesh.available() && ui.expanded("ui-section-autolod") && perf_counter_ms() - mesh_stats_sampled >= 250
-        if event.kind() == event_none() && automation_request == "" && !mesh_stats_due &&
+        if event.kind() == event_none() && automation_request == "" && mcp_request == "" && mcp_capture_ticket == 0 && mcp_input_ticket == 0 && !mesh_stats_due &&
         !redraw_pending && !simulating && !environment_active && !building && blueprint_build_worker.is_none() && !material_editor.busy() &&
         !content_mesh_worker.is_some() && !content_polled && ui.browser.request == "" && !ui.browser.dirty && !texture_loader.busy() && texture_upload.is_none() && texture_restore_path == "" && normal_restore_path == "" &&
         !navigation.orbiting && !navigation.panning && !navigation.pointer_locked &&
@@ -5714,7 +5832,7 @@ fn main() -> u32 {
         let mut content_chrome_dirty = content_polled || ui.browser.dirty
         let mut content_input_routed = false
         let mut local_action = ""
-        let mut dirty = profiler_active || aa_pending || content_polled || ui.browser.dirty || event.kind() == event_pointer_down() || event.kind() == event_pointer_up() || event.kind() == event_resize() || redraw_pending || ui_update_pending ||
+        let mut dirty = mcp_input_ticket > 0 || profiler_active || aa_pending || content_polled || ui.browser.dirty || event.kind() == event_pointer_down() || event.kind() == event_pointer_up() || event.kind() == event_resize() || redraw_pending || ui_update_pending ||
         (autolod_stats_changed && shading_mode != "lit" && shading_mode != "unlit")
         let mut blueprint_chrome_dirty = false
         let mut material_texture_changed = false
@@ -5722,17 +5840,161 @@ fn main() -> u32 {
         let mut transform_ui_refresh = false
         let save_pending_before_request = command_state.save_pending()
         let building_before_request = command_state.building()
-        if automation_request != "" {
-            dirty = true
+        if automation_request != "" || mcp_request != "" {
+            dirty = dirty || automation_request != ""
             let revision_before_request = command_state.revision()
             let simulation_before_request = command_state.simulation_mode()
-            let mut automation = AutomationServer::with_security(
-                command_state, automation_token, automation_scopes, approval_broker,)
-            let response = automation.handle(automation_request)
-            let automation_parts = automation.into_parts()
-            command_state = automation_parts.0
-            approval_broker = automation_parts.1
-            let _responded = automation_listener.respond(response)
+            if mcp_request != "" {
+                let operation = mcp_operation(mcp_request)
+                let arguments = mcp_arguments(mcp_request)
+                let mut response = ""
+                let mut handled = true
+                let mut result = mcp_ok("")
+                if operation == "editor.ui" {
+                    mcp_layout_revision = reactive_ui.inspection_revision() as u64
+                    result = mcp_ui(reactive_ui.layout(), arguments, mcp_layout_revision, window.presented_frames(), window.pixel_density(), ui.focused(), hovered, ui.pressed())
+                } elif operation == "editor.click" || operation == "editor.input" {
+                    let expected = mcp_unsigned(arguments.get("revision").unwrap_or(Json::Null))
+                    let stale = match expected {
+                        Some(revision) => revision != reactive_ui.inspection_revision() as u64 None => false
+                    }
+                    let events = if operation == "editor.click" {
+                        mcp_click(reactive_ui.layout(), mcp_string(arguments, "widget"))
+                    } else {
+                        mcp_events(arguments)
+                    }
+                    if stale {
+                        result = mcp_failed("UI layout changed; inspect the UI before clicking")
+                    } elif events.len() == 0 {
+                        result = mcp_failed("Widget is hidden, disabled, covered or missing")
+                    } elif !mcp_input.append(events) {
+                        result = mcp_failed("Input queue is full")
+                    } else {
+                        mcp_input_ticket = mcp_ticket mcp_input_request = mcp_request mcp_input_frame = window.presented_frames() mcp_input_started = performance_counter_ns()
+                        dirty = true redraw_pending = true handled = false
+                    }
+                } elif operation == "editor.capture" {
+                    if window.request_capture() {
+                        mcp_capture_ticket = mcp_ticket mcp_capture_request = mcp_request mcp_capture_frame = window.presented_frames() mcp_capture_started = performance_counter_ns()
+                        dirty = true redraw_pending = true viewport_redraw_pending = true handled = false
+                    } else {
+                        result = mcp_failed("Window capture is unavailable")
+                    }
+                } elif operation == "editor.camera" {
+                    result = mcp_camera(camera)
+                } elif operation == "editor.set_camera" {
+                    if simulating || pilot_id > 0 {
+                        result = mcp_failed("Stop simulation and camera piloting before moving the editor camera")
+                    } else {
+                        result = mcp_set_camera(camera, arguments) dirty = true viewport_redraw_pending = true
+                    }
+                } elif operation == "editor.logs" {
+                    result = mcp_logs(console_output + "\n" + status_message + "\n" + backend_error(), build_output, arguments)
+                } elif operation == "editor.performance" {
+                    match arguments.get("enabled").unwrap_or(Json::Null).as_bool() {
+                        Some(enabled) => {
+                            mcp_profile_enabled = enabled
+                        }
+                        None => {
+                        }
+                    }
+                    result = mcp_with(profile_snapshot(mcp_limit(arguments)), "collecting", Json::Bool(mcp_profile_enabled))
+                } elif operation == "editor.render_settings" {
+                    result = Json::Object(vec![field("ok", Json::Bool(true)), field("settings", mcp_rendering(ui.render_settings)), field("effectiveAA", Json::String(effective_reconstruction(ui.render_settings.anti_aliasing(), ui.aa_sample_counts, ui.reconstruction_capabilities).key())), field("capabilities", Json::Number(ui.reconstruction_capabilities.fmt())), field("status", Json::String(ui.reconstruction_status))])
+                } elif operation == "editor.set_render_settings" {
+                    if !project_loaded || simulating || building {
+                        result = mcp_failed("Load a project and stop simulation/build")
+                    } else {
+                        match RenderSettings::parse(stringify(arguments.get("settings").unwrap_or(Json::Null))) {
+                            Some(settings) => {
+                                if settings.save(project_root) {
+                                    ui.render_settings = settings window.clear_external_vulkan_images() viewport_renderer.set_render_settings(settings)
+                                    viewport_redraw_pending = true dirty = true ui_chrome_dirty = true result = mcp_ok("Rendering settings saved and applied")
+                                } else {
+                                    result = mcp_failed("Unable to save rendering settings")
+                                }
+                            }
+                            None => {
+                                result = mcp_failed("Invalid rendering settings")
+                            }
+                        }
+                    }
+                } elif operation == "editor.lod_groups" {
+                    result = Json::Object(vec![field("ok", Json::Bool(true)), field("groups", mcp_json(ui.lod_groups.catalog.encode()))])
+                } elif operation == "editor.set_lod_groups" {
+                    let catalog = graphene::LodGroups::decode(stringify(arguments.get("groups").unwrap_or(Json::Null)))
+                    if !project_loaded || simulating || building {
+                        result = mcp_failed("Load a project and stop simulation/build")
+                    } elif catalog.error != "" || !catalog.valid() {
+                        result = mcp_failed("Invalid AutoLOD groups")
+                    } elif !catalog.save(project_root) {
+                        result = mcp_failed("Unable to save AutoLOD groups")
+                    } else {
+                        ui.lod_groups.catalog = catalog
+                        for index in 0_usize..imported_gpu_meshes.len() {
+                            let asset = imported_meshes.get_unchecked_borrowed(index)
+                            let setting = AutoLodSettings::load(asset.project_path())
+                            let _applied = viewport_renderer.set_mesh_lod_group(imported_gpu_meshes.get(index).unwrap_or(MeshId::new(0)), catalog.resolve(setting.group_id))
+                        }
+                        viewport_redraw_pending = true ui_chrome_dirty = true dirty = true result = mcp_ok("AutoLOD groups saved and applied")
+                    }
+                } elif operation == "editor.assets" {
+                    result = mcp_assets(ui.browser, arguments)
+                } elif operation == "editor.asset" || operation == "editor.graph" {
+                    result = mcp_asset(ui.browser, arguments)
+                } elif operation == "editor.import" {
+                    result = mcp_jobs.import_asset(command_state, project_root, arguments)
+                } elif operation == "editor.job" {
+                    result = mcp_jobs.status(mcp_string(arguments, "jobId"))
+                } elif operation == "editor.set_material" {
+                    result = mcp_set_material(ui.browser, arguments)
+                    if result.get("ok").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false) {
+                        let changed_path = mcp_string(arguments, "path")
+                        if changed_path == "Content/Materials/Default.graphene-material.json" || changed_path == "Content/Materials/Default.gmaterial" {
+                            match load_material_asset_file(project_root + "/" + changed_path) {
+                                Some(material) => {
+                                    default_material = material viewport_renderer.set_default_material(material)
+                                    texture_restore_path = material.base_color_texture() normal_restore_path = material.normal_texture()
+                                    material_texture_changed = true viewport_redraw_pending = true dirty = true
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                } elif operation.contains("editor.") {
+                    let references = content_live_references(editor_scene, cube_mesh_names, project_root, material_editor.asset_path(), blueprint_path, default_material)
+                    result = mcp_asset_edit(ui.browser, operation, arguments, references)
+                    content_chrome_dirty = true dirty = true
+                } else {
+                    let mut gateway = GrapheneMcpGateway::new(AutomationServer::trusted(command_state, ui.mcp.token), ui.mcp.token)
+                    response = gateway.handle(mcp_request)
+                    command_state = gateway.into_api().state()
+                    if (operation == "project.save" || operation == "build.start") && !mcp_json(response).get("result").unwrap_or(Json::Null).get("isError").unwrap_or(Json::Bool(true)).as_bool().unwrap_or(true) {
+                        let job_id = mcp_jobs.record(operation, command_state.revision())
+                        result = Json::Object(vec![field("ok", Json::Bool(true)), field("jobId", Json::String(job_id)), field("status", Json::String("running"))])
+                        response = mcp_tool_result(mcp_request, result)
+                    }
+                }
+                if operation == "graphene.status" && response != "" {
+                    let details = Json::Object(vec![field("projectRoot", Json::String(project_root)), field("scenePath", Json::String(scene_path)), field("frame", Json::Number(window.presented_frames().fmt())), field("focusedWidget", Json::String(ui.focused())), field("popup", Json::String(ui.popup())), field("materialPath", Json::String(material_editor.asset_path())), field("blueprintPath", Json::String(blueprint_path)), field("dirty", Json::Bool(project_dirty || command_state.dirty() || command_state.blueprint_dirty()))])
+                    response = mcp_tool_result(mcp_request, mcp_with(mcp_payload(response), "editor", details))
+                }
+                if handled {
+                    if response == "" {
+                        response = mcp_tool_result(mcp_request, result)
+                    }
+                    let _responded = mcp_server.mailbox().respond(mcp_ticket, response)
+                }
+            } else {
+                let mut automation = AutomationServer::with_security(
+                    command_state, automation_token, automation_scopes, approval_broker,)
+                let response = automation.handle(automation_request)
+                let automation_parts = automation.into_parts()
+                command_state = automation_parts.0
+                approval_broker = automation_parts.1
+                let _responded = automation_listener.respond(response)
+            }
             if command_state.revision() != revision_before_request {
                 let previous_actor_count = object_count
                 editor_scene = command_state.scene()
@@ -5848,7 +6110,9 @@ fn main() -> u32 {
         // retained frame to be presented again; reflowing the whole editor
         // costs almost a second in debug builds and changes no geometry.
         let mut reactive_only = event.kind() == event_resize() && !resize_changed
-        let mut viewport_only = retrying_redraw || profiler_active
+        // Idle profiling can reuse the viewport-only frame. UI input must still
+        // commit hover, pressed and focus styles before presenting its result.
+        let mut viewport_only =(retrying_redraw || profiler_active) && event.kind() == event_none()
         let mut request_undo = false
         let mut request_redo = false
         let mut request_duplicate = false
@@ -6233,7 +6497,9 @@ fn main() -> u32 {
             let owner = ui.popup()
             let aa_popup = owner == "ui-project-settings" || owner == "ui-anti-aliasing"
             let mut consume = false
-            if owner == "ui-lod-groups" {
+            if owner == "ui-editor-settings" && ui.focused() == "mcp-port" && ui.mcp.edit_port(event, window) {
+                consume = true ui_chrome_dirty = true
+            } elif owner == "ui-lod-groups" {
                 ui.lod_groups.set_layout(layout)
                 let hit = reactive_ui.hit(event.x(), event.y())
                 if !ui.lod_groups.dragging() && event.kind() == event_pointer_down() &&(hit == "lod-cancel" || !retained_bounds(reactive_ui, "ui-local-popup").unwrap_or(Rect::new(0, 0, 0, 0)).contains(Point::new(event.x(), event.y()))) {
@@ -6317,7 +6583,9 @@ fn main() -> u32 {
                                 focused_bounds.y() - popup_bounds.y() - 10
                             } elif focused_bounds.y() + focused_bounds.height() > popup_bounds.y() + popup_bounds.height() - 10 {
                                 focused_bounds.y() + focused_bounds.height() - popup_bounds.y() - popup_bounds.height() + 10
-                            } else { 0_f32 }
+                            } else {
+                                0_f32
+                            }
                             if delta != 0 {
                                 reactive_ui.scroll_at(popup_bounds.x() + 12, popup_bounds.y() + 12, delta)
                                 layout = reactive_ui.layout()
@@ -6326,8 +6594,12 @@ fn main() -> u32 {
                     }
                 } elif event.key() == key_enter() || event.key() == 32 {
                     if ui.focused() != owner {
-                        local_action = ui.focused()
-                        if !local_action.contains("reconstruction-") {
+                        local_action = if owner == "ui-editor-settings" && ui.focused() == "mcp-port" {
+                            "mcp-apply-port"
+                        } else {
+                            ui.focused()
+                        }
+                        if !local_action.contains("reconstruction-") && owner != "ui-editor-settings" {
                             ui.close()
                         }
                     }
@@ -6338,7 +6610,10 @@ fn main() -> u32 {
                 if popup_bounds.contains(Point::new(event.x(), event.y())) {
                     if !aa_popup {
                         local_action = reactive_ui.hit(event.x(), event.y())
-                        if local_action != "" && local_action != "ui-local-popup" {
+                        if local_action == "mcp-port" {
+                            ui.focus("mcp-port") local_action = ""
+                        }
+                        if local_action != "" && local_action != "ui-local-popup" && owner != "ui-editor-settings" {
                             ui.close()
                         }
                     }
@@ -6599,6 +6874,19 @@ fn main() -> u32 {
             }
             if local_action != "" {
                 target = local_action
+            }
+            if target == "mcp-toggle" {
+                let previous = ui.mcp.enabled ui.mcp.enabled = !previous
+                if !ui.mcp.save() {
+                    ui.mcp.enabled = previous
+                }
+                ui_chrome_dirty = true dirty = true target = ""
+            } elif target == "mcp-apply-port" {
+                let _saved = ui.mcp.apply_port() ui_chrome_dirty = true dirty = true target = ""
+            } elif target == "mcp-copy-endpoint" {
+                window.set_clipboard(ui.mcp.endpoint()) status_message = "MCP endpoint copied" target = ""
+            } elif target == "mcp-copy-token" && ui.mcp.token != "" {
+                window.set_clipboard(ui.mcp.token) status_message = "MCP access token copied" target = ""
             }
             if target.contains("reconstruction-") && project_loaded {
                 let mut settings = ui.render_settings let mut changed = false
@@ -10890,7 +11178,7 @@ fn main() -> u32 {
                         None => 0.0_f32
                     }
                     viewport_renderer.set_camera_override(scene_camera(editor_scene, view_actor), view_aspect)
-                    if viewport_renderer.retire_generated_images(render_width,render_height) {
+                    if viewport_renderer.retire_generated_images(render_width, render_height) {
                         window.clear_external_vulkan_images() last_play_frame = Option[PreparedFrame]::None
                     }
                     scene_recorded = target_ready && viewport_renderer.render_camera_pose(camera.position, camera.yaw, camera.pitch, camera.fov)
@@ -11089,6 +11377,9 @@ fn main() -> u32 {
     profile_finish(false)
     performance_panel.sync(viewport_renderer.profiling_device(), false, false)
     audio_panel.runtime.close()
+    mcp_server.stop()
+    mcp_jobs.close()
+    mcp_waker.destroy()
     automation_listener.destroy()
     if file_exists(automation_discovery_path) {
         remove_file(automation_discovery_path)

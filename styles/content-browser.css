@@ -1,0 +1,109 @@
+.g-asset-tile.state-active {
+    background: #203441;
+    border-color: #317097;
+}
+
+.g-asset-tile:not(.state-active):hover {
+    background: var(--graphene-control-hover);
+    border-color: var(--graphene-border-hover);
+}
+
+.g-asset-tile:not(.state-active):not(:hover) {
+    background: var(--graphene-control);
+    border-color: var(--graphene-border);
+}
+
+.g-asset-tile {
+    border-width: 1px;
+    border-style: solid;
+    border-radius: 2px;
+    padding: 4px;
+    gap: 1px;
+    flex-direction: column;
+    flex: 0 1 80px;
+}
+
+.g-asset-selection-mark.state-active {
+    background: var(--graphene-accent);
+}
+
+.g-asset-selection-mark:not(.state-active).state-active {
+    background: #203441;
+}
+
+.g-asset-tile:hover .g-asset-selection-mark:not(.state-active):not(.state-active) {
+    background: var(--graphene-control-hover);
+}
+
+.g-asset-tile:not(:hover) .g-asset-selection-mark:not(.state-active):not(.state-active) {
+    background: var(--graphene-control);
+}
+
+.g-asset-selection-mark {
+    border-radius: 1px;
+    pointer-events: none;
+    flex: 0 1 2px;
+}
+
+.g-asset-thumbnail.state-active {
+    background: #162027;
+}
+
+.g-asset-thumbnail:not(.state-active) {
+    background: #141417;
+}
+
+.g-asset-thumbnail {
+    color: var(--tone);
+    border-radius: 1px;
+    padding: 10px;
+    pointer-events: none;
+    flex: 0 1 48px;
+}
+
+.g-asset-name {
+    color: #dadce0;
+    font-size: 9px;
+    font-weight: 500;
+    pointer-events: none;
+    flex: 0 1 18px;
+}
+
+.g-asset-kind {
+    color: #84878f;
+    font-size: 8px;
+    pointer-events: none;
+    flex: 0 1 15px;
+}
+
+.g-content-browser-2 {
+    gap: 2px;
+    flex-direction: row;
+    flex: 0 1 26px;
+}
+
+.g-content-browser-3 {
+    background: #131316;
+    border-width: 1px;
+    border-style: solid;
+    border-color: #2b2c30;
+    padding: 3px 5px;
+    gap: 4px;
+    flex-direction: row;
+    flex: 0 1 28px;
+}
+
+.g-content-browser-9 {
+    gap: 5px;
+    padding: 3px 0px;
+    flex-direction: row;
+    flex: 0 1 94px;
+}
+
+.g-content-browser-10 {
+    color: #84878f;
+    font-size: 10px;
+    padding: 12px 8px;
+    pointer-events: none;
+    flex: 1 1 0px;
+}

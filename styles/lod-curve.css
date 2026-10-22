@@ -1,0 +1,16 @@
+/* Distance / triangle-budget curve editing. All dimensions are logical pixels. */
+.g-lod-fields { overflow-y: hidden; }
+.g-lod-fields > .g-lod-workspace { flex: 1 1 0px; min-height: 0; }
+.g-lod-workspace { gap: 12px; min-width: 0; min-height: 0; }
+.g-lod-plot-panel { flex: 1 1 0px; min-width: 0; min-height: 220px; gap: 6px; }
+.g-lod-curve { flex: 1 1 0px; width: auto; height: auto; min-height: 200px; background: var(--graphene-bg); color: var(--graphene-muted); border: 1px solid var(--graphene-border); border-radius: 5px; cursor: crosshair; }
+.g-lod-curve-accent { color: var(--graphene-accent); }
+.g-lod-curve-text { color: var(--graphene-text-strong); font-size: 11px; }
+.g-lod-curve:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-lod-table { flex: 0 0 240px; min-width: 0; min-height: 0; gap: 6px; overflow-y: auto; }
+.g-lod-table > * { flex-shrink: 0; }
+.g-lod-point.state-selected { background: var(--graphene-control-hover); border-radius: 3px; }
+.g-lod-point.state-selected > .g-lod-input { border-color: var(--graphene-accent); }
+.g-lod-stacked { overflow-y: hidden; }
+.g-lod-stacked > .g-lod-plot-panel { flex: 0 0 240px; }
+.g-lod-stacked > .g-lod-table { flex: 1 1 0px; min-height: 0; }

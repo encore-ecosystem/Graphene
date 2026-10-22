@@ -1,0 +1,76 @@
+//! Actual direct Vulkan capture and cross-thread wake regression.
+import core::vec::Vec
+import luma::{Window, RendererKind, Color, Rect, WindowWaker, UiInputQueue, Event}
+import std::io::println
+import std::os::write_file
+import std::time::{perf_counter_ms, sleep_ms}
+fn wake_later(waker: WindowWaker) -> bool {
+    sleep_ms(50) ret waker.wake()
+}
+fn main() -> u32 {
+    let mut queue = UiInputQueue::new()
+    let mut events = Vec[Event]::new()
+    for i in 0_usize..256_usize {
+        events.push(Event::key_down(i as u32, 0))
+    }
+    if !queue.append(events) || queue.append(vec![Event::key_up(1, 0)]) {
+        ret 1
+    }
+    for i in 0_usize..32_usize {
+        if queue.next().unwrap_or(Event::none()).key() !=(i as u32) {
+            ret 2
+        }
+    }
+    let mut tail = Vec[Event]::new() for i in 256_usize..288_usize {
+        tail.push(Event::key_down(i as u32, 0))
+    }
+    if !queue.append(tail) || queue.events.len() > 256 {
+        ret 3
+    }
+    for i in 32_usize..288_usize {
+        if queue.next().unwrap_or(Event::none()).key() !=(i as u32) {
+            ret 4
+        }
+    }
+    if queue.pending() {
+        ret 5
+    }
+    let window = Window::create_with_renderer("Luma MCP capture", 640, 360, RendererKind::DirectVulkan)
+    if !window.available() {
+        println("Capture window unavailable") ret 6
+    }
+    for i in 0_usize..6_usize {
+        let _event = window.wait(16)
+        if !window.begin(Color::rgb(10, 20, 30)) || !window.fill_rect(Rect::new(16, 16, 160, 100), Color::rgb(200, 40, 90)) || !window.present() {
+            ret 7
+        }
+    }
+    if !window.request_capture() {
+        ret 8
+    }
+    if !window.begin(Color::rgb(10, 20, 30)) || !window.fill_rect(Rect::new(16, 16, 160, 100), Color::rgb(200, 40, 90)) || !window.present() {
+        ret 9
+    }
+    let captured = window.capture_png(Rect::new(0, 0, 0, 0), 640)
+    if captured.png.byte_len() < 100 || captured.width == 0 || captured.height == 0 || captured.frame == 0 {
+        ret 10
+    }
+    if write_file("capture.png", captured.png) != 0 {
+        ret 11
+    }
+    for i in 0_usize..10_usize {
+        let _event = window.poll()
+    }
+    let waker = window.waker()
+    let worker = spawn wake_later(waker)
+    let started = perf_counter_ms()
+    while perf_counter_ms() - started < 30 {
+        let _event = window.wait(1000)
+    }
+    let elapsed = perf_counter_ms() - started
+    if !worker.join() || elapsed > 500 {
+        ret 12
+    }
+    waker.destroy() window.destroy()
+    println("Direct capture, ordered bounded input and cross-thread wake passed") ret 0
+}
