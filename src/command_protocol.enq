@@ -1,10 +1,14 @@
+import mod::command_bus::ActorPhysicsCommand
+import mod::physics::component::PhysicsComponent
 //! Stable JSON command envelopes shared by Automation API and MCP adapters.
 
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
+
 import mod::command_bus::{ActorCommand, ActorComponentCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorTransformCommand, ActorVisibilityCommand, AddActorCommand, CommandResult, DuplicateActorCommand, GrapheneCommand, SimulationCommand}
 import mod::editor_values::parse_editor_scalar
 import mod::scene::component::SceneComponent
@@ -34,7 +38,7 @@ impl for CommandEnvelope {
 }
 
 impl for ProtocolError {
-    fn new(message: str) -> Self {
+    pub fn new(message: str) -> Self {
         ret Self {
             message
         }
@@ -237,7 +241,7 @@ pub fn decode_scene_batch(params: Json) -> Result[Vec[GrapheneCommand], Protocol
     let mut commands = Vec[GrapheneCommand]::new()
     for item in items {
         let method = string_field(item, "method").unwrap_or("")
-        if method != "scene.add" && method != "scene.duplicate" && method != "scene.delete" && method != "scene.set_parent" && method != "scene.rename" && method != "scene.set_visibility" && method != "scene.set_component" && method != "scene.set_transform" {
+        if method != "scene.add" && method != "scene.duplicate" && method != "scene.delete" && method != "scene.set_parent" && method != "scene.rename" && method != "scene.set_visibility" && method != "scene.set_component" && method != "scene.set_physics" && method != "scene.set_transform" {
             ret Result::Err(ProtocolError::new("Only scene edits can be batched"))
         }
         match decode_payload(method, item.get("params").unwrap_or(Json::Null)) {
@@ -250,6 +254,26 @@ pub fn decode_scene_batch(params: Json) -> Result[Vec[GrapheneCommand], Protocol
 }
 
 fn decode_payload(method: str, params: Json) -> Result[GrapheneCommand, ProtocolError] {
+    if method == "scene.set_physics" {
+        match actor_field(params) {
+            Some(actor) => {
+                match PhysicsComponent::from_json(params.get("physics").unwrap_or(Json::Null)) {
+                    Some(value) => {
+                        ret Result::Ok(GrapheneCommand::SetPhysics(ActorPhysicsCommand {
+                                    actor, value
+                                }
+                            ))
+                    }
+                    None => {
+                        ret Result::Err(ProtocolError::new("Invalid physics settings"))
+                    }
+                }
+            }
+            None => {
+                ret Result::Err(ProtocolError::new("Actor ID is required"))
+            }
+        }
+    }
     if method == "scene.set_component" {
         match actor_field(params) {
             Some(actor) => {
@@ -577,5 +601,5 @@ pub fn encode_command_response(id: str, result: CommandResult) -> str {
 
 /// Machine-readable command registry used by console completion and MCP tools.
 pub fn command_registry_json() -> str {
-    ret "{\"version\":1,\"commands\":[\"scene.add\",\"scene.batch\",\"scene.set_component\",\"scene.duplicate\",\"scene.delete\",\"scene.set_parent\",\"scene.rename\",\"scene.set_visibility\",\"scene.set_transform\",\"scene.select\",\"project.save\",\"build.start\",\"simulation.start\",\"simulation.stop\",\"history.undo\",\"history.redo\"]}"
+    ret "{\"version\":1,\"commands\":[\"scene.add\",\"scene.batch\",\"scene.set_component\",\"scene.set_physics\",\"scene.duplicate\",\"scene.delete\",\"scene.set_parent\",\"scene.rename\",\"scene.set_visibility\",\"scene.set_transform\",\"scene.select\",\"project.save\",\"build.start\",\"simulation.start\",\"simulation.stop\",\"history.undo\",\"history.redo\"]}"
 }

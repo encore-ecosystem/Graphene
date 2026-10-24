@@ -2,7 +2,9 @@
 //! destruction is explicit and modules cannot unload while instances are alive.
 import core::option::Option
 import core::result::Result
+
 import linalg::Vec3
+
 import mod::model::{BlueprintAsset, BlueprintInstance, BlueprintValue}
 import mod::validate::{validate_blueprint, validate_blueprint_instance}
 import refrain::scene::transform::Transform
@@ -13,6 +15,7 @@ extern fn graphene_bp_error_text() -> str
 extern fn graphene_bp_create(handle: usize, class_id: str) -> usize
 extern fn graphene_bp_destroy(handle: usize) -> bool
 extern fn graphene_bp_add_component(handle: usize, id: u64, parent: u64, px: f32, py: f32, pz: f32, rx: f32, ry: f32, rz: f32, sx: f32, sy: f32, sz: f32, visible: bool) -> bool
+extern fn graphene_bp_set_transform(handle: usize, id: u64, px: f32, py: f32, pz: f32, rx: f32, ry: f32, rz: f32, sx: f32, sy: f32, sz: f32) -> bool
 extern fn graphene_bp_has_component(handle: usize, id: u64) -> bool
 extern fn graphene_bp_axis(handle: usize, id: u64, field: u32, axis: u32) -> f32
 extern fn graphene_bp_is_visible(handle: usize, id: u64) -> bool
@@ -21,6 +24,13 @@ extern fn graphene_bp_invoke(handle: usize, kind: str, action: str, delta: f32) 
 extern fn graphene_bp_instance_error(handle: usize) -> str
 extern fn graphene_bp_error_node(handle: usize) -> u64
 extern fn graphene_bp_take_log(handle: usize) -> str
+
+extern fn graphene_bp_property_type(handle: usize, id: u64) -> u32
+extern fn graphene_bp_property_bool(handle: usize, id: u64) -> bool
+extern fn graphene_bp_property_i32(handle: usize, id: u64) -> i32
+extern fn graphene_bp_property_f32(handle: usize, id: u64, axis: u32) -> f32
+extern fn graphene_bp_property_reference(handle: usize, id: u64) -> u64
+extern fn graphene_bp_property_string(handle: usize, id: u64) -> str
 
 pub struct BlueprintModule {
     handle: usize
@@ -74,14 +84,35 @@ impl for BlueprintModule {
 }
 
 impl for BlueprintRuntimeInstance {
+    /// Copies one typed property out of the compiled instance; no borrowed pointers escape.
+    #attr(safe)
+    pub fn property(self: Self, id: u64) -> Option[BlueprintValue] {
+        ret match graphene_bp_property_type(self.handle, id) {
+            1 => Option[BlueprintValue]::Some(BlueprintValue::Bool(graphene_bp_property_bool(self.handle, id)))
+            2 => Option[BlueprintValue]::Some(BlueprintValue::I32(graphene_bp_property_i32(self.handle, id)))
+            3 => Option[BlueprintValue]::Some(BlueprintValue::F32(graphene_bp_property_f32(self.handle, id, 0)))
+            4 => Option[BlueprintValue]::Some(BlueprintValue::String(graphene_bp_property_string(self.handle, id)))
+            5 => Option[BlueprintValue]::Some(BlueprintValue::Vector(Vec3::new(graphene_bp_property_f32(self.handle, id, 0), graphene_bp_property_f32(self.handle, id, 1), graphene_bp_property_f32(self.handle, id, 2))))
+            6 => Option[BlueprintValue]::Some(BlueprintValue::Actor(graphene_bp_property_reference(self.handle, id)))
+            7 => Option[BlueprintValue]::Some(BlueprintValue::Component(graphene_bp_property_reference(self.handle, id)))
+            _ => Option[BlueprintValue]::None
+        }
+    }
+
     #attr(safe)
     pub fn destroy(self: Self) -> bool {
         ret graphene_bp_destroy(self.handle)
     }
     #attr(safe)
-    fn add_component(self: Self, id: u64, parent: u64, transform: Transform, visible: bool) -> bool {
+    pub fn add_component(self: Self, id: u64, parent: u64, transform: Transform, visible: bool) -> bool {
         let p = transform.position() let r = transform.rotation() let s = transform.scale()
         ret graphene_bp_add_component(self.handle, id, parent, p.x(), p.y(), p.z(), r.x(), r.y(), r.z(), s.x(), s.y(), s.z(), visible)
+    }
+    /// Copies an already computed runtime pose into the existing Blueprint host.
+    #attr(safe)
+    pub fn set_transform(self: Self, id: u64, transform: Transform) -> bool {
+        let p = transform.position() let r = transform.rotation() let s = transform.scale()
+        ret graphene_bp_set_transform(self.handle, id, p.x(), p.y(), p.z(), r.x(), r.y(), r.z(), s.x(), s.y(), s.z())
     }
     #attr(safe)
     pub fn set_property(self: Self, id: u64, value: BlueprintValue) -> bool {

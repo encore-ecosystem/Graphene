@@ -1,0 +1,1061 @@
+//! Terrain policy and compact retained controls; all authoring and geometry are Encore.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all}
+import std::time::perf_counter_ms
+
+import linalg::{Mat4, Vec3}
+import luma::{Color, DisplayList, Event, Point, PreparedFrame, ReactiveUi, Rect, StyleSheet, TextEditor, Widget, WidgetLayout, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_text_input, horizontal, key_backspace, key_delete, key_enter, key_escape, key_left, key_right, key_tab, vertical}
+
+import mod::asset::{import_heightmap, load_terrain, save_terrain, terrain_texture}
+import mod::brush::{TerrainBrush}
+import mod::document::TerrainDocument
+import mod::foliage::{FoliageBrush, foliage_mesh}
+import mod::geometry::{merge_terrain_chunks, terrain_chunk, terrain_collision, terrain_local_ray, terrain_lod, terrain_ray}
+import mod::model::{TerrainAsset, clamp, terrain_path}
+import refrain::editor_camera::EditorCameraState
+import refrain::editor_gesture::{gizmo_cos, gizmo_sin}
+import refrain::editor_guides::gizmo_step_label
+import refrain::editor_values::parse_editor_scalar
+import refrain::preview::ViewportRenderer
+import refrain::scene::primitive::MeshData
+import refrain::scene::renderable::{MeshId, RenderItem, Renderable}
+import refrain::scene::transform::Transform
+import refrain::scene::world::Scene
+import refrain::texture_asset::{TextureImage}
+
+struct TerrainEntry {
+    path: str
+    document: TerrainDocument
+    mesh: MeshId
+    images: Vec[TextureImage]
+    chunks: Vec[MeshData]
+    lods: Vec[u32]
+    invalid: Vec[bool]
+    triangles: usize
+}
+pub fn terrain_key(path: str) -> str {
+    ret "@terrain:" + path
+}
+pub fn terrain_key_path(key: str) -> str {
+    ret if key.byte_len() > 9 && key.slice_bytes(0, 9) == "@terrain:" {
+        key.slice_bytes(9, key.byte_len() - 9)
+    } else {
+        ""
+    }
+}
+fn empty_image() -> TextureImage {
+    ret TextureImage { 0_u32, 0_u32, Vec[u32]::new() }
+}
+fn images(project: str, asset: TerrainAsset) -> Vec[TextureImage] {
+    let mut result = Vec[TextureImage]::new()
+    for layer in asset.layers {
+        result.push(if layer.texture != "" {
+                terrain_texture(project + "/" + layer.texture).unwrap_or(empty_image())
+            } else {
+                empty_image()
+            }
+        )
+    }
+    ret result
+}
+fn entry(path: str, project: str, asset: TerrainAsset) -> TerrainEntry<H> {
+    let mut chunks = Vec[MeshData]::new() let mut lods = Vec[u32]::new() let mut invalid = Vec[bool]::new()
+    let count =(asset.resolution - 1) / 32
+    let terrain_count =(count * count) as usize
+    for _ in 0_usize..terrain_count {
+        chunks.push(MeshData::new(Vec[f32]::new(), Vec[u32]::new(), 44_u32)) lods.push(99_u32) invalid.push(true)
+    }
+    ret TerrainEntry<H> {
+        path, TerrainDocument::new(asset), MeshId::new(0_u64), images(project, asset), chunks, lods, invalid, 0_usize
+    }
+}
+pub struct TerrainEditor {
+    entries: Vec[TerrainEntry<H>]
+    project: str
+    active: usize
+    actor: u64
+    world: Mat4
+    brush: TerrainBrush
+    foliage: FoliageBrush
+    grass_mesh: MeshId
+    tree_mesh: MeshId
+    foliage_visible: usize
+    foliage_camera: Vec3
+    foliage_scene_revision: u64
+    foliage_dirty: bool
+    enabled: bool
+    stroking: bool
+    stroke_changed: bool
+    hit: Option[Vec3]
+    target: f32
+    last: u64
+    last_upload: u64
+    dirty: bool
+    changed: bool
+    focused: str
+    hovered: str
+    pressed: str
+    text: TextEditor
+    owns_focus: bool
+    message: str
+    request: str
+    source: str
+    range: f32
+    resolution: u32
+    spacing: f32
+    pending_create: bool
+    pending_path: str
+    selected_actor: u64
+    selected_key: str
+    invert: bool
+}
+
+impl for TerrainEditor {
+    pub fn new() -> Self {
+        ret Self {
+            Vec[TerrainEntry<H>]::new(), "", 0_usize, 0_u64, Mat4::identity(), TerrainBrush::defaults(), FoliageBrush::defaults(), MeshId::new(0_u64), MeshId::new(0_u64), 0_usize, Vec3::zero(), 0_u64, true, false, false, false, Option[Vec3]::None, 0_f32, 0_u64, 0_u64, true, false, "", "", "", TextEditor::new(""), false, "Create a landscape or select a terrain actor", "", "Content/Terrain/Height.raw16", 64_f32, 129_u32, 1_f32, false, "", 0_u64, "", false
+        }
+    }
+    pub fn configure(self: mut Self, project: str) ->() {
+        self.foliage_dirty = true self.entries.clear() self.selected_actor = 0_u64 self.selected_key = "" self.pending_path = "" self.pending_create = false self.project = project self.active = 0 self.actor = 0 self.enabled = false self.stroking = false self.focused = "" self.hit = Option[Vec3]::None self.dirty = true self.changed = false
+    }
+    pub fn changed(self: Self) -> bool {
+        for e in self.entries {
+            if e.document.changed() {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn save_all(self: mut Self) -> bool {
+        self.end_stroke(false)
+        for i in 0_usize..self.entries.len() {
+            let mut e = self.entries.get_unchecked_borrowed(i)
+            if e.document.changed() {
+                if !save_terrain(self.project + "/" + e.path, e.document.asset()) {
+                    self.message = "Unable to save " + e.path ret false
+                }
+                e.document.saved()
+            }
+        }
+        self.dirty = true ret true
+    }
+    pub fn take_dirty(self: mut Self) -> bool {
+        let value = self.dirty self.dirty = false ret value
+    }
+    pub fn take_changed(self: mut Self) -> bool {
+        let value = self.changed self.changed = false ret value
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.stroking
+    }
+    pub fn focused(self: Self) -> str {
+        ret if self.focused != "" {
+            "terrain-field-" + self.focused
+        } elif self.owns_focus {
+            self.request
+        } else {
+            ""
+        }
+    }
+    pub fn active(self: Self) -> bool {
+        ret self.actor != 0 && self.active < self.entries.len()
+    }
+    fn invalidate(self: mut Self) ->() {
+        if self.active() {
+            let mut e = self.entries.get_unchecked_borrowed(self.active) for i in 0_usize..e.invalid.len() {
+                e.invalid.set(i, true)
+            }
+        }
+        self.foliage_dirty = true self.dirty = true self.changed = true
+    }
+    pub fn ensure(self: mut Self, key: str) -> bool {
+        let path = terrain_key_path(key)
+        if !terrain_path(path) {
+            ret false
+        }
+        for e in self.entries {
+            if e.path == path {
+                ret true
+            }
+        }
+        match load_terrain(self.project + "/" + path) {
+            Ok(asset) => {
+                self.entries.push(entry(path, self.project, asset)) ret true
+            }
+            Err(error) => {
+                self.message = error self.dirty = true ret false
+            }
+        }
+    }
+    pub fn select(self: mut Self, scene: Scene, actor: u64, key: str) ->() {
+        if actor == self.selected_actor && key == self.selected_key {
+            self.world = scene.world_matrix(actor).unwrap_or(Mat4::identity()) ret()
+        }
+        self.end_stroke(false) self.selected_actor = actor self.selected_key = key self.actor = 0 self.hit = Option[Vec3]::None
+        if self.ensure(key) {
+            let path = terrain_key_path(key) for i in 0_usize..self.entries.len() {
+                if self.entries.get_unchecked_borrowed(i).path == path {
+                    self.active = i self.actor = actor self.world = scene.world_matrix(actor).unwrap_or(Mat4::identity()) break
+                }
+            }
+        }
+        self.dirty = true
+    }
+    pub fn queue_place(self: mut Self, path: str) ->() {
+        if terrain_path(path) && self.ensure(terrain_key(path)) {
+            self.pending_path = path self.pending_create = true
+        }
+    }
+    pub fn references(self: Self) -> Vec[str] {
+        let mut paths = Vec[str]::new()
+        for e in self.entries {
+            paths.push(e.path) for layer in e.document.asset().layers {
+                paths.push(layer.texture)
+            }
+        }
+        ret paths
+    }
+    pub fn create(self: mut Self) -> str {
+        if self.pending_path != "" {
+            let path = self.pending_path self.pending_path = "" self.enabled = true ret terrain_key(path)
+        }
+        if self.project == "" {
+            self.message = "Open a project first" ret ""
+        }
+        if mkdir_all(self.project + "/Content/Terrain") != 0 {
+            self.message = "Unable to create Content/Terrain" ret ""
+        }
+        let mut path = "Content/Terrain/Landscape.gterrain" let mut number = 1_u32
+        while file_exists(self.project + "/" + path) {
+            path = "Content/Terrain/Landscape" + number.fmt() + ".gterrain" number += 1
+        }
+        let asset = TerrainAsset::flat(self.resolution, self.spacing)
+        if !save_terrain(self.project + "/" + path, asset) {
+            self.message = "Unable to save terrain" ret ""
+        }
+        self.entries.push(entry(path, self.project, asset)) self.active = self.entries.len() - 1 self.enabled = true
+        self.message = "Landscape created · LMB sculpt · Shift reverses · Esc cancels a stroke" self.dirty = true
+        ret terrain_key(path)
+    }
+    pub fn take_create(self: mut Self) -> bool {
+        let value = self.pending_create self.pending_create = false ret value
+    }
+    pub fn mesh(self: Self, key: str) -> MeshId {
+        let path = terrain_key_path(key) for e in self.entries {
+            if e.path == path {
+                ret e.mesh
+            }
+        }
+        ret MeshId::new(0_u64)
+    }
+    pub fn collision(self: Self, key: str) -> Option[MeshData] {
+        let path = terrain_key_path(key) for e in self.entries {
+            if e.path == path {
+                ret Option[MeshData]::Some(terrain_collision(e.document.asset()))
+            }
+        }
+        ret Option[MeshData]::None
+    }
+    /// Reuses every clean chunk. Only LOD transitions or touched brush bounds rebuild.
+    pub fn sync(self: mut Self, renderer: mut ViewportRenderer&, scene: Scene, ids: Vec[u64], keys: Vec[str], camera: Vec3) -> bool {
+        let now = perf_counter_ms() if self.stroking && now - self.last_upload < 50_u64 {
+            ret false
+        }
+        let mut updated = false
+        for key in keys {
+            if terrain_key_path(key) != "" {
+                let _loaded = self.ensure(key)
+            }
+        }
+        for ei in 0_usize..self.entries.len() {
+            let mut e = self.entries.get_unchecked_borrowed(ei)
+            let mut worlds = Vec[Mat4]::new()
+            for j in 0_usize..keys.len() {
+                if terrain_key_path(keys.get_unchecked_borrowed(j)) == e.path {
+                    if scene.world_visible(ids.get(j).unwrap_or(0_u64)) {
+                        worlds.push(scene.world_matrix(ids.get(j).unwrap_or(0_u64)).unwrap_or(Mat4::identity()))
+                    }
+                }
+            }
+            if worlds.len() == 0 {
+                continue
+            }
+            let asset = e.document.asset() let count =((asset.resolution - 1) / 32) as usize
+            let mut rebuilt = false
+            for cz in 0_usize..count {
+                for cx in 0_usize..count {
+                    let i = cz * count + cx let mut distance = 1000000_f32
+                    for world in worlds {
+                        let center = world.transform_point(asset.point((cx * 32 + 16) as u32,(cz * 32 + 16) as u32))
+                        let span = world.transform_point(asset.point((cx * 32) as u32,(cz * 32) as u32)).sub(center).length()
+                        let d = clamp(camera.sub(center).length() - span, 0_f32, 1000000_f32)
+                        if d < distance {
+                            distance = d
+                        }
+                    }
+                    let old = e.lods.get_unchecked_borrowed(i)
+                    let lod = if self.stroking && self.brush.tool != "foliage" {
+                        0_u32
+                    } else {
+                        terrain_lod(distance, asset.lod_distance, if old > 4 {
+                                0_u32
+                            } else {
+                                old
+                            }
+                            ,
+                        )
+                    }
+                    if lod != old || e.invalid.get_unchecked_borrowed(i) {
+                        e.chunks.set(i, terrain_chunk(asset, cx as u32, cz as u32, lod, e.images)) e.lods.set(i, lod) e.invalid.set(i, false) rebuilt = true
+                    }
+                }
+            }
+            if rebuilt || !e.mesh.valid() {
+                let data = merge_terrain_chunks(e.chunks) e.triangles = data.index_count() / 3
+                let uploaded = renderer.update_terrain_mesh(e.mesh, data)
+                if uploaded.valid() {
+                    e.mesh = uploaded updated = true self.dirty = true
+                } else {
+                    self.message = "Terrain GPU upload failed" for i in 0_usize..e.invalid.len() {
+                        e.invalid.set(i, true)
+                    }
+                }
+            }
+        }
+        if updated {
+            self.last_upload = now
+        }
+        if !self.foliage_dirty && self.foliage_scene_revision == scene.revision() && camera.sub(self.foliage_camera).length() < 0.5_f32 {
+            ret updated
+        }
+        self.foliage_dirty = false self.foliage_camera = camera self.foliage_scene_revision = scene.revision()
+        let mut plants = Vec[RenderItem]::new()
+        let budget = renderer.foliage_budget()
+        let mut grass = false let mut trees = false
+        for e in self.entries {
+            for plant in e.document.asset().foliage {
+                if plant.kind == "tree" {
+                    trees = true
+                } else {
+                    grass = true
+                }
+            }
+        }
+        let mixed = grass && trees
+        for kind in vec!["tree", "grass"] {
+            let species_start = plants.len()
+            let species_budget = if mixed && kind == "tree" {
+                budget / 2_usize
+            } else {
+                budget - species_start
+            }
+            for ei in 0_usize..self.entries.len() {
+                let e = self.entries.get_unchecked_borrowed(ei) let asset = e.document.asset()
+                for j in 0_usize..keys.len() {
+                    let actor = ids.get(j).unwrap_or(0_u64)
+                    if terrain_key_path(keys.get_unchecked_borrowed(j)) != e.path || !scene.world_visible(actor) {
+                        continue
+                    }
+                    let world = scene.world_matrix(actor).unwrap_or(Mat4::identity())
+                    for plant in asset.foliage {
+                        if plant.kind != kind {
+                            continue
+                        }
+                        let position = Vec3::new(plant.x, asset.sample(plant.x, plant.z), plant.z)
+                        let distance = world.transform_point(position).sub(camera).length()
+                        if distance >(if kind == "grass" {
+                                60_f32
+                            } else {
+                                300_f32
+                            }
+                        ) || plants.len() - species_start >= species_budget {
+                            continue
+                        }
+                        let mut mesh = if kind == "grass" {
+                            self.grass_mesh
+                        } else {
+                            self.tree_mesh
+                        }
+                        if !mesh.valid() {
+                            mesh = renderer.update_terrain_mesh(MeshId::new(0_u64), foliage_mesh(kind))
+                            if kind == "grass" {
+                                self.grass_mesh = mesh
+                            } else {
+                                self.tree_mesh = mesh
+                            }
+                        }
+                        if !mesh.valid() {
+                            continue
+                        }
+                        let transform = Transform::identity().with_position(position).with_rotation(Vec3::new(0_f32, plant.yaw, 0_f32)).with_scale(Vec3::new(plant.scale, plant.scale, plant.scale))
+                        let identity = 9223372036854775808_u64 + actor * 17179869184_u64 + plant.id
+                        plants.push(renderer.foliage_item(identity, mesh, world.mul(transform.matrix())))
+                    }
+                }
+            }
+        }
+        if self.foliage_visible != plants.len() {
+            self.foliage_visible = plants.len() self.dirty = true
+        }
+        updated = renderer.set_foliage(plants) || updated
+        ret updated
+    }
+    fn value(self: Self, key: str) -> str {
+        ret match key {
+            "density" => gizmo_step_label(self.foliage.density)
+            "scale-min" => gizmo_step_label(self.foliage.minimum_scale)
+            "scale-max" => gizmo_step_label(self.foliage.maximum_scale)
+            "slope" => gizmo_step_label(self.foliage.slope)
+            "radius" => gizmo_step_label(self.brush.radius) "strength" => gizmo_step_label(self.brush.strength) "falloff" => gizmo_step_label(self.brush.falloff)
+            "spacing" => gizmo_step_label(self.spacing) "source" => self.source "range" => gizmo_step_label(self.range)
+            "lod" => if self.active() {
+                gizmo_step_label(self.entries.get_unchecked_borrowed(self.active).document.asset().lod_distance)
+            } else {
+                "48"
+            }
+            "texture" => if self.active() {
+                self.entries.get_unchecked_borrowed(self.active).document.asset().layers.get_unchecked_borrowed(self.brush.layer as usize).texture
+            } else {
+                ""
+            }
+            "tiling" => if self.active() {
+                gizmo_step_label(self.entries.get_unchecked_borrowed(self.active).document.asset().layers.get_unchecked_borrowed(self.brush.layer as usize).tiling)
+            } else {
+                "4"
+            }
+            _ => ""
+        }
+    }
+    fn commit_field(self: mut Self) ->() {
+        let key = self.focused let text = self.text.value() let number = parse_editor_scalar(text)
+        let mut okay = true
+        if key == "source" {
+            if terrain_path(text) {
+                self.source = text
+            } else {
+                okay = false
+            }
+        } elif key == "texture" && self.active() {
+            if text != "" && !terrain_path(text) {
+                okay = false
+            } else {
+                let mut loaded = empty_image()
+                if text != "" {
+                    match terrain_texture(self.project + "/" + text) {
+                        Ok(image) => {
+                            loaded = image
+                        }
+                        Err(error) => {
+                            self.message = error okay = false
+                        }
+                    }
+                }
+                if okay {
+                    let mut e = self.entries.get_unchecked_borrowed(self.active) let mut asset = e.document.asset().copy()
+                    let mut layer = asset.layers.get_unchecked_borrowed(self.brush.layer as usize) layer.texture = text asset.layers.set(self.brush.layer as usize, layer)
+                    e.document.replace(asset) e.images.set(self.brush.layer as usize, loaded) self.invalidate()
+                }
+            }
+        } else {
+            match number {
+                Some(n) => {
+                    if key == "density" && n >= 0.001_f32 && n <= 1 {
+                        self.foliage.density = n
+                    } elif key == "scale-min" && n > 0 && n <= self.foliage.maximum_scale {
+                        self.foliage.minimum_scale = n
+                    } elif key == "scale-max" && n >= self.foliage.minimum_scale && n <= 100 {
+                        self.foliage.maximum_scale = n
+                    } elif key == "slope" && n >= 0 && n <= 1 {
+                        self.foliage.slope = n
+                    } elif key == "radius" && n >= 0.1_f32 && n <= 10000 {
+                        self.brush.radius = n
+                    } elif key == "strength" && n > 0 && n <= 1000 {
+                        self.brush.strength = n
+                    } elif key == "falloff" && n >= 0 && n <= 1 {
+                        self.brush.falloff = n
+                    } elif key == "spacing" && n >= 0.1_f32 && n <= 100 {
+                        self.spacing = n
+                    } elif key == "range" && n >= 0.01_f32 && n <= 65536 {
+                        self.range = n
+                    } elif (key == "lod" || key == "tiling") && self.active() && n >= 1 && n <= 10000 {
+                        let mut e = self.entries.get_unchecked_borrowed(self.active) let mut asset = e.document.asset().copy()
+                        if key == "lod" {
+                            asset.lod_distance = n
+                        } else {
+                            let mut layer = asset.layers.get_unchecked_borrowed(self.brush.layer as usize) layer.tiling = n asset.layers.set(self.brush.layer as usize, layer)
+                        }
+                        e.document.replace(asset) self.invalidate()
+                    } else {
+                        okay = false
+                    }
+                }
+                None => {
+                    okay = false
+                }
+            }
+        }
+        if okay {
+            self.focused = ""
+        } else {
+            self.message = "Invalid value · Radius > 0 · Falloff 0–1 · Content paths only"
+        }
+        self.dirty = true
+    }
+    pub fn action(self: mut Self, id: str, locked: bool) -> bool {
+        if !id.contains("terrain-") {
+            ret false
+        }
+        if locked {
+            ret true
+        }
+        if !self.active() && id != "terrain-create" && id != "terrain-resolution" && id != "terrain-save" {
+            ret true
+        }
+        if id == "terrain-create" {
+            self.pending_create = true
+        } elif id == "terrain-enable" {
+            self.end_stroke(false) self.enabled = !self.enabled self.hit = Option[Vec3]::None
+        } elif id == "terrain-resolution" {
+            self.resolution = if self.resolution == 33 {
+                65_u32
+            } elif self.resolution == 65 {
+                129_u32
+            } elif self.resolution == 129 {
+                257_u32
+            } elif self.resolution == 257 {
+                513_u32
+            } else {
+                33_u32
+            }
+        } elif id == "terrain-save" {
+            self.message = if self.save_all() {
+                "Terrain saved"
+            } else {
+                "Unable to save terrain"
+            }
+        } elif id == "terrain-undo" || id == "terrain-redo" {
+            if self.active() {
+                let mut e = self.entries.get_unchecked_borrowed(self.active) let changed = if id == "terrain-undo" {
+                    e.document.undo()
+                } else {
+                    e.document.redo()
+                }
+                if changed {
+                    e.images = images(self.project, e.document.asset()) self.invalidate()
+                }
+            }
+        } elif id == "terrain-foliage-grass" || id == "terrain-foliage-tree" {
+            self.end_stroke(false) self.brush.tool = "foliage" self.enabled = true
+            self.foliage.kind = if id == "terrain-foliage-grass" {
+                "grass"
+            } else {
+                "tree"
+            }
+            self.message = "LMB plants · Shift erases this species · Terrain strokes share Undo/Redo"
+        } elif id == "terrain-import" && self.active() {
+            if terrain_path(self.source) {
+                let mut e = self.entries.get_unchecked_borrowed(self.active)
+                match import_heightmap(self.project + "/" + self.source, e.document.asset(), self.range) {
+                    Ok(asset) => {
+                        e.document.replace(asset) self.invalidate() self.message = "Heightmap imported"
+                    }
+                    Err(error) => {
+                        self.message = error
+                    }
+                }
+            }
+        } else {
+            for tool in vec!["raise", "lower", "smooth", "flatten", "paint"] {
+                if id == "terrain-tool-" + tool {
+                    self.end_stroke(false) self.brush.tool = tool self.enabled = true
+                }
+            }
+            let terrain_start_i = 0_usize
+            let terrain_end_i = 3_usize
+            for terrain_index_i in terrain_start_i..terrain_end_i {
+                let i = terrain_index_i as u32
+                if id == "terrain-layer-" + i.fmt() {
+                    self.brush.layer = i self.brush.tool = "paint" self.enabled = true
+                }
+            }
+        }
+        self.dirty = true ret true
+    }
+    fn end_stroke(self: mut Self, cancel: bool) ->() {
+        if self.stroking && self.active() {
+            let mut e = self.entries.get_unchecked_borrowed(self.active)
+            if cancel {
+                e.document.cancel() self.invalidate()
+            } else {
+                e.document.end(self.stroke_changed)
+            }
+        }
+        if self.stroking {
+            self.dirty = true
+        }
+        self.stroking = false self.stroke_changed = false
+    }
+    fn dab(self: mut Self, hit: Vec3, dt: f32, invert: bool) ->() {
+        let mut e = self.entries.get_unchecked_borrowed(self.active)
+        let foliage = self.brush.tool == "foliage"
+        if foliage && !invert && self.brush.radius * self.brush.radius * self.foliage.density > 900_f32 {
+            self.message = "Foliage brush too broad: reduce radius or density" self.dirty = true ret()
+        }
+        let edited = if foliage {
+            e.document.foliage(self.foliage, hit, self.brush.radius, invert)
+        } else {
+            e.document.dab(self.brush, hit, dt, self.target, invert)
+        }
+        if edited {
+            self.foliage_dirty = true
+            if foliage {
+                self.stroke_changed = true self.changed = true self.dirty = true ret()
+            }
+            let asset = e.document.asset() let count =(asset.resolution - 1) / 32
+            let radius = self.brush.radius + asset.spacing * 2
+            let terrain_start_cz = 0_usize
+            let terrain_end_cz =(count as usize)
+            for terrain_index_cz in terrain_start_cz..terrain_end_cz {
+                let cz = terrain_index_cz as u32
+                let terrain_start_cx = 0_usize
+                let terrain_end_cx =(count as usize)
+                for terrain_index_cx in terrain_start_cx..terrain_end_cx {
+                    let cx = terrain_index_cx as u32
+
+                    let a = asset.point(cx * 32, cz * 32) let b = asset.point(cx * 32 + 32, cz * 32 + 32)
+                    if hit.x() + radius >= a.x() && hit.x() - radius <= b.x() && hit.z() + radius >= a.z() && hit.z() - radius <= b.z() {
+                        e.invalid.set((cz * count + cx) as usize, true)
+                    }
+                }
+            }
+            self.stroke_changed = true self.changed = true self.dirty = true
+        }
+    }
+    fn next_focus(self: mut Self, backwards: bool, locked: bool) ->() {
+        let ids = vec!["terrain-enable", "terrain-tool-raise", "terrain-tool-lower", "terrain-tool-smooth", "terrain-tool-flatten", "terrain-tool-paint", "terrain-undo", "terrain-redo", "terrain-save", "terrain-create", "terrain-resolution", "terrain-field-radius", "terrain-field-strength", "terrain-field-falloff", "terrain-field-source", "terrain-field-range", "terrain-field-spacing", "terrain-import", "terrain-layer-0", "terrain-layer-1", "terrain-layer-2", "terrain-field-texture", "terrain-field-tiling", "terrain-field-lod", "terrain-foliage-grass", "terrain-foliage-tree", "terrain-field-density", "terrain-field-scale-min", "terrain-field-scale-max", "terrain-field-slope"]
+        let controls = self.widget(locked)
+        let mut start = 0_usize
+        for i in 0_usize..ids.len() {
+            if ids.get_unchecked_borrowed(i) == self.request {
+                start = i
+            }
+        }
+        for step in 1_usize..ids.len() + 1_usize {
+            let index = if backwards {
+                (start + ids.len() - step % ids.len()) % ids.len()
+            } else {
+                (start + step) % ids.len()
+            }
+            let id = ids.get_unchecked_borrowed(index)
+            match controls.find(id) {
+                Some(control) => {
+                    if !control.disabled() {
+                        self.request = id ret()
+                    }
+                }
+                None => {
+                }
+            }
+        }
+    }
+    pub fn reveal_focus(self: Self, ui: mut ReactiveUi) -> bool {
+        if !self.owns_focus || self.request == "" {
+            ret false
+        }
+        let layout = ui.layout()
+        match layout.find_bounds("terrain-body") {
+            Some(view) => {
+                match layout.find_bounds(self.focused()) {
+                    Some(focus) => {
+                        // The toolbar lies outside the body scroll container.
+                        if self.request == "terrain-enable" || self.request == "terrain-undo" || self.request == "terrain-redo" || self.request == "terrain-save" {
+                            ret false
+                        }
+                        let delta = if focus.bottom() > view.bottom() - 4_f32 {
+                            focus.bottom() - view.bottom() + 4_f32
+                        } elif focus.y() < view.y() + 4_f32 {
+                            focus.y() - view.y() - 4_f32
+                        } else {
+                            0_f32
+                        }
+                        if delta != 0_f32 {
+                            ret ui.scroll_at(view.x() + view.width() * 0.5_f32, view.y() + view.height() * 0.5_f32, delta)
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret false
+    }
+    /// Pointer capture survives leaving the viewport. RMB/MMB/wheel remain camera input.
+    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout, ray:(Vec3, Vec3), locked: bool, visible: bool) -> bool {
+        let kind = event.kind()
+        if kind == event_focus_lost() {
+            self.end_stroke(true) self.owns_focus = false self.focused = "" self.pressed = "" self.hit = Option[Vec3]::None self.dirty = true ret false
+        }
+        if locked || !visible {
+            self.end_stroke(false) self.hit = Option[Vec3]::None self.owns_focus = false self.focused = "" ret false
+        }
+        let on_panel = target.contains("terrain-")
+        if kind == event_pointer_move() {
+            let next = if on_panel {
+                target
+            } else {
+                ""
+            }
+            if next != self.hovered {
+                self.hovered = next self.dirty = true
+            }
+        }
+        if kind == event_pointer_up() && self.pressed != "" {
+            let id = self.pressed self.pressed = "" self.dirty = true if id == target {
+                self.action(id, false)
+            }
+            ret true
+        }
+        if self.stroking && kind == event_key_down() && event.key() == key_escape() {
+            self.end_stroke(true) ret true
+        }
+        if self.owns_focus && kind == event_key_down() && event.control() &&(event.key() == 122 || event.key() == 121) {
+            self.action(if event.key() == 121 || event.shift() {
+                    "terrain-redo"
+                } else {
+                    "terrain-undo"
+                }
+                , false,) ret true
+        }
+        if self.focused != "" {
+            if kind == event_text_input() {
+                self.text = self.text.insert(event.text()) self.dirty = true ret true
+            }
+            if kind == event_key_down() {
+                if event.key() == key_enter() {
+                    self.commit_field()
+                } elif event.key() == key_escape() {
+                    self.focused = "" self.dirty = true
+                } elif event.key() == key_backspace() {
+                    self.text = self.text.backspace()
+                } elif event.key() == key_delete() {
+                    self.text = self.text.delete()
+                } elif event.key() == key_left() {
+                    self.text = self.text.move_left(event.shift())
+                } elif event.key() == key_right() {
+                    self.text = self.text.move_right(event.shift())
+                } elif event.control() && event.key() == 97 {
+                    self.text = self.text.select_all()
+                } elif event.key() == key_tab() {
+                    self.commit_field()
+                    if self.focused == "" {
+                        self.next_focus(event.shift(), locked)
+                    }
+                }
+                self.dirty = true ret true
+            }
+        }
+        if self.owns_focus && kind == event_key_down() && event.key() == key_tab() {
+            self.next_focus(event.shift(), locked)
+            self.dirty = true ret true
+        }
+        if self.owns_focus && kind == event_key_down() &&(event.key() == key_enter() || event.key() == 32) && self.request != "" {
+            if self.request.contains("terrain-field-") {
+                self.focused = self.request.slice_bytes(14, self.request.byte_len() - 14) self.text = TextEditor::new(self.value(self.focused))
+            } else {
+                self.action(self.request, false)
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_pointer_down() && event.key() == 1 && on_panel {
+            match layout.find_widget(target) {
+                Some(control) => {
+                    if control.disabled() {
+                        ret true
+                    }
+                }
+                None => {
+                }
+            }
+            if self.focused != "" {
+                self.commit_field()
+            }
+            self.owns_focus = true self.request = target
+            if target.contains("terrain-field-") {
+                self.focused = target.slice_bytes(14, target.byte_len() - 14) self.text = TextEditor::new(self.value(self.focused))
+            } else {
+                self.focused = "" self.pressed = target
+            }
+            self.dirty = true ret true
+        }
+        let bounds = layout.find_bounds("viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0))
+        let inside = event.x() >= bounds.x() && event.x() < bounds.right() && event.y() >= bounds.y() && event.y() < bounds.bottom()
+        if self.enabled && self.active() &&(inside || self.stroking) {
+            let previous_hit = self.hit
+            let mut next = if kind == 0_u32 {
+                self.hit
+            } else {
+                Option[Vec3]::None
+            }
+            if inside && kind != 0_u32 {
+                match terrain_local_ray(self.world, ray.0, ray.1) {
+                    Some(local) => {
+                        next = terrain_ray(self.entries.get_unchecked_borrowed(self.active).document.asset(), local.0, local.1)
+                    }
+                    None => {
+                    }
+                }
+            }
+            if kind == event_pointer_move() || kind == event_pointer_down() || self.stroking {
+                self.hit = next
+            }
+            if kind == event_pointer_down() && event.key() == 1 {
+                match next {
+                    Some(hit) => {
+                        let mut e = self.entries.get_unchecked_borrowed(self.active) e.document.begin() self.target = hit.y() self.stroking = true self.stroke_changed = false self.last = perf_counter_ms() self.invert = event.shift() self.owns_focus = true self.focused = "" self.dab(hit, 0.016_f32, event.shift()) self.dirty = true ret true
+                    }
+                    None => {
+                    }
+                }
+            }
+            if self.stroking {
+                if kind == event_pointer_up() && event.key() == 1 {
+                    self.end_stroke(false) ret true
+                }
+                if kind == event_pointer_move() || kind == 0_u32 {
+                    let now = perf_counter_ms() let dt =((now - self.last) as f32) * 0.001_f32 self.last = now
+                    match next {
+                        Some(hit) => {
+                            if kind == event_pointer_move() {
+                                self.invert = event.shift()
+                            }
+                            let from = previous_hit.unwrap_or(hit)
+                            let samples = clamp(from.sub(hit).length() /(self.brush.radius * 0.25_f32) + 1, 1_f32, 128_f32) as usize
+                            for sample in 0_usize..samples {
+                                let t =((sample + 1) as f32) /(samples as f32)
+                                self.dab(from.scale(1 - t).add(hit.scale(t)), clamp(dt, 0.001_f32, 0.05_f32) /(samples as f32), self.invert)
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                ret kind == event_pointer_move() || kind == event_pointer_down()
+            }
+            if kind == event_pointer_move() {
+                self.dirty = true
+            }
+        } else {
+            if self.hit.is_some() {
+                self.hit = Option[Vec3]::None self.dirty = true
+            }
+        }
+        if kind == event_pointer_down() && !on_panel && !self.stroking {
+            self.focused = "" self.owns_focus = false self.request = "" self.dirty = true
+        }
+        ret false
+    }
+    fn button(self: Self, id: str, label: str, active: bool, disabled: bool) -> Widget {
+        ret Widget::button(id, label).with_classes("terrain-button" + if active {
+                " is-active"
+            } else {
+                ""
+            }
+            + if !disabled && self.hovered == id {
+                " is-hovered"
+            } else {
+                ""
+            }
+            + if !disabled && self.pressed == id {
+                " is-pressed"
+            } else {
+                ""
+            }
+        )
+        .with_checked(active).with_disabled(disabled).with_focus(!disabled && self.owns_focus && self.request == id)
+        .with_attribute("aria-pressed", if active {
+                "true"
+            } else {
+                "false"
+            }
+            ,
+        ).with_attribute("title", label)
+    }
+    fn field(self: Self, key: str, label: str, disabled: bool) -> Widget {
+        let id = "terrain-field-" + key
+        let mut row = Widget::panel("").with_classes("terrain-property").with_direction(horizontal())
+        row.push(Widget::label(label).with_classes("terrain-label"))
+        row.push(Widget::input(id, if self.focused == key {
+                    self.text.value()
+                } else {
+                    self.value(key)
+                }
+                ,
+            ).with_classes("terrain-input").with_disabled(disabled).with_focus(!disabled && self.owns_focus &&(self.focused == key || self.request == id)).with_attribute("aria-label", label))
+        ret row
+    }
+    pub fn widget(self: Self, locked: bool) -> Widget {
+        let active = self.active() let disabled = locked || !active
+        let mut root = Widget::panel("terrain-panel").with_classes("terrain-panel").with_direction(vertical())
+        let mut tools = Widget::panel("terrain-toolbar").with_classes("terrain-toolbar").with_direction(horizontal())
+        tools.push(self.button("terrain-enable", if self.enabled {
+                    "Brush on"
+                } else {
+                    "Brush off"
+                }
+                , self.enabled, disabled,))
+        let mut can_undo = false let mut can_redo = false
+        if active {
+            let e = self.entries.get_unchecked_borrowed(self.active) can_undo = e.document.can_undo() can_redo = e.document.can_redo()
+        }
+        tools.push(self.button("terrain-undo", "Undo", false, disabled || !can_undo || self.stroking))
+        tools.push(self.button("terrain-redo", "Redo", false, disabled || !can_redo || self.stroking))
+        tools.push(self.button("terrain-save", "Save", false, locked || !self.changed())) root.push(tools)
+        let mut body = Widget::panel("terrain-body").with_classes("terrain-body").with_direction(horizontal()).with_attribute("data-luma-scrollable", "true")
+        let mut sculpt = Widget::panel("terrain-brush").with_classes("terrain-column").with_direction(vertical())
+        sculpt.push(Widget::label("BRUSH").with_classes("terrain-heading"))
+        for group in vec![vec!["raise", "lower", "smooth"], vec!["flatten", "paint"]] {
+            let mut choices = Widget::panel("").with_classes("terrain-row").with_direction(horizontal())
+            for tool in group {
+                choices.push(self.button("terrain-tool-" + tool, if tool == "raise" {
+                            "Raise"
+                        } elif tool == "lower" {
+                            "Lower"
+                        } elif tool == "smooth" {
+                            "Smooth"
+                        } elif tool == "flatten" {
+                            "Flatten"
+                        } else {
+                            "Paint"
+                        }
+                        , self.brush.tool == tool, disabled,))
+            }
+            sculpt.push(choices)
+        }
+        sculpt.push(self.field("radius", "Radius · m", disabled)) sculpt.push(self.field("strength", "Strength · m/s", disabled)) sculpt.push(self.field("falloff", "Falloff · 0–1", disabled)) sculpt.push(self.field("lod", "LOD distance · m", disabled))
+        sculpt.push(Widget::label("LMB: stroke · Shift: reverse\nEsc: cancel · Ctrl+Z: undo\nRMB / MMB / wheel: camera").with_classes("terrain-hint").with_text_wrap(true)) body.push(sculpt)
+        let mut layers = Widget::panel("terrain-layers").with_classes("terrain-column").with_direction(vertical())
+        layers.push(Widget::label("MATERIAL LAYERS").with_classes("terrain-heading"))
+        let mut choices = Widget::panel("").with_classes("terrain-row").with_direction(horizontal())
+        let terrain_start_i = 0_usize
+        let terrain_end_i = 3_usize
+        for terrain_index_i in terrain_start_i..terrain_end_i {
+            let i = terrain_index_i as u32
+            choices.push(self.button("terrain-layer-" + i.fmt(), if i == 0 {
+                        "Grass"
+                    } elif i == 1 {
+                        "Rock"
+                    } else {
+                        "Earth"
+                    }
+                    , self.brush.layer == i, disabled,))
+        }
+        layers.push(choices)
+        layers.push(self.field("texture", "Albedo", disabled)) layers.push(self.field("tiling", "Tile size · m", disabled))
+        layers.push(Widget::label("PNG / .gtexture in Content/\nEmpty: layer's base color\nLayers blend with normalized weights").with_classes("terrain-hint").with_text_wrap(true)) body.push(layers)
+        let mut manage = Widget::panel("terrain-manage").with_classes("terrain-column").with_direction(vertical())
+        manage.push(Widget::label("HEIGHTMAP & CREATION").with_classes("terrain-heading"))
+        manage.push(self.field("source", "Heightmap", locked)) manage.push(self.field("range", "Height range · m", locked))
+        manage.push(self.button("terrain-import", "Import RAW16 / PNG", false, disabled))
+        let mut create = Widget::panel("").with_classes("terrain-row").with_direction(horizontal())
+        create.push(self.button("terrain-resolution", self.resolution.fmt() + " × " + self.resolution.fmt(), false, locked)) create.push(self.button("terrain-create", "Create", false, locked || self.project == "")) manage.push(create)
+        manage.push(self.field("spacing", "Grid spacing · m", locked)) body.push(manage)
+        let mut foliage = Widget::panel("terrain-foliage").with_classes("terrain-column").with_direction(vertical())
+        foliage.push(Widget::label("FOLIAGE").with_classes("terrain-heading"))
+        let mut species = Widget::panel("").with_classes("terrain-row").with_direction(horizontal())
+        species.push(self.button("terrain-foliage-grass", "Grass", self.brush.tool == "foliage" && self.foliage.kind == "grass", disabled))
+        species.push(self.button("terrain-foliage-tree", "Trees", self.brush.tool == "foliage" && self.foliage.kind == "tree", disabled)) foliage.push(species)
+        foliage.push(self.field("density", "Density · /m²", disabled))
+        foliage.push(self.field("scale-min", "Min scale", disabled)) foliage.push(self.field("scale-max", "Max scale", disabled))
+        foliage.push(self.field("slope", "Flatness · 0–1", disabled))
+        foliage.push(Widget::label("LMB: plant · Shift: erase species\nHeight follows sculpted terrain\nBuilt-in meshes · 8,192 stored max").with_classes("terrain-hint").with_text_wrap(true))
+        body.push(foliage) root.push(body)
+        let info = if active {
+            let e = self.entries.get_unchecked_borrowed(self.active) let asset = e.document.asset() e.path + if e.document.changed() {
+                " *"
+            } else {
+                ""
+            }
+            + " · " + asset.extent().fmt() + " m · " + e.chunks.len().fmt() + " chunks · " + e.triangles.fmt() + " tris · " + asset.foliage.len().fmt() + " plants (" + self.foliage_visible.fmt() + " visible)"
+        } else {
+            "Select a terrain actor to edit"
+        }
+        root.push(Widget::label(info).with_id("terrain-info").with_classes("terrain-status"))
+        root.push(Widget::label(self.message).with_id("terrain-message").with_classes("terrain-status"))
+        ret root
+    }
+    /// Brush rings follow the actual surface, with outer radius and hard inner radius.
+    pub fn compose(self: Self, frame: PreparedFrame, layout: WidgetLayout, camera: EditorCameraState, locked: bool) -> PreparedFrame {
+        if locked || !self.enabled || !self.active() {
+            ret frame
+        }
+        let hit = match self.hit {
+            Some(hit) => hit None => {
+                ret frame
+            }
+        }
+        let bounds = layout.find_bounds("viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0))
+        let asset = self.entries.get_unchecked_borrowed(self.active).document.asset()
+        let forward = Vec3::zero().sub(Vec3::from_spherical(camera.yaw, camera.pitch)) let right = forward.cross(Vec3::new(0_f32, 1_f32, 0_f32)).normalized() let up = right.cross(forward)
+        // tan(fov/2) from the same stable trigonometry used by gizmo overlays.
+        let tangent = gizmo_sin(camera.fov * 0.5_f32) / gizmo_cos(camera.fov * 0.5_f32)
+        let mut display = DisplayList::new()
+        let terrain_start_ring = 0_usize
+        let terrain_end_ring = 2_usize
+        for terrain_index_ring in terrain_start_ring..terrain_end_ring {
+            let ring = terrain_index_ring as u32
+
+            let radius = self.brush.radius * if ring == 0 {
+                1_f32
+            } else {
+                1 - self.brush.falloff
+            }
+            if radius <= 0.001_f32 {
+                continue
+            }
+            let mut previous = Option[Point]::None
+            let terrain_start_i = 0_usize
+            let terrain_end_i = 65_usize
+            for terrain_index_i in terrain_start_i..terrain_end_i {
+                let i = terrain_index_i as u32
+
+                let angle =(i as f32) * 6.2831855_f32 / 64_f32
+                let x = hit.x() + gizmo_cos(angle) * radius let z = hit.z() + gizmo_sin(angle) * radius
+                let world = self.world.transform_point(Vec3::new(x, asset.sample(x, z) + 0.03_f32, z)) let rel = world.sub(camera.position) let depth = rel.dot(forward)
+                if depth < 0.05_f32 || x < - asset.extent() * 0.5_f32 || x > asset.extent() * 0.5_f32 || z < - asset.extent() * 0.5_f32 || z > asset.extent() * 0.5_f32 {
+                    previous = Option[Point]::None continue
+                }
+                let scale = bounds.height() /(2 * depth * tangent)
+                let p = Point::new(bounds.x() + bounds.width() * 0.5_f32 + rel.dot(right) * scale, bounds.y() + bounds.height() * 0.5_f32 - rel.dot(up) * scale)
+                match previous {
+                    Some(a) => {
+                        if p.x() >= bounds.x() && p.x() <= bounds.right() && p.y() >= bounds.y() && p.y() <= bounds.bottom() && a.x() >= bounds.x() && a.x() <= bounds.right() && a.y() >= bounds.y() && a.y() <= bounds.bottom() {
+                            display.line(a.x(), a.y(), p.x(), p.y(), if ring == 0 {
+                                    2_f32
+                                } else {
+                                    1_f32
+                                }
+                                , if self.stroking {
+                                    Color::rgba(255, 178, 73, 255)
+                                } else {
+                                    Color::rgba(100, 206, 255, 255)
+                                }
+                                ,
+                            )
+                        }
+                    }
+                    None => {
+                    }
+                }
+                previous = Option[Point]::Some(p)
+            }
+        }
+        ret frame.with_display_overlay(display, bounds)
+    }
+}

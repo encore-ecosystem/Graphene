@@ -1,10 +1,13 @@
 import mod::environment::model::EnvironmentComponent
-import mod::scene::component::{SceneComponent, LightComponent}
+import mod::physics::component::PhysicsComponent
+import mod::scene::component::{LightComponent, SceneComponent}
 //! Typed editor commands, transactional history, and ordered state events.
 
 import core::option::Option
 import core::vec::Vec
+
 import linalg::Vec3
+
 import mod::blueprint::document::{BlueprintCommand, BlueprintDocument}
 import mod::blueprint::model::{BlueprintAsset, BlueprintInstance}
 import mod::scene::renderable::{MaterialId, MeshId, Renderable}
@@ -22,6 +25,10 @@ pub struct AddActorCommand {
     value: Transform
     asset_name: str
     component: SceneComponent
+}
+pub struct ActorPhysicsCommand {
+    actor: u64
+    value: PhysicsComponent
 }
 pub struct ActorComponentCommand {
     actor: u64
@@ -111,6 +118,7 @@ pub enum GrapheneCommand {
     SetParent(ActorParentCommand)
     Rename(ActorNameCommand)
     SetVisibility(ActorVisibilityCommand)
+    SetPhysics(ActorPhysicsCommand)
     SetComponent(ActorComponentCommand)
     SetTransform(ActorTransformCommand)
     Select(ActorSelectionCommand)
@@ -153,6 +161,7 @@ enum CommandEdit {
     Parent(ActorParentEdit)
     Rename(ActorNameCommand)
     Visibility(ActorVisibilityCommand)
+    Physics(ActorPhysicsCommand)
     Component(ActorComponentCommand)
     Transform(ActorTransformCommand)
     Transforms(ActorTransformsCommand)
@@ -439,7 +448,7 @@ impl for AssetImportCommand {
 }
 
 impl for GrapheneTask {
-    fn new(id: str, kind: str, state: str, message: str) -> Self {
+    pub fn new(id: str, kind: str, state: str, message: str) -> Self {
         ret Self {
             id, kind, state, message
         }
@@ -482,7 +491,7 @@ impl for GrapheneDiagnostic {
 }
 
 impl for GrapheneEvent {
-    fn new(kind: str, actor: Option[u64], revision: u64) -> Self {
+    pub fn new(kind: str, actor: Option[u64], revision: u64) -> Self {
         ret Self {
             kind, actor, revision
         }
@@ -499,12 +508,12 @@ impl for GrapheneEvent {
 }
 
 impl for CommandResult {
-    fn ok(revision: u64, events: Vec[GrapheneEvent]) -> Self {
+    pub fn ok(revision: u64, events: Vec[GrapheneEvent]) -> Self {
         ret Self {
             true, "", revision, events
         }
     }
-    fn error(revision: u64, message: str) -> Self {
+    pub fn error(revision: u64, message: str) -> Self {
         ret Self {
             false, message, revision, Vec[GrapheneEvent]::new()
         }
@@ -782,7 +791,7 @@ impl for EditorState {
         }
         for command in commands {
             let allowed = match command {
-                GrapheneCommand::AddActor(_) => true GrapheneCommand::DuplicateActor(_) => true GrapheneCommand::DeleteActor(_) => true GrapheneCommand::SetParent(_) => true GrapheneCommand::Rename(_) => true GrapheneCommand::SetVisibility(_) => true GrapheneCommand::SetComponent(_) => true GrapheneCommand::SetTransform(_) => true GrapheneCommand::SetTransforms(_) => true _ => false
+                GrapheneCommand::AddActor(_) => true GrapheneCommand::DuplicateActor(_) => true GrapheneCommand::DeleteActor(_) => true GrapheneCommand::SetParent(_) => true GrapheneCommand::Rename(_) => true GrapheneCommand::SetVisibility(_) => true GrapheneCommand::SetPhysics(_) => true GrapheneCommand::SetComponent(_) => true GrapheneCommand::SetTransform(_) => true GrapheneCommand::SetTransforms(_) => true _ => false
             }
             if !allowed {
                 ret CommandResult::error(self.revision, "Only scene edits can be batched")
@@ -958,6 +967,10 @@ impl for EditorState {
                 self.scene.set_renderable(actor,
                     Option[Renderable]::Some(Renderable::new(MeshId::new(1_u64), MaterialId::new(1_u64))),)
                 self.scene.set_component(actor, value.component)
+                if value.asset_name().byte_len() > 9 && value.asset_name().slice_bytes(0, 9) == "@terrain:" {
+                    let mut physics = PhysicsComponent::defaults() physics.mode = "static" physics.shape = "mesh"
+                    self.scene.set_physics(actor, physics)
+                }
                 self.set_asset_name(actor, value.asset_name())
                 ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
                     "scene.actor.added", actor,)
@@ -977,7 +990,7 @@ impl for EditorState {
                         self.scene.set_visible(actor, source.visible())
                         self.scene.set_parent(actor, source.parent())
                         self.scene.set_blueprint(actor, source.blueprint())
-                        self.scene.set_component(actor, source.component())
+                        self.scene.set_component(actor, source.component()) self.scene.set_physics(actor, source.physics())
                         self.set_asset_name(actor, self.asset_name(value.actor()))
                         ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
                             "scene.actor.duplicated", actor,)
@@ -1063,6 +1076,25 @@ impl for EditorState {
                         ret self.commit(inverse, "scene.actor.visibility-changed", value.actor())
                     }
                     Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetPhysics(value) => {
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before editing physics")
+                }
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if !self.scene.set_physics(value.actor, value.value) {
+                            ret CommandResult::error(self.revision, "Invalid physics settings")
+                        }
+                        ret self.commit(CommandEdit::Physics(ActorPhysicsCommand {
+                                    value.actor, actor.physics()
+                                }
+                            ), "scene.actor.physics-changed", value.actor)
+                    }
+                    None => {
                         ret CommandResult::error(self.revision, "Actor was not found")
                     }
                 }
@@ -1667,7 +1699,7 @@ impl for EditorState {
                     let entity = snapshot.entity
                     self.scene.create_entity_with_id(entity.id(), entity.name(), entity.transform())
                     self.scene.set_visible(entity.id(), entity.visible()) self.scene.set_renderable(entity.id(), entity.renderable())
-                    self.scene.set_component(entity.id(), entity.component()) self.set_asset_name(entity.id(), snapshot.asset_name)
+                    self.scene.set_component(entity.id(), entity.component()) self.scene.set_physics(entity.id(), entity.physics()) self.set_asset_name(entity.id(), snapshot.asset_name)
                     ids.push(entity.id())
                 }
                 ret Option[CommandEdit]::Some(CommandEdit::RemoveActors(ids))
@@ -1693,7 +1725,7 @@ impl for EditorState {
                     self.scene.set_visible(entity.id(), entity.visible())
                     self.scene.set_renderable(entity.id(), entity.renderable())
                     self.scene.set_blueprint(entity.id(), entity.blueprint())
-                    self.scene.set_component(entity.id(), entity.component())
+                    self.scene.set_component(entity.id(), entity.component()) self.scene.set_physics(entity.id(), entity.physics())
                     self.set_asset_name(entity.id(), value.asset_name)
                     self.scene.set_parent(entity.id(), entity.parent())
                     for child in value.children {
@@ -1740,6 +1772,20 @@ impl for EditorState {
                         }
                     }
                     Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Physics(value) => {
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if self.scene.set_physics(value.actor, value.value) {
+                            ret Option[CommandEdit]::Some(CommandEdit::Physics(ActorPhysicsCommand {
+                                        value.actor, actor.physics()
+                                    }
+                                ))
+                        }
+                    }
+                    None => {
                     }
                 }
             }

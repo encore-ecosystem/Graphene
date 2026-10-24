@@ -1,0 +1,135 @@
+//! GTR2 terrain with GTR1 migration, encoded with Encore's format-independent binary library.
+import binary::{encode, decode}
+import core::result::Result
+import core::vec::Vec
+
+import std::os::write_file_atomic
+
+import linalg::Vec3
+
+import mod::model::{FoliageInstance, TerrainAsset, TerrainLayer}
+import refrain::native_asset::load_native_texture
+import refrain::texture_asset::{TextureImage, decode_png}
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+extern fn encore_file_open(path: str, writing: bool) -> u64
+extern fn encore_file_read(id: u64, size: usize) -> str
+extern fn encore_file_close(id: u64) -> bool
+extern fn encore_file_error_code() -> i32
+struct LegacyTerrain {
+    version: u32
+    resolution: u32
+    spacing: f32
+    heights: Vec[f32]
+    weights: Vec[Vec3]
+    layers: Vec[TerrainLayer]
+    lod_distance: f32
+}
+#attr(safe)
+pub fn terrain_bytes(asset: TerrainAsset) -> Result[str, str] {
+    if !asset.valid() {
+        ret Result::Err("Invalid terrain")
+    }
+    match encode(asset) {
+        Ok(bytes) => {
+            unsafe {
+                ret Result::Ok("GTR2" + graphene_asset_bytes(bytes.as_ptr(), bytes.len()))
+            }
+        }
+        Err(_) => {
+            ret Result::Err("Unable to encode terrain")
+        }
+    }
+}
+pub fn terrain_decode(source: str) -> Result[TerrainAsset, str] {
+    if source.byte_len() < 8 || source.byte_len() > 8388608 ||(source.slice_bytes(0, 4) != "GTR1" && source.slice_bytes(0, 4) != "GTR2") {
+        ret Result::Err("Invalid terrain signature or size")
+    }
+    let mut bytes = Vec[u8]::with_capacity(source.byte_len() - 4)
+    for i in 4_usize..source.byte_len() {
+        bytes.push(source.byte_at(i))
+    }
+    if source.slice_bytes(0, 4) == "GTR1" {
+        match decode[LegacyTerrain](bytes) {
+            Ok(old) => {
+                let converted = TerrainAsset {
+                    2_u32, old.resolution, old.spacing, old.heights, old.weights, old.layers, old.lod_distance, Vec[FoliageInstance]::new()
+                }
+                if old.version == 1 && converted.valid() {
+                    ret Result::Ok(converted)
+                }
+            }
+            Err(_) => {
+            }
+        }
+        ret Result::Err("Invalid legacy terrain asset")
+    }
+    match decode[TerrainAsset](bytes) {
+        Ok(asset) => {
+            if asset.valid() {
+                ret Result::Ok(asset)
+            }
+        }
+        Err(_) => {
+        }
+    }
+    ret Result::Err("Invalid or unsupported terrain asset")
+}
+#attr(safe)
+pub fn terrain_read(path: str, limit: usize) -> Result[str, str] {
+    unsafe {
+        let file = encore_file_open(path, false) if file == 0 {
+            ret Result::Err("Unable to open: " + path)
+        }
+        let data = encore_file_read(file, limit + 1)
+        let failed = encore_file_error_code() != 0 let closed = encore_file_close(file)
+        if failed || !closed || data.byte_len() > limit {
+            ret Result::Err("Unable to read bounded asset: " + path)
+        }
+        ret Result::Ok(data)
+    }
+}
+pub fn load_terrain(path: str) -> Result[TerrainAsset, str] {
+    ret terrain_decode(terrain_read(path, 8388608)?)
+}
+pub fn save_terrain(path: str, asset: TerrainAsset) -> bool {
+    ret match terrain_bytes(asset) {
+        Ok(bytes) => write_file_atomic(path, bytes) == 0 Err(_) => false
+    }
+}
+/// RAW16 is unsigned little endian, square, with the exact current sample count.
+pub fn import_heightmap(path: str, asset: TerrainAsset, range: f32) -> Result[TerrainAsset, str] {
+    if range < 0.01_f32 || range > 65536 || range != range {
+        ret Result::Err("Height range must be 0.01–65536 m")
+    }
+    let mut next = asset.copy()
+    let raw = path.byte_len() >= 6 && path.slice_bytes(path.byte_len() - 6, 6) == ".raw16"
+    if raw {
+        let count =(asset.resolution * asset.resolution) as usize
+        let bytes = terrain_read(path, count * 2)?
+        if bytes.byte_len() != count * 2 {
+            ret Result::Err("RAW16 dimensions must match terrain resolution")
+        }
+        for i in 0_usize..count {
+            let value =(bytes.byte_at(i * 2) as u32) |((bytes.byte_at(i * 2 + 1) as u32) << 8)
+            next.heights.set(i,((value as f32) / 65535_f32 - 0.5_f32) * range)
+        }
+    } else {
+        let image = terrain_texture(path)?
+        if image.width != asset.resolution || image.height != asset.resolution {
+            ret Result::Err("Heightmap dimensions must match terrain resolution")
+        }
+        for i in 0_usize..next.heights.len() {
+            let p = image.pixels.get(i).unwrap_or(0_u32)
+            let gray =((p & 255) as f32) * 0.2126_f32 +(((p >> 8) & 255) as f32) * 0.7152_f32 +(((p >> 16) & 255) as f32) * 0.0722_f32
+            next.heights.set(i,(gray / 255_f32 - 0.5_f32) * range)
+        }
+    }
+    ret Result::Ok(next)
+}
+
+pub fn terrain_texture(path: str) -> Result[TextureImage, str] {
+    if path.byte_len() > 9 && path.slice_bytes(path.byte_len() - 9, 9) == ".gtexture" {
+        ret load_native_texture(path, "")
+    }
+    ret decode_png(terrain_read(path, 67108864)?)
+}

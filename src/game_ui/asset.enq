@@ -1,0 +1,252 @@
+//! Versioned UI documents and project screen configuration; authored JSON only.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all, read_dir, read_file, write_file_atomic}
+
+import json::{Json, field, parse, stringify}
+
+import mod::model::{UiScreenAsset, UiWidget, ui_kinds}
+import refrain::blueprint::{BlueprintDiagnostic, validate_blueprint}
+import refrain::blueprint::codec::{blueprint_json, blueprint_json_id, blueprint_json_text, blueprint_parse}
+import refrain::scene::json_value::parse_number
+
+fn required[T](value: Option[T], message: str) -> Result[T, str] {
+    ret match value {
+        Some(value) => Result[T, str]::Ok(value) None => Result[T, str]::Err(message)
+    }
+}
+fn n(value: f32) -> Json {
+    ret Json::Number(Debug::fmt(value))
+}
+pub fn ui_number(root: Json, name: str, fallback: f32) -> f32 {
+    ret match root.get(name) {
+        Some(value) => match value.as_number() {
+            Some(text) => parse_number(text).unwrap_or( - 999999_f32) None => - 999999_f32
+        }
+        None => fallback
+    }
+}
+pub fn ui_text(root: Json, name: str, fallback: str) -> str {
+    ret match root.get(name) {
+        Some(value) => value.as_str().unwrap_or(fallback) None => fallback
+    }
+}
+fn flag(root: Json, name: str, fallback: bool) -> bool {
+    ret match root.get(name) {
+        Some(value) => value.as_bool().unwrap_or(fallback) None => fallback
+    }
+}
+pub fn ui_path_valid(path: str) -> bool {
+    ret path.byte_len() > 8 && path.slice_bytes(0, 8) == "Content/" && !path.contains("..") && !path.contains("\\") && !path.contains(":") && path.byte_len() < 4096
+}
+pub fn ui_asset_json(asset: UiScreenAsset) -> Json {
+    let mut widgets = Vec[Json]::new()
+    for w in asset.widgets {
+        let mut options = Vec[Json]::new() for value in w.options {
+            options.push(Json::String(value))
+        }
+        widgets.push(Json::Object(vec![field("id", Json::Number(Debug::fmt(w.id))), field("parent", Json::Number(Debug::fmt(w.parent))), field("name", Json::String(w.name)), field("kind", Json::String(w.kind)), field("x", n(w.x)), field("y", n(w.y)), field("width", n(w.width)), field("height", n(w.height)), field("anchorX", n(w.anchor_x)), field("anchorY", n(w.anchor_y)), field("anchorRight", n(w.anchor_right)), field("anchorBottom", n(w.anchor_bottom)), field("alignX", n(w.align_x)), field("alignY", n(w.align_y)), field("gap", n(w.gap)), field("padding", n(w.padding)), field("fill", Json::Bool(w.fill)), field("text", Json::String(w.text)), field("image", Json::String(w.image)), field("value", n(w.value)), field("visible", Json::Bool(w.visible)), field("enabled", Json::Bool(w.enabled)), field("color", Json::String(w.color)), field("fontSize", n(w.font_size)), field("radius", n(w.radius)), field("binding", Json::String(w.binding)), field("options", Json::Array(options))]))
+    }
+    ret Json::Object(vec![field("format", Json::String("graphene-ui")), field("version", Json::Number("1")), field("id", Json::String(asset.id)), field("name", Json::String(asset.name)), field("referenceWidth", n(asset.reference_width)), field("referenceHeight", n(asset.reference_height)), field("widgets", Json::Array(widgets)), field("graph", blueprint_json(asset.graph, true))])
+}
+pub fn ui_asset_stringify(asset: UiScreenAsset) -> str {
+    ret stringify(ui_asset_json(asset))
+}
+pub fn ui_asset_validate(asset: UiScreenAsset) -> Result[(), str] {
+    if asset.id == "" || asset.name == "" || asset.reference_width < 320 || asset.reference_width > 16384 || asset.reference_height < 200 || asset.reference_height > 16384 || asset.widgets.len() == 0 || asset.widgets.len() > 2048 {
+        ret Result[(), str]::Err("Invalid UI identity, resolution or widget count")
+    }
+    if asset.graph.domain != "ui" || asset.graph.id != asset.id {
+        ret Result[(), str]::Err("UI graph identity/domain mismatch")
+    }
+    let mut ids = Vec[u64]::new() let mut names = Vec[str]::new() let mut roots = 0_u32
+    for w in asset.widgets {
+        if w.id == 0 || w.id > 100000 || w.name == "" || w.x < - 32768 || w.x > 32768 || w.y < - 32768 || w.y > 32768 || w.radius < 0 || w.radius > 1024 || w.gap > 4096 || w.padding > 4096 || w.width <= 0 || w.width > 32768 || w.height <= 0 || w.height > 32768 || w.anchor_x < 0 || w.anchor_x > 1 || w.anchor_y < 0 || w.anchor_y > 1 || w.anchor_right < w.anchor_x || w.anchor_right > 1 || w.anchor_bottom < w.anchor_y || w.anchor_bottom > 1 || w.align_x < 0 || w.align_x > 1 || w.align_y < 0 || w.align_y > 1 || w.value < 0 || w.value > 1 || w.font_size < 1 || w.font_size > 256 || w.gap < 0 || w.padding < 0 {
+            ret Result[(), str]::Err("Invalid widget geometry or values: " + w.name)
+        }
+        for id in ids {
+            if id == w.id {
+                ret Result[(), str]::Err("Duplicate widget ID")
+            }
+        }
+        ids.push(w.id)
+        for name in names {
+            if name == w.name {
+                ret Result[(), str]::Err("Widget names must be unique")
+            }
+        }
+        names.push(w.name)
+        let mut known = false for kind in ui_kinds() {
+            if w.kind == kind {
+                known = true
+            }
+        }
+        if !known {
+            ret Result[(), str]::Err("Unknown widget kind: " + w.kind)
+        }
+        if w.color != "" {
+            if (w.color.byte_len() != 7 && w.color.byte_len() != 9) || w.color.slice_bytes(0, 1) != "#" {
+                ret Result[(), str]::Err("Use #RRGGBB or #RRGGBBAA for color")
+            }
+            for i in 1_usize..w.color.byte_len() {
+                let c = w.color.byte_at(i) if !((c >= 48 && c <= 57) ||(c >= 65 && c <= 70) ||(c >= 97 && c <= 102)) {
+                    ret Result[(), str]::Err("Invalid color")
+                }
+            }
+        }
+        if w.kind == "Select" &&(w.options.len() == 0 || w.options.len() > 64) {
+            ret Result[(), str]::Err("Select needs 1–64 options")
+        }
+        if w.image != "" && !ui_path_valid(w.image) {
+            ret Result[(), str]::Err("Images must be project Content paths")
+        }
+        if w.parent == 0 {
+            roots += 1 if w.kind != "Canvas" {
+                ret Result[(), str]::Err("Screen root must be a Canvas")
+            }
+        } else {
+            let mut cursor = w.parent let mut depth = 0_usize
+            while cursor != 0 && depth <= asset.widgets.len() {
+                if cursor == w.id {
+                    ret Result[(), str]::Err("Widget hierarchy cycle")
+                }
+                let parent = required(asset.widget(cursor), "Missing widget parent")?
+                if !mod::model::ui_container(parent.kind) {
+                    ret Result[(), str]::Err("Only containers can have children")
+                }
+                cursor = parent.parent depth += 1
+            }
+            if depth > 64 {
+                ret Result[(), str]::Err("Widget hierarchy exceeds 64 levels")
+            }
+            if cursor != 0 {
+                ret Result[(), str]::Err("Widget hierarchy cycle")
+            }
+        }
+    }
+    if roots != 1 {
+        ret Result[(), str]::Err("Exactly one root Canvas is required")
+    }
+    ret Result[(), str]::Ok(())
+}
+pub fn ui_asset_parse(source: str) -> Result[UiScreenAsset, str] {
+    let root = match parse(source) {
+        Ok(value) => value Err(error) => {
+            ret Result[UiScreenAsset, str]::Err(error.message())
+        }
+    }
+    if ui_text(root, "format", "") != "graphene-ui" || blueprint_json_id(root, "version")? != 1 {
+        ret Result[UiScreenAsset, str]::Err("Unsupported UI asset format/version")
+    }
+    let mut asset = UiScreenAsset::new(blueprint_json_text(root, "id")?, blueprint_json_text(root, "name")?)
+    asset.reference_width = ui_number(root, "referenceWidth", 1920) asset.reference_height = ui_number(root, "referenceHeight", 1080)
+    asset.widgets = Vec[UiWidget]::new()
+    let items = required(required(root.get("widgets"), "Missing widgets")?.as_array(), "Expected widgets array")?
+    for value in items {
+        let mut w = UiWidget::new(blueprint_json_id(value, "id")?, blueprint_json_id(value, "parent")?, blueprint_json_text(value, "kind")?)
+        w.name = blueprint_json_text(value, "name")? w.x = ui_number(value, "x", 0) w.y = ui_number(value, "y", 0) w.width = ui_number(value, "width", 240) w.height = ui_number(value, "height", 48)
+        w.anchor_x = ui_number(value, "anchorX", 0) w.anchor_y = ui_number(value, "anchorY", 0) w.anchor_right = ui_number(value, "anchorRight", w.anchor_x) w.anchor_bottom = ui_number(value, "anchorBottom", w.anchor_y) w.align_x = ui_number(value, "alignX", 0) w.align_y = ui_number(value, "alignY", 0)
+        w.gap = ui_number(value, "gap", 12) w.padding = ui_number(value, "padding", 12) w.fill = flag(value, "fill", false) w.text = ui_text(value, "text", "") w.image = ui_text(value, "image", "") w.value = ui_number(value, "value", 0)
+        w.visible = flag(value, "visible", true) w.enabled = flag(value, "enabled", true) w.color = ui_text(value, "color", "") w.font_size = ui_number(value, "fontSize", 20) w.radius = ui_number(value, "radius", 8) w.binding = ui_text(value, "binding", "")
+        match value.get("options") {
+            Some(options) => {
+                match options.as_array() {
+                    Some(values) => {
+                        w.options = Vec[str]::new() for option in values {
+                            w.options.push(required(option.as_str(), "Expected option text")?)
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        asset.widgets.push(w)
+    }
+    asset.graph = blueprint_parse(stringify(required(root.get("graph"), "Missing UI graph")?))?
+    ui_asset_validate(asset)?
+    ret Result[UiScreenAsset, str]::Ok(asset)
+}
+pub fn load_ui_asset(project: str, path: str) -> Result[UiScreenAsset, str] {
+    if !ui_path_valid(path) {
+        ret Result[UiScreenAsset, str]::Err("Invalid UI asset path")
+    }
+    ret ui_asset_parse(read_file(project + "/" + path))
+}
+pub fn save_ui_asset(project: str, path: str, asset: UiScreenAsset) -> Result[(), str] {
+    ui_asset_validate(asset)? if !ui_path_valid(path) || write_file_atomic(project + "/" + path, ui_asset_stringify(asset)) != 0 {
+        ret Result[(), str]::Err("Unable to save UI asset")
+    }
+    ret Result[(), str]::Ok(())
+}
+pub struct UiConfiguration {
+    hud: str
+    pause: str
+    settings: str
+}
+
+impl for UiConfiguration {
+    pub fn defaults() -> Self {
+        ret Self { "", "", "" }
+    }
+    pub fn load(project: str) -> Result[Self, str] {
+        if !file_exists(project + "/Config/UI.json") {
+            ret Result[Self, str]::Ok(Self::defaults())
+        }
+        let root = match parse(read_file(project + "/Config/UI.json")) {
+            Ok(value) => value Err(error) => {
+                ret Result[Self, str]::Err(error.message())
+            }
+        }
+        let result = Self {
+            ui_text(root, "hud", ""), ui_text(root, "pause", ""), ui_text(root, "settings", "")
+        }
+        for path in vec![result.hud, result.pause, result.settings] {
+            if path != "" && !ui_path_valid(path) {
+                ret Result[Self, str]::Err("Invalid configured UI path")
+            }
+        }
+        ret Result[Self, str]::Ok(result)
+    }
+    pub fn save(self: Self, project: str) -> bool {
+        ret mkdir_all(project + "/Config") == 0 && write_file_atomic(project + "/Config/UI.json", stringify(Json::Object(vec![field("hud", Json::String(self.hud)), field("pause", Json::String(self.pause)), field("settings", Json::String(self.settings))]))) == 0
+    }
+}
+
+/// Structural graph checks also preserve unresolved widget references as diagnostics.
+pub fn ui_graph_diagnostics(asset: UiScreenAsset) -> Vec[BlueprintDiagnostic] {
+    let mut result = validate_blueprint(asset.graph)
+    for node in asset.graph.nodes {
+        if node.operation == "ui-click" || node.operation == "ui-change" {
+            let mut found = false
+            for w in asset.widgets {
+                if node.text == Debug::fmt(w.id) {
+                    found = true
+                    let valid = if node.operation == "ui-click" {
+                        w.kind == "Button"
+                    } else {
+                        w.kind == "Slider" || w.kind == "Checkbox" || w.kind == "Select" || w.kind == "Input"
+                    }
+                    if !valid {
+                        result.push(BlueprintDiagnostic {
+                                node.id, "", "Widget does not support this UI event"
+                            }
+                        )
+                    }
+                }
+            }
+            if !found {
+                result.push(BlueprintDiagnostic {
+                        node.id, "", "Referenced widget no longer exists; choose its stable ID"
+                    }
+                )
+            }
+        }
+    }
+    ret result
+}

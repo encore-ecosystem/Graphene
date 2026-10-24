@@ -1281,6 +1281,7 @@ impl for GpuBuffer {
 }
 
 impl for GpuMesh {
+    pub fn unavailable() -> Self { ret Self { GpuBuffer::unavailable(), GpuBuffer::unavailable(), 0_u32, false } }
     pub fn available(self: Self) -> bool {
         ret self.uploaded && self.index_count > 0_u32 && self.vertex.available() && self.index.available()
     }

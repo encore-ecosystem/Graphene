@@ -1,16 +1,22 @@
+import physics::CharacterConfig
+
 import mod::animation::component::{CharacterMorphChoice, CharacterMorphControl}
+import mod::command_bus::ActorPhysicsCommand
 import mod::editor_guides::gizmo_step_label
 import mod::environment::model::EnvironmentComponent
 import mod::particles::model::ParticleComponent
+import mod::physics::component::PhysicsComponent
 //! Compact component inspector; scene mutations always pass through Command Bus.
 import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
+
 import linalg::Vec3
-import luma::{Widget, Style, TextEditor, ColorPicker, PickerColor, Event, WidgetLayout, Rect, Point, Size, SvgDocument, property_row, horizontal, vertical, anchored_popup_bounds, event_pointer_down, event_pointer_up, event_key_down, event_text_input, event_scroll, event_focus_lost, key_enter, key_escape, key_tab, key_backspace, key_delete, key_left, key_right, key_home, key_end, key_up, key_down}
-import mod::audio::model::{sound_fields, sound_value, sound_set}
-import mod::command_bus::{EditorState, GrapheneCommand, ActorComponentCommand}
-import mod::environment::editor::{environment_fields, environment_value, environment_set}
+import luma::{ColorPicker, Event, PickerColor, Point, Rect, Size, Style, SvgDocument, TextEditor, Widget, WidgetLayout, anchored_popup_bounds, event_focus_lost, event_key_down, event_pointer_down, event_pointer_up, event_scroll, event_text_input, horizontal, key_backspace, key_delete, key_down, key_end, key_enter, key_escape, key_home, key_left, key_right, key_tab, key_up, property_row, vertical}
+
+import mod::audio::model::{sound_fields, sound_set, sound_value}
+import mod::command_bus::{ActorComponentCommand, EditorState, GrapheneCommand}
+import mod::environment::editor::{environment_fields, environment_set, environment_value}
 import mod::scene::component::SceneComponent
 import mod::scene::json_value::parse_number
 import mod::scene::world::Scene
@@ -19,6 +25,8 @@ pub struct ActorDetails {
     source: Scene
     actor: u64
     component: SceneComponent
+    physics: PhysicsComponent
+    physics_expanded: bool
     disabled: bool
     field: str
     original_text: str
@@ -39,7 +47,7 @@ pub struct ActorDetails {
 impl for ActorDetails {
     pub fn new() -> Self {
         ret Self {
-            Scene::new(), 0_u64, SceneComponent::None, false, "", "", TextEditor::new(""), false, ColorPicker::new("actor-color-picker", PickerColor::linear(1, 1, 1)).with_compact(), false, true, false, Vec[(str, str)]::new(), false, 0_usize, 0_usize, Vec[CharacterMorphChoice]::new(), ""
+            Scene::new(), 0_u64, SceneComponent::None, PhysicsComponent::defaults(), false, false, "", "", TextEditor::new(""), false, ColorPicker::new("actor-color-picker", PickerColor::linear(1, 1, 1)).with_compact(), false, true, false, Vec[(str, str)]::new(), false, 0_usize, 0_usize, Vec[CharacterMorphChoice]::new(), ""
         }
     }
     pub fn set_clip_choices(self: mut Self, choices: Vec[(str, str)]) -> bool {
@@ -86,6 +94,9 @@ impl for ActorDetails {
             self.clip_menu = false
         }
         self.source = scene self.actor = actor self.disabled = disabled
+        self.physics = match scene.get(actor) {
+            Some(entity) => entity.physics() None => PhysicsComponent::defaults()
+        }
         self.component = match scene.get(actor) {
             Some(entity) => entity.component() None => SceneComponent::None
         }
@@ -112,7 +123,98 @@ impl for ActorDetails {
     pub fn component_kind(self: Self) -> str {
         ret self.component.kind()
     }
+    pub fn physics_available(self: Self) -> bool {
+        ret self.actor != 0_u64 &&(self.component.kind() == "" || self.component.kind() == "skeletal-mesh")
+    }
     fn fields(self: Self) -> Vec[str] {
+        let mut fields = self.component_fields()
+        if self.physics_available() && self.physics_expanded {
+            fields.push("actor-physics-mode")
+            if self.physics.mode != "off" {
+                if self.physics.mode != "character" {
+                    fields.push("actor-physics-shape") fields.push("actor-physics-sensor")
+                }
+                for row in self.physics_rows() {
+                    fields.push("actor-physics-" + row.0)
+                }
+            }
+        }
+        ret fields
+    }
+    fn physics_rows(self: Self) -> Vec[(str, str)] {
+        let mut rows = Vec[(str, str)]::new()
+        if self.physics.mode == "character" || self.physics.shape == "sphere" || self.physics.shape == "capsule" {
+            rows.push(("radius", "Radius"))
+        }
+        if self.physics.mode == "character" || self.physics.shape == "capsule" {
+            rows.push(("half_height", "Half segment"))
+        }
+        if self.physics.shape == "box" && self.physics.mode != "character" {
+            rows.push(("extent-x", "Half width")) rows.push(("extent-y", "Half height")) rows.push(("extent-z", "Half depth"))
+        }
+        if self.physics.mode == "dynamic" {
+            rows.push(("mass", "Mass (kg)")) rows.push(("gravity_scale", "Gravity scale"))
+        }
+        if self.physics.mode == "character" {
+            for row in vec![("speed", "Speed (m/s)"),("jump_speed", "Jump speed"),("slope_degrees", "Max slope (deg)"),("step_height", "Step height"),("ground_snap", "Ground snap")] {
+                rows.push(row)
+            }
+        } else {
+            rows.push(("friction", "Friction")) rows.push(("restitution", "Restitution"))
+        }
+        ret rows
+    }
+    pub fn physics_widget(self: Self) -> Widget {
+        let mut panel = Widget::panel("actor-physics-details").with_classes("g-property-content").with_direction(vertical())
+        for key in vec!["mode", "shape", "sensor"] {
+            if key != "mode" &&(self.physics.mode == "off" || self.physics.mode == "character") {
+                continue
+            }
+            let value = if key == "mode" {
+                self.physics.mode
+            } elif key == "shape" {
+                self.physics.shape
+            } elif self.physics.sensor {
+                "On"
+            } else {
+                "Off"
+            }
+            let active = if key == "mode" {
+                self.physics.mode != "off"
+            } elif key == "sensor" {
+                self.physics.sensor
+            } else {
+                false
+            }
+            let id = "actor-physics-" + key
+            panel.push(property_row(id + "-row", if key == "mode" {
+                        "Simulation"
+                    } elif key == "shape" {
+                        "Collider"
+                    } else {
+                        "Trigger"
+                    }
+                    , Widget::button(id, value).with_classes("g-property-value").with_checked(active).with_focus(self.field == id).with_disabled(self.disabled).with_attribute("aria-label", "Physics " + key).with_attribute("title", if key == "mode" {
+                            "Cycle: Off, Static, Dynamic, Kinematic, Character"
+                        } elif key == "shape" {
+                            "Cycle collider shape; triangle meshes are static"
+                        } else {
+                            "Report overlaps without collision response"
+                        }
+                        ,
+                    ),))
+        }
+        if self.physics.mode != "off" {
+            for row in self.physics_rows() {
+                panel.push(self.input_row("actor-physics-" + row.0, row.1))
+            }
+        }
+        if self.physics.mode == "character" {
+            panel.push(Widget::label("Play: WASD to move, Space to jump").with_classes("g-property-hint"))
+        }
+        ret panel
+    }
+    fn component_fields(self: Self) -> Vec[str] {
         match self.component {
             SkeletalMesh(c) => {
                 let mut fields = vec!["actor-anim-asset"] if self.clips.len() > 1_usize {
@@ -228,6 +330,9 @@ impl for ActorDetails {
         }
     }
     fn display(self: Self, id: str) -> str {
+        if id.contains("actor-physics-") {
+            ret gizmo_step_label(self.physics.value(id.slice_bytes(14, id.byte_len() - 14)))
+        }
         match self.component {
             SkeletalMesh(c) => {
                 if id == "actor-anim-asset" {
@@ -529,6 +634,30 @@ impl for ActorDetails {
         ret content
     }
     fn commit(self: mut Self, state: mut EditorState) -> bool {
+        if self.field.contains("actor-physics-") {
+            if animation_button(self.field) || self.editor.value() == self.original_text {
+                ret true
+            }
+            let key = self.field.slice_bytes(14, self.field.byte_len() - 14)
+            let value = match parse_number(self.editor.value()) {
+                Some(v) => v None => {
+                    self.invalid = true ret false
+                }
+            }
+            let next = self.physics.with_value(key, value)
+            if !next.valid() {
+                self.invalid = true ret false
+            }
+            let result = state.execute(GrapheneCommand::SetPhysics(ActorPhysicsCommand {
+                        self.actor, next
+                    }
+                ))
+            self.invalid = !result.success() if result.success() {
+                self.physics = next
+            }
+            ret result.success()
+        }
+
         for i in 0_usize..self.morphs.len() {
             if self.field != "actor-anim-morph-" + i.fmt() {
                 continue
@@ -825,6 +954,52 @@ impl for ActorDetails {
     }
     fn activate(self: mut Self, id: str, state: mut EditorState) ->() {
         self.field = id self.invalid = false
+        if id.contains("actor-physics-") {
+            if animation_button(id) {
+                let mut c = self.physics
+                if id == "actor-physics-mode" {
+                    c.mode = if c.mode == "off" {
+                        "static"
+                    } elif c.mode == "static" {
+                        "dynamic"
+                    } elif c.mode == "dynamic" {
+                        "kinematic"
+                    } elif c.mode == "kinematic" {
+                        "character"
+                    } else {
+                        "off"
+                    }
+                    if c.mode != "static" && c.mode != "off" && c.shape == "mesh" {
+                        c.shape = "box"
+                    }
+                    if c.mode == "character" {
+                        c.shape = "capsule" c.radius = c.character.radius c.half_height = c.character.half_height c.sensor = false
+                    }
+                } elif id == "actor-physics-shape" {
+                    c.shape = if c.shape == "box" {
+                        "sphere"
+                    } elif c.shape == "sphere" {
+                        "capsule"
+                    } elif c.shape == "capsule" && c.mode == "static" && self.component.kind() == "" {
+                        "mesh"
+                    } else {
+                        "box"
+                    }
+                } else {
+                    c.sensor = !c.sensor
+                }
+                let result = state.execute(GrapheneCommand::SetPhysics(ActorPhysicsCommand {
+                            self.actor, c
+                        }
+                    ))
+                self.invalid = !result.success() if result.success() {
+                    self.physics = c
+                }
+            } else {
+                self.original_text = self.display(id) self.editor = TextEditor::new(self.original_text).select_all()
+            }
+            ret()
+        }
         if id == "actor-anim-morph-reset" {
             let mut c = match self.component {
                 SkeletalMesh(c) => c _ => {
@@ -1259,5 +1434,5 @@ fn edit_text(editor: TextEditor, event: Event) -> TextEditor {
 }
 
 fn animation_button(id: str) -> bool {
-    ret id == "actor-anim-morph-reset" || id == "actor-anim-clip" || id == "actor-anim-loop" || id == "actor-anim-autoplay" || id == "actor-anim-preview"
+    ret id == "actor-physics-mode" || id == "actor-physics-shape" || id == "actor-physics-sensor" || id == "actor-anim-morph-reset" || id == "actor-anim-clip" || id == "actor-anim-loop" || id == "actor-anim-autoplay" || id == "actor-anim-preview"
 }

@@ -1,0 +1,922 @@
+//! Visual screen authoring. Preview and Play use the same retained Luma tree.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all, read_dir}
+
+import luma::{CanvasView, Color, DisplayList, Event, InteractionState, Point, PreparedFrame, Rect, Style, StyleSheet, TextEditor, UiLayer, Widget, WidgetLayout, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_scroll, event_text_input, horizontal, key_backspace, key_delete, key_enter, key_escape, key_left, key_right, key_tab, vertical}
+
+import mod::asset::{UiConfiguration, load_ui_asset, save_ui_asset, ui_asset_validate, ui_graph_diagnostics}
+import mod::build::UiBuild
+import mod::document::UiDocument
+import mod::model::{UiScreenAsset, UiWidget, ui_container, ui_kinds}
+import mod::templates::ui_template
+import mod::view::{UiImage, build_ui_screen, game_ui_styles, load_ui_images, ui_widget_id}
+import refrain::automation_transport::automation_capability_token
+import refrain::blueprint::{BlueprintAsset, BlueprintComponent}
+import refrain::blueprint::editor::BlueprintEditor
+import refrain::command_bus::{EditorState, GrapheneCommand}
+import refrain::editor_values::parse_editor_scalar
+import refrain::scene::world::Scene
+
+fn fresh_template(name: str) -> UiScreenAsset {
+    let mut asset = ui_template(name)
+    let token = automation_capability_token()
+    if token != "" {
+        asset.id = "UI_" + token asset.graph.id = asset.id
+    }
+    ret asset
+}
+fn prefix(widget: Widget) -> Widget {
+    let mut children = Vec[Widget]::new() for child in widget.children() {
+        children.push(prefix(child))
+    }
+    if widget.id() == "bp-place" || widget.id() == "bp-browser" || widget.id() == "bp-components-toggle" || widget.id() == "bp-save" || widget.id() == "bp-compile" || widget.id() == "bp-undo" || widget.id() == "bp-redo" {
+        ret widget.with_style(widget.style().with_displayed(false))
+    }
+    ret widget.with_id(if widget.id() == "" {
+            ""
+        } else {
+            "uigraph-" + widget.id()
+        }
+    ).with_children(children)
+}
+fn states(widget: Widget, interaction: InteractionState, locked: bool) -> Widget {
+    let mut children = Vec[Widget]::new() for child in widget.children() {
+        children.push(states(child, interaction, locked))
+    }
+    let mut classes = widget.classes()
+    let disabled = locked || widget.disabled()
+    let focused = !disabled && widget.id().contains("uid-") && widget.id() == interaction.focused()
+    if !disabled && widget.id().contains("uid-") {
+        if widget.id() == interaction.hovered() {
+            classes += " is-hovered"
+        }
+        if widget.id() == interaction.active() {
+            classes += " is-pressed"
+        }
+        if focused {
+            classes += " is-focused"
+        }
+    }
+    ret widget.with_children(children).with_classes(classes).with_focus(!disabled &&(focused || widget.focused())).with_disabled(disabled)
+}
+
+fn field_value(w: UiWidget, key: str) -> str {
+    ret match key {
+        "name" => w.name "text" => w.text "image" => w.image "color" => w.color "binding" => w.binding "x" => Debug::fmt(w.x) "y" => Debug::fmt(w.y) "width" => Debug::fmt(w.width) "height" => Debug::fmt(w.height) "anchor-x" => Debug::fmt(w.anchor_x) "anchor-y" => Debug::fmt(w.anchor_y) "anchor-right" => Debug::fmt(w.anchor_right) "anchor-bottom" => Debug::fmt(w.anchor_bottom) "align-x" => Debug::fmt(w.align_x) "align-y" => Debug::fmt(w.align_y) "gap" => Debug::fmt(w.gap) "padding" => Debug::fmt(w.padding) "font-size" => Debug::fmt(w.font_size) "radius" => Debug::fmt(w.radius) "value" => Debug::fmt(w.value) _ => ""
+    }
+}
+pub struct UiEditor {
+    document: UiDocument
+    graph_state: EditorState
+    graph_editor: BlueprintEditor
+    preview: UiLayer
+    images: Vec[UiImage]
+    project: str
+    path: str
+    selection: u64
+    graph_mode: bool
+    dirty: bool
+    focused: str
+    text: TextEditor
+    message: str
+    bounds: Rect
+    zoom: f32
+    pan: Point
+    dragging: bool
+    resizing: bool
+    panning: bool
+    start: Point
+    before: UiWidget
+    request: str
+    build: UiBuild
+    pending: str
+    snap: bool
+    interaction: InteractionState
+    owns_focus: bool
+    graph_dirty: bool
+    cached: UiScreenAsset
+    cached_revision: u64
+    preview_revision: u64
+}
+
+impl for UiEditor {
+    pub fn new() -> Self {
+        let asset = fresh_template("HUD")
+        let mut state = EditorState::new(Scene::new()) let _opened = state.execute(GrapheneCommand::OpenBlueprint(asset.graph))
+        let bounds = Rect::new(0, 0, 960, 540)
+        ret Self {
+            UiDocument::new(asset), state, BlueprintEditor::new(), UiLayer::new(build_ui_screen(asset, bounds, Vec[UiImage]::new()), game_ui_styles(), bounds), Vec[UiImage]::new(), "", "", 1, false, true, "", TextEditor::new(""), "Choose a template or open a UI asset", bounds, 1, Point::new(0, 0), false, false, false, Point::new(0, 0), UiWidget::new(0, 0, "Canvas"), "", UiBuild::new(), "", true, InteractionState::new(), false, true, asset.snapshot(), 0_u64, 18446744073709551615_u64
+        }
+    }
+    pub fn configure(self: mut Self, project: str) ->() {
+        if self.project == project {
+            ret()
+        }
+        self.project = project self.path = "" self.document = UiDocument::new(fresh_template("HUD")) self.images = Vec[UiImage]::new() self.load_graph() self.dirty = true
+    }
+    pub fn asset(self: Self) -> UiScreenAsset {
+        ret self.document.asset()
+    }
+    pub fn path(self: Self) -> str {
+        ret self.path
+    }
+    pub fn focused_control(self: Self) -> str {
+        let id = self.interaction.focused()
+        if (id == "uid-undo" && !self.document.can_undo()) ||(id == "uid-redo" && !self.document.can_redo()) ||(id == "uid-compile" && self.build.busy()) {
+            ret ""
+        }
+        ret id
+    }
+    pub fn hovered_control(self: Self) -> str {
+        ret self.interaction.hovered()
+    }
+    pub fn pressed_control(self: Self) -> str {
+        ret self.interaction.active()
+    }
+    pub fn invalidate(self: mut Self) ->() {
+        self.dirty = true
+    }
+    pub fn changed(self: Self) -> bool {
+        ret self.document.dirty()
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.build.busy()
+    }
+    pub fn take_dirty(self: mut Self) -> bool {
+        let result = self.dirty self.dirty = false ret result
+    }
+    pub fn take_request(self: mut Self) -> str {
+        let result = self.request self.request = "" ret result
+    }
+    pub fn open(self: mut Self, path: str) -> bool {
+        if self.document.dirty() {
+            self.pending = "open:" + path self.message = "Save or discard changes before opening another screen" self.dirty = true ret false
+        }
+        match load_ui_asset(self.project, path) {
+            Ok(asset) => {
+                self.document = UiDocument::new(asset) self.path = path self.selection = 1 self.images = load_ui_images(self.project, asset) self.load_graph() self.dirty = true ret true
+            }
+            Err(error) => {
+                self.message = error self.dirty = true ret false
+            }
+        }
+    }
+    fn load_graph(self: mut Self) ->() {
+        self.graph_dirty = true
+        self.cached = self.document.asset() self.cached_revision = self.document.revision() self.preview_revision = 18446744073709551615_u64
+        if self.cached.widget(self.selection).is_none() {
+            for w in self.cached.widgets {
+                if w.parent == 0 {
+                    self.selection = w.id
+                }
+            }
+        }
+        self.graph_state = EditorState::new(Scene::new())
+        let _opened = self.graph_state.execute(GrapheneCommand::OpenBlueprint(self.document.asset().graph))
+        self.graph_editor = BlueprintEditor::new()
+        let mut actions = Vec[str]::new() for w in self.document.asset().widgets {
+            if w.kind == "Button" || w.kind == "Slider" || w.kind == "Checkbox" || w.kind == "Select" || w.kind == "Input" {
+                actions.push(Debug::fmt(w.id))
+            }
+        }
+        self.graph_editor.set_actions(actions)
+        if self.build.completed && self.build.error == "" {
+            match self.build.job {
+                Some(job) => {
+                    let semantic = self.graph_state.blueprint_semantic()
+                    if job.semantic == semantic + "\n" {
+                        self.graph_state.blueprint_compiled(semantic)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+    }
+    fn apply_widget(self: mut Self, widget: UiWidget) -> bool {
+        let mut asset = self.document.asset() let mut widgets = Vec[UiWidget]::new()
+        for w in asset.widgets {
+            widgets.push(if w.id == widget.id {
+                    widget
+                } else {
+                    w
+                }
+            )
+        }
+        asset.widgets = widgets
+        if widget.parent == 0 {
+            asset.reference_width = widget.width asset.reference_height = widget.height
+        }
+        match ui_asset_validate(asset) {
+            Ok(_) => {
+                let result = self.document.replace(asset.synchronized()) self.dirty = result || self.dirty ret result
+            }
+            Err(error) => {
+                self.message = error self.dirty = true ret false
+            }
+        }
+    }
+    pub fn save(self: mut Self) -> bool {
+        if self.project == "" {
+            self.message = "Open a project first" self.dirty = true ret false
+        }
+        if self.path == "" {
+            if mkdir_all(self.project + "/Content/UI") != 0 {
+                self.message = "Cannot create Content/UI" self.dirty = true ret false
+            }
+            let base = "Content/UI/" + self.document.asset().id let mut index = 1_usize self.path = base + ".graphene-ui.json"
+            while file_exists(self.project + "/" + self.path) {
+                self.path = base + "-" + Debug::fmt(index) + ".graphene-ui.json" index += 1
+            }
+        }
+        match save_ui_asset(self.project, self.path, self.document.asset()) {
+            Ok(_) => {
+                self.document.mark_saved() self.graph_state.blueprint_saved() self.message = "Saved " + self.path self.dirty = true ret true
+            }
+            Err(error) => {
+                self.message = error self.dirty = true ret false
+            }
+        }
+    }
+    fn template(self: mut Self, name: str) ->() {
+        if self.document.dirty() {
+            self.pending = "template:" + name self.message = "Save or discard changes before changing template" self.dirty = true ret()
+        }
+        self.document = UiDocument::new(fresh_template(name)) self.path = "" self.selection = 1 self.load_graph() self.dirty = true
+    }
+    fn finish_pending(self: mut Self) ->() {
+        let action = self.pending self.pending = ""
+        if action.contains("template:") {
+            self.template(action.slice_bytes(9, action.byte_len() - 9))
+        } elif action.contains("open:") {
+            let _opened = self.open(action.slice_bytes(5, action.byte_len() - 5))
+        }
+    }
+    fn entry(self: Self, w: UiWidget, key: str, title: str) -> Widget {
+        let mut row = Widget::panel("").with_classes("ui-designer-property").with_direction(horizontal())
+        row.push(Widget::label(title).with_classes("ui-designer-label"))
+        row.push(Widget::input("uid-field-" + key, if self.focused == key {
+                    self.text.value()
+                } else {
+                    field_value(w, key)
+                }
+                ,
+            ).with_classes("ui-designer-input").with_focus(self.focused == key).with_selection(if self.focused == key {
+                    self.text.selection_start()
+                } else {
+                    0_usize
+                }
+                , if self.focused == key {
+                    self.text.selection_end()
+                } else {
+                    0_usize
+                }
+                ,
+            )) ret row
+    }
+    pub fn widget(self: mut Self, locked: bool) -> Widget {
+        if self.cached_revision != self.document.revision() {
+            self.cached = self.document.asset() self.cached_revision = self.document.revision()
+        }
+        let asset = self.cached
+        let mut root = Widget::panel("ui-editor").with_classes("ui-designer").with_direction(vertical())
+        let mut toolbar = Widget::panel("").with_classes("ui-designer-toolbar").with_direction(horizontal())
+        toolbar.push(Widget::label(asset.name + if self.document.dirty() {
+                    " *"
+                } else {
+                    ""
+                }
+            ).with_classes("ui-designer-title"))
+        for tab in vec![("designer", "Designer"),("graph", "Graph")] {
+            toolbar.push(Widget::button("uid-tab-" + tab.0, tab.1).with_classes(if self.graph_mode ==(tab.0 == "graph") {
+                        "ui-designer-button is-active"
+                    } else {
+                        "ui-designer-button"
+                    }
+                ))
+        }
+        toolbar.push(Widget::spacer(1))
+        toolbar.push(Widget::button("uid-save", "Save").with_classes("ui-designer-button").with_disabled(locked))
+        toolbar.push(Widget::button("uid-compile", if self.build.busy() {
+                    "Compiling…"
+                } else {
+                    "Compile"
+                }
+                ,
+            ).with_classes("ui-designer-button").with_disabled(locked || self.build.busy()))
+        toolbar.push(Widget::button("uid-undo", "Undo").with_classes("ui-designer-button").with_disabled(locked || !self.document.can_undo())) toolbar.push(Widget::button("uid-redo", "Redo").with_classes("ui-designer-button").with_disabled(locked || !self.document.can_redo()))
+        root.push(toolbar)
+        let mut templates = Widget::panel("").with_classes("ui-designer-toolbar").with_direction(horizontal())
+        for name in vec!["HUD", "Pause", "Settings"] {
+            templates.push(Widget::button("uid-template-" + name, name).with_classes("ui-designer-button").with_disabled(locked))
+        }
+        for role in vec!["HUD", "Pause", "Settings"] {
+            templates.push(Widget::button("uid-assign-" + role, "Use as " + role).with_classes("ui-designer-button").with_disabled(locked))
+        }
+        root.push(templates)
+        if self.pending != "" {
+            let mut row = Widget::panel("").with_classes("ui-designer-toolbar").with_direction(horizontal()) row.push(Widget::label("Unsaved screen")) for choice in vec!["save", "discard", "cancel"] {
+                row.push(Widget::button("uid-pending-" + choice, choice).with_classes("ui-designer-button"))
+            }
+            root.push(row)
+        }
+        if self.graph_mode {
+            root.push(prefix(self.graph_editor.widget(self.graph_state, self.build.busy())))
+        } else {
+            let mut workspace = Widget::panel("").with_classes("ui-designer-workspace").with_direction(horizontal()).with_flex(0, 1)
+            let mut left = Widget::panel("uid-palette").with_classes("ui-designer-left").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+            left.push(Widget::label("PALETTE").with_classes("ui-designer-section"))
+            for kind in ui_kinds() {
+                left.push(Widget::button("uid-add-" + kind, "+ " + kind).with_classes("ui-designer-item").with_disabled(locked))
+            }
+            left.push(Widget::label("HIERARCHY").with_classes("ui-designer-section"))
+            for w in asset.widgets {
+                let mut depth = 0_usize let mut parent = w.parent while parent != 0 && depth < asset.widgets.len() {
+                    parent = asset.widget(parent).unwrap_or(UiWidget::new(0, 0, "Canvas")).parent depth += 1
+                }
+                let mut indent = "" for i in 0_usize..depth {
+                    indent += "  "
+                }
+                left.push(Widget::button("uid-select-" + Debug::fmt(w.id), indent + w.name).with_classes(if self.selection == w.id {
+                            "ui-designer-item is-active"
+                        } else {
+                            "ui-designer-item"
+                        }
+                    ))
+            }
+            for name in read_dir(self.project + "/Content/UI") {
+                if name.contains(".graphene-ui.json") {
+                    left.push(Widget::button("uid-open-" + name, name).with_classes("ui-designer-item"))
+                }
+            }
+            workspace.push(left)
+            let mut center = Widget::panel("").with_classes("ui-designer-center").with_direction(vertical()).with_flex(0, 1)
+            let mut resolutions = Widget::panel("").with_classes("ui-designer-toolbar").with_direction(horizontal())
+            for value in vec!["720p", "1080p", "1440p", "Fit", "+", "-"] {
+                resolutions.push(Widget::button("uid-resolution-" + value, value).with_classes("ui-designer-button"))
+            }
+            resolutions.push(Widget::button("uid-snap", if self.snap {
+                        "Snap 8 ✓"
+                    } else {
+                        "Snap off"
+                    }
+                    ,
+                ).with_classes("ui-designer-button"))
+            center.push(resolutions)
+            center.push(Widget::panel("ui-designer-preview").with_attribute("data-luma-raw-input", "true").with_classes("ui-designer-preview").with_flex(0, 1)) workspace.push(center)
+            let mut details = Widget::panel("uid-details").with_classes("ui-designer-details").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+            details.push(Widget::label("DETAILS").with_classes("ui-designer-section"))
+            match asset.widget(self.selection) {
+                Some(w) => {
+                    details.push(Widget::label(w.kind + " · " + Debug::fmt(w.id)).with_classes("ui-designer-section"))
+                    for item in vec![("name", "Name"),("text", "Text"),("x", "Offset X"),("y", "Offset Y"),("width", "Width"),("height", "Height"),("anchor-x", "Anchor X"),("anchor-y", "Anchor Y"),("anchor-right", "Anchor right"),("anchor-bottom", "Anchor bottom"),("align-x", "Align X"),("align-y", "Align Y"),("gap", "Gap"),("padding", "Padding"),("font-size", "Font size"),("radius", "Radius"),("value", "Value"),("color", "Color"),("image", "Image"),("binding", "Setting")] {
+                        details.push(self.entry(w, item.0, item.1))
+                    }
+                    for item in vec![("visible", w.visible),("enabled", w.enabled),("fill", w.fill)] {
+                        details.push(Widget::checkbox("uid-flag-" + item.0, item.0, item.1).with_classes("ui-designer-item").with_disabled(locked))
+                    }
+                    details.push(Widget::label("Reparent into").with_classes("ui-designer-section"))
+                    for parent in asset.widgets {
+                        if ui_container(parent.kind) && parent.id != w.id {
+                            details.push(Widget::button("uid-parent-" + Debug::fmt(parent.id), parent.name).with_classes("ui-designer-item").with_disabled(locked || w.parent == 0))
+                        }
+                    }
+                    details.push(Widget::button("uid-up", "Move up").with_classes("ui-designer-button").with_disabled(locked)) details.push(Widget::button("uid-down", "Move down").with_classes("ui-designer-button").with_disabled(locked))
+                    details.push(Widget::button("uid-delete", "Delete widget").with_classes("ui-designer-button").with_disabled(locked || w.parent == 0))
+                }
+                None => {
+                }
+            }
+            workspace.push(details) root.push(workspace)
+        }
+        root.push(Widget::label(self.message).with_classes("ui-designer-status")) ret states(root, self.interaction, locked)
+    }
+    fn preview_bounds(self: Self, area: Rect) -> Rect {
+        let asset = self.cached
+        let sx =(area.width() - 32) / asset.reference_width let sy =(area.height() - 32) / asset.reference_height
+        let scale = if sx < sy {
+            sx
+        } else {
+            sy
+        }
+        let width = asset.reference_width * scale * self.zoom let height = asset.reference_height * scale * self.zoom
+        ret Rect::new(area.x() +(area.width() - width) * 0.5_f32 + self.pan.x(), area.y() +(area.height() - height) * 0.5_f32 + self.pan.y(), width, height)
+    }
+    pub fn compose(self: mut Self, frame: PreparedFrame, layout: WidgetLayout, sheet: StyleSheet) -> PreparedFrame {
+        if self.graph_mode {
+            if self.graph_dirty {
+                self.graph_editor.refresh(self.graph_state.blueprint_asset(), sheet) self.graph_editor.set_diagnostics(ui_graph_diagnostics(self.document.asset())) self.graph_dirty = false
+            }
+            match layout.find_bounds("uigraph-blueprint-canvas") {
+                Some(bounds) => {
+                    self.graph_editor.set_bounds(bounds) ret frame.with_canvas_at(self.graph_editor.canvas(), self.graph_editor.view(), bounds)
+                }
+                None => {
+                }
+            }
+            ret frame
+        }
+        match layout.find_bounds("ui-designer-preview") {
+            Some(area) => {
+                let bounds = self.preview_bounds(area)
+                if self.cached_revision != self.document.revision() {
+                    self.cached = self.document.asset() self.cached_revision = self.document.revision()
+                }
+                let asset = self.cached
+                if self.preview_revision != self.cached_revision || bounds.x() != self.bounds.x() || bounds.y() != self.bounds.y() || bounds.width() != self.bounds.width() || bounds.height() != self.bounds.height() {
+                    self.bounds = bounds self.preview.set_root(build_ui_screen(asset, self.bounds, self.images), self.bounds) self.preview_revision = self.cached_revision
+                }
+                let mut result = self.preview.compose_clipped(frame, area)
+                let mut guides = DisplayList::new()
+                guides.stroke_rect(self.bounds, Color::rgb(75, 85, 104))
+                match self.preview.layout().find_bounds(ui_widget_id(self.selection)) {
+                    Some(bounds) => {
+                        guides.stroke_rect(bounds, Color::rgb(116, 191, 255)) guides.fill_rect(Rect::new(bounds.right() - 5, bounds.bottom() - 5, 10, 10), Color::rgb(116, 191, 255))
+                        let selected = asset.widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas"))
+                        let ax = self.bounds.x() + self.bounds.width() * selected.anchor_x let ay = self.bounds.y() + self.bounds.height() * selected.anchor_y
+                        guides.line(ax - 7, ay, ax + 7, ay, 1, Color::rgb(231, 178, 87)) guides.line(ax, ay - 7, ax, ay + 7, 1, Color::rgb(231, 178, 87))
+                    }
+                    None => {
+                    }
+                }
+                result = result.with_foreground_overlay(guides, area) ret result
+            }
+            None => {
+                ret frame
+            }
+        }
+    }
+    pub fn popup(self: Self, width: f32, height: f32, layout: WidgetLayout) -> Widget {
+        ret prefix(self.graph_editor.popup(width, height, self.graph_state, layout))
+    }
+    pub fn popup_open(self: Self) -> bool {
+        ret self.graph_mode && self.graph_editor.popup_open()
+    }
+    fn compile(self: mut Self) ->() {
+        self.build.prepare(self.project, vec![self.document.asset()])
+        self.message = "Compiling UI graph"
+        self.poll() self.dirty = true
+    }
+    pub fn poll(self: mut Self) -> bool {
+        if self.build.poll() ||(self.build.completed && self.message == "Compiling UI graph") {
+            self.message = if self.build.error == "" {
+                let semantic = self.graph_state.blueprint_semantic()
+                match self.build.job {
+                    Some(job) => {
+                        if job.semantic == semantic + "\n" {
+                            self.graph_state.blueprint_compiled(semantic)
+                            "UI graph compiled"
+                        } else {
+                            "Snapshot compiled; current graph needs compile"
+                        }
+                    }
+                    None => "UI graph compiled"
+                }
+            } else {
+                self.build.error
+            }
+            self.graph_editor.build_result(self.message, self.build.error != "") self.dirty = true ret true
+        }
+        ret false
+    }
+    fn commit_field(self: mut Self) ->() {
+        if self.focused == "" {
+            ret()
+        }
+        let mut w = self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas"))
+        let key = self.focused let text = self.text.value()
+        if key == "name" {
+            w.name = text
+        } elif key == "text" {
+            w.text = text
+        } elif key == "image" {
+            w.image = text
+        } elif key == "color" {
+            w.color = text
+        } elif key == "binding" {
+            w.binding = text
+        } else {
+            match parse_editor_scalar(text) {
+                Some(value) => {
+                    if key == "x" {
+                        w.x = value
+                    } elif key == "y" {
+                        w.y = value
+                    } elif key == "width" {
+                        w.width = value
+                    } elif key == "height" {
+                        w.height = value
+                    } elif key == "anchor-x" {
+                        w.anchor_x = value
+                    } elif key == "anchor-y" {
+                        w.anchor_y = value
+                    } elif key == "anchor-right" {
+                        w.anchor_right = value
+                    } elif key == "anchor-bottom" {
+                        w.anchor_bottom = value
+                    } elif key == "align-x" {
+                        w.align_x = value
+                    } elif key == "align-y" {
+                        w.align_y = value
+                    } elif key == "gap" {
+                        w.gap = value
+                    } elif key == "padding" {
+                        w.padding = value
+                    } elif key == "font-size" {
+                        w.font_size = value
+                    } elif key == "radius" {
+                        w.radius = value
+                    } elif key == "value" {
+                        w.value = value
+                    }
+                }
+                None => {
+                    self.message = "Enter a finite number" self.dirty = true ret()
+                }
+            }
+        }
+        let applied = self.apply_widget(w) if applied {
+            if key == "image" {
+                self.images = load_ui_images(self.project, self.document.asset())
+                let mut loaded = w.image == ""
+                for image in self.images {
+                    if image.path == w.image && image.payload.byte_len() > 8 {
+                        loaded = true
+                    }
+                }
+                if !loaded {
+                    self.message = "Cannot load image: use .gtexture or 8-bit RGB/RGBA PNG"
+                }
+            }
+            self.load_graph()
+        }
+        self.focused = "" self.dirty = true
+    }
+    pub fn input(self: mut Self, event: Event, hit_target: str, layout: WidgetLayout, sheet: StyleSheet, locked: bool) -> bool {
+        let mut target = hit_target
+        let mut kind = event.kind()
+        if locked {
+            self.focused = "" self.interaction = self.interaction.pointer_cancel().with_focus("") ret false
+        }
+        let inside = target.contains("uid-") || target == "ui-designer-preview" || target.contains("uigraph-")
+        let previous_interaction = self.interaction
+        if kind == event_pointer_move() {
+            self.interaction = self.interaction.pointer_move_to(if inside {
+                    target
+                } else {
+                    ""
+                }
+            )
+        }
+        if kind == event_pointer_down() {
+            self.owns_focus = inside
+            if inside {
+                self.interaction = self.interaction.pointer_down_on(target, layout.find_widget(target))
+            }
+        }
+        if kind == event_pointer_up() {
+            self.interaction = self.interaction.pointer_up_on(target)
+        }
+        if previous_interaction.hovered() != self.interaction.hovered() || previous_interaction.active() != self.interaction.active() || previous_interaction.focused() != self.interaction.focused() {
+            self.dirty = true
+        }
+        if kind == event_key_down() && self.owns_focus && event.key() == key_tab() && !self.graph_mode {
+            self.commit_field()
+            let root = layout.find_widget("ui-editor").unwrap_or(Widget::panel(""))
+            self.interaction = if event.shift() {
+                self.interaction.focus_previous(root)
+            } else {
+                self.interaction.focus_next(root)
+            }
+            let id = self.interaction.focused()
+            if id.contains("uid-field-") {
+                self.focused = id.slice_bytes(10, id.byte_len() - 10) self.text = TextEditor::new(field_value(self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas")), self.focused))
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_key_down() && self.owns_focus && event.control() && self.focused == "" {
+            if event.key() == 115 {
+                self.save() ret true
+            }
+            if event.key() == 122 || event.key() == 121 {
+                if event.key() == 121 || event.shift() {
+                    self.document.redo()
+                } else {
+                    self.document.undo()
+                }
+                self.load_graph() self.dirty = true ret true
+            }
+        }
+        if kind == event_key_down() && self.owns_focus && self.focused == "" && !self.graph_mode &&(event.key() == key_enter() || event.key() == 32) && self.interaction.focused().contains("uid-") {
+            target = self.interaction.focused() kind = event_pointer_down()
+        }
+        if kind == event_key_down() && self.owns_focus && self.focused == "" && !self.graph_mode && event.key() == key_delete() {
+            target = "uid-delete" kind = event_pointer_down()
+        }
+        if kind == event_pointer_up() {
+            self.document.end_gesture()
+            if !self.graph_mode && previous_interaction.active() != "" && !self.dragging && !self.resizing && !self.panning {
+                ret true
+            }
+        }
+        if kind == event_focus_lost() {
+            self.interaction = self.interaction.pointer_cancel().pointer_move_to("")
+            if self.graph_mode {
+                self.document.cancel_gesture() self.load_graph()
+            }
+            if self.dragging || self.resizing {
+                self.document.cancel_gesture()
+            }
+            self.dragging = false self.resizing = false self.panning = false self.dirty = true ret false
+        }
+        if self.graph_mode && kind == event_pointer_up() {
+            self.document.end_gesture()
+        }
+        if self.graph_mode &&(target.contains("uigraph-") || self.graph_editor.popup_open() || self.owns_focus) {
+            let raw = if target.contains("uigraph-") {
+                target.slice_bytes(8, target.byte_len() - 8)
+            } else {
+                ""
+            }
+            if kind == event_pointer_down() &&(raw == "bp-save" || raw == "bp-compile") {
+                if raw == "bp-save" {
+                    self.save()
+                } else {
+                    self.compile()
+                }
+                self.dirty = true ret true
+            }
+            if kind == event_pointer_down() && raw == "bp-undo" {
+                self.document.undo() self.load_graph() self.dirty = true ret true
+            }
+            if kind == event_pointer_down() && raw == "bp-redo" {
+                self.document.redo() self.load_graph() self.dirty = true ret true
+            }
+            let bounds = layout.find_bounds("uigraph-blueprint-canvas").unwrap_or(Rect::new(0, 0, 0, 0))
+            let revision = self.graph_state.revision()
+            if kind == event_pointer_down() &&(target.contains("uigraph-") || self.graph_editor.popup_open()) {
+                self.document.begin_gesture()
+            }
+            if self.graph_editor.input(self.graph_state, event, raw, bounds, sheet) {
+                self.graph_dirty = true
+                if self.graph_state.revision() != revision {
+                    let mut asset = self.document.asset() asset.graph = self.graph_state.blueprint_asset() self.document.replace(asset)
+                }
+                if kind == event_pointer_up() {
+                    self.document.end_gesture()
+                }
+                self.dirty = true ret true
+            }
+        }
+        if kind == event_key_down() && self.focused != "" {
+            if event.key() == key_escape() {
+                self.focused = ""
+            } elif event.key() == key_enter() {
+                self.commit_field()
+            } elif event.key() == key_backspace() {
+                self.text = self.text.backspace()
+            } elif event.key() == key_delete() {
+                self.text = self.text.delete()
+            } elif event.key() == key_left() {
+                self.text = self.text.move_left(event.shift())
+            } elif event.key() == key_right() {
+                self.text = self.text.move_right(event.shift())
+            } elif event.control() &&(event.key() == 97 || event.key() == 65) {
+                self.text = self.text.select_all()
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_text_input() && self.focused != "" {
+            self.text = self.text.insert(event.text()) self.dirty = true ret true
+        }
+        if kind == event_key_down() &&(self.dragging || self.resizing) && event.key() == key_escape() {
+            self.document.cancel_gesture() self.dragging = false self.resizing = false self.dirty = true ret true
+        }
+        if locked {
+            ret false
+        }
+        if kind == event_pointer_move() &&(self.dragging || self.resizing || self.panning) {
+            let scale = self.bounds.width() / self.document.asset().reference_width
+            if self.panning {
+                self.pan = Point::new(self.pan.x() + event.x() - self.start.x(), self.pan.y() + event.y() - self.start.y()) self.start = Point::new(event.x(), event.y())
+            } else {
+                let dx =(event.x() - self.start.x()) / scale let dy =(event.y() - self.start.y()) / scale let mut w = self.before.snapshot()
+                if self.resizing {
+                    w.width += dx w.height += dy
+                } else {
+                    w.x += dx w.y += dy
+                }
+                if self.snap {
+                    w.x =((w.x / 8) as i32 as f32) * 8 w.y =((w.y / 8) as i32 as f32) * 8 w.width =((w.width / 8) as i32 as f32) * 8 w.height =((w.height / 8) as i32 as f32) * 8
+                }
+                self.apply_widget(w)
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_pointer_up() &&(self.dragging || self.resizing || self.panning) {
+            self.document.end_gesture() self.dragging = false self.resizing = false self.panning = false self.load_graph() self.dirty = true ret true
+        }
+        if kind == event_scroll() && target == "ui-designer-preview" {
+            self.zoom += event.wheel_y() * 0.1_f32 if self.zoom < 0.25_f32 {
+                self.zoom = 0.25_f32
+            } elif self.zoom > 4 {
+                self.zoom = 4
+            }
+            self.dirty = true ret true
+        }
+        if kind != event_pointer_down() ||(event.kind() == event_pointer_down() && event.key() != 1 && target != "ui-designer-preview") {
+            ret false
+        }
+        if self.focused != "" && target != "uid-field-" + self.focused {
+            self.commit_field()
+        }
+        if target == "uid-tab-designer" || target == "uid-tab-graph" {
+            self.graph_mode = target == "uid-tab-graph" self.load_graph() self.dirty = true ret true
+        }
+        if target == "uid-save" {
+            self.save() ret true
+        }
+        if target == "uid-compile" {
+            self.compile() ret true
+        }
+        if target == "uid-undo" || target == "uid-redo" {
+            if target == "uid-undo" {
+                self.document.undo()
+            } else {
+                self.document.redo()
+            }
+            self.load_graph() self.dirty = true ret true
+        }
+        if target == "uid-pending-save" {
+            if self.save() {
+                self.finish_pending()
+            }
+            ret true
+        }
+        if target == "uid-pending-discard" {
+            self.document.mark_saved() self.finish_pending() ret true
+        }
+        if target == "uid-pending-cancel" {
+            self.pending = "" self.dirty = true ret true
+        }
+        if target == "uid-snap" {
+            self.snap = !self.snap self.dirty = true ret true
+        }
+        for name in vec!["HUD", "Pause", "Settings"] {
+            if target == "uid-template-" + name {
+                self.template(name) ret true
+            }
+            if target == "uid-assign-" + name {
+                if self.save() {
+                    let mut config = UiConfiguration::load(self.project).unwrap_or(UiConfiguration::defaults()) if name == "HUD" {
+                        config.hud = self.path
+                    } elif name == "Pause" {
+                        config.pause = self.path
+                    } else {
+                        config.settings = self.path
+                    }
+                    self.message = if config.save(self.project) {
+                        "Assigned " + name
+                    } else {
+                        "Cannot save Config/UI.json"
+                    }
+                    self.dirty = true
+                }
+                ret true
+            }
+        }
+        if target.contains("uid-open-") {
+            self.open("Content/UI/" + target.slice_bytes(9, target.byte_len() - 9)) ret true
+        }
+        if target.contains("uid-resolution-") {
+            let name = target.slice_bytes(15, target.byte_len() - 15) let mut asset = self.document.asset() if name == "720p" {
+                asset.reference_width = 1280 asset.reference_height = 720
+            } elif name == "1080p" {
+                asset.reference_width = 1920 asset.reference_height = 1080
+            } elif name == "1440p" {
+                asset.reference_width = 2560 asset.reference_height = 1440
+            } elif name == "+" {
+                self.zoom += 0.1_f32
+            } elif name == "-" {
+                self.zoom -= 0.1_f32
+            } else {
+                self.zoom = 1 self.pan = Point::new(0, 0)
+            }
+            if self.zoom < 0.25_f32 {
+                self.zoom = 0.25_f32
+            } elif self.zoom > 4 {
+                self.zoom = 4
+            }
+            self.document.replace(asset.synchronized()) self.dirty = true ret true
+        }
+        if target.contains("uid-add-") {
+            let kind = target.slice_bytes(8, target.byte_len() - 8) let mut asset = self.document.asset() let id = asset.next_id() let selected = asset.widget(self.selection).unwrap_or(UiWidget::new(1, 0, "Canvas")) let parent = if ui_container(selected.kind) {
+                selected.id
+            } else {
+                selected.parent
+            }
+            let mut widget = UiWidget::new(id, parent, kind) widget.name = kind + Debug::fmt(id) asset.widgets.push(widget) self.document.replace(asset.synchronized()) self.selection = id self.load_graph() self.dirty = true ret true
+        }
+        if target.contains("uid-select-") {
+            for w in self.document.asset().widgets {
+                if target == "uid-select-" + Debug::fmt(w.id) {
+                    self.selection = w.id self.dirty = true
+                }
+            }
+            ret true
+        }
+        if target.contains("uid-field-") {
+            self.focused = target.slice_bytes(10, target.byte_len() - 10) self.text = TextEditor::new(field_value(self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas")), self.focused)) self.dirty = true ret true
+        }
+        if target.contains("uid-parent-") || target.contains("uid-flag-") {
+            let mut w = self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas"))
+            if target == "uid-flag-visible" {
+                w.visible = !w.visible
+            } elif target == "uid-flag-enabled" {
+                w.enabled = !w.enabled
+            } elif target == "uid-flag-fill" {
+                w.fill = !w.fill
+            } else {
+                for parent in self.document.asset().widgets {
+                    if target == "uid-parent-" + Debug::fmt(parent.id) {
+                        w.parent = parent.id
+                    }
+                }
+            }
+            self.apply_widget(w) self.load_graph() ret true
+        }
+        if target == "uid-delete" {
+            let mut asset = self.document.asset() let selected = asset.widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas")) if selected.parent == 0 {
+                ret true
+            }
+            let mut ids = vec![self.selection] let mut index = 0_usize while index < ids.len() {
+                let parent = ids.get(index).unwrap_or(0) for w in asset.widgets {
+                    if w.parent == parent {
+                        ids.push(w.id)
+                    }
+                }
+                index += 1
+            }
+            let mut retained = Vec[UiWidget]::new() for w in asset.widgets {
+                let mut removed = false for id in ids {
+                    if w.id == id {
+                        removed = true
+                    }
+                }
+                if !removed {
+                    retained.push(w)
+                }
+            }
+            asset.widgets = retained self.document.replace(asset.synchronized()) self.selection = selected.parent self.load_graph() self.dirty = true ret true
+        }
+        if target == "uid-up" || target == "uid-down" {
+            let mut asset = self.document.asset() let mut index = 0_usize for w in asset.widgets {
+                if w.id == self.selection {
+                    break
+                }
+                index += 1
+            }
+            let w = asset.widgets.get(index).unwrap_or(UiWidget::new(0, 0, "Canvas"))
+            let mut other = index
+            let mut cursor = index
+            while (target == "uid-up" && cursor > 0) ||(target == "uid-down" && cursor + 1 < asset.widgets.len()) {
+                cursor = if target == "uid-up" {
+                    cursor - 1
+                } else {
+                    cursor + 1
+                }
+                if asset.widgets.get(cursor).unwrap_or(w).parent == w.parent {
+                    other = cursor break
+                }
+            }
+            if other != index {
+                let adjacent = asset.widgets.get(other).unwrap_or(w)
+                asset.widgets.set(index, adjacent) asset.widgets.set(other, w) self.document.replace(asset)
+            }
+            self.dirty = true ret true
+        }
+        if target == "ui-designer-preview" {
+            self.start = Point::new(event.x(), event.y())
+            if event.key() == 2 || event.key() == 3 {
+                self.panning = true ret true
+            }
+            let hit = self.preview.layout().hit(event.x(), event.y())
+            for w in self.document.asset().widgets {
+                if hit == ui_widget_id(w.id) {
+                    self.selection = w.id self.before = w
+                    let bounds = self.preview.layout().find_bounds(hit).unwrap_or(self.bounds)
+                    self.resizing = event.x() >= bounds.right() - 9 && event.y() >= bounds.bottom() - 9
+                    let parent = self.document.asset().widget(w.parent).unwrap_or(w)
+                    self.dragging = !self.resizing && w.parent != 0 &&(parent.kind == "Canvas" || parent.kind == "Overlay")
+                    self.document.begin_gesture() self.dirty = true break
+                }
+            }
+            ret true
+        }
+        ret inside
+    }
+}

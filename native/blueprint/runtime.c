@@ -175,7 +175,8 @@ static bool gbp_invoke(void *handle, const gbp_host_v1 *host, const char *kind, 
     else if (begin) { if (state->begun || !state->constructing) return false; state->begun = true; }
     else if (!state->begun) return false;
     if (!construction && !begin && !gbp_equal_slice("tick", kind, kind_length) &&
-        !gbp_equal_slice("input-pressed", kind, kind_length) && !gbp_equal_slice("input-released", kind, kind_length)) return false;
+        !gbp_equal_slice("input-pressed", kind, kind_length) && !gbp_equal_slice("input-released", kind, kind_length) &&
+        !gbp_equal_slice("ui-click", kind, kind_length) && !gbp_equal_slice("ui-change", kind, kind_length) && !gbp_equal_slice("ui-destruct", kind, kind_length)) return false;
     for (size_t i = 0; i < state->class_info->event_count; ++i) {
         const gbp_event *event = &state->class_info->events[i];
         if (gbp_equal_slice(event->kind, kind, kind_length) && gbp_equal_slice(event->action, action, action_length)) {

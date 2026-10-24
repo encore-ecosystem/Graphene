@@ -1,16 +1,16 @@
-import binary::{encode, decode}
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::{copy_file, file_exists, mkdir_all, read_file, write_file}
+import std::time::perf_counter_ns
+
+import binary::{decode, encode}
+import graphene::{MeshData, NativeMesh, StandardMaterial, TextureImage, asset_source_stamp, cube_mesh, load_material_asset_file, load_native_material, load_native_mesh, load_native_texture, load_obj_asset, native_mesh_valid, prepare_mesh_geometry, save_material_asset_file, save_native_material, save_native_mesh, save_native_texture}
 import graphene::content_browser::files::{content_move, scan_content}
 import graphene::content_browser::model::ContentAsset
 import graphene::content_browser::operations::content_suffix
-import graphene::prepare_mesh_geometry
-import graphene::{NativeMesh, StandardMaterial, TextureImage, asset_source_stamp, load_obj_asset, load_native_mesh, save_native_mesh, load_native_texture, save_native_texture, load_native_material, save_native_material, cube_mesh, native_mesh_valid, MeshData}
-import graphene::{load_material_asset_file, save_material_asset_file}
 import linalg::Vec3
-import std::os::{mkdir_all, read_file, write_file, copy_file, file_exists}
-import std::time::perf_counter_ns
 
 extern fn encore_str_from_buffer(bytes: u8*, length: usize) -> str
 #attr(safe)
@@ -89,7 +89,7 @@ fn main() -> u32 {
     loaded.geometry().hierarchy().len() != geometry.hierarchy().len() || loaded.mesh().indices().len() != cube.indices().len() {
         ret 15
     }
-    let bad = MeshData::new(cube.vertices(), vec![4294967295_u32, 0, 1], 44)
+    let bad = MeshData::new(cube.vertices(), vec![4294967295_u32, 0_u32, 1_u32], 44)
     if save_native_mesh(root + "/Invalid.gmesh", "bad", "", bad, geometry) {
         ret 16
     }
@@ -172,7 +172,7 @@ fn main() -> u32 {
             ret 31
         }
     }
-    let mut prefix = vec![71_u8, 65, 83, 49]
+    let mut prefix = vec![71_u8, 65_u8, 83_u8, 49_u8]
     for shift in 0_usize..4_usize {
         prefix.push(((replacement.len() as u32) >>((shift as u32) * 8)) as u8)
     }

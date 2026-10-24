@@ -1,0 +1,96 @@
+//! Reuses the native Blueprint compiler, cache and diagnostics for UI graphs.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::read_file
+import std::thread::JoinHandle
+
+import mod::asset::ui_graph_diagnostics
+import mod::model::UiScreenAsset
+import refrain::blueprint::{BlueprintAsset, BlueprintBuild, BlueprintDiagnostic, blueprint_compiler_path, prepare_blueprint_build, run_blueprint_build, validate_blueprint}
+import refrain::blueprint::codec::blueprint_semantic_source
+pub struct UiBuild {
+    job: Option[BlueprintBuild]
+    worker: Option[JoinHandle[i32]]
+    library: str
+    error: str
+    completed: bool
+}
+
+impl for UiBuild {
+    pub fn new() -> Self {
+        ret Self { Option::None, Option::None, "", "", false }
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.worker.is_some()
+    }
+    pub fn prepare(self: mut Self, project: str, screens: Vec[UiScreenAsset]) -> bool {
+        if self.busy() {
+            ret false
+        }
+        self.error = "" self.library = "" self.completed = false
+        let mut assets = Vec[BlueprintAsset]::new()
+        for screen in screens {
+            let graph = screen.synchronized().graph
+            let errors = ui_graph_diagnostics(screen.synchronized())
+            if errors.len() > 0 {
+                let first = errors.get(0).unwrap_or(BlueprintDiagnostic {
+                        0, "", "Invalid graph"
+                    }
+                ) self.error = screen.name + ": node " + core::fmt::Debug::fmt(first.node) + ": " + first.message self.completed = true ret false
+            }
+            let mut duplicate = false for existing in assets {
+                if existing.id == graph.id {
+                    if blueprint_semantic_source(existing) != blueprint_semantic_source(graph) {
+                        self.error = "Different UI screens share an asset identity" self.completed = true ret false
+                    }
+                    duplicate = true
+                }
+            }
+            if !duplicate {
+                assets.push(graph)
+            }
+        }
+        match prepare_blueprint_build(project, "native/blueprint", blueprint_compiler_path(), assets) {
+            Ok(job) => {
+                self.job = Option[BlueprintBuild]::Some(job)
+                if job.cached {
+                    self.library = job.library self.completed = true
+                } else {
+                    self.worker = Option[JoinHandle[i32]]::Some(spawn run_blueprint_build(job.compiler, job.directory, job.library, job.receipt, job.key))
+                }
+                ret true
+            }
+            Err(error) => {
+                self.error = error self.completed = true ret false
+            }
+        }
+    }
+    pub fn poll(self: mut Self) -> bool {
+        match self.worker {
+            Some(worker) => {
+                if !worker.is_finished() {
+                    ret false
+                }
+                let code = worker.join() self.worker = Option[JoinHandle[i32]]::None
+                match self.job {
+                    Some(job) => {
+                        if code == 0 {
+                            self.library = job.library
+                        } else {
+                            self.error = read_file(job.directory + "/build.log")
+                        }
+                    }
+                    None => {
+                        self.error = "Missing UI build snapshot"
+                    }
+                }
+                self.completed = true ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+}

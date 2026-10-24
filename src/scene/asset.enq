@@ -2,12 +2,15 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
+
 import mod::component::SceneComponent
 import mod::transform::Transform
 import refrain::blueprint::codec::{blueprint_instance_json, blueprint_instance_parse}
 import refrain::blueprint::model::BlueprintInstance
+import refrain::physics::component::PhysicsComponent
 
 pub struct SceneActor {
     id: u64
@@ -18,6 +21,7 @@ pub struct SceneActor {
     visible: bool
     blueprint: Option[BlueprintInstance]
     component: SceneComponent
+    physics: PhysicsComponent
 }
 pub struct SceneAsset {
     version: u32
@@ -47,32 +51,32 @@ fn parse_u64(source: str) -> Option[u64] {
     ret Option[u64]::Some(value)
 }
 
-pub import mod::json_value::{parse_number, vec3_json, json_vec3}
+pub import mod::json_value::{json_vec3, parse_number, vec3_json}
 
 impl for SceneActor {
     pub fn new(name: str, kind: str, transform: Transform) -> SceneActor {
         ret SceneActor {
-            0_u64, Option[u64]::None, name, kind, transform, true, Option[BlueprintInstance]::None, SceneComponent::for_kind(kind)
+            0_u64, Option[u64]::None, name, kind, transform, true, Option[BlueprintInstance]::None, SceneComponent::for_kind(kind), PhysicsComponent::defaults()
         }
     }
     pub fn with_identity(self: Self, id: u64) -> SceneActor {
         ret SceneActor {
-            id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component
+            id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics
         }
     }
     pub fn with_parent(self: Self, parent: Option[u64]) -> SceneActor {
         ret SceneActor {
-            self.id, parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component
+            self.id, parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics
         }
     }
     pub fn with_visible(self: Self, visible: bool) -> SceneActor {
         ret SceneActor {
-            self.id, self.parent, self.name, self.kind, self.transform, visible, self.blueprint, self.component
+            self.id, self.parent, self.name, self.kind, self.transform, visible, self.blueprint, self.component, self.physics
         }
     }
     pub fn with_blueprint(self: Self, blueprint: BlueprintInstance) -> SceneActor {
         ret SceneActor {
-            self.id, self.parent, self.name, "blueprint", self.transform, self.visible, Option[BlueprintInstance]::Some(blueprint), self.component
+            self.id, self.parent, self.name, "blueprint", self.transform, self.visible, Option[BlueprintInstance]::Some(blueprint), self.component, self.physics
         }
     }
     pub fn component(self: Self) -> SceneComponent {
@@ -85,7 +89,15 @@ impl for SceneActor {
             } else {
                 component.kind()
             }
-            , self.transform, self.visible, self.blueprint, component
+            , self.transform, self.visible, self.blueprint, component, self.physics
+        }
+    }
+    pub fn physics(self: Self) -> PhysicsComponent {
+        ret self.physics
+    }
+    pub fn with_physics(self: Self, physics: PhysicsComponent) -> Self {
+        ret Self {
+            self.id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, physics
         }
     }
     pub fn blueprint(self: Self) -> Option[BlueprintInstance] {
@@ -128,6 +140,7 @@ impl for SceneActor {
         if self.component.kind() != "" {
             fields.push(field("component", self.component.to_json()))
         }
+        fields.push(field("physics", self.physics.to_json()))
         match self.blueprint {
             Some(instance) => {
                 fields.push(field("blueprint", blueprint_instance_json(instance)))
@@ -320,6 +333,20 @@ impl for SceneActor {
                 None => {
                 }
             }
+            match value.get("physics") {
+                Some(settings) => {
+                    match PhysicsComponent::from_json(settings) {
+                        Some(c) => {
+                            actor = actor.with_physics(c)
+                        }
+                        None => {
+                            ret Option[SceneActor]::None
+                        }
+                    }
+                }
+                None => {
+                }
+            }
             ret Option[SceneActor]::Some(actor)
         }
         ret Option[SceneActor]::None
@@ -329,7 +356,7 @@ impl for SceneActor {
 impl for SceneAsset {
     pub fn new() -> SceneAsset {
         ret SceneAsset {
-            6_u32, Vec[SceneActor]::new(), 6_u32
+            7_u32, Vec[SceneActor]::new(), 7_u32
         }
     }
     pub fn source_version(self: Self) -> u32 {
@@ -460,6 +487,8 @@ impl for SceneAsset {
                                     version = 5_u32
                                 } elif value == "6" {
                                     version = 6_u32
+                                } elif value == "7" {
+                                    version = 7_u32
                                 }
                             }
                             Option::None => {
@@ -495,7 +524,7 @@ impl for SceneAsset {
                                     ret Option[SceneAsset]::None
                                 }
                                 // Legacy identities survive upgrades; generated components are not actors.
-                                asset.version = 6_u32
+                                asset.version = 7_u32
                                 ret Option[SceneAsset]::Some(asset)
                             }
                             Option::None => {

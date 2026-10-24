@@ -2,7 +2,8 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import mod::codec::{blueprint_stringify, blueprint_semantic_source}
+
+import mod::codec::{blueprint_semantic_source, blueprint_stringify}
 import mod::model::*
 import mod::validate::blueprint_connection_error
 
@@ -62,7 +63,7 @@ pub fn snapshot_blueprint(asset: BlueprintAsset) -> BlueprintAsset {
     for link in asset.links {
         links.push(link)
     }
-    ret BlueprintAsset { asset.id, asset.name, components, properties, nodes, links }
+    ret BlueprintAsset { asset.id, asset.name, components, properties, nodes, links, asset.domain }
 }
 fn selected(ids: Vec[u64], id: u64) -> bool {
     for value in ids {

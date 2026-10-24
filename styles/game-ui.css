@@ -1,0 +1,35 @@
+.ui-designer { flex: 1 1 0px; height: 100%; min-height: 0; min-width: 0; background: var(--graphene-surface); color: var(--graphene-text); flex-direction: column; overflow: hidden; }
+.ui-designer-toolbar { flex: 0 0 38px; height: 38px; min-height: 38px; flex-direction: row; align-items: center; gap: 6px; padding: 4px 10px; background: #20242b; border-bottom: 1px solid #343943; }
+.ui-designer-title { flex: 0 0 110px; width: 110px; min-width: 110px; height: 26px; font-size: 13px; font-weight: 600; padding-right: 12px; }
+.ui-designer-button { background: #303640; color: #e1e6ef; border: 1px solid #414a59; border-radius: 4px; padding: 4px 9px; font-size: 12px; min-height: 28px; }
+.ui-designer-toolbar .ui-designer-button { flex: 0 0 76px; width: 76px; min-width: 76px; height: 28px; min-height: 28px; white-space: nowrap; }
+#uid-assign-HUD, #uid-assign-Pause, #uid-assign-Settings { flex: 0 0 124px; width: 124px; }
+#uid-compile { flex: 0 0 96px; width: 96px; }
+.ui-designer-workspace { flex: 1 1 0px; flex-direction: row; min-height: 0; min-width: 0; overflow: hidden; }
+.ui-designer-left { flex: 0 0 172px; width: 172px; min-width: 172px; min-height: 0; padding: 8px; gap: 3px; overflow-y: auto; background: #20242b; }
+.ui-designer-details { flex: 0 0 256px; width: 256px; min-width: 256px; min-height: 0; padding: 8px; gap: 4px; overflow-y: auto; background: #20242b; }
+.ui-designer-center { flex: 1 1 0px; min-height: 0; min-width: 0; overflow: hidden; }
+.ui-designer-preview { flex: 1 1 0px; min-height: 80px; background: #11151c; overflow: hidden; }
+.ui-designer-section { flex: 0 0 28px; height: 28px; min-height: 28px; padding: 5px 2px; font-size: 10px; color: #9daac0; font-weight: 600; }
+.ui-designer-item { flex: 0 0 26px; height: 26px; min-height: 26px; background: transparent; color: #d3dae5; border: 1px solid transparent; border-radius: 3px; padding: 4px 6px; font-size: 11px; }
+.ui-designer-property { flex: 0 0 28px; height: 28px; min-height: 28px; flex-direction: row; gap: 5px; align-items: center; }
+.ui-designer-label { flex: 0 0 84px; width: 84px; min-width: 84px; height: 24px; font-size: 11px; color: #b0b9c8; }
+.ui-designer-input { flex: 1 1 0px; min-width: 30px; height: 24px; min-height: 24px; background: #151a22; color: #e5ebf4; border: 1px solid #343e4d; border-radius: 3px; padding: 3px 5px; font-size: 11px; }
+.ui-designer-details > .ui-designer-button { flex: 0 0 28px; height: 28px; }
+.ui-designer-status { flex: 0 0 28px; height: 28px; min-height: 28px; background: #1a1e25; color: #aebed3; padding: 5px 10px; font-size: 11px; }
+.ui-designer-button:hover, .ui-designer-item:hover, .ui-designer-button.is-hovered, .ui-designer-item.is-hovered { background: #3c485b; }
+.ui-designer-button:active, .ui-designer-item:active, .ui-designer-button.is-pressed, .ui-designer-item.is-pressed { background: #274d70; border-color: #8bc8ff; }
+.ui-designer-button.is-active, .ui-designer-item.is-active { background: #234663; border-color: #6ab5f1; color: #e9f5ff; }
+.ui-designer-button.is-active.is-hovered, .ui-designer-item.is-active.is-hovered { background: #2c5577; border-color: #7abff4; }
+.ui-designer-button.is-active.is-pressed, .ui-designer-item.is-active.is-pressed { background: #274d70; border-color: #8bc8ff; }
+.ui-designer-button:focus-visible, .ui-designer-item:focus-visible, .ui-designer-input:focus-visible, .ui-designer-button.is-focused, .ui-designer-item.is-focused, .ui-designer-input.is-focused { border: 1px solid #8bc8ff; }
+.ui-designer-button:disabled, .ui-designer-button:disabled.is-hovered, .ui-designer-button:disabled.is-pressed { color: #7d8594; background: #292d34; border-color: #414a59; outline: none; }
+.ui-designer-item:disabled, .ui-designer-item:disabled.is-hovered, .ui-designer-item:disabled.is-pressed { color: #7d8594; background: transparent; border-color: transparent; outline: none; }
+.ui-designer-item.is-active:disabled, .ui-designer-item.is-active:disabled.is-hovered { background: #223348; color: #8799ad; border-color: #40556c; }
+.ui-designer-input:disabled { color: #7d8594; background: #1c2027; border-color: #303743; outline: none; }
+#uigraph-bp-save { flex: 0 0 72px; width: 72px; }
+#uigraph-bp-compile { flex: 0 0 112px; width: 112px; }
+#uigraph-bp-new { flex: 0 0 154px; width: 154px; }
+.ui-designer-center .ui-designer-toolbar { gap: 4px; padding: 4px 6px; }
+.ui-designer-center .ui-designer-toolbar .ui-designer-button { flex: 0 0 48px; width: 48px; min-width: 48px; padding: 4px; font-size: 11px; }
+.ui-designer-center .ui-designer-toolbar #uid-snap { flex: 0 0 64px; width: 64px; min-width: 64px; }

@@ -1,6 +1,7 @@
 //! Graphs lower to the same typed, bounded vector program on CPU and GPU.
 import core::option::Option
 import core::vec::Vec
+
 import mod::model::*
 pub fn vfx_opcode(name: str) -> u32 {
     let ops = particle_operations()
@@ -199,7 +200,7 @@ pub fn compile_particle_emitter(system: ParticleSystem, index: usize) -> Particl
                     }
                     curves.push((start + 4_usize, node.points)) value.x = 0 value.y = node.points.len() as f32
                 }
-                for word in vec![op as f32, ni as f32, sources.get(0_usize).unwrap_or(0), sources.get(1_usize).unwrap_or(0), value.x, value.y, value.z, value.w, sources.get(2_usize).unwrap_or(0), node.attribute as f32, module.stage as f32, node.id as f32, 0, 0, 0, 0] {
+                for word in vec![op as f32, ni as f32, sources.get(0_usize).unwrap_or(0), sources.get(1_usize).unwrap_or(0), value.x, value.y, value.z, value.w, sources.get(2_usize).unwrap_or(0), node.attribute as f32, module.stage as f32, node.id as f32, 0_f32, 0_f32, 0_f32, 0_f32] {
                     out.words.push(word)
                 }
                 emitted.push(node.id) count += 1_u32
@@ -218,7 +219,7 @@ pub fn compile_particle_emitter(system: ParticleSystem, index: usize) -> Particl
                 vfx_report(out, index, 0_usize, 0_u64, "Curve points must be ordered")
             }
             previous = point.time
-            for v in vec![point.time, 0, 0, 0, point.value.x, point.value.y, point.value.z, point.value.w] {
+            for v in vec![point.time, 0_f32, 0_f32, 0_f32, point.value.x, point.value.y, point.value.z, point.value.w] {
                 out.words.push(v)
             }
         }

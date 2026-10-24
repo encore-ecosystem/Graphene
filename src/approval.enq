@@ -2,8 +2,10 @@
 
 import core::option::Option
 import core::vec::Vec
-import mod::automation_transport::automation_capability_token
+
 import std::time::perf_counter_ms
+
+import mod::automation_transport::automation_capability_token
 
 pub struct ApprovalRequest {
     id: str
@@ -20,7 +22,7 @@ pub struct ApprovalBroker {
 }
 
 impl for ApprovalRequest {
-    fn new(id: str, client_request: str, scope: str, method: str) -> Self {
+    pub fn new(id: str, client_request: str, scope: str, method: str) -> Self {
         ret Self {
             id, client_request, scope, method, "pending", "",
             perf_counter_ms() + 120000_u64

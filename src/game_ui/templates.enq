@@ -1,0 +1,92 @@
+//! Small editable screen templates; all button behavior is a compiled graph.
+import core::fmt::Debug
+import core::vec::Vec
+
+import mod::model::{UiScreenAsset, UiWidget}
+import refrain::blueprint::{BlueprintNode, BlueprintType, BlueprintValue}
+fn add(asset: mut UiScreenAsset, name: str, kind: str, parent: u64, text: str, binding: str) -> u64 {
+    let id = asset.next_id() let mut w = UiWidget::new(id, parent, kind) w.name = name w.text = text w.binding = binding
+    if kind == "Text" {
+        w.height = 32
+    } elif kind == "Horizontal" {
+        w.height = 72
+    } elif kind == "Vertical" || kind == "Scroll" {
+        w.height = 680 w.width = 620
+    }
+    asset.widgets.push(w) ret id
+}
+fn action(asset: mut UiScreenAsset, widget: u64, code: i32) ->() {
+    let id = asset.graph.next_node_id()
+    let operation = match code {
+        1 => "ui-resume" 2 => "ui-open-settings" 5 => "ui-apply-settings" 6 => "ui-reset-settings" 7 => "ui-cancel-settings" 8 => "ui-stop-play" _ => "ui-close"
+    }
+    asset.graph.nodes.push(BlueprintNode::new(id, "ui-click", BlueprintType::Exec).with_text(Debug::fmt(widget)).at(0,(id as f32) * 100))
+    asset.graph.nodes.push(BlueprintNode::new(id + 1, operation, BlueprintType::Exec).at(330,(id as f32) * 100))
+    asset.graph.connect(id, "then", id + 1, "in")
+}
+
+pub fn ui_template(kind: str) -> UiScreenAsset {
+    let mut asset = UiScreenAsset::new("UI_" + kind, kind)
+    if kind == "HUD" {
+        let mut panel = UiWidget::new(2, 1, "Vertical") panel.name = "Status" panel.x = 40 panel.y = - 40 panel.anchor_y = 1 panel.anchor_bottom = 1 panel.align_y = 1 panel.width = 360 panel.height = 150
+        asset.widgets.push(panel)
+        add(asset, "PlayerName", "Text", 2, "PLAYER", "")
+        add(asset, "Health", "Progress", 2, "", "")
+        add(asset, "PauseHint", "Text", 2, "Esc · Pause", "")
+    } else {
+        let mut panel = UiWidget::new(2, 1, "Vertical") panel.name = "Menu" panel.anchor_x = 0.5_f32 panel.anchor_right = 0.5_f32 panel.anchor_y = 0.5_f32 panel.anchor_bottom = 0.5_f32 panel.align_x = 0.5_f32 panel.align_y = 0.5_f32 panel.x = 0 panel.y = 0 panel.width = if kind == "Settings" {
+            760
+        } else {
+            520
+        }
+        panel.height = if kind == "Settings" {
+            960
+        } else {
+            360
+        }
+        panel.padding = 28 panel.gap = 16
+        asset.widgets.push(panel)
+        let title = add(asset, "Title", "Text", 2, if kind == "Settings" {
+                "SETTINGS"
+            } else {
+                "PAUSED"
+            }
+            , "",)
+        if kind == "Settings" {
+            let scroll = add(asset, "SettingsScroll", "Scroll", 2, "", "")
+            for row in vec![("AA", "Anti-aliasing", "aa"),("Quality", "Upscaling quality", "quality"),("FrameGeneration", "Frame generation", "fg"),("Multiplier", "Frame multiplier", "multiplier")] {
+                add(asset, row.0 + "Label", "Text", scroll, row.1, "")
+                let id = add(asset, row.0, "Select", scroll, row.1, row.2)
+                let mut w = asset.widget(id).unwrap_or(UiWidget::new(id, scroll, "Select"))
+                w.options = match row.2 {
+                    "aa" => vec!["Off", "FXAA", "SMAA", "MSAA 2×", "MSAA 4×", "TAA", "AMD FSR 3.1", "NVIDIA DLSS", "NVIDIA DLAA"] "quality" => vec!["Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"] "fg" => vec!["Off", "AMD FSR", "NVIDIA DLSS"] _ => vec!["2×", "3×", "4×"]
+                }
+                let mut widgets = Vec[UiWidget]::new() for stored in asset.widgets {
+                    widgets.push(if stored.id == id {
+                            w
+                        } else {
+                            stored
+                        }
+                    )
+                }
+                asset.widgets = widgets
+            }
+            add(asset, "SharpnessLabel", "Text", scroll, "Sharpness", "readout:sharpness") add(asset, "Sharpness", "Slider", scroll, "", "sharpness")
+            for name in vec!["Master", "Music", "SFX", "UI"] {
+                add(asset, name + "Label", "Text", scroll, name + " volume", "readout:gain:" + name) add(asset, name + "Volume", "Slider", scroll, "", "gain:" + name) add(asset, name + "Mute", "Checkbox", scroll, "Mute " + name, "mute:" + name)
+            }
+            add(asset, "Headphones", "Checkbox", scroll, "Headphones · HRTF", "headphones")
+            add(asset, "VoicesLabel", "Text", scroll, "Maximum voices", "readout:voices") add(asset, "Voices", "Slider", scroll, "", "voices")
+            add(asset, "DeviceLabel", "Text", scroll, "Output device", "") add(asset, "Device", "Select", scroll, "System default", "device")
+            let footer = add(asset, "Footer", "Horizontal", 2, "", "")
+            let apply = add(asset, "Apply", "Button", footer, "Apply", "") action(asset, apply, 5)
+            let reset = add(asset, "Reset", "Button", footer, "Reset", "") action(asset, reset, 6)
+            let back = add(asset, "Cancel", "Button", footer, "Back", "") action(asset, back, 7)
+        } else {
+            let resume = add(asset, "Resume", "Button", 2, "Resume", "") action(asset, resume, 1)
+            let settings = add(asset, "Settings", "Button", 2, "Settings", "") action(asset, settings, 2)
+            let stop = add(asset, "Stop", "Button", 2, "Stop Play", "") action(asset, stop, 8)
+        }
+    }
+    ret asset.synchronized()
+}

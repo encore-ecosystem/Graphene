@@ -2,8 +2,10 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import linalg::Vec3
-import luma::{Window, PreparedFrame, ExternalVulkanImage}
+import luma::{ExternalVulkanImage, PreparedFrame, Window}
+
 import refrain::environment::frame::*
 import refrain::environment::system::EnvironmentSystem
 import refrain::rhi::*
@@ -47,11 +49,11 @@ impl for MaterialPreview {
         let mesh = device.create_mesh(parts.0, parts.1)
         let mut vertices = Vec[f32]::new()
         for p in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
-            for v in vec![p.x(), p.y(), p.z(), 0.0_f32, 0, 1, 1, 1, 1, 0, 0] {
+            for v in vec![p.x(), p.y(), p.z(), 0.0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32, 0_f32, 0_f32] {
                 vertices.push(v)
             }
         }
-        let quad = device.create_mesh(vertices, vec![0_u32, 1, 2, 2, 3, 0])
+        let quad = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
         let vs = device.create_shader_module(vertex, shader_stage_vertex())
         let fs = device.create_shader_module(fragment, shader_stage_fragment())
         let pipeline = Self::pipeline(device, target, layout, vs, fs)

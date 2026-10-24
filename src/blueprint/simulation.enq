@@ -1,18 +1,25 @@
+import linalg::Vec3
+import physics::CharacterConfig
+
+import refrain::physics::component::PhysicsComponent
+import refrain::physics::scene::{PhysicsMesh, scene_physics}
 //! Authoring state is never mutated by Play. Generated components belong to
 //! this disposable runtime scene and disappear with their owning instance.
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::{file_exists, read_file}
+import std::path::Path
+
 import mod::codec::{blueprint_parse, blueprint_semantic_source}
 import mod::input::load_blueprint_input
 import mod::model::*
 import mod::native::{BlueprintModule, BlueprintRuntimeInstance}
 import mod::validate::{validate_blueprint, validate_blueprint_instance}
-import refrain::runtime::{RuntimeConfig, RuntimeSession, RuntimeTransform, World, PhysicsWorld, InputSnapshot, InputMap}
+import refrain::runtime::{InputMap, InputSnapshot, PhysicsWorld, RuntimeConfig, RuntimeSession, RuntimeTransform, World}
 import refrain::scene::transform::Transform
 import refrain::scene::world::Scene
-import std::os::{file_exists, read_file}
-import std::path::Path
 
 pub struct BlueprintClass {
     path: str
@@ -44,6 +51,8 @@ pub struct BlueprintSimulation {
     logs: str
     input_map: InputMap
     keys: Vec[u32]
+    jump_pending: bool
+    controller_input: bool
 }
 pub fn blueprint_class_semantic(classes: Vec[BlueprintClass]) -> str {
     let mut semantic = ""
@@ -97,7 +106,7 @@ fn copy_scene(source: Scene) -> Scene {
         scene.create_entity_with_id(entity.id(), entity.name(), entity.transform())
         scene.set_visible(entity.id(), entity.visible()) scene.set_renderable(entity.id(), entity.renderable())
         scene.set_blueprint(entity.id(), entity.blueprint())
-        scene.set_component(entity.id(), entity.component())
+        scene.set_component(entity.id(), entity.component()) scene.set_physics(entity.id(), entity.physics())
     }
     for entity in source.entities() {
         scene.set_parent(entity.id(), entity.parent())
@@ -110,7 +119,7 @@ impl for BlueprintSimulation {
         let config = RuntimeConfig::defaults()
         ret BlueprintSimulation {
             Option[BlueprintModule]::None, RuntimeSession::new(config, World::new(), PhysicsWorld::new(config.gravity())),
-            Scene::new(), Vec[LiveBlueprint]::new(), Vec[BlueprintRuntimeDiagnostic]::new(), "", InputMap::new(), Vec[u32]::new()
+            Scene::new(), Vec[LiveBlueprint]::new(), Vec[BlueprintRuntimeDiagnostic]::new(), "", InputMap::new(), Vec[u32]::new(), false, true
         }
     }
     pub fn scene(self: Self) -> Scene {
@@ -145,9 +154,13 @@ impl for BlueprintSimulation {
         }
         self.module = Option[BlueprintModule]::None
         self.scene = Scene::new()
-        self.keys = Vec[u32]::new()
+        self.keys = Vec[u32]::new() self.jump_pending = false
     }
     pub fn start(self: mut Self, project: str, authoring: Scene, library: str, semantic: str, classes: Vec[BlueprintClass]) -> Result[(), str] {
+        let physics = scene_physics(authoring, Vec[PhysicsMesh]::new())?
+        ret self.start_with_physics(project, authoring, library, semantic, classes, physics)
+    }
+    pub fn start_with_physics(self: mut Self, project: str, authoring: Scene, library: str, semantic: str, classes: Vec[BlueprintClass], physics: PhysicsWorld) -> Result[(), str] {
         self.stop()
         self.input_map = load_blueprint_input(project)?
         if blueprint_class_semantic(classes) != semantic {
@@ -223,7 +236,7 @@ impl for BlueprintSimulation {
         for actor in authoring.entities() {
             world.set_parent(actor.id(), actor.parent())
         }
-        self.session = RuntimeSession::new(config, world, PhysicsWorld::new(config.gravity()))
+        self.session = RuntimeSession::new(config, world, physics)
         self.dispatch("construction", "", 0)
         self.dispatch("begin-play", "", 0)
         self.sync()
@@ -279,6 +292,9 @@ impl for BlueprintSimulation {
         if down {
             keys.push(key)
         }
+        if down && key == 32_u32 {
+            self.jump_pending = true
+        }
         self.keys = keys
         let input = if down {
             InputSnapshot::empty().with_pressed(key)
@@ -294,7 +310,16 @@ impl for BlueprintSimulation {
             }
         }
     }
+    /// The editor releases character controls while its menus or panels own focus.
+    pub fn set_controller_input(self: mut Self, enabled: bool) ->() {
+        self.controller_input = enabled
+        if !enabled {
+            self.jump_pending = false
+        }
+        ret()
+    }
     pub fn release_input(self: mut Self) ->() {
+        self.jump_pending = false
         let keys = self.keys
         for key in keys {
             self.input_key(key, false)
@@ -302,6 +327,33 @@ impl for BlueprintSimulation {
     }
     pub fn tick(self: mut Self, elapsed: f32, input: InputSnapshot) ->() {
         let frame = self.session.begin_frame(elapsed, input)
+        if frame.fixed_steps() > 0_u32 {
+            let mut x = 0_f32 let mut z = 0_f32
+            if self.controller_input {
+                for key in self.keys {
+                    if key == 97_u32 || key == 65_u32 {
+                        x -= 1_f32
+                    }
+                    if key == 100_u32 || key == 68_u32 {
+                        x += 1_f32
+                    }
+                    if key == 119_u32 || key == 87_u32 {
+                        z -= 1_f32
+                    }
+                    if key == 115_u32 || key == 83_u32 {
+                        z += 1_f32
+                    }
+                }
+            }
+            let direction = Vec3::new(x, 0_f32, z).normalized()
+            for actor in self.scene.entities() {
+                let c = actor.physics()
+                if c.mode == "character" {
+                    self.session.character_input(actor.id(), direction.scale(c.character.speed), self.jump_pending && self.controller_input)
+                }
+            }
+            self.jump_pending = false
+        }
         self.dispatch("tick", "", frame.delta_seconds())
         self.sync()
         self.session.finish_frame(frame)
@@ -309,6 +361,19 @@ impl for BlueprintSimulation {
             match self.session.world().transform(actor) {
                 Some(value) => {
                     self.scene.set_transform(actor, Transform::new(value.position(), value.rotation(), value.scale()))
+                }
+                None => {
+                }
+            }
+        }
+        // The next Blueprint tick must read the pose produced by physics,
+        // rather than restoring last frame's authoring transform.
+        for live in self.instances {
+            match self.scene.get(live.actor) {
+                Some(entity) => {
+                    if entity.physics().mode != "off" {
+                        live.instance.set_transform(0_u64, entity.transform())
+                    }
                 }
                 None => {
                 }

@@ -1,0 +1,272 @@
+//! Physics is orthogonal to the render/audio/animation component. Dimensions
+//! are actor-local; the scene adapter bakes authored scale into the collider.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+
+import json::{Json, field}
+import linalg::Vec3
+import physics::CharacterConfig
+
+import refrain::scene::json_value::{json_vec3, parse_number, vec3_json}
+
+pub struct PhysicsComponent {
+    mode: str
+    shape: str
+    half_extents: Vec3
+    radius: f32
+    half_height: f32
+    mass: f32
+    friction: f32
+    restitution: f32
+    gravity_scale: f32
+    sensor: bool
+    character: CharacterConfig
+}
+fn finite(x: f32) -> bool {
+    ret x >= - 340282346638528859811704183484516925440_f32 && x <= 340282346638528859811704183484516925440_f32
+}
+
+impl for PhysicsComponent {
+    pub fn defaults() -> Self {
+        ret Self {
+            "off", "box", Vec3::new(0.5_f32, 0.5_f32, 0.5_f32), 0.5_f32, 0.5_f32, 1_f32, 0.6_f32, 0_f32, 1_f32, false, CharacterConfig::defaults()
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        let mode = self.mode == "off" || self.mode == "static" || self.mode == "dynamic" || self.mode == "kinematic" || self.mode == "character"
+        let shape = self.shape == "box" || self.shape == "sphere" || self.shape == "capsule" || self.shape == "mesh"
+        let h = self.half_extents
+        ret mode && shape &&(self.shape != "mesh" || self.mode == "static" || self.mode == "off") && finite(h.x()) && finite(h.y()) && finite(h.z()) && h.x() > 0_f32 && h.y() > 0_f32 && h.z() > 0_f32 && finite(self.radius) && self.radius > 0_f32 && finite(self.half_height) && self.half_height >= 0_f32 && finite(self.mass) && self.mass > 0_f32 && finite(self.friction) && self.friction >= 0_f32 && finite(self.restitution) && self.restitution >= 0_f32 && self.restitution <= 1_f32 && finite(self.gravity_scale) && self.character.valid() && !(self.mode == "character" && self.sensor)
+    }
+    pub fn to_json(self: Self) -> Json {
+        let mut f = Vec[(str, Json)]::new()
+        f.push(field("mode", Json::String(self.mode))) f.push(field("shape", Json::String(self.shape)))
+        f.push(field("half_extents", vec3_json(self.half_extents))) f.push(field("sensor", Json::Bool(self.sensor)))
+        for key in vec!["radius", "half_height", "mass", "friction", "restitution", "gravity_scale", "speed", "jump_speed", "gravity", "slope_degrees", "step_height", "ground_snap", "skin"] {
+            f.push(field(key, Json::Number(Debug::fmt(self.value(key)))))
+        }
+        ret Json::Object(f)
+    }
+    pub fn value(self: Self, key: str) -> f32 {
+        ret if key == "radius" {
+            self.radius
+        } elif key == "half_height" {
+            self.half_height
+        } elif key == "mass" {
+            self.mass
+        } elif key == "friction" {
+            self.friction
+        } elif key == "restitution" {
+            self.restitution
+        } elif key == "gravity_scale" {
+            self.gravity_scale
+        } elif key == "extent-x" {
+            self.half_extents.x()
+        } elif key == "extent-y" {
+            self.half_extents.y()
+        } elif key == "extent-z" {
+            self.half_extents.z()
+        } elif key == "speed" {
+            self.character.speed
+        } elif key == "jump_speed" {
+            self.character.jump_speed
+        } elif key == "gravity" {
+            self.character.gravity
+        } elif key == "slope_degrees" {
+            self.character.slope_degrees
+        } elif key == "step_height" {
+            self.character.step_height
+        } elif key == "ground_snap" {
+            self.character.ground_snap
+        } else {
+            self.character.skin
+        }
+    }
+    pub fn with_value(self: Self, key: str, v: f32) -> Self {
+        let h = self.half_extents let c = self.character
+        ret Self {
+            self.mode, self.shape, Vec3::new(if key == "extent-x" {
+                    v
+                } else {
+                    h.x()
+                }
+                , if key == "extent-y" {
+                    v
+                } else {
+                    h.y()
+                }
+                , if key == "extent-z" {
+                    v
+                } else {
+                    h.z()
+                }
+                ,
+            ), if key == "radius" {
+                v
+            } else {
+                self.radius
+            }
+            , if key == "half_height" {
+                v
+            } else {
+                self.half_height
+            }
+            , if key == "mass" {
+                v
+            } else {
+                self.mass
+            }
+            , if key == "friction" {
+                v
+            } else {
+                self.friction
+            }
+            , if key == "restitution" {
+                v
+            } else {
+                self.restitution
+            }
+            , if key == "gravity_scale" {
+                v
+            } else {
+                self.gravity_scale
+            }
+            , self.sensor, CharacterConfig {
+                if key == "radius" {
+                    v
+                } else {
+                    c.radius
+                }
+                , if key == "half_height" {
+                    v
+                } else {
+                    c.half_height
+                }
+                , if key == "speed" {
+                    v
+                } else {
+                    c.speed
+                }
+                , if key == "jump_speed" {
+                    v
+                } else {
+                    c.jump_speed
+                }
+                , if key == "gravity" {
+                    v
+                } else {
+                    c.gravity
+                }
+                , if key == "slope_degrees" {
+                    v
+                } else {
+                    c.slope_degrees
+                }
+                , if key == "step_height" {
+                    v
+                } else {
+                    c.step_height
+                }
+                , if key == "ground_snap" {
+                    v
+                } else {
+                    c.ground_snap
+                }
+                , if key == "skin" {
+                    v
+                } else {
+                    c.skin
+                }
+                , c.mask
+            }
+        }
+    }
+
+    pub fn from_json(value: Json) -> Option[Self] {
+        match value {
+            Object(_) => {
+            }
+            _ => {
+                ret Option[Self]::None
+            }
+        }
+        let mut c = Self::defaults()
+        for key in vec!["mode", "shape"] {
+            match value.get(key) {
+                Some(v) => {
+                    match v.as_str() {
+                        Some(s) => {
+                            if key == "mode" {
+                                c.mode = s
+                            } else {
+                                c.shape = s
+                            }
+                        }
+                        None => {
+                            ret Option[Self]::None
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        match value.get("half_extents") {
+            Some(v) => {
+                match json_vec3(v) {
+                    Some(h) => {
+                        c.half_extents = h
+                    }
+                    None => {
+                        ret Option[Self]::None
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match value.get("sensor") {
+            Some(v) => {
+                match v.as_bool() {
+                    Some(b) => {
+                        c.sensor = b
+                    }
+                    None => {
+                        ret Option[Self]::None
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        for key in vec!["radius", "half_height", "mass", "friction", "restitution", "gravity_scale", "speed", "jump_speed", "gravity", "slope_degrees", "step_height", "ground_snap", "skin"] {
+            match value.get(key) {
+                Some(v) => {
+                    match v.as_number() {
+                        Some(s) => {
+                            match parse_number(s) {
+                                Some(n) => {
+                                    c = c.with_value(key, n)
+                                }
+                                None => {
+                                    ret Option[Self]::None
+                                }
+                            }
+                        }
+                        None => {
+                            ret Option[Self]::None
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret if c.valid() {
+            Option[Self]::Some(c)
+        } else {
+            Option[Self]::None
+        }
+    }
+}

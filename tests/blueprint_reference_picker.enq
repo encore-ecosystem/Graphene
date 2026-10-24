@@ -1,10 +1,16 @@
+import std::os::read_file
+
+import graphene::{EditorState, GrapheneCommand, Scene}
 import graphene::blueprint::*
 import graphene::blueprint::editor::BlueprintEditor
-import graphene::{EditorState, GrapheneCommand, Scene}
-import luma::{Event, Rect, StyleSheet, Widget, layout_widget, event_pointer_down}
-import std::os::read_file
+import luma::{Event, Rect, StyleSheet, Widget, event_pointer_down, layout_widget}
 fn main() -> u32 {
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     let mut asset = BlueprintAsset::new("references", "References")
     asset.properties.push(BlueprintProperty { 1, "Owner", BlueprintValue::Actor(0) })
     asset.properties.push(BlueprintProperty { 2, "MeshRef", BlueprintValue::Component(0) })

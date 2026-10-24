@@ -1,0 +1,138 @@
+//! Deterministic brush integration with radial falloff and bounded sample visits.
+import core::vec::Vec
+import linalg::Vec3
+
+import mod::model::{TerrainAsset, clamp, finite}
+pub struct TerrainBrush {
+    tool: str
+    radius: f32
+    strength: f32
+    falloff: f32
+    layer: u32
+}
+
+impl for TerrainBrush {
+    pub fn defaults() -> Self {
+        ret Self { "raise", 8_f32, 5_f32, 0.7_f32, 0_u32 }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret(self.tool == "raise" || self.tool == "lower" || self.tool == "smooth" || self.tool == "flatten" || self.tool == "paint") && finite(self.radius) && self.radius > 0 && self.radius <= 10000 && finite(self.strength) && self.strength > 0 && self.strength <= 1000 && finite(self.falloff) && self.falloff >= 0 && self.falloff <= 1 && self.layer < 3
+    }
+}
+pub fn brush_weight(distance: f32, radius: f32, falloff: f32) -> f32 {
+    if distance >= radius || radius <= 0 {
+        ret 0_f32
+    }
+    let inner = radius *(1 - falloff)
+    if distance <= inner || falloff <= 0 {
+        ret 1_f32
+    }
+    let t = clamp((radius - distance) /(radius - inner), 0_f32, 1_f32)
+    ret t * t *(3 - 2 * t)
+}
+/// Source must be an independent pre-dab snapshot for unbiased smoothing.
+pub fn apply_brush(asset: mut TerrainAsset, brush: TerrainBrush, center: Vec3, seconds: f32, target: f32, invert: bool) -> bool {
+    if !brush.valid() || !finite(seconds) || seconds <= 0 || !finite(center.x()) || !finite(center.z()) || !finite(target) {
+        ret false
+    }
+    let dt = clamp(seconds, 0_f32, 0.05_f32)
+    let half = asset.extent() * 0.5_f32 let last =(asset.resolution - 1) as f32
+    let x0 = clamp((center.x() - brush.radius + half) / asset.spacing, 0_f32, last) as u32
+    let z0 = clamp((center.z() - brush.radius + half) / asset.spacing, 0_f32, last) as u32
+    let x1 =(clamp((center.x() + brush.radius + half) / asset.spacing + 1, 0_f32, last) as u32) + 1
+    let z1 =(clamp((center.z() + brush.radius + half) / asset.spacing + 1, 0_f32, last) as u32) + 1
+    let mut source = Vec[f32]::new()
+    if brush.tool == "smooth" {
+        for h in asset.heights {
+            source.push(h)
+        }
+    }
+    let mut changed = false
+    let terrain_start_z =(z0 as usize)
+    let terrain_end_z =(z1 as usize)
+    for terrain_index_z in terrain_start_z..terrain_end_z {
+        let z = terrain_index_z as u32
+        let terrain_start_x =(x0 as usize)
+        let terrain_end_x =(x1 as usize)
+        for terrain_index_x in terrain_start_x..terrain_end_x {
+            let x = terrain_index_x as u32
+
+            let p = asset.point(x, z) let dx = p.x() - center.x() let dz = p.z() - center.z()
+            let weight = brush_weight(Vec3::new(dx, 0_f32, dz).length(), brush.radius, brush.falloff)
+            if weight <= 0 {
+                continue
+            }
+            let i =(z * asset.resolution + x) as usize let before = asset.heights.get(i).unwrap_or(0_f32)
+            let amount = brush.strength * weight * dt
+            if brush.tool == "paint" {
+                let w = asset.weights.get(i).unwrap_or(Vec3::new(1_f32, 0_f32, 0_f32))
+                let value = clamp(amount, 0_f32, 1_f32)
+                let t = if invert {
+                    Vec3::new(1_f32, 0_f32, 0_f32)
+                } elif brush.layer == 0 {
+                    Vec3::new(1_f32, 0_f32, 0_f32)
+                } elif brush.layer == 1 {
+                    Vec3::new(0_f32, 1_f32, 0_f32)
+                } else {
+                    Vec3::new(0_f32, 0_f32, 1_f32)
+                }
+                let next = w.scale(1 - value).add(t.scale(value))
+                if next.sub(w).length() > 0.000001_f32 {
+                    asset.weights.set(i, next) changed = true
+                }
+                continue
+            }
+            let mut next = before
+            if brush.tool == "smooth" {
+                let mut sum = 0_f32 let mut count = 0_f32
+                let ax = if x > 0 {
+                    x - 1
+                } else {
+                    0_u32
+                }
+                let az = if z > 0 {
+                    z - 1
+                } else {
+                    0_u32
+                }
+                let terrain_start_zz =(az as usize)
+                let terrain_end_zz =((if z + 2 < asset.resolution {
+                            z + 2
+                        } else {
+                            asset.resolution
+                        }
+                    ) as usize)
+                for terrain_index_zz in terrain_start_zz..terrain_end_zz {
+                    let zz = terrain_index_zz as u32
+
+                    let terrain_start_xx =(ax as usize)
+                    let terrain_end_xx =((if x + 2 < asset.resolution {
+                                x + 2
+                            } else {
+                                asset.resolution
+                            }
+                        ) as usize)
+                    for terrain_index_xx in terrain_start_xx..terrain_end_xx {
+                        let xx = terrain_index_xx as u32
+                        sum += source.get((zz * asset.resolution + xx) as usize).unwrap_or(before) count += 1
+                    }
+                }
+                next = before +(sum / count - before) * clamp(amount, 0_f32, 1_f32)
+            } elif brush.tool == "flatten" {
+                next = before +(target - before) * clamp(amount, 0_f32, 1_f32)
+            } else {
+                next = before + amount *(if (brush.tool == "lower") != invert {
+                        - 1_f32
+                    } else {
+                        1_f32
+                    }
+                )
+            }
+            next = clamp(next, - 32768_f32, 32768_f32)
+            if next != before {
+                asset.heights.set(i, next) changed = true
+            }
+        }
+    }
+    ret changed
+}

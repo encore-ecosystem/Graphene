@@ -1,10 +1,11 @@
 //! Dense asset navigation, virtualized views and editor-owned popup surfaces.
 import core::option::Option
 import core::vec::Vec
-import luma::{Widget, Style, Rect, Size, SvgDocument, IconManager, horizontal, vertical, VirtualGrid, anchored_popup_bounds}
-import mod::files::{content_kind_name, content_parent, content_leaf}
-import mod::model::content_contains
-import mod::model::{ContentBrowser, ContentAsset}
+
+import luma::{IconManager, Rect, Size, Style, SvgDocument, VirtualGrid, Widget, anchored_popup_bounds, horizontal, vertical}
+
+import mod::files::{content_kind_name, content_leaf, content_parent}
+import mod::model::{ContentAsset, ContentBrowser, content_contains}
 
 pub struct ContentIcons {
     back: SvgDocument
@@ -21,8 +22,16 @@ pub struct ContentIcons {
     scene: SvgDocument
     add: SvgDocument
     upload: SvgDocument
-    grid: SvgDocument list: SvgDocument star: SvgDocument search: SvgDocument close: SvgDocument
-    settings: SvgDocument chevron: SvgDocument expanded: SvgDocument details: SvgDocument sound: SvgDocument
+    grid: SvgDocument
+    list: SvgDocument
+    star: SvgDocument
+    search: SvgDocument
+    close: SvgDocument
+    settings: SvgDocument
+    chevron: SvgDocument
+    expanded: SvgDocument
+    details: SvgDocument
+    sound: SvgDocument
 }
 
 impl for ContentIcons {
@@ -37,8 +46,8 @@ impl for ContentIcons {
     }
     pub fn asset(self: Self, kind: str) -> SvgDocument {
         ret match kind {
-            "particle-system"=>self.blueprint "sound" => self.sound
-            "character"=>self.mesh "skeletal-mesh"=>self.mesh "skeleton"=>self.blueprint "animation-clip"=>self.blueprint "folder" => self.folder "mesh" => self.mesh "material" => self.material "material-graph" => self.material
+            "terrain" => self.mesh "ui" => self.blueprint "particle-system" => self.blueprint "sound" => self.sound
+            "character" => self.mesh "skeletal-mesh" => self.mesh "skeleton" => self.blueprint "animation-clip" => self.blueprint "folder" => self.folder "mesh" => self.mesh "material" => self.material "material-graph" => self.material
             "texture" => self.texture "blueprint" => self.blueprint "script" => self.script "scene" => self.scene _ => self.file
         }
     }
@@ -216,11 +225,22 @@ pub fn content_widget(browser: ContentBrowser, icons: ContentIcons, editable: bo
     panel.push(toolbar)
     let mut search = Widget::panel("cb-search-bar").with_classes("cb-search-bar").with_direction(horizontal())
     search.push(Widget::icon("", icons.search).with_classes("cb-list-icon"))
-    search.push(Widget::input("cb-query", if browser.query.value() == "" && !browser.query_focused { "Search assets · t:mesh, path:Textures, -draft" } else { browser.query.value() }).with_classes("cb-query" + if browser.query.value() == "" && !browser.query_focused { " placeholder" } else { "" }).with_attribute("placeholder", "Search assets · t:mesh, path:Textures, -draft")
+    search.push(Widget::input("cb-query", if browser.query.value() == "" && !browser.query_focused {
+                "Search assets · t:mesh, path:Textures, -draft"
+            } else {
+                browser.query.value()
+            }
+            ,
+        ).with_classes("cb-query" + if browser.query.value() == "" && !browser.query_focused {
+                " placeholder"
+            } else {
+                ""
+            }
+        ).with_attribute("placeholder", "Search assets · t:mesh, path:Textures, -draft")
         .with_attribute("aria-label", "Search project assets").with_focus(browser.query_focused).with_cursor(browser.query.cursor()).with_selection(browser.query.selection_start(), browser.query.selection_end()))
     search.push(icon_button("cb-clear", "Clear search and filters", icons.close, false, browser.query.value() == "" && browser.types.len() == 0))
     search.push(icon_button("cb-save-search", "Save current search", icons.star, false, browser.query.value() == ""))
-    for kind in vec!["mesh", "material", "texture", "sound", "particle-system", "blueprint", "script"] {
+    for kind in vec!["mesh", "material", "texture", "sound", "particle-system", "ui", "blueprint", "script"] {
         search.push(text_button("cb-filter-" + kind, if kind == "mesh" {
                     "Meshes"
                 } elif kind == "material" {
@@ -360,7 +380,7 @@ fn popup_action(id: str, text: str, icons: SvgDocument, active: bool, disabled: 
     ret Widget::icon_button(id, text, icons).with_classes(classes("cb-popup-action", active)).with_disabled(disabled).with_attribute("role", "menuitem")
 }
 pub fn content_popup(browser: ContentBrowser, icons: ContentIcons, screen: Rect, editable: bool) -> Widget {
-    let modal = browser.popup=="particle" || browser.popup == "folder" || browser.popup == "material" || browser.popup == "blueprint" || browser.popup == "rename" || browser.popup == "move" || browser.popup == "delete" || browser.popup == "preview"
+    let modal = browser.popup == "ui" || browser.popup == "particle" || browser.popup == "folder" || browser.popup == "material" || browser.popup == "blueprint" || browser.popup == "rename" || browser.popup == "move" || browser.popup == "delete" || browser.popup == "preview"
     let mut popup = Widget::panel("cb-popup").with_classes(if modal {
             "cb-dialog interactive-overlay"
         } else {
@@ -375,11 +395,12 @@ pub fn content_popup(browser: ContentBrowser, icons: ContentIcons, screen: Rect,
     )
     let mut size = Size::new(224, 210)
     if browser.popup == "add" {
-        size = Size::new(224, 136)
+        size = Size::new(224, 164)
         popup.push(popup_action("cb-new-folder", "New Folder", icons.folder, false, !editable))
         popup.push(popup_action("cb-new-material", "Material Graph", icons.material, false, !editable))
+        popup.push(popup_action("cb-new-ui", "UI Screen", icons.blueprint, false, !editable))
         popup.push(popup_action("cb-new-blueprint", "Blueprint", icons.blueprint, false, !editable))
-        popup.push(popup_action("cb-new-particle","Particle System",icons.material,false,!editable))
+        popup.push(popup_action("cb-new-particle", "Particle System", icons.material, false, !editable))
     } elif browser.popup == "sort" {
         size = Size::new(224, 132)
         for mode in vec!["name", "type", "size"] {

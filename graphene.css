@@ -32,3 +32,7 @@
 @import "styles/rendering-overrides.css";
 
 @import "styles/mcp.css";
+
+@import "styles/game-ui.css";
+
+@import "styles/terrain.css";

@@ -1,0 +1,215 @@
+//! Designer and runtime share this Luma widget builder and isolated stylesheet.
+import core::fmt::Debug
+import core::vec::Vec
+
+import std::os::read_file
+
+import luma::{Color, Insets, Rect, Style, StyleSheet, Widget, WidgetLayout, horizontal, layout_widget, vertical}
+
+import mod::model::{UiScreenAsset, UiWidget}
+import refrain::content_browser::path::ends
+import refrain::native_asset::load_native_texture
+import refrain::texture_asset::decode_png
+extern fn graphene_content_pixels(address: usize, count: usize) -> str
+pub fn ui_widget_id(id: u64) -> str {
+    ret "game-ui-" + Debug::fmt(id)
+}
+// Authored geometry stays in the cascade, so hover/focus can change visual state.
+pub fn game_ui_styles() -> StyleSheet {
+    ret StyleSheet::parse(".game-ui { font-family: Inter; } .game-ui-button:hover, .game-ui-select:hover { background: #354b68; border-color: #7da5d9; } .game-ui-button:active, .game-ui-select:active { background: #244e78; } .game-ui-button:focus-visible, .game-ui-select:focus-visible, .game-ui-slider:focus-visible, .game-ui-input:focus-visible, .game-ui-checkbox:focus-visible { border: 2px solid #91c7ff; } .game-ui-button:disabled, .game-ui-select:disabled { background: #242a34; color: #929bad; }")
+}
+pub fn game_ui_widget_style(kind: str, scale: f32) -> Style {
+    let mut style = Style::default().with_background(Color::rgba(0, 0, 0, 0)).with_foreground(Color::rgb(244, 246, 250)).with_radius(8 * scale).with_font_size(20 * scale)
+    if kind == "Vertical" || kind == "Horizontal" || kind == "Scroll" {
+        style = style.with_background(Color::rgba(22, 28, 40, 242)).with_border(scale, Color::rgb(58, 71, 93))
+    } elif kind == "Button" || kind == "Select" {
+        style = style.with_background(Color::rgb(41, 54, 76)).with_border(scale, Color::rgb(80, 101, 130)).with_padding(Insets::all(8 * scale))
+    } elif kind == "Input" {
+        style = style.with_background(Color::rgb(16, 23, 34)).with_border(scale, Color::rgb(80, 101, 130)).with_padding(Insets::all(6 * scale))
+    } elif kind == "Progress" || kind == "Slider" {
+        style = style.with_background(Color::rgb(32, 44, 60)).with_foreground(Color::rgb(105, 201, 174)).with_accent_color(Color::rgb(105, 201, 174))
+    }
+    ret style
+}
+pub struct UiImage {
+    path: str
+    payload: str
+}
+pub fn load_ui_images(project: str, asset: UiScreenAsset) -> Vec[UiImage] {
+    let mut images = Vec[UiImage]::new()
+    for w in asset.widgets {
+        if w.image != "" {
+            let mut exists = false for image in images {
+                if image.path == w.image {
+                    exists = true
+                }
+            }
+            if !exists {
+                match (if ends(w.image, ".gtexture") {
+                        load_native_texture(project + "/" + w.image, "")
+                    } else {
+                        decode_png(read_file(project + "/" + w.image))
+                    }
+                ) {
+                    Ok(image) => {
+                        let mut pixels = vec![256_u32, 256_u32]
+                        for y in 0_usize..256_usize {
+                            for x in 0_usize..256_usize {
+                                pixels.push(image.pixels.get((y *(image.height as usize) / 256) *(image.width as usize) + x *(image.width as usize) / 256).unwrap_or(0))
+                            }
+                        }
+                        unsafe {
+                            images.push(UiImage {
+                                    w.image, graphene_content_pixels(pixels.as_ptr() as usize, pixels.len())
+                                }
+                            )
+                        }
+                    }
+                    Err(_) => {
+                    }
+                }
+            }
+        }
+    }
+    ret images
+}
+fn hex_digit(byte: u8) -> u8 {
+    ret if byte >= 48 && byte <= 57 {
+        byte - 48
+    } elif byte >= 65 && byte <= 70 {
+        byte - 55
+    } else {
+        byte - 87
+    }
+}
+fn authored_color(value: str) -> Color {
+    let mut channels = vec![255_u8, 255_u8, 255_u8, 255_u8]
+    let mut i = 0_usize
+    while i < 4 && 1 + i * 2 + 1 < value.byte_len() {
+        channels.set(i, hex_digit(value.byte_at(1 + i * 2)) * 16_u8 + hex_digit(value.byte_at(2 + i * 2))) i += 1
+    }
+    ret Color::rgba(channels.get(0).unwrap_or(255), channels.get(1).unwrap_or(255), channels.get(2).unwrap_or(255), channels.get(3).unwrap_or(255))
+}
+fn widget_tree(asset: UiScreenAsset, w: UiWidget, parent: UiWidget, parent_width: f32, parent_height: f32, scale: f32, images: Vec[UiImage]) -> Widget {
+    let id = ui_widget_id(w.id)
+    let mut widget = match w.kind {
+        "Text" => Widget::label(w.text).with_id(id).with_classes("game-ui-text")
+        "Button" => Widget::button(id, w.text).with_classes("game-ui-button")
+        "Progress" => Widget::progress(w.value).with_id(id).with_classes("game-ui-progress")
+        "Slider" => Widget::slider(id, w.value).with_classes("game-ui-slider")
+        "Checkbox" => Widget::checkbox(id, w.text, w.value >= 0.5_f32).with_classes("game-ui-checkbox")
+        "Select" => Widget::select(id, w.options.get(((w.value *((if w.options.len() > 0 {
+                                    w.options.len() - 1
+                                } else {
+                                    0_usize
+                                }
+                            ) as f32)) + 0.5_f32) as usize).unwrap_or(w.text)).with_classes("game-ui-select")
+        "Input" => Widget::input(id, w.text).with_classes("game-ui-input")
+        "Image" => {
+            let mut payload = "" for image in images {
+                if image.path == w.image {
+                    payload = image.payload
+                }
+            }
+            Widget::image(id, payload)
+        }
+        "Spacer" => Widget::spacer(1).with_id(id)
+        _ => Widget::panel(id).with_classes(if w.kind == "Canvas" || w.kind == "Overlay" {
+                "game-ui"
+            } else {
+                "game-ui-container"
+            }
+        )
+    }
+    let free = parent.kind == "Canvas" || parent.kind == "Overlay"
+    let width = if w.parent == 0 {
+        parent_width
+    } elif free {
+        parent_width *(w.anchor_right - w.anchor_x) + w.width * scale
+    } else {
+        if parent.kind == "Horizontal" {
+            w.width * scale
+        } else {
+            parent_width
+        }
+    }
+    let height = if w.parent == 0 {
+        parent_height
+    } elif free {
+        parent_height *(w.anchor_bottom - w.anchor_y) + w.height * scale
+    } else {
+        w.height * scale
+    }
+    let mut style = game_ui_widget_style(w.kind, scale).with_width(width).with_height(height).with_displayed(w.visible).with_visibility(w.visible).with_font_size(w.font_size * scale).with_radius(w.radius * scale)
+    if free && w.parent != 0 {
+        style = style.with_absolute(true).with_left(parent_width * w.anchor_x + w.x * scale - width * w.align_x).with_top(parent_height * w.anchor_y + w.y * scale - height * w.align_y)
+    }
+    if w.kind == "Canvas" || w.kind == "Overlay" {
+        style = style.with_overflow_hidden(true)
+    }
+    if w.kind == "Vertical" || w.kind == "Horizontal" || w.kind == "Scroll" {
+        widget = widget.with_direction(if w.kind == "Horizontal" {
+                horizontal()
+            } else {
+                vertical()
+            }
+        )
+        style = style.with_gap(w.gap * scale).with_padding(Insets::all(w.padding * scale))
+        if w.kind == "Scroll" {
+            widget = widget.with_attribute("data-luma-scrollable", "true") style = style.with_overflow_hidden(true)
+        }
+    }
+    if w.color != "" {
+        if w.kind == "Text" || w.kind == "Progress" || w.kind == "Slider" {
+            style = style.with_foreground(authored_color(w.color))
+            if w.kind == "Progress" || w.kind == "Slider" {
+                style = style.with_accent_color(authored_color(w.color))
+            }
+        } else {
+            style = style.with_background(authored_color(w.color))
+        }
+    }
+    if !free {
+        let growing = w.fill || parent.kind == "Horizontal"
+        style = style.with_flex_shrink(if growing {
+                1_f32
+            } else {
+                0_f32
+            }
+        )
+        widget = widget.with_flex(if growing {
+                0_f32
+            } else {
+                height
+            }
+            , if growing {
+                1_f32
+            } else {
+                0_f32
+            }
+            ,
+        )
+    }
+    widget = widget.with_computed_style(style).with_disabled(!w.enabled).with_attribute("aria-label", w.name)
+    for child in asset.widgets {
+        if child.parent == w.id {
+            widget.push(widget_tree(asset, child, w, width - w.padding * scale * 2, height - w.padding * scale * 2, scale, images))
+        }
+    }
+    ret widget
+}
+pub fn build_ui_screen(asset: UiScreenAsset, bounds: Rect, images: Vec[UiImage]) -> Widget {
+    let sx = bounds.width() / asset.reference_width let sy = bounds.height() / asset.reference_height
+    let scale = if sx < sy {
+        sx
+    } else {
+        sy
+    }
+    let mut root = asset.widgets.get(0).unwrap_or(UiWidget::new(1, 0, "Canvas"))
+    for w in asset.widgets {
+        if w.parent == 0 {
+            root = w
+        }
+    }
+    ret widget_tree(asset, root, root, bounds.width(), bounds.height(), scale, images).with_classes("game-ui")
+}

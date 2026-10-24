@@ -7,7 +7,21 @@ pub fn content_leaf(path: str) -> str {
 }
 pub fn content_kind(path: str) -> str {
     let name = lower(path)
-    ret if ends(name,".gcharacter") {"character"} elif ends(name,".gskel") {"skeleton"} elif ends(name,".gskin") {"skeletal-mesh"} elif ends(name,".ganim") {"animation-clip"} elif ends(name,".graphene-particle.json") || ends(name,".gparticle") {"particle-system"} elif ends(name, ".graphene-material-graph.json") {
+    ret if ends(name, ".gterrain") {
+        "terrain"
+    } elif ends(name, ".graphene-ui.json") {
+        "ui"
+    } elif ends(name, ".gcharacter") {
+        "character"
+    } elif ends(name, ".gskel") {
+        "skeleton"
+    } elif ends(name, ".gskin") {
+        "skeletal-mesh"
+    } elif ends(name, ".ganim") {
+        "animation-clip"
+    } elif ends(name, ".graphene-particle.json") || ends(name, ".gparticle") {
+        "particle-system"
+    } elif ends(name, ".graphene-material-graph.json") {
         "material-graph"
     } elif ends(name, ".gsound") || ends(name, ".wav") || ends(name, ".flac") || ends(name, ".mp3") || ends(name, ".ogg") {
         "sound"
@@ -31,7 +45,7 @@ pub fn content_kind(path: str) -> str {
 }
 pub fn content_kind_name(kind: str) -> str {
     ret match kind {
-        "character"=>"Character" "skeleton"=>"Skeleton" "skeletal-mesh"=>"Skeletal Mesh" "animation-clip"=>"Animation Clip" "particle-system"=>"Particle System" "folder" => "Folder" "mesh" => "Static Mesh" "material" => "Material"
+        "terrain" => "Terrain" "ui" => "UI Screen" "character" => "Character" "skeleton" => "Skeleton" "skeletal-mesh" => "Skeletal Mesh" "animation-clip" => "Animation Clip" "particle-system" => "Particle System" "folder" => "Folder" "mesh" => "Static Mesh" "material" => "Material"
         "material-graph" => "Material Graph" "texture" => "Texture" "blueprint" => "Blueprint"
         "weather-preset" => "Weather Preset" "script" => "Encore Script" "scene" => "Scene" "sound" => "Sound" _ => "File"
     }
@@ -68,7 +82,13 @@ pub fn content_under(path: str, directory: str) -> bool {
 }
 pub fn content_name(path: str, kind: str) -> str {
     let leaf = content_leaf(path)
-    let suffix = if kind=="particle-system" {".graphene-particle.json"} elif kind == "material-graph" {
+    let suffix = if kind == "terrain" {
+        ".gterrain"
+    } elif kind == "ui" {
+        ".graphene-ui.json"
+    } elif kind == "particle-system" {
+        ".graphene-particle.json"
+    } elif kind == "material-graph" {
         ".graphene-material-graph.json"
     } elif kind == "material" {
         ".graphene-material.json"

@@ -2,10 +2,11 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import mod::model::{ContentAsset, ContentScan}
-import std::os::{read_dir, read_file, file_exists, mkdir_all, write_file_atomic, copy_file}
+
+import std::os::{copy_file, file_exists, mkdir_all, read_dir, read_file, write_file_atomic}
 import std::path::Path
 
+import mod::model::{ContentAsset, ContentScan}
 import refrain::project_files::project_file_info
 extern fn graphene_content_move(root: str, source: str, destination: str) -> bool
 
@@ -22,8 +23,12 @@ fn move_file(root: str, source: str, destination: str) -> bool {
 pub fn content_move(root: str, source: str, destination: str) -> bool {
     let mut pairs = Vec[(str, str)]::new()
     pairs.push((source, destination))
-    if ends(source,".graphene-particle.json") {pairs.push((source+".gparticle",destination+".gparticle"))}
-    if ends(lower(source), ".gsound") { pairs.push((source + ".waveform.json", destination + ".waveform.json")) }
+    if ends(source, ".graphene-particle.json") {
+        pairs.push((source + ".gparticle", destination + ".gparticle"))
+    }
+    if ends(lower(source), ".gsound") {
+        pairs.push((source + ".waveform.json", destination + ".waveform.json"))
+    }
     if ends(lower(source), ".obj") {
         pairs.push((source + ".gmesh", destination + ".gmesh"))
         pairs.push((source + ".autolod", destination + ".autolod"))
@@ -79,8 +84,12 @@ pub fn content_move(root: str, source: str, destination: str) -> bool {
     ret true
 }
 fn native_companion(root: str, path: str) -> bool {
-    if ends(path,".gparticle") {ret file_exists(root+"/"+path.slice_bytes(0,path.byte_len()-10_usize))}
-    if ends(path, ".gsound.waveform.json") { ret true }
+    if ends(path, ".gparticle") {
+        ret file_exists(root + "/" + path.slice_bytes(0, path.byte_len() - 10_usize))
+    }
+    if ends(path, ".gsound.waveform.json") {
+        ret true
+    }
     if ends(path, ".gmesh") {
         ret file_exists(root + "/" + path.slice_bytes(0, path.byte_len() - 6))
     }
@@ -157,7 +166,20 @@ pub fn content_referencer(project: str, target: ContentAsset, entries: Vec[Conte
         }
     }
     for asset in entries {
-        if asset.path != target.path &&(asset.kind == "scene" || asset.kind == "material" || asset.kind == "material-graph" || asset.kind == "blueprint") && asset.bytes < 4194304 {
+        if asset.path != target.path && asset.kind == "terrain" && asset.bytes < 8388608 {
+            match refrain::terrain::asset::load_terrain(project + "/" + asset.path) {
+                Ok(terrain) => {
+                    for layer in terrain.layers {
+                        if layer.texture == target.path {
+                            ret asset.path
+                        }
+                    }
+                }
+                Err(_) => {
+                }
+            }
+        }
+        if asset.path != target.path &&(asset.kind == "ui" || asset.kind == "scene" || asset.kind == "material" || asset.kind == "material-graph" || asset.kind == "blueprint") && asset.bytes < 4194304 {
             let data = read_file(project + "/" + asset.path)
             if data.contains(target.path) ||(target.kind == "mesh" && data.contains("\"" + content_leaf(target.path) + "\"")) {
                 ret asset.path

@@ -3,9 +3,11 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
+
 import mod::model::*
-import refrain::scene::json_value::{parse_number, vec3_json, json_vec3}
+import refrain::scene::json_value::{json_vec3, parse_number, vec3_json}
 import refrain::scene::transform::Transform
 
 pub fn blueprint_value_json(value: BlueprintValue) -> Json {
@@ -222,7 +224,7 @@ pub fn blueprint_json(asset: BlueprintAsset, layout: bool) -> Json {
     for link in asset.links {
         links.push(Json::Object(vec![field("from", endpoint_json(link.source)), field("to", endpoint_json(link.target))]))
     }
-    ret Json::Object(vec![field("format", Json::String("graphene-blueprint")), field("version", number(1_u64)),
+    ret Json::Object(vec![field("domain", Json::String(asset.domain)), field("format", Json::String("graphene-blueprint")), field("version", number(1_u64)),
             field("id", Json::String(asset.id)), field("name", Json::String(asset.name)), field("components", Json::Array(components)),
             field("properties", Json::Array(properties)), field("nodes", Json::Array(nodes)), field("links", Json::Array(links))],)
 }
@@ -243,7 +245,9 @@ pub fn blueprint_parse(source: str) -> Result[BlueprintAsset, str] {
     }
     let mut asset = BlueprintAsset {
         blueprint_json_text(root, "id")?, blueprint_json_text(root, "name")?,
-        Vec[BlueprintComponent]::new(), Vec[BlueprintProperty]::new(), Vec[BlueprintNode]::new(), Vec[BlueprintLink]::new()
+        Vec[BlueprintComponent]::new(), Vec[BlueprintProperty]::new(), Vec[BlueprintNode]::new(), Vec[BlueprintLink]::new(), match root.get("domain") {
+            Some(value) => value.as_str().unwrap_or("actor") None => "actor"
+        }
     }
     for component in array_field(root, "components")? {
         let position = match json_vec3(blueprint_json_field(component, "position")?) {

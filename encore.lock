@@ -2,15 +2,15 @@ version = 2
 
 [[packages]]
 name = "std"
-ref = "index@std@0.0.5"
-version = "0.0.5"
-archive = "http://127.0.0.1:8137/archives/afc9dec339ff611549b23cbe3430576d88b843dc35b1321a75af25e3997c000f.tar.gz"
-checksum = "afc9dec339ff611549b23cbe3430576d88b843dc35b1321a75af25e3997c000f"
+ref = "index@std@>=0.0.5"
+version = "0.0.8"
+archive = "http://127.0.0.1:8137/archives/aebaf85350327d57a665d1ca95760783ff14803c160a78ab45f532df08c7458f.tar.gz"
+checksum = "aebaf85350327d57a665d1ca95760783ff14803c160a78ab45f532df08c7458f"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "json"
-ref = "index@json@0.0.3"
+ref = "index@json@>=0.0.3"
 version = "0.0.3"
 archive = "http://127.0.0.1:8137/archives/018cce6bcbca73c3aa1afa26d0ec09156b1cf0c915e2e0334e07207588f55258.tar.gz"
 checksum = "018cce6bcbca73c3aa1afa26d0ec09156b1cf0c915e2e0334e07207588f55258"
@@ -18,7 +18,7 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "linalg"
-ref = "index@linalg@0.0.1"
+ref = "index@linalg@>=0.0.1"
 version = "0.0.1"
 archive = "http://127.0.0.1:8137/archives/50b20218e37dc4065faa64e61bc36f8d5ecd8fcb834d120cb8368677f5461842.tar.gz"
 checksum = "50b20218e37dc4065faa64e61bc36f8d5ecd8fcb834d120cb8368677f5461842"
@@ -26,16 +26,19 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "binary"
-ref = "index@binary@0.1.0"
+ref = "index@binary@>=0.1.0"
 version = "0.1.0"
-archive = "http://127.0.0.1:8137/archives/1b704ca6c502bc9f8ec5c72da70444b0e8a999e4c8783133725f16d85c2671a7.tar.gz"
-checksum = "1b704ca6c502bc9f8ec5c72da70444b0e8a999e4c8783133725f16d85c2671a7"
+archive = "http://127.0.0.1:8137/archives/12dbd4b95372042c0d83a36dbe4e17fa132c9caf212f73a6909e048384fc0121.tar.gz"
+checksum = "12dbd4b95372042c0d83a36dbe4e17fa132c9caf212f73a6909e048384fc0121"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "vulkan"
-ref = "path@../Vulkan"
+ref = "index@vulkan@>=0.1.1"
 version = "0.1.1"
+archive = "http://127.0.0.1:8137/archives/db116f49be56e729ae425168790e5b9ff02d04ac446048b01448a7d6ac84f175.tar.gz"
+checksum = "db116f49be56e729ae425168790e5b9ff02d04ac446048b01448a7d6ac84f175"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "luma"
@@ -45,13 +48,19 @@ features = ["fonts"]
 
 [[packages]]
 name = "sdl"
-ref = "path@../SDL"
+ref = "index@sdl@>=0.1.0"
 version = "0.1.0"
+archive = "http://127.0.0.1:8137/archives/e885102779a6a4ceb961966b31a1aea661c74cbe7063bc1503daf0ab8f1174ed.tar.gz"
+checksum = "e885102779a6a4ceb961966b31a1aea661c74cbe7063bc1503daf0ab8f1174ed"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "gpu"
-ref = "path@../GPU"
+ref = "index@gpu@>=0.1.1"
 version = "0.1.1"
+archive = "http://127.0.0.1:8137/archives/667c967b6a42b359f808a16f0b4958798f6f48e7931facc770224231f9d02bce.tar.gz"
+checksum = "667c967b6a42b359f808a16f0b4958798f6f48e7931facc770224231f9d02bce"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "audio"
@@ -72,6 +81,11 @@ ref = "path@../Blaze"
 version = "0.1.0-beta.2"
 
 [[packages]]
+name = "physics"
+ref = "path@../Physics"
+version = "0.1.0"
+
+[[packages]]
 name = "core"
 ref = "sys@core"
 version = "0.0.0"
@@ -83,11 +97,10 @@ version = "0.0.0"
 
 [[packages]]
 name = "color"
-ref = "index@color"
+ref = "workspace@color"
 version = "0.0.0"
-archive = "http://127.0.0.1:8137/archives/e1b883aabe52e4a79a6b02c507ea627ce4696bd67fb42b56b051036a4f19059c.tar.gz"
-checksum = "e1b883aabe52e4a79a6b02c507ea627ce4696bd67fb42b56b051036a4f19059c"
-registry = "http://127.0.0.1:8137/index"
+source = "embedded@luma"
+path = "workspace/color"
 
 [[packages]]
 name = "ui_native"

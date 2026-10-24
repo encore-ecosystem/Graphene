@@ -1,7 +1,6 @@
 //! Validation is independent of code generation and never mutates the document.
 import core::vec::Vec
-import mod::model::BlueprintLink
-import mod::model::{BlueprintAsset, BlueprintDiagnostic, BlueprintInstance, BlueprintNode, BlueprintType, blueprint_event, blueprint_pin, blueprint_pins}
+import mod::model::{BlueprintAsset, BlueprintDiagnostic, BlueprintInstance, BlueprintLink, BlueprintNode, BlueprintType, blueprint_event, blueprint_pin, blueprint_pins, blueprint_ui_action}
 
 /// Edge validation does not reject unrelated unfinished inputs in the document.
 pub fn blueprint_connection_error(asset: BlueprintAsset, link: BlueprintLink) -> str {
@@ -173,7 +172,10 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
             }
         }
     }
-    if roots != 1 {
+    if asset.domain != "actor" && asset.domain != "ui" {
+        errors.push(diagnostic(0, "", "unknown Blueprint domain"))
+    }
+    if (asset.domain == "actor" && roots != 1) ||(asset.domain == "ui" && asset.components.len() != 0) {
         errors.push(diagnostic(0, "", "exactly one root component is required"))
     }
     let mut property_ids = Vec[u64]::new()
@@ -200,12 +202,21 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
         }
         node_ids.push(node.id)
         let operation = node.operation
+        if asset.domain == "ui" &&(component_operation(operation) || operation == "input-pressed" || operation == "input-released") {
+            errors.push(diagnostic(node.id, "", "actor operation is unavailable in UI graphs"))
+        }
+        if asset.domain != "ui" &&(blueprint_ui_action(operation) != 0 || operation == "ui-click" || operation == "ui-change" || operation == "ui-destruct") {
+            errors.push(diagnostic(node.id, "", "UI events require a UI graph"))
+        }
+        if blueprint_ui_action(operation) != 0 && asset.property(999999_u64).is_none() {
+            errors.push(diagnostic(node.id, "", "UI screen action property is missing"))
+        }
         let pins = blueprint_pins(node)
         if pins.len() == 0 {
             errors.push(diagnostic(node.id, "", "unknown node operation: " + operation))
         }
         if blueprint_event(operation) {
-            if operation != "input-pressed" && operation != "input-released" && node.text != "" {
+            if operation != "input-pressed" && operation != "input-released" && operation != "ui-click" && operation != "ui-change" && node.text != "" {
                 errors.push(diagnostic(node.id, "", "only input events accept an action name"))
             }
             let key = operation + ":" + node.text
@@ -215,7 +226,7 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
                 }
             }
             events.push(key)
-            if (operation == "input-pressed" || operation == "input-released") && node.text == "" {
+            if (operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change") && node.text == "" {
                 errors.push(diagnostic(node.id, "", "input action name is required"))
             }
         }

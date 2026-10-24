@@ -1,0 +1,104 @@
+//! History stores value snapshots, never shared Vec graph handles or native resources.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import mod::asset::{ui_asset_parse, ui_asset_stringify}
+import mod::model::*
+pub struct UiDocument {
+    asset: UiScreenAsset
+    undo: Vec[str]
+    redo: Vec[str]
+    gesture: Option[str]
+    saved: str
+    revision: u64
+    changed: bool
+}
+
+impl for UiDocument {
+    pub fn new(asset: UiScreenAsset) -> Self {
+        let text = ui_asset_stringify(asset) ret Self {
+            ui_asset_parse(text).unwrap_or(UiScreenAsset::new("empty", "UI")), Vec[str]::new(), Vec[str]::new(), Option[str]::None, text, 0_u64, false
+        }
+    }
+    pub fn asset(self: Self) -> UiScreenAsset {
+        ret ui_asset_parse(ui_asset_stringify(self.asset)).unwrap_or(UiScreenAsset::new("empty", "UI"))
+    }
+    pub fn can_undo(self: Self) -> bool {
+        ret self.undo.len() > 0
+    }
+    pub fn can_redo(self: Self) -> bool {
+        ret self.redo.len() > 0
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn dirty(self: Self) -> bool {
+        ret self.changed
+    }
+    pub fn mark_saved(self: mut Self) ->() {
+        self.saved = ui_asset_stringify(self.asset) self.changed = false
+    }
+    pub fn replace(self: mut Self, asset: UiScreenAsset) -> bool {
+        let previous = ui_asset_stringify(self.asset) let next = ui_asset_stringify(asset) if previous == next {
+            ret false
+        }
+        if self.gesture.is_none() {
+            self.undo.push(previous)
+        }
+        if self.undo.len() > 128_usize {
+            let mut retained = Vec[str]::new() for i in 1_usize..self.undo.len() {
+                retained.push(self.undo.get(i).unwrap_or(""))
+            }
+            self.undo = retained
+        }
+        self.redo.clear() self.asset = ui_asset_parse(next).unwrap_or(self.asset) self.changed = next != self.saved self.revision += 1_u64 ret true
+    }
+    pub fn begin_gesture(self: mut Self) ->() {
+        if self.gesture.is_none() {
+            self.gesture = Option[str]::Some(ui_asset_stringify(self.asset))
+        }
+    }
+    pub fn end_gesture(self: mut Self) ->() {
+        match self.gesture {
+            Some(before) => {
+                if before != ui_asset_stringify(self.asset) {
+                    self.undo.push(before) self.redo.clear()
+                }
+            }
+            None => {
+            }
+        }
+        self.gesture = Option[str]::None
+    }
+    pub fn cancel_gesture(self: mut Self) ->() {
+        match self.gesture {
+            Some(before) => {
+                self.asset = ui_asset_parse(before).unwrap_or(self.asset) self.changed = before != self.saved self.revision += 1_u64
+            }
+            None => {
+            }
+        }
+        self.gesture = Option[str]::None
+    }
+    pub fn undo(self: mut Self) -> bool {
+        match self.undo.pop() {
+            Some(text) => {
+                self.redo.push(ui_asset_stringify(self.asset)) self.asset = ui_asset_parse(text).unwrap_or(self.asset) self.changed = text != self.saved self.revision += 1_u64 ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+    pub fn redo(self: mut Self) -> bool {
+        match self.redo.pop() {
+            Some(text) => {
+                self.undo.push(ui_asset_stringify(self.asset)) self.asset = ui_asset_parse(text).unwrap_or(self.asset) self.changed = text != self.saved self.revision += 1_u64 ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+}

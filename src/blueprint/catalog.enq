@@ -1,6 +1,7 @@
 //! Presentation metadata for the existing, closed native operation catalog.
 import core::vec::Vec
 import linalg::Vec3
+
 import mod::model::{BlueprintNode, BlueprintType, BlueprintValue}
 
 pub struct OperationInfo {
@@ -11,10 +12,21 @@ pub struct OperationInfo {
     description: str
 }
 pub fn blueprint_operations() -> Vec[str] {
-    ret vec!["construction", "begin-play", "tick", "input-pressed", "input-released", "constant", "get-variable", "set-variable", "add", "subtract", "multiply", "divide", "equal", "less", "greater", "and", "or", "not", "make-vector", "break-vector", "branch", "sequence", "get-position", "get-rotation", "get-scale", "set-position", "set-rotation", "set-scale", "add-offset", "add-rotation", "get-visible", "set-visible", "print"]
+    ret vec!["ui-resume", "ui-open-settings", "ui-open-pause", "ui-close", "ui-apply-settings", "ui-reset-settings", "ui-cancel-settings", "ui-stop-play", "ui-click", "ui-change", "ui-destruct", "construction", "begin-play", "tick", "input-pressed", "input-released", "constant", "get-variable", "set-variable", "add", "subtract", "multiply", "divide", "equal", "less", "greater", "and", "or", "not", "make-vector", "break-vector", "branch", "sequence", "get-position", "get-rotation", "get-scale", "set-position", "set-rotation", "set-scale", "add-offset", "add-rotation", "get-visible", "set-visible", "print"]
 }
 pub fn operation_info(key: str) -> OperationInfo {
     let metadata = match key {
+        "ui-resume" =>("Resume Game", "UI", "play", "Close modal menus and resume gameplay.")
+        "ui-open-settings" =>("Open Settings", "UI", "settings", "Open player settings while the game is paused.")
+        "ui-open-pause" =>("Open Pause", "UI", "pause", "Pause simulation and show the pause screen.")
+        "ui-close" =>("Close Screen", "UI", "x", "Close the current modal screen.")
+        "ui-apply-settings" =>("Apply Settings", "UI", "check", "Apply and save player preferences without changing project settings.")
+        "ui-reset-settings" =>("Reset Settings", "UI", "rotate-ccw", "Restore the draft to project defaults.")
+        "ui-cancel-settings" =>("Cancel Settings", "UI", "arrow-left", "Discard the settings draft and return to pause.")
+        "ui-stop-play" =>("Stop Play", "UI", "square", "End Play and return to the editor.")
+        "ui-destruct" =>("Destruct", "UI Events", "square", "Run before removing this screen instance.")
+        "ui-click" =>("On Clicked", "UI Events", "mouse-pointer", "Run when a named widget is activated.")
+        "ui-change" =>("On Value Changed", "UI Events", "sliders-horizontal", "Run after a widget value changes.")
         "construction" =>("Construction", "Events", "hammer", "Initialize an actor while constructing its instance.")
         "begin-play" =>("Begin Play", "Events", "play", "Run once when simulation begins.")
         "tick" =>("Tick", "Events", "timer", "Run every simulation step. Delta is elapsed seconds.")
@@ -80,7 +92,7 @@ pub fn operation_node(id: u64, key: str) -> BlueprintNode {
     if key == "print" {
         kind = BlueprintType::String
     }
-    if key == "construction" || key == "begin-play" || key == "tick" || key == "input-pressed" || key == "input-released" || key == "sequence" || key == "branch" {
+    if key.contains("ui-") || key == "construction" || key == "begin-play" || key == "tick" || key == "input-pressed" || key == "input-released" || key == "sequence" || key == "branch" {
         kind = BlueprintType::Exec
     }
     ret BlueprintNode::new(id, key, kind)

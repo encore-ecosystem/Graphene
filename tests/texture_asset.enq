@@ -1,10 +1,12 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import graphene::{decode_png, texture_path_valid, load_material_texture}
+
 import std::io::println
-import std::os::{mkdir_all, write_file, read_file, file_exists}
+import std::os::{file_exists, mkdir_all, read_file, write_file}
 import std::time::perf_counter_ms
+
+import graphene::{decode_png, load_material_texture, texture_path_valid}
 
 extern fn encore_str_from_buffer(bytes: u8*, length: usize) -> str
 
@@ -51,7 +53,7 @@ fn chunk(bytes: mut Vec[u8], name: str, payload: Vec[u8]) ->() {
 }
 
 fn stored(raw: Vec[u8]) -> Vec[u8] {
-    let mut result = vec![120_u8, 1, 1]
+    let mut result = vec![120_u8, 1_u8, 1_u8]
     let length = raw.len() as u32
     result.push(length as u8) result.push((length >> 8) as u8)
     result.push((length ^ 65535) as u8) result.push(((length ^ 65535) >> 8) as u8)
@@ -64,7 +66,7 @@ fn stored(raw: Vec[u8]) -> Vec[u8] {
 }
 
 fn png(width: u32, height: u32, color: u8, interlace: u8, compressed: Vec[u8]) -> Vec[u8] {
-    let mut bytes = vec![137_u8, 80, 78, 71, 13, 10, 26, 10]
+    let mut bytes = vec![137_u8, 80_u8, 78_u8, 71_u8, 13_u8, 10_u8, 26_u8, 10_u8]
     let mut header = Vec[u8]::new()
     be32(header, width) be32(header, height)
     header.push(8) header.push(color) header.push(0) header.push(0) header.push(interlace)
@@ -93,13 +95,13 @@ fn rejected(bytes: Vec[u8]) -> bool {
 fn main() -> u32 {
     // Adjacent rows and pixels differ: the previous row must not change as
     // the current row is reconstructed (especially Paeth's upper-left byte).
-    let transitions = vec![0_u8, 239, 85, 73, 239, 85, 73,
-        4, 119, 105, 39, 0, 0, 0,
-        3, 225, 191, 240, 19, 236, 24,
-        2, 246, 246, 246, 216, 216, 216,
-        1, 200, 180, 160, 196, 196, 196]
-    let expected = vec![4282996207_u32, 4282996207, 4285578854, 4285578854,
-        4280819220, 4284766800, 4280161290, 4282135080, 4288722120, 4284774540]
+    let transitions = vec![0_u8, 239_u8, 85_u8, 73_u8, 239_u8, 85_u8, 73_u8,
+        4_u8, 119_u8, 105_u8, 39_u8, 0_u8, 0_u8, 0_u8,
+        3_u8, 225_u8, 191_u8, 240_u8, 19_u8, 236_u8, 24_u8,
+        2_u8, 246_u8, 246_u8, 246_u8, 216_u8, 216_u8, 216_u8,
+        1_u8, 200_u8, 180_u8, 160_u8, 196_u8, 196_u8, 196_u8]
+    let expected = vec![4282996207_u32, 4282996207_u32, 4285578854_u32, 4285578854_u32,
+        4280819220_u32, 4284766800_u32, 4280161290_u32, 4282135080_u32, 4288722120_u32, 4284774540_u32]
     match decode_png(bytes_string(png(2, 5, 2, 0, stored(transitions)))) {
         Result::Ok(image) => {
             for index in 0..expected.len() {
@@ -114,10 +116,10 @@ fn main() -> u32 {
     }
     // The alpha channel participates in filtering too. Cover a changing
     // Paeth row followed by Average, with non-opaque alpha at both pixels.
-    let rgba_rows = vec![0_u8, 239, 85, 73, 31, 239, 85, 73, 255,
-        4, 119, 105, 39, 32, 0, 0, 0, 128,
-        3, 225, 191, 240, 225, 19, 236, 24, 137]
-    let rgba_expected = vec![524899823_u32, 4282996207, 1064353382, 2138095206, 2629140, 3362019920]
+    let rgba_rows = vec![0_u8, 239_u8, 85_u8, 73_u8, 31_u8, 239_u8, 85_u8, 73_u8, 255_u8,
+        4_u8, 119_u8, 105_u8, 39_u8, 32_u8, 0_u8, 0_u8, 0_u8, 128_u8,
+        3_u8, 225_u8, 191_u8, 240_u8, 225_u8, 19_u8, 236_u8, 24_u8, 137_u8]
+    let rgba_expected = vec![524899823_u32, 4282996207_u32, 1064353382_u32, 2138095206_u32, 2629140_u32, 3362019920_u32]
     match decode_png(bytes_string(png(2, 3, 6, 0, stored(rgba_rows)))) {
         Result::Ok(image) => {
             for index in 0..rgba_expected.len() {
@@ -130,11 +132,11 @@ fn main() -> u32 {
             ret 33
         }
     }
-    let raw = vec![0_u8, 100, 50, 25, 200, 100, 50,
-        1, 100, 50, 25, 100, 50, 25,
-        2, 0, 0, 0, 0, 0, 0,
-        3, 50, 25, 13, 50, 25, 13,
-        4, 0, 0, 0, 0, 0, 0]
+    let raw = vec![0_u8, 100_u8, 50_u8, 25_u8, 200_u8, 100_u8, 50_u8,
+        1_u8, 100_u8, 50_u8, 25_u8, 100_u8, 50_u8, 25_u8,
+        2_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8,
+        3_u8, 50_u8, 25_u8, 13_u8, 50_u8, 25_u8, 13_u8,
+        4_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]
     let mut valid = png(2, 5, 2, 0, stored(raw))
     match decode_png(bytes_string(valid)) {
         Result::Ok(image) => {
@@ -153,7 +155,7 @@ fn main() -> u32 {
             ret 3
         }
     }
-    let rgba = vec![0_u8, 255, 0, 0, 31, 0, 255, 0, 255]
+    let rgba = vec![0_u8, 255_u8, 0_u8, 0_u8, 31_u8, 0_u8, 255_u8, 0_u8, 255_u8]
     match decode_png(bytes_string(png(2, 1, 6, 0, stored(rgba)))) {
         Result::Ok(image) => {
             if image.pixels.get(0).unwrap_or(0) != 520093951_u32 || image.pixels.get(1).unwrap_or(0) != 4278255360_u32 {
@@ -164,7 +166,7 @@ fn main() -> u32 {
             ret 5
         }
     }
-    let fixed = vec![120_u8, 1, 99, 72, 49, 146, 60, 145, 98, 196, 8, 164, 128, 136, 137, 1, 12, 152, 141, 36, 121, 129, 136, 5, 194, 3, 0, 106, 186, 4, 38]
+    let fixed = vec![120_u8, 1_u8, 99_u8, 72_u8, 49_u8, 146_u8, 60_u8, 145_u8, 98_u8, 196_u8, 8_u8, 164_u8, 128_u8, 136_u8, 137_u8, 1_u8, 12_u8, 152_u8, 141_u8, 36_u8, 121_u8, 129_u8, 136_u8, 5_u8, 194_u8, 3_u8, 0_u8, 106_u8, 186_u8, 4_u8, 38_u8]
     match decode_png(bytes_string(png(2, 5, 2, 0, fixed))) {
         Result::Ok(image) => {
             if image.pixels.get(9).unwrap_or(0) != 4281492680_u32 {
@@ -177,7 +179,7 @@ fn main() -> u32 {
     }
     // Independently generated zlib dynamic-Huffman stream, including overlapping
     // back-references. Uncompressed bytes are index % 91, including filter 0.
-    let dynamic = vec![120_u8, 156, 237, 204, 83, 2, 2, 1, 0, 64, 193, 205, 174, 205, 214, 102, 219, 182, 237, 238, 127, 144, 110, 209, 215, 155, 3, 140, 32, 147, 43, 148, 42, 181, 70, 171, 211, 27, 140, 38, 179, 69, 180, 218, 236, 14, 167, 203, 237, 241, 250, 252, 129, 96, 40, 28, 137, 74, 177, 120, 34, 153, 74, 103, 178, 185, 124, 161, 88, 42, 87, 170, 181, 122, 163, 217, 106, 119, 186, 189, 254, 96, 56, 26, 79, 166, 179, 249, 98, 185, 90, 111, 182, 187, 253, 225, 120, 58, 95, 174, 183, 251, 227, 249, 122, 127, 190, 2, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 53, 245, 191, 234, 31, 85, 247, 220, 150]
+    let dynamic = vec![120_u8, 156_u8, 237_u8, 204_u8, 83_u8, 2_u8, 2_u8, 1_u8, 0_u8, 64_u8, 193_u8, 205_u8, 174_u8, 205_u8, 214_u8, 102_u8, 219_u8, 182_u8, 237_u8, 238_u8, 127_u8, 144_u8, 110_u8, 209_u8, 215_u8, 155_u8, 3_u8, 140_u8, 32_u8, 147_u8, 43_u8, 148_u8, 42_u8, 181_u8, 70_u8, 171_u8, 211_u8, 27_u8, 140_u8, 38_u8, 179_u8, 69_u8, 180_u8, 218_u8, 236_u8, 14_u8, 167_u8, 203_u8, 237_u8, 241_u8, 250_u8, 252_u8, 129_u8, 96_u8, 40_u8, 28_u8, 137_u8, 74_u8, 177_u8, 120_u8, 34_u8, 153_u8, 74_u8, 103_u8, 178_u8, 185_u8, 124_u8, 161_u8, 88_u8, 42_u8, 87_u8, 170_u8, 181_u8, 122_u8, 163_u8, 217_u8, 106_u8, 119_u8, 186_u8, 189_u8, 254_u8, 96_u8, 56_u8, 26_u8, 79_u8, 166_u8, 179_u8, 249_u8, 98_u8, 185_u8, 90_u8, 111_u8, 182_u8, 187_u8, 253_u8, 225_u8, 120_u8, 58_u8, 95_u8, 174_u8, 183_u8, 251_u8, 227_u8, 249_u8, 122_u8, 127_u8, 190_u8, 2_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 53_u8, 245_u8, 191_u8, 234_u8, 31_u8, 85_u8, 247_u8, 220_u8, 150_u8]
     match decode_png(bytes_string(png(3333, 1, 2, 0, dynamic))) {
         Result::Ok(image) => {
             for x in 0..3333 {
@@ -207,10 +209,10 @@ fn main() -> u32 {
     if !rejected(png(2, 1, 3, 0, stored(rgba))) {
         ret 9
     }
-    if !rejected(png(1, 1, 6, 0, stored(vec![5_u8, 0, 0, 0, 0]))) {
+    if !rejected(png(1, 1, 6, 0, stored(vec![5_u8, 0_u8, 0_u8, 0_u8, 0_u8]))) {
         ret 10
     }
-    if !rejected(png(1, 1, 6, 0, stored(vec![0_u8, 0, 0, 0, 0, 1]))) {
+    if !rejected(png(1, 1, 6, 0, stored(vec![0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 1_u8]))) {
         ret 11
     }
     let mut bad_adler = stored(rgba)
@@ -218,14 +220,14 @@ fn main() -> u32 {
     if !rejected(png(2, 1, 6, 0, bad_adler)) {
         ret 17
     }
-    if !rejected(png(1, 1, 6, 0, vec![120_u8, 1, 7, 0, 0, 0, 1])) {
+    if !rejected(png(1, 1, 6, 0, vec![120_u8, 1_u8, 7_u8, 0_u8, 0_u8, 0_u8, 1_u8])) {
         ret 18
     }
     if !texture_path_valid("Content/Textures/example.png") || texture_path_valid("../texture.png") ||
     texture_path_valid("Content/Textures/../outside.png") || texture_path_valid("/tmp/texture.png") {
         ret 12
     }
-    let scratch = f "target/texture-test-{perf_counter_ms()}"
+    let scratch = f"target/texture-test-{perf_counter_ms()}"
     if mkdir_all(scratch) != 0 {
         ret 19
     }

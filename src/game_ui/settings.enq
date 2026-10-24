@@ -1,0 +1,168 @@
+//! Play preferences are local user data; project authoring settings stay intact.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+
+import std::os::{mkdir_all, read_file, write_file_atomic}
+
+import json::{Json, field, parse, stringify}
+
+import mod::asset::{ui_number, ui_text}
+import refrain::audio::model::{AudioSettings, audio_bus_names}
+import refrain::render_settings::{AntiAliasingMethod, FrameGenerationMethod, RenderSettings, UpscalingQuality, anti_aliasing_methods, upscaling_qualities}
+
+pub struct PlaySettings {
+    rendering: RenderSettings
+    audio: AudioSettings
+    device: str
+}
+
+impl for PlaySettings {
+    pub fn snapshot(self: Self) -> Self {
+        ret Self {
+            self.rendering, self.audio.snapshot(), self.device
+        }
+    }
+    pub fn load(project: str, rendering: RenderSettings, audio: AudioSettings, device: str) -> Self {
+        let mut result = Self { rendering, audio.snapshot(), device }
+        match parse(read_file(project + "/.graphene/PlaySettings.json")) {
+            Ok(root) => {
+                match root.get("rendering") {
+                    Some(value) => {
+                        result.rendering = RenderSettings::parse(stringify(value)).unwrap_or(rendering)
+                    }
+                    None => {
+                    }
+                }
+                result.device = ui_text(root, "device", device)
+                result.audio.max_voices = ui_number(root, "maxVoices", audio.max_voices as f32) as u32
+                if result.audio.max_voices < 1 || result.audio.max_voices > 1024 {
+                    result.audio.max_voices = audio.max_voices
+                }
+                result.audio.headphones = match root.get("headphones") {
+                    Some(value) => value.as_bool().unwrap_or(audio.headphones) None => audio.headphones
+                }
+                for i in 0_usize..4_usize {
+                    let name = audio_bus_names().get(i).unwrap_or("Master") let gain = ui_number(root, name, 1) if gain >= 0 && gain <= 4 {
+                        result.audio.gains.set(i, gain)
+                    }
+                    match root.get(name + "Muted") {
+                        Some(value) => {
+                            result.audio.mutes.set(i, value.as_bool().unwrap_or(false))
+                        }
+                        None => {
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+            }
+        }
+        ret result
+    }
+    pub fn save(self: Self, project: str) -> bool {
+        let r = self.rendering
+        let rendering = Json::Object(vec![field("anti_aliasing", Json::String(r.anti_aliasing().key())), field("upscaling_quality", Json::String(r.quality().key())), field("frame_generation", Json::String(r.frame_generation().key())), field("frame_generation_multiplier", Json::Number(Debug::fmt(r.multiplier()))), field("upscaling_sharpness", Json::Number(Debug::fmt(r.sharpness())))])
+        let mut fields = vec![field("rendering", rendering), field("device", Json::String(self.device)), field("headphones", Json::Bool(self.audio.headphones)), field("maxVoices", Json::Number(Debug::fmt(self.audio.max_voices)))]
+        for i in 0_usize..4_usize {
+            let name = audio_bus_names().get(i).unwrap_or("Master") fields.push(field(name, Json::Number(Debug::fmt(self.audio.gains.get(i).unwrap_or(1))))) fields.push(field(name + "Muted", Json::Bool(self.audio.mutes.get(i).unwrap_or(false))))
+        }
+        ret mkdir_all(project + "/.graphene") == 0 && write_file_atomic(project + "/.graphene/PlaySettings.json", stringify(Json::Object(fields))) == 0
+    }
+    pub fn value(self: Self, binding: str, devices: Vec[str]) -> f32 {
+        if binding == "aa" {
+            let mut index = 0_usize for method in anti_aliasing_methods() {
+                if method.key() == self.rendering.anti_aliasing().key() {
+                    ret(index as f32) / 8
+                }
+                index += 1
+            }
+        }
+        if binding == "quality" {
+            ret(self.rendering.quality().value() as f32) / 4
+        }
+        if binding == "fg" {
+            ret match self.rendering.frame_generation() {
+                Off => 0 Fsr => 0.5_f32 Dlss => 1
+            }
+        }
+        if binding == "multiplier" {
+            ret((self.rendering.multiplier() - 2) as f32) / 2
+        }
+        if binding == "sharpness" {
+            ret self.rendering.sharpness()
+        }
+        if binding == "headphones" {
+            ret if self.audio.headphones {
+                1
+            } else {
+                0
+            }
+        }
+        if binding == "voices" {
+            ret((self.audio.max_voices - 1) as f32) / 1023
+        }
+        if binding == "device" {
+            let mut index = 0_usize for device in devices {
+                if device == self.device {
+                    ret if devices.len() > 1 {
+                        (index as f32) /((devices.len() - 1) as f32)
+                    } else {
+                        0
+                    }
+                }
+                index += 1
+            }
+        }
+        for i in 0_usize..4_usize {
+            let name = audio_bus_names().get(i).unwrap_or("Master") if binding == "gain:" + name {
+                ret self.audio.gains.get(i).unwrap_or(1) / 4
+            }
+            if binding == "mute:" + name {
+                ret if self.audio.mutes.get(i).unwrap_or(false) {
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+        ret 0
+    }
+    pub fn set(self: mut Self, binding: str, value: f32, devices: Vec[str]) ->() {
+        if value < 0 || value > 1 {
+            ret()
+        }
+        if binding == "aa" {
+            self.rendering = self.rendering.with_anti_aliasing(anti_aliasing_methods().get((value * 8 + 0.5_f32) as usize).unwrap_or(AntiAliasingMethod::Smaa))
+        } elif binding == "quality" {
+            self.rendering = self.rendering.with_quality(upscaling_qualities().get((value * 4 + 0.5_f32) as usize).unwrap_or(UpscalingQuality::Quality))
+        } elif binding == "fg" {
+            self.rendering = self.rendering.with_frame_generation(if value < 0.25_f32 {
+                    FrameGenerationMethod::Off
+                } elif value < 0.75_f32 {
+                    FrameGenerationMethod::Fsr
+                } else {
+                    FrameGenerationMethod::Dlss
+                }
+            )
+        } elif binding == "multiplier" {
+            self.rendering = self.rendering.with_multiplier(2_u32 +(value * 2 + 0.5_f32) as u32)
+        } elif binding == "sharpness" {
+            self.rendering = self.rendering.with_sharpness(value)
+        } elif binding == "headphones" {
+            self.audio.headphones = value >= 0.5_f32
+        } elif binding == "voices" {
+            self.audio.max_voices = 1_u32 +(value * 1023) as u32
+        } elif binding == "device" {
+            self.device = devices.get((value *((devices.len() - 1) as f32) + 0.5_f32) as usize).unwrap_or("")
+        }
+        for i in 0_usize..4_usize {
+            let name = audio_bus_names().get(i).unwrap_or("Master") if binding == "gain:" + name {
+                self.audio.gains.set(i, value * 4)
+            }
+            if binding == "mute:" + name {
+                self.audio.mutes.set(i, value >= 0.5_f32)
+            }
+        }
+    }
+}

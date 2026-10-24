@@ -4,7 +4,9 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, stringify}
+
 import mod::model::*
 import mod::validate::validate_blueprint
 
@@ -169,6 +171,9 @@ fn execution(asset: BlueprintAsset, prefix: str, node: BlueprintNode) -> str {
     }
     if operation == "sequence" {
         ret body + next_statement(asset, prefix, node.id, "first") + next_statement(asset, prefix, node.id, "second")
+    }
+    if blueprint_ui_action(operation) != 0 {
+        body += "    gbp_set_i32(s, " + variable(asset, 999999_u64) + ", " + Debug::fmt(blueprint_ui_action(operation)) + "_i32)\n"
     }
     if operation == "set-variable" {
         body += property_write(variable(asset, node.reference), node.value_type, input_expression(asset, prefix, node.id, "value"))

@@ -1,13 +1,19 @@
 //! Component fields must remain visible inside narrow Details docks.
 import core::vec::Vec
-import graphene::editor_actor_details::ActorDetails
-import graphene::scene::camera::camera_frame_extent
-import graphene::{Scene, Transform, SceneComponent}
-import luma::{Widget, Rect, StyleSheet, layout_widget, property_section, vertical}
 import std::os::read_file
 
+import graphene::{Scene, SceneComponent, Transform}
+import graphene::editor_actor_details::ActorDetails
+import graphene::scene::camera::camera_frame_extent
+import luma::{Rect, StyleSheet, Widget, layout_widget, property_section, vertical}
+
 fn main() -> u32 {
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     for kind in vec!["camera", "directional-light", "point-light", "spot-light"] {
         let mut scene = Scene::new()
         let id = scene.create_entity("Actor", Transform::identity())

@@ -1,12 +1,13 @@
 //! Dense controls stay visible, menus stay in bounds, and 10k assets create bounded widgets.
 import core::vec::Vec
-import graphene::content_browser::thumbnail::content_thumbnail
-import graphene::content_browser::view::{ContentIcons, content_widget, content_popup}
-import graphene::content_browser::{ContentBrowser, ContentAsset}
-import luma::{Widget, Rect, StyleSheet, IconManager, layout_widget}
 import std::io::println
 import std::os::read_file
 import std::time::perf_counter_ms
+
+import graphene::content_browser::{ContentAsset, ContentBrowser}
+import graphene::content_browser::thumbnail::content_thumbnail
+import graphene::content_browser::view::{ContentIcons, content_popup, content_widget}
+import luma::{IconManager, Rect, StyleSheet, Widget, layout_widget}
 
 fn count(widget: Widget) -> usize {
     let mut total = 1_usize for child in widget.children() {
@@ -15,7 +16,12 @@ fn count(widget: Widget) -> usize {
     ret total
 }
 fn main() -> u32 {
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     let icons = ContentIcons::load(IconManager::with_bundled("../Luma/assets/icons"))
     let mut browser = ContentBrowser::new() browser.project = "/tmp/graphene-layout-only" browser.editable = true
     for width in vec![640.0_f32, 1000.0_f32, 1280.0_f32] {
@@ -38,7 +44,7 @@ fn main() -> u32 {
         }
     }
     browser.entries.clear() let started = perf_counter_ms()
-    for index in 0..10000 {
+    for index in 0_usize..10000_usize {
         browser.entries.push(ContentAsset::new("Content/Textures/Texture_" + index.fmt() + ".png", "Texture_" + index.fmt(), "texture", 128))
     }
     browser.directory = "@all" browser.view = "grid" browser.bounds = Rect::new(176, 56, 1104, 180) browser.rebuild()

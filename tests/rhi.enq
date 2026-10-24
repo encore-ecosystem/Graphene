@@ -161,7 +161,7 @@ fn scene_asset_contract() -> bool {
     if !encoded.contains("graphene-scene") || !encoded.contains("Cube 1") || !encoded.contains("Imported Pyramid") { ret false }
     match SceneAsset::parse(encoded) {
         Option::Some(decoded) => {
-            if decoded.version() != 6_u32 || decoded.len() != 2_usize || !decoded.valid_hierarchy() { ret false }
+            if decoded.version() != 7_u32 || decoded.len() != 2_usize || !decoded.valid_hierarchy() { ret false }
             match decoded.actor(0_usize) {
                 Option::Some(actor) => {
                     let transform = actor.transform()
@@ -192,7 +192,7 @@ fn scene_asset_contract() -> bool {
     if !loaded { ret false }
     match SceneAsset::parse("{\"format\":\"graphene-scene\",\"version\":1,\"actors\":[{\"name\":\"Legacy\",\"kind\":\"cube\",\"transform\":{\"position\":[0,0,0],\"rotation\":[0,0,0],\"scale\":[1,1,1]}}]}") {
         Option::Some(legacy) => { match legacy.actor(0_usize) { Option::Some(actor) => {
-            if legacy.version() != 6_u32 || actor.id() != 1_u64 || actor.parent().is_some() || !actor.visible() { ret false }
+            if legacy.version() != 7_u32 || actor.id() != 1_u64 || actor.parent().is_some() || !actor.visible() { ret false }
         } Option::None => { ret false } } }
         Option::None => { ret false }
     }

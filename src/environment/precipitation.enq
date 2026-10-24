@@ -1,10 +1,11 @@
 //! GPU precipitation and a geometry-derived shelter map. No particle CPU simulation/readback.
 import core::vec::Vec
 import linalg::Vec3
+
 import mod::frame::*
 import mod::sky_view::environment_spirv
 import mod::system::EnvironmentFrame
-import refrain::assets::{MeshAssets, MaterialAssets}
+import refrain::assets::{MaterialAssets, MeshAssets}
 import refrain::material_graph::runtime::{RuntimeMaterial, material_path_valid}
 import refrain::renderer::SceneRenderer
 import refrain::rhi::*
@@ -75,7 +76,7 @@ impl for PrecipitationView {
         ret PrecipitationView<H> {
             device, device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, shader_stage_vertex() | shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(1, shader_stage_vertex())]),
             device.create_shader_module(environment_spirv(1), shader_stage_vertex()), device.create_shader_module(environment_spirv(2), shader_stage_fragment()),
-            device.create_mesh(vertices, vec![0_u32, 1, 2, 2, 1, 3]), Vec[ParticlePipeline]::new(), target, shelter_layout, pipeline, vec![sv, sf], renderer, texture, device.create_sampler(), Vec3::zero(), 0, false, "", "", RuntimeMaterial::new(), "", Vec[u32]::new()
+            device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 1_u32, 3_u32]), Vec[ParticlePipeline]::new(), target, shelter_layout, pipeline, vec![sv, sf], renderer, texture, device.create_sampler(), Vec3::zero(), 0, false, "", "", RuntimeMaterial::new(), "", Vec[u32]::new()
         }
     }
     pub fn set_project(self: mut Self&, project: str) ->() {

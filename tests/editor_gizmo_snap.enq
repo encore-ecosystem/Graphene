@@ -1,12 +1,14 @@
 //! Snap actions are tied to their tool; the compact menu has no wrapped or clipped rows.
 import core::fmt::Debug
 import core::option::Option
-import graphene::GizmoSnap
-import graphene::editor_gizmo_snap::{snap_step_values, snap_step_grid, snap_value_action, snap_step_label}
-import graphene::editor_guides::gizmo_step_label
-import luma::{Widget, Rect, Size, Style, StyleSheet, layout_widget, anchored_popup_bounds, vertical}
+
 import std::io::println
 import std::os::read_file
+
+import graphene::GizmoSnap
+import graphene::editor_gizmo_snap::{snap_step_grid, snap_step_label, snap_step_values, snap_value_action}
+import graphene::editor_guides::gizmo_step_label
+import luma::{Rect, Size, Style, StyleSheet, Widget, anchored_popup_bounds, layout_widget, vertical}
 
 fn main() -> u32 {
     let mut settings = GizmoSnap::new()
@@ -35,7 +37,12 @@ fn main() -> u32 {
     if snap_step_label(45, "rotate") != "45°" || snap_step_label(0.5, "move") != "0.5 u" {
         ret 5_u32
     }
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     for tool in vec!["move", "rotate", "scale"] {
         let height = if tool == "scale" {
             128.0_f32

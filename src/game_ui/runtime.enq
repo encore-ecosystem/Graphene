@@ -1,0 +1,670 @@
+//! Play-only screen instances. Widget actions execute compiled Encore graphs.
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import audio::output_devices
+import luma::{Event, Insets, PreparedFrame, Rect, Size, UiLayer, Widget, WidgetLayout, anchored_popup_bounds, event_key_down, event_none, event_pointer_down, key_down, key_escape, key_up, vertical, widget_input}
+
+import mod::asset::{UiConfiguration, load_ui_asset}
+import mod::build::UiBuild
+import mod::model::{UiScreenAsset, UiWidget, ui_property}
+import mod::settings::PlaySettings
+import mod::templates::ui_template
+import mod::view::{UiImage, build_ui_screen, game_ui_styles, game_ui_widget_style, load_ui_images, ui_widget_id}
+import refrain::audio::model::AudioSettings
+import refrain::blueprint::{BlueprintInstance, BlueprintModule, BlueprintOverride, BlueprintRuntimeInstance, BlueprintValue}
+import refrain::render_settings::{RenderSettings, anti_aliasing_methods, effective_frame_generation, effective_reconstruction}
+import refrain::scene::transform::Transform
+
+struct UiScreenInstance {
+    asset: UiScreenAsset
+    runtime: BlueprintRuntimeInstance
+    images: Vec[UiImage]
+}
+pub struct GameUi {
+    project: str
+    screens: Vec[UiScreenAsset]
+    instances: Vec[UiScreenInstance]
+    module: Option[BlueprintModule]
+    build: UiBuild
+    prepared: bool
+    active: bool
+    starting: bool
+    paused: bool
+    settings_open: bool
+    layer: UiLayer
+    bounds: Rect
+    layer_dirty: bool
+    originals: PlaySettings
+    applied: PlaySettings
+    draft: PlaySettings
+    apply_requested: bool
+    stop_requested: bool
+    devices: Vec[str]
+    message: str
+    selecting: u64
+    capabilities: u32
+    sample_counts: u32
+    select_index: usize
+}
+
+impl for GameUi {
+    pub fn new() -> Self {
+        let settings = PlaySettings { RenderSettings::defaults(), AudioSettings::defaults(), "" }
+        let bounds = Rect::new(0, 0, 1, 1)
+        ret Self {
+            "", Vec[UiScreenAsset]::new(), Vec[UiScreenInstance]::new(), Option[BlueprintModule]::None, UiBuild::new(), false, false, false, false, false, UiLayer::new(Widget::panel("game-ui-root"), game_ui_styles(), bounds), bounds, true, settings.snapshot(), settings.snapshot(), settings.snapshot(), false, false, vec![""], "", 0, 0, 1, 0_usize
+        }
+    }
+    pub fn inspection_layout(self: mut Self) -> WidgetLayout {
+        ret self.layer.layout()
+    }
+    pub fn keyboard_captured(self: mut Self) -> bool {
+        if self.paused {
+            ret true
+        }
+        let id = self.layer.focused()
+        ret match self.layer.layout().find_widget(id) {
+            Some(widget) => widget.kind() == widget_input() None => false
+        }
+    }
+    pub fn focused(self: Self) -> str {
+        ret self.layer.focused()
+    }
+    pub fn hovered(self: Self) -> str {
+        ret self.layer.hovered()
+    }
+    pub fn pressed(self: Self) -> str {
+        ret self.layer.pressed()
+    }
+    pub fn ready(self: Self) -> bool {
+        ret self.prepared && self.build.completed && self.build.error == ""
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.build.busy()
+    }
+    pub fn paused(self: Self) -> bool {
+        ret self.active && self.paused
+    }
+    pub fn active(self: Self) -> bool {
+        ret self.active
+    }
+    pub fn prepare(self: mut Self, project: str, open_path: str, open_asset: UiScreenAsset, render: RenderSettings, audio: AudioSettings, device: str) -> bool {
+        if self.busy() {
+            ret false
+        }
+        self.close() self.project = project
+        let config = match UiConfiguration::load(project) {
+            Ok(value) => value Err(error) => {
+                self.message = error ret false
+            }
+        }
+        self.screens = Vec[UiScreenAsset]::new()
+        for pair in vec![(config.hud, "HUD"),(config.pause, "Pause"),(config.settings, "Settings")] {
+            let screen = if pair.0 != "" {
+                if pair.0 == open_path {
+                    open_asset
+                } else {
+                    match load_ui_asset(project, pair.0) {
+                        Ok(value) => value Err(error) => {
+                            self.message = error ret false
+                        }
+                    }
+                }
+            } elif pair.1 == "HUD" {
+                UiScreenAsset::new("UI_EmptyHUD", "HUD").synchronized()
+            } else {
+                ui_template(pair.1)
+            }
+            self.screens.push(screen)
+        }
+        self.originals = PlaySettings { render, audio.snapshot(), device }
+        self.applied = PlaySettings::load(project, render, audio, device) self.draft = self.applied.snapshot()
+        self.devices = vec![""] for name in output_devices() {
+            if name != "" {
+                self.devices.push(name)
+            }
+        }
+        self.starting = true self.prepared = true
+        let success = self.build.prepare(project, self.screens)
+        self.message = if self.build.error == "" {
+            "Compiling UI screens"
+        } else {
+            self.build.error
+        }
+        ret success
+    }
+    pub fn poll(self: mut Self) -> bool {
+        let changed = self.build.poll()
+        if changed {
+            self.message = if self.build.error == "" {
+                "UI screens ready"
+            } else {
+                self.build.error
+            }
+        }
+        ret changed
+    }
+    pub fn take_start(self: mut Self) -> bool {
+        if self.starting && self.ready() {
+            self.starting = false ret true
+        }
+        if self.starting && self.build.completed && self.build.error != "" {
+            self.starting = false
+        }
+        ret false
+    }
+    pub fn begin(self: mut Self) -> Result[(), str] {
+        if !self.ready() {
+            ret Result[(), str]::Err("UI compilation has not completed")
+        }
+        let module = BlueprintModule::open(self.build.library)?
+        self.module = Option[BlueprintModule]::Some(module)
+        for asset in self.screens {
+            let runtime = match module.instantiate(asset.graph, BlueprintInstance {
+                    "", Vec[BlueprintOverride]::new()
+                }
+                , Transform::identity(),) {
+                Ok(value) => value Err(error) => {
+                    self.close() ret Result[(), str]::Err(error)
+                }
+            }
+            if !runtime.invoke("construction", "", 0) || !runtime.invoke("begin-play", "", 0) {
+                let error = runtime.error() runtime.destroy() self.close() ret Result[(), str]::Err(error)
+            }
+            self.instances.push(UiScreenInstance {
+                    asset, runtime, load_ui_images(self.project, asset)
+                }
+            )
+        }
+        self.active = true self.paused = false self.settings_open = false self.layer_dirty = true self.message = "" self.apply_requested = true
+        ret Result[(), str]::Ok(())
+    }
+    pub fn close(self: mut Self) ->() {
+        for instance in self.instances {
+            instance.runtime.invoke("ui-destruct", "", 0) instance.runtime.destroy()
+        }
+        self.instances = Vec[UiScreenInstance]::new()
+        match self.module {
+            Some(module) => {
+                module.close()
+            }
+            None => {
+            }
+        }
+        self.module = Option[BlueprintModule]::None
+        self.active = false self.prepared = false self.starting = false self.paused = false self.settings_open = false self.layer.clear_state() self.layer_dirty = true self.selecting = 0
+    }
+    pub fn take_stop(self: mut Self) -> bool {
+        let result = self.stop_requested self.stop_requested = false ret result
+    }
+    pub fn take_apply(self: mut Self) -> bool {
+        let result = self.apply_requested self.apply_requested = false ret result
+    }
+    pub fn requested_settings(self: Self) -> PlaySettings {
+        ret self.draft.snapshot()
+    }
+    pub fn editor_settings(self: Self) -> PlaySettings {
+        ret self.originals.snapshot()
+    }
+    pub fn accept_settings(self: mut Self, persist: bool) ->() {
+        self.applied = self.draft.snapshot()
+        self.message = if !persist || self.applied.save(self.project) {
+            "Settings applied"
+        } else {
+            "Settings applied; could not save local preferences"
+        }
+        self.layer_dirty = true
+    }
+    pub fn reject_settings(self: mut Self, error: str) ->() {
+        self.message = error self.draft = self.applied.snapshot() self.layer_dirty = true
+    }
+    pub fn set_capabilities(self: mut Self, samples: u32, capabilities: u32) ->() {
+        if self.sample_counts != samples || self.capabilities != capabilities {
+            self.sample_counts = samples self.capabilities = capabilities self.layer_dirty = true
+        }
+    }
+    fn index(self: Self) -> usize {
+        ret if self.settings_open {
+            2_usize
+        } elif self.paused {
+            1_usize
+        } else {
+            0_usize
+        }
+    }
+    pub fn set_variable(self: mut Self, screen: usize, property: u64, value: BlueprintValue) -> bool {
+        match self.instances.get(screen) {
+            Some(instance) => {
+                let changed = instance.runtime.set_property(property, value) self.layer_dirty = changed || self.layer_dirty ret changed
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+    pub fn set_widget_value(self: mut Self, screen: usize, widget: u64, value: f32) -> bool {
+        ret self.set_variable(screen, ui_property(widget, 1), BlueprintValue::F32(value))
+    }
+    fn selection_allowed(self: Self, binding: str, index: usize) -> bool {
+        if binding == "aa" {
+            let method = anti_aliasing_methods().get(index).unwrap_or(self.draft.rendering.anti_aliasing()) ret effective_reconstruction(method, self.sample_counts, self.capabilities).key() == method.key()
+        }
+        if binding == "quality" && index == 0 {
+            ret self.draft.rendering.anti_aliasing().key() == "fsr"
+        }
+        if binding == "fg" {
+            if index == 0 {
+                ret true
+            }
+            ret self.draft.rendering.anti_aliasing().temporal() &&(self.capabilities & if index == 1 {
+                    8_u32
+                } else {
+                    16_u32
+                }
+            ) != 0
+        }
+        if binding == "multiplier" && index > 0 {
+            ret self.draft.rendering.frame_generation().key() == "dlss" &&(self.capabilities & if index == 1 {
+                    32_u32
+                } else {
+                    64_u32
+                }
+            ) != 0
+        }
+        ret true
+    }
+    fn rebuild(self: mut Self) ->() {
+        let instance = match self.instances.get(self.index()) {
+            Some(value) => value None => {
+                ret()
+            }
+        }
+        let mut asset = instance.asset.snapshot() let mut widgets = Vec[UiWidget]::new()
+        for source in asset.widgets {
+            let mut w = source.snapshot()
+            match instance.runtime.property(ui_property(w.id, 0)) {
+                Some(stored) => {
+                    match stored {
+                        String(text) => {
+                            w.text = text
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            match instance.runtime.property(ui_property(w.id, 1)) {
+                Some(stored) => {
+                    match stored {
+                        F32(value) => {
+                            w.value = value
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            match instance.runtime.property(ui_property(w.id, 2)) {
+                Some(stored) => {
+                    match stored {
+                        Bool(value) => {
+                            w.visible = value
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            match instance.runtime.property(ui_property(w.id, 3)) {
+                Some(stored) => {
+                    match stored {
+                        Bool(value) => {
+                            w.enabled = value
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            if self.settings_open && w.binding != "" {
+                w.value = self.draft.value(w.binding, self.devices)
+            }
+            if self.settings_open && w.kind == "Text" {
+                if w.binding == "readout:voices" {
+                    w.text += " · " + Debug::fmt(self.draft.audio.max_voices)
+                } elif w.binding == "readout:sharpness" {
+                    w.text += " · " + Debug::fmt((self.draft.rendering.sharpness() * 100) as u32) + "%"
+                }
+                for i in 0_usize..4_usize {
+                    let name = refrain::audio::model::audio_bus_names().get(i).unwrap_or("Master") if w.binding == "readout:gain:" + name {
+                        w.text += " · " + Debug::fmt((self.draft.audio.gains.get(i).unwrap_or(1) * 100) as u32) + "%"
+                    }
+                }
+            }
+            if w.binding == "device" {
+                w.options = Vec[str]::new() for device in self.devices {
+                    w.options.push(if device == "" {
+                            "System default"
+                        } else {
+                            device
+                        }
+                    )
+                }
+            }
+            if self.selecting != 0 {
+                w.enabled = false
+            }
+            widgets.push(w)
+        }
+        asset.widgets = widgets
+        self.instances.set(self.index(), UiScreenInstance {
+                asset, instance.runtime, instance.images
+            }
+            ,
+        )
+        let mut root = build_ui_screen(asset, self.bounds, instance.images)
+        if self.paused {
+            root = root.with_computed_style(root.style().with_background(luma::Color::rgba(6, 10, 18, 180)))
+        }
+        if self.message != "" && self.paused {
+            root.push(Widget::label(self.message).with_computed_style(game_ui_widget_style("Text", 1).with_absolute(true).with_bottom(12).with_left(16).with_height(28).with_width(self.bounds.width() - 32).with_font_size(14)).with_classes("game-ui-text"))
+        }
+        if self.selecting != 0 {
+            // Resolve the anchor from retained layout, including scroll offsets.
+            self.layer.set_root(root, self.bounds)
+            match asset.widget(self.selecting) {
+                Some(w) => {
+                    let current = self.layer.layout().find_bounds(ui_widget_id(w.id)).unwrap_or(self.bounds)
+                    let mut popup = Widget::panel("ui-game-options").with_classes("game-ui-container").with_direction(vertical())
+                    let desired_height =(w.options.len() as f32) * 32 + 8
+                    let height = if desired_height > self.bounds.height() * 0.7_f32 {
+                        self.bounds.height() * 0.7_f32
+                    } else {
+                        desired_height
+                    }
+                    let popup_bounds = anchored_popup_bounds(current, Size::new(current.width(), height), self.bounds)
+                    popup = popup.with_attribute("data-luma-scrollable", "true").with_computed_style(game_ui_widget_style("Vertical", 1).with_padding(Insets::all(4)).with_gap(2).with_absolute(true).with_left(popup_bounds.x() - self.bounds.x()).with_top(popup_bounds.y() - self.bounds.y()).with_width(popup_bounds.width()).with_height(popup_bounds.height()).with_z_index(100).with_overflow_hidden(true))
+                    let mut index = 0_usize for option in w.options {
+                        let allowed = self.selection_allowed(w.binding, index) popup.push(Widget::button("ui-game-option-" + Debug::fmt(index), option + if allowed {
+                                    ""
+                                } else {
+                                    " · unavailable"
+                                }
+                                ,
+                            ).with_classes("game-ui-button").with_computed_style(game_ui_widget_style("Button", 1).with_padding(Insets::all(4)).with_height(30).with_font_size(13)).with_disabled(!allowed)) index += 1
+                    }
+                    root.push(popup)
+                }
+                None => {
+                }
+            }
+        }
+        self.layer.set_modal(self.paused) self.layer.set_root(root, self.bounds) self.layer_dirty = false
+    }
+    pub fn compose(self: mut Self, frame: PreparedFrame, bounds: Rect) -> PreparedFrame {
+        if !self.active || bounds.width() <= 0 || bounds.height() <= 0 {
+            ret frame
+        }
+        if bounds.x() != self.bounds.x() || bounds.y() != self.bounds.y() || bounds.width() != self.bounds.width() || bounds.height() != self.bounds.height() {
+            self.bounds = bounds self.layer_dirty = true
+        }
+        if self.layer_dirty {
+            self.rebuild()
+        }
+        ret self.layer.compose(frame)
+    }
+    fn dispatch_action(self: mut Self, runtime: BlueprintRuntimeInstance) ->() {
+        let previous_screen = self.index()
+        match runtime.property(999999) {
+            Some(stored) => {
+                match stored {
+                    I32(action) => {
+                        runtime.set_property(999999, BlueprintValue::I32(0))
+                        if action != 0 {
+                            self.layer_dirty = true
+                        }
+                        if action == 1 {
+                            self.paused = false self.settings_open = false
+                        } elif action == 2 {
+                            self.paused = true self.settings_open = true self.draft = self.applied.snapshot()
+                        } elif action == 3 {
+                            self.paused = true
+                        } elif action == 4 {
+                            if self.settings_open {
+                                self.settings_open = false
+                            } else {
+                                self.paused = false
+                            }
+                        } elif action == 5 {
+                            self.apply_requested = true
+                        } elif action == 6 {
+                            self.draft = self.originals.snapshot()
+                        } elif action == 7 {
+                            self.draft = self.applied.snapshot() self.settings_open = false
+                        } elif action == 8 {
+                            self.stop_requested = true
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if previous_screen != self.index() {
+            self.layer.clear_state() self.rebuild() if self.paused {
+                self.layer.focus_first()
+            }
+        }
+    }
+    pub fn input(self: mut Self, event: Event) -> bool {
+        if !self.active {
+            ret false
+        }
+        if event.kind() == event_key_down() && event.key() == key_escape() {
+            if event.shift() {
+                self.stop_requested = true ret true
+            }
+            if self.selecting != 0 {
+                self.selecting = 0
+            } elif self.settings_open {
+                self.settings_open = false self.draft = self.applied.snapshot()
+            } else {
+                self.paused = !self.paused
+            }
+            self.layer.clear_state() self.layer_dirty = true self.rebuild() if self.paused {
+                self.layer.focus_first()
+            }
+            ret true
+        }
+        if self.layer_dirty {
+            self.rebuild()
+        }
+        if self.selecting != 0 && event.kind() == event_key_down() &&(event.key() == key_down() || event.key() == key_up()) {
+            let instance = match self.instances.get(self.index()) {
+                Some(value) => value None => {
+                    ret false
+                }
+            }
+            let w = instance.asset.widget(self.selecting).unwrap_or(UiWidget::new(0, 0, "Select"))
+            let count = if w.binding == "device" {
+                self.devices.len()
+            } else {
+                w.options.len()
+            }
+            if count > 0 {
+                for i in 0_usize..count {
+                    self.select_index = if event.key() == key_down() {
+                        (self.select_index + 1) % count
+                    } elif self.select_index == 0 {
+                        count - 1
+                    } else {
+                        self.select_index - 1
+                    }
+                    if self.selection_allowed(w.binding, self.select_index) {
+                        break
+                    }
+                }
+                self.layer.focus("ui-game-option-" + Debug::fmt(self.select_index))
+            }
+            ret true
+        }
+        if self.selecting != 0 && event.kind() == event_pointer_down() && !self.layer.layout().hit(event.x(), event.y()).contains("ui-game-option-") {
+            self.selecting = 0 self.layer_dirty = true ret true
+        }
+        let previous_screen = self.index()
+        let input = self.layer.input(event)
+        if input.action == "" {
+            ret input.consumed
+        }
+        let instance = match self.instances.get(self.index()) {
+            Some(value) => value None => {
+                ret input.consumed
+            }
+        }
+        if input.target.contains("ui-game-option-") && self.selecting != 0 {
+            let w = instance.asset.widget(self.selecting).unwrap_or(UiWidget::new(0, 0, "Select"))
+            let options = if w.binding == "device" {
+                self.devices
+            } else {
+                w.options
+            }
+            let mut index = 0_usize for option in options {
+                if input.target == "ui-game-option-" + Debug::fmt(index) && self.selection_allowed(w.binding, index) {
+                    let value = if options.len() > 1 {
+                        (index as f32) /((options.len() - 1) as f32)
+                    } else {
+                        0_f32
+                    }
+                    self.draft.set(w.binding, value, self.devices) instance.runtime.set_property(ui_property(w.id, 1), BlueprintValue::F32(value)) instance.runtime.invoke("ui-change", Debug::fmt(w.id), 0)
+                    self.dispatch_action(instance.runtime)
+                }
+                index += 1
+            }
+            self.selecting = 0 self.layer_dirty = true ret true
+        }
+        for w in instance.asset.widgets {
+            if input.target == ui_widget_id(w.id) {
+                if w.kind == "Select" {
+                    self.selecting = w.id self.select_index = 0 self.layer_dirty = true self.rebuild()
+                    self.layer.focus("ui-game-option-0") ret true
+                }
+                if input.action == "text" {
+                    instance.runtime.set_property(ui_property(w.id, 0), BlueprintValue::String(input.text))
+                }
+                if input.action == "change" {
+                    instance.runtime.set_property(ui_property(w.id, 1), BlueprintValue::F32(input.value)) if self.settings_open && w.binding != "" {
+                        self.draft.set(w.binding, input.value, self.devices)
+                    }
+                }
+                if !instance.runtime.invoke(if input.action == "click" {
+                        "ui-click"
+                    } else {
+                        "ui-change"
+                    }
+                    , Debug::fmt(w.id), 0,) {
+                    self.message = instance.runtime.error()
+                }
+                self.dispatch_action(instance.runtime)
+                self.layer_dirty = true
+            }
+        }
+        if previous_screen != self.index() {
+            self.layer.clear_state() self.rebuild() if self.paused {
+                self.layer.focus_first()
+            }
+        }
+        ret input.consumed
+    }
+    /// UI graphs use unscaled time; a screen without Tick has no per-frame UI work.
+    pub fn tick(self: mut Self, elapsed: f32) ->() {
+        if !self.active {
+            ret()
+        }
+        match self.instances.get(self.index()) {
+            Some(instance) => {
+                let mut ticks = false for node in instance.asset.graph.nodes {
+                    if node.operation == "tick" {
+                        ticks = true
+                    }
+                }
+                if !ticks {
+                    ret()
+                }
+                if !instance.runtime.invoke("tick", "", if elapsed > 0 && elapsed < 0.1_f32 {
+                        elapsed
+                    } else {
+                        0_f32
+                    }
+                    ,
+                ) {
+                    self.message = instance.runtime.error()
+                }
+                self.dispatch_action(instance.runtime)
+                for w in instance.asset.widgets {
+                    match instance.runtime.property(ui_property(w.id, 0)) {
+                        Some(value) => {
+                            match value {
+                                String(text) => {
+                                    if text != w.text {
+                                        self.layer_dirty = true
+                                    }
+                                }
+                                _ => {
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                    if w.binding == "" {
+                        match instance.runtime.property(ui_property(w.id, 1)) {
+                            Some(value) => {
+                                match value {
+                                    F32(number) => {
+                                        if number != w.value {
+                                            self.layer_dirty = true
+                                        }
+                                    }
+                                    _ => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    match instance.runtime.property(ui_property(w.id, 2)) {
+                        Some(value) => {
+                            match value {
+                                Bool(flag) => {
+                                    if flag != w.visible {
+                                        self.layer_dirty = true
+                                    }
+                                }
+                                _ => {
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+    }
+}

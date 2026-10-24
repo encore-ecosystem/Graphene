@@ -1,9 +1,11 @@
 //! Environment shader ABI: 32 vec4s in the reserved tail of the shared lighting block.
 import core::vec::Vec
+import std::math::{cos, sin}
+
 import linalg::Vec3
+
 import mod::model::bounded
 import mod::system::EnvironmentFrame
-import std::math::{sin, cos}
 
 impl for EnvironmentFrame {
     pub fn sun_direction(self: Self) -> Vec3 {
@@ -55,7 +57,7 @@ impl for EnvironmentFrame {
                     packed.push(axis.x()) packed.push(axis.y()) packed.push(axis.z()) packed.push(0)
                 }
                 let local = volume.weather
-                for value in vec![local.cloudiness, local.rain, local.snow, local.fog, local.wind.x(), local.wind.y(), local.wind.z(), local.temperature, local.wetness, local.snow_coverage, local.storm, 0.0_f32, 0, 0, 0, 0] {
+                for value in vec![local.cloudiness, local.rain, local.snow, local.fog, local.wind.x(), local.wind.y(), local.wind.z(), local.temperature, local.wetness, local.snow_coverage, local.storm, 0.0_f32, 0_f32, 0_f32, 0_f32, 0_f32] {
                     packed.push(value)
                 }
                 for i in 0..packed.len() {

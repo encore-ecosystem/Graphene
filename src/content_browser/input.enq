@@ -1,14 +1,16 @@
 //! Content-specific input capture keeps file shortcuts separate from scene history.
 import core::option::Option
 import core::vec::Vec
-import luma::{Event, Window, Widget, WidgetLayout, ReactiveUi, TextEditor, Rect, Point, event_pointer_down, event_pointer_up, event_pointer_move, event_scroll, event_key_down, event_text_input, event_focus_lost, key_enter, key_escape, key_backspace, key_delete, key_home, key_end, key_left, key_right, key_up, key_down, widget_button, widget_icon_button, widget_input}
-import mod::files::{content_parent, content_leaf}
-import mod::model::{ContentBrowser, ContentAsset}
-import mod::model::{content_contains, content_toggled}
-import mod::operations::{content_create, content_rename, content_delete, content_duplicate, content_history, content_stem, content_move_selection}
-import mod::view::{ContentIcons, content_popup}
+
 import std::os::read_file
 import std::time::perf_counter_ms
+
+import luma::{Event, Point, ReactiveUi, Rect, TextEditor, Widget, WidgetLayout, Window, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_scroll, event_text_input, key_backspace, key_delete, key_down, key_end, key_enter, key_escape, key_home, key_left, key_right, key_up, widget_button, widget_icon_button, widget_input}
+
+import mod::files::{content_leaf, content_parent}
+import mod::model::{ContentAsset, ContentBrowser, content_contains, content_toggled}
+import mod::operations::{content_create, content_delete, content_duplicate, content_history, content_move_selection, content_rename, content_stem}
+import mod::view::{ContentIcons, content_popup}
 
 fn actions(widget: Widget) -> Vec[str] {
     let mut result = Vec[str]::new()
@@ -65,15 +67,17 @@ fn popup(browser: mut ContentBrowser, kind: str, x: f32, y: f32) ->() {
     } else {
         kind
     }
-    browser.popup_x = x browser.popup_y = y browser.popup_focus = 0 browser.focus_id = if kind == "folder" || kind == "material" || kind == "blueprint" || kind=="particle" || kind == "rename" || kind == "move" {
+    browser.popup_x = x browser.popup_y = y browser.popup_focus = 0 browser.focus_id = if kind == "folder" || kind == "material" || kind == "blueprint" || kind == "ui" || kind == "particle" || kind == "rename" || kind == "move" {
         "cb-name"
     } else {
         ""
     }
     browser.error = "" browser.dirty = true
-    if kind == "folder" || kind == "material" || kind == "blueprint" || kind=="particle" {
+    if kind == "folder" || kind == "material" || kind == "blueprint" || kind == "ui" || kind == "particle" {
         browser.name = TextEditor::new(if kind == "folder" {
                 "New Folder"
+            } elif kind == "ui" {
+                "UI_NewScreen"
             } elif kind == "material" {
                 "M_NewMaterial"
             } else {
@@ -105,7 +109,7 @@ fn open(browser: mut ContentBrowser) ->() {
             browser.popup = "" browser.query_focused = false
             if asset.kind == "folder" {
                 browser.navigate(asset.path, true)
-            } elif asset.kind == "blueprint" || asset.kind == "material-graph" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "texture" {
+            } elif asset.kind == "ui" || asset.kind == "blueprint" || asset.kind == "material-graph" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "texture" {
                 browser.emit("open", asset.path)
             } else {
                 if !asset.builtin() && asset.bytes <= 1048576 {
@@ -154,11 +158,15 @@ pub fn content_action(browser: mut ContentBrowser, target: str, window: Window, 
         }
     } elif target == "cb-sort" {
         popup(browser, "sort", browser.popup_x, browser.popup_y)
-    } elif target == "cb-new-folder" || target == "cb-new-material" || target == "cb-new-blueprint" || target=="cb-new-particle" {
+    } elif target == "cb-new-folder" || target == "cb-new-material" || target == "cb-new-blueprint" || target == "cb-new-particle" || target == "cb-new-ui" {
         if editable {
             popup(browser, if target == "cb-new-folder" {
                     "folder"
-                } elif target=="cb-new-particle" {"particle"} elif target == "cb-new-material" {
+                } elif target == "cb-new-ui" {
+                    "ui"
+                } elif target == "cb-new-particle" {
+                    "particle"
+                } elif target == "cb-new-material" {
                     "material"
                 } else {
                     "blueprint"
@@ -300,7 +308,7 @@ pub fn content_input(browser: mut ContentBrowser, event: Event, target: str, lay
             if dx * dx + dy * dy >= 36 {
                 browser.pending_open = false browser.last_click = ""
                 let asset = browser.find(browser.pressed_path).unwrap_or(ContentAsset::new("", "", "", 0))
-                if editable && (asset.kind == "mesh" || asset.kind == "sound" || asset.kind=="particle-system") {
+                if editable &&(asset.kind == "mesh" || asset.kind == "sound" || asset.kind == "particle-system") {
                     browser.drag_request = true browser.emit("drag", browser.pressed_path) browser.dirty = true
                 }
             }

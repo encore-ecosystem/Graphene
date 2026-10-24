@@ -1,13 +1,13 @@
 import std::os::read_file
 //! Routing regressions use the actual inspector and scene command history.
 import core::vec::Vec
-import graphene::animation::component::{SkeletalMeshComponent, CharacterMorphChoice, CharacterMorphControl}
+import graphene::animation::component::{CharacterMorphChoice, CharacterMorphControl, SkeletalMeshComponent}
 import graphene::command_bus::{EditorState, GrapheneCommand}
 import graphene::editor_actor_details::ActorDetails
 import graphene::scene::component::SceneComponent
 import graphene::scene::transform::Transform
 import graphene::scene::world::Scene
-import luma::{Event, Widget, Rect, StyleSheet, layout_widget, event_pointer_down, event_scroll, key_down, key_enter, key_escape, key_end, key_home}
+import luma::{Event, Rect, StyleSheet, Widget, event_pointer_down, event_scroll, key_down, key_end, key_enter, key_escape, key_home, layout_widget}
 fn down() -> Event {
     ret Event {
         event_pointer_down(), 0_f32, 0_f32, 0_f32, 0_f32, 1_u32, 0_u32, 0_u32, 0_f32, 0_f32, "", 0_u64
@@ -33,7 +33,12 @@ fn main() -> u32 {
     if !details.input(down(), "actor-anim-clip", layout, state) || !details.popup_open() {
         ret 1_u32
     }
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     let overlay = Widget::panel("overlay").with_child(details.popup(1600_f32, 1000_f32, layout))
     let popup_layout = layout_widget(sheet.apply(overlay, "", "", ""), Rect::new(0_f32, 0_f32, 1600_f32, 1000_f32))
     let menu = popup_layout.find_bounds("actor-anim-clip-menu").unwrap_or(Rect::new(0_f32, 0_f32, 0_f32, 0_f32))

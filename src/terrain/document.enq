@@ -1,0 +1,133 @@
+//! Independent, bounded history. A pointer gesture creates exactly one undo entry.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::Vec3
+
+import mod::brush::{TerrainBrush, apply_brush}
+import mod::foliage::{FoliageBrush, paint_foliage}
+import mod::model::TerrainAsset
+pub struct TerrainDocument {
+    asset: TerrainAsset
+    undo: Vec[TerrainAsset]
+    redo: Vec[TerrainAsset]
+    before: Option[TerrainAsset]
+    revision: u64
+    saved_revision: u64
+    undo_revisions: Vec[u64]
+    redo_revisions: Vec[u64]
+    serial: u64
+}
+
+impl for TerrainDocument {
+    pub fn new(asset: TerrainAsset) -> Self {
+        ret Self {
+            asset.copy(), Vec[TerrainAsset]::new(), Vec[TerrainAsset]::new(), Option[TerrainAsset]::None, 0_u64, 0_u64, Vec[u64]::new(), Vec[u64]::new(), 0_u64
+        }
+    }
+    pub fn asset(self: Self) -> TerrainAsset {
+        ret self.asset
+    }
+    pub fn dab(self: mut Self, brush: TerrainBrush, center: Vec3, seconds: f32, target: f32, invert: bool) -> bool {
+        ret apply_brush(self.asset, brush, center, seconds, target, invert)
+    }
+    pub fn foliage(self: mut Self, brush: FoliageBrush, center: Vec3, radius: f32, erase: bool) -> bool {
+        ret paint_foliage(self.asset, brush, center, radius, erase)
+    }
+    pub fn revision(self: Self) -> u64 {
+        ret self.revision
+    }
+    pub fn changed(self: Self) -> bool {
+        ret self.revision != self.saved_revision
+    }
+    pub fn can_undo(self: Self) -> bool {
+        ret self.undo.len() > 0
+    }
+    pub fn can_redo(self: Self) -> bool {
+        ret self.redo.len() > 0
+    }
+    pub fn saved(self: mut Self) ->() {
+        self.saved_revision = self.revision
+    }
+    pub fn begin(self: mut Self) ->() {
+        if self.before.is_none() {
+            self.before = Option[TerrainAsset]::Some(self.asset.copy())
+        }
+    }
+    fn record(self: mut Self, previous: TerrainAsset) ->() {
+        // A 32 MiB sample budget; never retain an unbounded chain of heightmaps.
+        let limit = 33554432_usize /(previous.heights.len() * 16_usize + previous.foliage.len() * 64_usize + 1_usize)
+        if self.undo.len() >= limit || self.undo.len() >= 64 {
+            let mut kept = Vec[TerrainAsset]::new() let mut revisions = Vec[u64]::new()
+            for i in 1_usize..self.undo.len() {
+                kept.push(self.undo.get_unchecked_borrowed(i)) revisions.push(self.undo_revisions.get_unchecked_borrowed(i))
+            }
+            self.undo = kept self.undo_revisions = revisions
+        }
+        self.undo.push(previous) self.undo_revisions.push(self.revision)
+        self.redo.clear() self.redo_revisions.clear() self.serial += 1_u64 self.revision = self.serial
+    }
+    pub fn replace(self: mut Self, asset: TerrainAsset) -> bool {
+        if !asset.valid() {
+            ret false
+        }
+        let previous = self.asset.copy() self.asset = asset.copy()
+        if self.before.is_none() {
+            self.record(previous)
+        }
+        ret true
+    }
+    pub fn touch(self: mut Self) ->() {
+        self.serial += 1_u64
+    }
+    pub fn end(self: mut Self, changed: bool) ->() {
+        match self.before {
+            Some(before) => {
+                if changed {
+                    self.record(before)
+                }
+            }
+            None => {
+            }
+        }
+        self.before = Option[TerrainAsset]::None
+    }
+    pub fn cancel(self: mut Self) ->() {
+        match self.before {
+            Some(before) => {
+                self.asset = before
+            }
+            None => {
+            }
+        }
+        self.before = Option[TerrainAsset]::None
+    }
+    pub fn undo(self: mut Self) -> bool {
+        if self.before.is_some() {
+            ret false
+        }
+        match self.undo.pop() {
+            Some(asset) => {
+                self.redo.push(self.asset.copy()) self.redo_revisions.push(self.revision)
+                self.asset = asset self.revision = self.undo_revisions.pop().unwrap_or(0_u64) ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+    pub fn redo(self: mut Self) -> bool {
+        if self.before.is_some() {
+            ret false
+        }
+        match self.redo.pop() {
+            Some(asset) => {
+                self.undo.push(self.asset.copy()) self.undo_revisions.push(self.revision)
+                self.asset = asset self.revision = self.redo_revisions.pop().unwrap_or(0_u64) ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+}

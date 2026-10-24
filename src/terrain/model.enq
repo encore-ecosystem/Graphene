@@ -1,0 +1,166 @@
+//! Heightfield authoring data. Heights are metres; weights always sum to one.
+import core::vec::Vec
+import linalg::Vec3
+
+pub struct TerrainLayer {
+    name: str
+    color: Vec3
+    texture: str
+    tiling: f32
+}
+pub struct FoliageInstance {
+    id: u64
+    kind: str
+    x: f32
+    z: f32
+    yaw: f32
+    scale: f32
+}
+pub struct TerrainAsset {
+    version: u32
+    resolution: u32
+    spacing: f32
+    heights: Vec[f32]
+    weights: Vec[Vec3]
+    layers: Vec[TerrainLayer]
+    lod_distance: f32
+    foliage: Vec[FoliageInstance]
+}
+pub fn clamp(v: f32, low: f32, high: f32) -> f32 {
+    ret if v < low {
+        low
+    } elif v > high {
+        high
+    } else {
+        v
+    }
+}
+pub fn finite(v: f32) -> bool {
+    ret v >= - 1000000_f32 && v <= 1000000_f32
+}
+pub fn terrain_path(path: str) -> bool {
+    ret path.byte_len() > 8 && path.slice_bytes(0, 8) == "Content/" && !path.contains("..") && !path.contains("\\") && !path.contains(":") && path.byte_len() < 4096
+}
+
+impl for TerrainAsset {
+    pub fn flat(resolution: u32, spacing: f32) -> Self {
+        let n = if resolution == 33 || resolution == 65 || resolution == 129 || resolution == 257 || resolution == 513 {
+            resolution
+        } else {
+            129_u32
+        }
+        let mut heights = Vec[f32]::with_capacity((n * n) as usize)
+        let mut weights = Vec[Vec3]::with_capacity((n * n) as usize)
+        let terrain_count =(n * n) as usize
+        for _ in 0_usize..terrain_count {
+            heights.push(0_f32) weights.push(Vec3::new(1_f32, 0_f32, 0_f32))
+        }
+        ret Self {
+            2_u32, n, clamp(spacing, 0.1_f32, 100_f32), heights, weights,
+            vec![TerrainLayer { "Grass", Vec3::new(0.20_f32, 0.34_f32, 0.09_f32), "", 4_f32 },
+                TerrainLayer { "Rock", Vec3::new(0.40_f32, 0.42_f32, 0.43_f32), "", 4_f32 },
+                TerrainLayer { "Earth", Vec3::new(0.29_f32, 0.17_f32, 0.08_f32), "", 4_f32 }], 48_f32, Vec[FoliageInstance]::new()
+        }
+    }
+    pub fn valid(self: Self) -> bool {
+        let n = self.resolution
+        if self.version != 2 || !(n == 33 || n == 65 || n == 129 || n == 257 || n == 513) || !finite(self.spacing) || self.spacing < 0.1_f32 || self.spacing > 100_f32 || self.heights.len() !=(n * n) as usize || self.weights.len() != self.heights.len() || self.layers.len() != 3 || !finite(self.lod_distance) || self.lod_distance < 1 || self.lod_distance > 100000 {
+            ret false
+        }
+        for h in self.heights {
+            if !finite(h) || h < - 32768 || h > 32768 {
+                ret false
+            }
+        }
+        for w in self.weights {
+            let sum = w.x() + w.y() + w.z()
+            if !finite(sum) || w.x() < 0 || w.y() < 0 || w.z() < 0 || sum < 0.999_f32 || sum > 1.001_f32 {
+                ret false
+            }
+        }
+        if self.foliage.len() > 8192 {
+            ret false
+        }
+        for plant in self.foliage {
+            if !finite(plant.x) || !finite(plant.z) || !finite(plant.yaw) || !finite(plant.scale) || plant.scale <= 0 || plant.scale > 100 || plant.x < - self.extent() * 0.5_f32 || plant.x > self.extent() * 0.5_f32 || plant.z < - self.extent() * 0.5_f32 || plant.z > self.extent() * 0.5_f32 ||(plant.kind != "grass" && plant.kind != "tree") {
+                ret false
+            }
+        }
+        for layer in self.layers {
+            let c = layer.color
+            if !finite(c.x()) || !finite(c.y()) || !finite(c.z()) || c.x() < 0 || c.x() > 1 || c.y() < 0 || c.y() > 1 || c.z() < 0 || c.z() > 1 || !finite(layer.tiling) || layer.tiling < 0.1_f32 || layer.tiling > 10000 ||(layer.texture != "" && !terrain_path(layer.texture)) {
+                ret false
+            }
+        }
+        ret true
+    }
+    pub fn copy(self: Self) -> Self {
+        let mut h = Vec[f32]::with_capacity(self.heights.len()) for x in self.heights {
+            h.push(x)
+        }
+        let mut w = Vec[Vec3]::with_capacity(self.weights.len()) for x in self.weights {
+            w.push(x)
+        }
+        let mut l = Vec[TerrainLayer]::new() for x in self.layers {
+            l.push(x)
+        }
+        let mut plants = Vec[FoliageInstance]::with_capacity(self.foliage.len())
+        for plant in self.foliage {
+            plants.push(plant)
+        }
+        ret Self { self.version, self.resolution, self.spacing, h, w, l, self.lod_distance, plants }
+    }
+    pub fn extent(self: Self) -> f32 {
+        ret((self.resolution - 1) as f32) * self.spacing
+    }
+    pub fn height(self: Self, x: u32, z: u32) -> f32 {
+        ret self.heights.get((z * self.resolution + x) as usize).unwrap_or(0_f32)
+    }
+    pub fn point(self: Self, x: u32, z: u32) -> Vec3 {
+        ret Vec3::new((x as f32) * self.spacing - self.extent() * 0.5_f32, self.height(x, z),(z as f32) * self.spacing - self.extent() * 0.5_f32)
+    }
+    pub fn normal(self: Self, x: u32, z: u32) -> Vec3 {
+        let left = if x > 0 {
+            x - 1
+        } else {
+            x
+        }
+        let right = if x + 1 < self.resolution {
+            x + 1
+        } else {
+            x
+        }
+        let top = if z > 0 {
+            z - 1
+        } else {
+            z
+        }
+        let bottom = if z + 1 < self.resolution {
+            z + 1
+        } else {
+            z
+        }
+        ret Vec3::new( -(self.height(right, z) - self.height(left, z)) /(((right - left) as f32) * self.spacing), 1_f32, -(self.height(x, bottom) - self.height(x, top)) /(((bottom - top) as f32) * self.spacing)).normalized()
+    }
+    pub fn sample(self: Self, x: f32, z: f32) -> f32 {
+        let gx = clamp((x + self.extent() * 0.5_f32) / self.spacing, 0_f32,(self.resolution - 1) as f32)
+        let gz = clamp((z + self.extent() * 0.5_f32) / self.spacing, 0_f32,(self.resolution - 1) as f32)
+        let ix = if gx as u32 >= self.resolution - 1 {
+            self.resolution - 2
+        } else {
+            gx as u32
+        }
+        let iz = if gz as u32 >= self.resolution - 1 {
+            self.resolution - 2
+        } else {
+            gz as u32
+        }
+        let u = gx -(ix as f32) let v = gz -(iz as f32)
+        let a = self.height(ix, iz) let b = self.height(ix, iz + 1) let c = self.height(ix + 1, iz + 1) let d = self.height(ix + 1, iz)
+        ret if v >= u {
+            a *(1 - v) + b *(v - u) + c * u
+        } else {
+            a *(1 - u) + c * v + d *(u - v)
+        }
+    }
+}

@@ -1,7 +1,9 @@
 //! Compact, tool-specific snap choices. Menus never participate in viewport layout.
 import core::option::Option
 import core::vec::Vec
+
 import luma::{Widget, horizontal, vertical}
+
 import mod::editor_gesture::GizmoSnap
 import mod::editor_guides::gizmo_step_label
 
@@ -27,11 +29,11 @@ pub fn snap_step_label(step: f32, tool: str) -> str {
 
 pub fn snap_step_values(tool: str) -> Vec[f32] {
     ret if tool == "rotate" {
-        vec![1.0_f32, 5, 10, 15, 30, 45, 90]
+        vec![1.0_f32, 5_f32, 10_f32, 15_f32, 30_f32, 45_f32, 90_f32]
     } elif tool == "scale" {
-        vec![0.01_f32, 0.05, 0.1, 0.25, 0.5, 1]
+        vec![0.01_f32, 0.05_f32, 0.1_f32, 0.25_f32, 0.5_f32, 1_f32]
     } else {
-        vec![0.01_f32, 0.1, 0.5, 1, 5, 10, 50, 100]
+        vec![0.01_f32, 0.1_f32, 0.5_f32, 1_f32, 5_f32, 10_f32, 50_f32, 100_f32]
     }
 }
 

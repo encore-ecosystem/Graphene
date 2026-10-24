@@ -1,0 +1,129 @@
+//! UI documents, compiled widget events, stable references and coalesced history.
+import core::result::Result
+import core::option::Option
+import core::vec::Vec
+
+import graphene::audio::model::AudioSettings
+import graphene::blueprint::{blueprint_semantic_source, generate_blueprints, validate_blueprint}
+import graphene::game_ui::asset::{ui_asset_parse, ui_asset_stringify, ui_asset_validate, ui_path_valid}
+import graphene::game_ui::document::UiDocument
+import graphene::game_ui::model::{UiScreenAsset, UiWidget, ui_property}
+import graphene::game_ui::settings::PlaySettings
+import graphene::game_ui::templates::ui_template
+import graphene::game_ui::view::{UiImage, build_ui_screen, game_ui_styles}
+import graphene::render_settings::RenderSettings
+import luma::{Event, Rect, UiLayer, Widget}
+
+fn main() -> u32 {
+    for name in vec!["HUD", "Pause", "Settings"] {
+        let asset = ui_template(name)
+        if ui_asset_validate(asset).is_err() || validate_blueprint(asset.graph).len() != 0 {
+            ret 1
+        }
+        let encoded = ui_asset_stringify(asset)
+        match ui_asset_parse(encoded) {
+            Ok(decoded) => {
+                if ui_asset_stringify(decoded) != encoded {
+                    ret 2
+                }
+            }
+            Err(_) => {
+                ret 3
+            }
+        }
+        if generate_blueprints(vec![asset.graph]).is_err() {
+            ret 4
+        }
+    }
+    let asset = ui_template("HUD")
+    let mut doc = UiDocument::new(asset)
+    doc.begin_gesture()
+    let mut moved = doc.asset() let mut widgets = Vec[UiWidget]::new()
+    for w in moved.widgets {
+        let mut next = w.snapshot() if w.id == 2 {
+            next.x += 24
+        }
+        widgets.push(next)
+    }
+    moved.widgets = widgets
+    doc.replace(moved) doc.end_gesture()
+    if !doc.dirty() || !doc.undo() || doc.dirty() || !doc.redo() || !doc.dirty() {
+        ret 5
+    }
+    doc.begin_gesture() let mut resized = doc.asset() resized.reference_width = 1280 doc.replace(resized) doc.cancel_gesture()
+    if doc.asset().reference_width != 1920 {
+        ret 6
+    }
+    let mut cyclic = ui_template("HUD") let mut broken = Vec[UiWidget]::new()
+    for w in cyclic.widgets {
+        let mut next = w.snapshot() if w.id == 2 {
+            next.parent = 2
+        }
+        broken.push(next)
+    }
+    cyclic.widgets = broken
+    if ui_asset_validate(cyclic).is_ok() {
+        ret 7
+    }
+    if ui_path_valid("Content/../../secret") || ui_path_valid("/tmp/ui.json") || !ui_path_valid("Content/UI/HUD.graphene-ui.json") {
+        ret 8
+    }
+    if blueprint_semantic_source(asset.graph) != blueprint_semantic_source(moved.graph) {
+        ret 9
+    }
+    let mut settings = PlaySettings { RenderSettings::defaults(), AudioSettings::defaults(), "" }
+    let snapshot = settings.snapshot() settings.set("gain:Master", 0.1_f32, vec![""])
+    if settings.audio.gains.get(0).unwrap_or(0) == snapshot.audio.gains.get(0).unwrap_or(0) {
+        ret 10
+    }
+    if ui_property(2, 1) == ui_property(3, 1) {
+        ret 11
+    }
+    // Authored geometry must not bypass theme, hover state or user colors.
+    let mut screen = ui_template("Pause")
+    let bounds = Rect::new(0, 0, 960, 540)
+    let mut layer = UiLayer::new(build_ui_screen(screen, bounds, Vec[UiImage]::new()), game_ui_styles(), bounds)
+    let before = layer.layout().find_widget("game-ui-4").unwrap_or(Widget::panel(""))
+    if before.style().foreground().red() != 244 || before.style().background().red() != 41 || before.style().font_size() != 10 {
+        ret 12
+    }
+    let button = layer.layout().find_bounds("game-ui-4").unwrap_or(Rect::new(0, 0, 0, 0))
+    layer.input(Event::pointer_move(button.x() + 5, button.y() + 5, 0, 0, 0))
+    if layer.layout().find_widget("game-ui-4").unwrap_or(Widget::panel("")).style().background().red() != 53 {
+        ret 13
+    }
+    layer.input(Event::pointer_move(0, 0, 0, 0, 0))
+    let mut colored = Vec[UiWidget]::new()
+    for w in screen.widgets {
+        let mut next = w.snapshot()
+        if next.id == 4 {
+            next.color = "#ff2233"
+        }
+        colored.push(next)
+    }
+    screen.widgets = colored
+    layer.set_root(build_ui_screen(screen, bounds, Vec[UiImage]::new()), bounds)
+    if layer.layout().find_widget("game-ui-4").unwrap_or(Widget::panel("")).style().background().red() != 255 {
+        ret 14
+    }
+    let settings_root = build_ui_screen(ui_template("Settings"), bounds, Vec[UiImage]::new())
+    let mut scroll_layer = UiLayer::new(settings_root, game_ui_styles(), bounds)
+    let pane = scroll_layer.layout().find_bounds("game-ui-4").unwrap_or(Rect::new(0, 0, 0, 0))
+    let device_before = scroll_layer.layout().find_bounds("game-ui-31").unwrap_or(Rect::new(0, 0, 0, 0))
+    if device_before.bottom() <= pane.bottom() {
+        ret 15
+    }
+    let scrolled = scroll_layer.input(Event {
+            event_scroll(), pane.x() + 10, pane.y() + 10, 0_f32, 0_f32, 0_u32, 0_u32, 0_u32, 0_f32, - 3_f32, "", 0_u64
+        }
+    )
+    let device_after = scroll_layer.layout().find_bounds("game-ui-31").unwrap_or(Rect::new(0, 0, 0, 0))
+    if !scrolled.consumed || device_after.y() >= device_before.y() {
+        ret 16
+    }
+    let mut hud = UiLayer::new(build_ui_screen(ui_template("HUD"), bounds, Vec[UiImage]::new()), game_ui_styles(), bounds)
+    if hud.layout().find_widget("game-ui-4").unwrap_or(Widget::panel("")).style().accent_color().green() != 201 {
+        ret 17
+    }
+    ret 0
+}

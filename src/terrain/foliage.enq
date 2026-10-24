@@ -1,0 +1,163 @@
+//! Stable jittered cells: holding the brush does not stack duplicate plants.
+//! Placement is local to the terrain; height is sampled again after sculpting.
+import core::vec::Vec
+import linalg::Vec3
+
+import mod::model::{FoliageInstance, TerrainAsset, clamp, finite}
+import refrain::scene::primitive::{MeshData, cube_mesh, sphere_mesh}
+import refrain::scene::transform::Transform
+
+pub struct FoliageBrush {
+    kind: str
+    density: f32
+    minimum_scale: f32
+    maximum_scale: f32
+    slope: f32
+    seed: u32
+}
+
+impl for FoliageBrush {
+    pub fn defaults() -> Self {
+        ret Self { "grass", 0.2_f32, 0.7_f32, 1.3_f32, 0.7_f32, 42_u32 }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret(self.kind == "grass" || self.kind == "tree") && finite(self.density) && self.density >= 0.001_f32 && self.density <= 1 && finite(self.minimum_scale) && finite(self.maximum_scale) && self.minimum_scale > 0 && self.maximum_scale >= self.minimum_scale && self.maximum_scale <= 100 && finite(self.slope) && self.slope >= 0 && self.slope <= 1 && self.seed < 65518_u32
+    }
+}
+fn hash(x: u64, z: u64, seed: u32) -> f32 {
+    let v =(x * 1987_u64 + z * 7907_u64 +(seed as u64) * 104729_u64) % 65521_u64
+    ret(((v * v + v * 31337_u64) % 65521_u64) as f32) / 65521_f32
+}
+fn root(value: f32) -> f32 {
+    let mut result = value
+    for _ in 0_usize..16_usize {
+        result =(result + value / result) * 0.5_f32
+    }
+    ret result
+}
+/// Returns false without allocation for invalid or excessively broad brushes.
+pub fn paint_foliage(asset: mut TerrainAsset, brush: FoliageBrush, center: Vec3, radius: f32, erase: bool) -> bool {
+    if !brush.valid() || !finite(radius) || radius <= 0 || !finite(center.x()) || !finite(center.z()) {
+        ret false
+    }
+    if erase {
+        let mut kept = Vec[FoliageInstance]::with_capacity(asset.foliage.len())
+        for plant in asset.foliage {
+            let dx = plant.x - center.x() let dz = plant.z - center.z()
+            if plant.kind != brush.kind || dx * dx + dz * dz >= radius * radius {
+                kept.push(plant)
+            }
+        }
+        if kept.len() == asset.foliage.len() {
+            ret false
+        }
+        asset.foliage = kept ret true
+    }
+    let cell = root(1_f32 / brush.density)
+    let half = asset.extent() * 0.5_f32
+    let x0 = clamp((center.x() - radius + half) / cell, 0_f32, 65534_f32) as u32
+    let z0 = clamp((center.z() - radius + half) / cell, 0_f32, 65534_f32) as u32
+    let x1 =(clamp((center.x() + radius + half) / cell, 0_f32, 65534_f32) as u32) + 1_u32
+    let z1 =(clamp((center.z() + radius + half) / cell, 0_f32, 65534_f32) as u32) + 1_u32
+    let nx = x1 - x0 let nz = z1 - z0
+    if nx * nz > 4096 || asset.foliage.len() >= 8192 {
+        ret false
+    }
+    let species = if brush.kind == "tree" {
+        1_u64
+    } else {
+        0_u64
+    }
+    let mut occupied = Vec[bool]::with_capacity((nx * nz) as usize)
+    let candidates =(nx * nz) as usize
+    for _ in 0_usize..candidates {
+        occupied.push(false)
+    }
+    for plant in asset.foliage {
+        if plant.kind == brush.kind {
+            let gx =((plant.id / 2_u64) % 65536_u64) as u32
+            let gz =((plant.id / 2_u64) / 65536_u64) as u32
+            if gx >= x0 && gx < x1 && gz >= z0 && gz < z1 {
+                occupied.set(((gz - z0) * nx + gx - x0) as usize, true)
+            }
+        }
+    }
+    let mut changed = false
+    let start_z = z0 as usize let end_z = z1 as usize
+    let start_x = x0 as usize let end_x = x1 as usize
+    for iz in start_z..end_z {
+        for ix in start_x..end_x {
+            if occupied.get_unchecked_borrowed((iz -(z0 as usize)) *(nx as usize) + ix -(x0 as usize)) {
+                continue
+            }
+            let x =((ix as f32) + 0.15_f32 + 0.7_f32 * hash(ix as u64, iz as u64, brush.seed)) * cell - half
+            let z =((iz as f32) + 0.15_f32 + 0.7_f32 * hash(iz as u64, ix as u64, brush.seed + 1_u32)) * cell - half
+            let dx = x - center.x() let dz = z - center.z()
+            if x < - half || x > half || z < - half || z > half || dx * dx + dz * dz >= radius * radius {
+                continue
+            }
+            let gx = clamp((x + half) / asset.spacing, 0_f32,(asset.resolution - 1_u32) as f32) as u32
+            let gz = clamp((z + half) / asset.spacing, 0_f32,(asset.resolution - 1_u32) as f32) as u32
+            if asset.normal(gx, gz).y() < brush.slope {
+                continue
+            }
+            if asset.foliage.len() >= 8192 {
+                ret changed
+            }
+            let id =((iz as u64) * 65536_u64 +(ix as u64)) * 2_u64 + species
+            let yaw = hash(ix as u64, iz as u64, brush.seed + 2_u32) * 6.2831855_f32
+            let scale = brush.minimum_scale +(brush.maximum_scale - brush.minimum_scale) * hash(ix as u64, iz as u64, brush.seed + 3_u32)
+            asset.foliage.push(FoliageInstance { id, brush.kind, x, z, yaw, scale }) changed = true
+        }
+    }
+    ret changed
+}
+fn part(vertices: mut Vec[f32], indices: mut Vec[u32], mesh: MeshData, transform: Transform, color: Vec3) ->() {
+    let base =(vertices.len() / 11_usize) as u32 let packed = mesh.with_uvs() let source = packed.vertices() let matrix = transform.matrix()
+    for vertex in 0_usize..source.len() / 11_usize {
+        let i = vertex * 11_usize
+        let p = matrix.transform_point(Vec3::new(source.get_unchecked_borrowed(i), source.get_unchecked_borrowed(i + 1_usize), source.get_unchecked_borrowed(i + 2_usize)))
+        let scale = transform.scale()
+        let normal = Vec3::new(source.get_unchecked_borrowed(i + 3_usize) / scale.x(), source.get_unchecked_borrowed(i + 4_usize) / scale.y(), source.get_unchecked_borrowed(i + 5_usize) / scale.z()).normalized()
+        for v in vec![p.x(), p.y(), p.z(), normal.x(), normal.y(), normal.z(), color.x(), color.y(), color.z(), 0_f32, 0_f32] {
+            vertices.push(v)
+        }
+    }
+    for i in packed.indices() {
+        indices.push(base + i)
+    }
+}
+/// Tiny built-in meshes make foliage usable without downloading large assets.
+pub fn foliage_mesh(kind: str) -> MeshData {
+    let mut vertices = Vec[f32]::new() let mut indices = Vec[u32]::new()
+    if kind == "tree" {
+        part(vertices, indices, cube_mesh(1_f32), Transform::identity().with_scale(Vec3::new(0.22_f32, 1.8_f32, 0.22_f32)).with_position(Vec3::new(0_f32, 0.9_f32, 0_f32)), Vec3::new(0.23_f32, 0.12_f32, 0.05_f32))
+        part(vertices, indices, sphere_mesh(1_f32, 5_u32, 8_u32), Transform::identity().with_scale(Vec3::new(1.2_f32, 1.8_f32, 1.2_f32)).with_position(Vec3::new(0_f32, 2.6_f32, 0_f32)), Vec3::new(0.11_f32, 0.25_f32, 0.045_f32))
+    } else {
+        // Three crossed tapered blades, with both windings and no alpha texture.
+        for blade in 0_usize..3_usize {
+            let base =(vertices.len() / 11_usize) as u32
+            let x = if blade == 0 {
+                0.15_f32
+            } elif blade == 1 {
+                0.075_f32
+            } else {
+                - 0.075_f32
+            }
+            let z = if blade == 0 {
+                0_f32
+            } else {
+                0.13_f32
+            }
+            for p in vec![Vec3::new( - x, 0_f32, - z), Vec3::new(x, 0_f32, z), Vec3::new(x * 0.5_f32, 0.65_f32 +(blade as f32) * 0.1_f32, z * 0.5_f32)] {
+                for v in vec![p.x(), p.y(), p.z(), 0_f32, 1_f32, 0_f32, 0.18_f32, 0.38_f32, 0.055_f32, 0_f32, 0_f32] {
+                    vertices.push(v)
+                }
+            }
+            for i in vec![base, base + 1_u32, base + 2_u32, base + 2_u32, base + 1_u32, base] {
+                indices.push(i)
+            }
+        }
+    }
+    ret MeshData::new(vertices, indices, 44_u32)
+}

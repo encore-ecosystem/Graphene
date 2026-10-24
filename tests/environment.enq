@@ -63,7 +63,7 @@ fn main() -> u32 {
     asset.add(SceneActor::new("Sky", "sky-atmosphere", Transform::identity()).with_identity(sky).with_component(SceneComponent::Environment(a)))
     match SceneAsset::parse(asset.stringify()) {
         Some(parsed) => {
-            if parsed.len() != 1 || parsed.version() != 6 {
+            if parsed.len() != 1 || parsed.version() != 7 {
                 ret 10
             }
         }

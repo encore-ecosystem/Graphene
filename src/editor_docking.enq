@@ -3,6 +3,7 @@
 import core::option::Option
 import core::panic::panic
 import core::vec::Vec
+
 import luma::{DockHost, DockNodeId, DockPanel, DockPlacement, DockWorkspace, PanelId, Rect, Size, UiBindings, Widget, WindowId, vertical}
 
 pub fn editor_dock_shell(view: Widget) -> Widget {
@@ -28,10 +29,12 @@ pub fn create_editor_docks(bindings: UiBindings<H>, view: Widget, main: WindowId
     host.register(DockPanel::new("details", "Details", Size::new(280, 180)), required(view, "details-panel")) &&
     host.register(DockPanel::new("content", "Content Browser", Size::new(280, 140)), required(view, "content-browser")) &&
     host.register(DockPanel::new("blueprint", "Blueprint", Size::new(620, 280)), Widget::panel("blueprint-editor").with_classes("blueprint-editor")) &&
-    host.register(DockPanel::new("particles", "VFX", Size::new(840,360)),Widget::panel("particle-editor").with_classes("blueprint-editor vfx-editor")) &&
+    host.register(DockPanel::new("particles", "VFX", Size::new(840, 360)), Widget::panel("particle-editor").with_classes("blueprint-editor vfx-editor")) &&
     host.register(DockPanel::new("audio", "Audio", Size::new(660, 330)), Widget::panel("audio-panel").with_classes("g-perf-panel")) &&
     host.register(DockPanel::new("environment", "Environment", Size::new(540, 220)), Widget::panel("environment-panel").with_classes("g-perf-panel")) &&
     host.register(DockPanel::new("performance", "Performance", Size::new(600, 260)), Widget::panel("performance-panel").with_classes("g-perf-panel")) &&
+    host.register(DockPanel::new("terrain", "Terrain", Size::new(780, 300)), Widget::panel("terrain-panel").with_classes("terrain-panel")) &&
+    host.register(DockPanel::new("ui", "UI Designer", Size::new(820, 360)), Widget::panel("ui-editor").with_classes("ui-designer")) &&
     host.register(DockPanel::new("material", "Material", Size::new(620, 280)), Widget::panel("material-editor").with_classes("material-editor"))
     if !registered {
         panic("unable to register editor panels")

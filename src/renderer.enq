@@ -1,15 +1,18 @@
 import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
+
+import std::io::println
+
 import linalg::{Mat4, Vec3}
+
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
 import mod::rhi::*
 import mod::scene::camera::PerspectiveCamera
 import mod::scene::light::DirectionalLight
-import mod::scene::renderable::RenderItem
+import mod::scene::renderable::{MeshId, RenderItem}
 import mod::scene::world::Scene
 import mod::temporal_view::TemporalView
-import std::io::println
 
 pub struct ObjectUniforms {
     buffers: Vec[GpuBuffer]

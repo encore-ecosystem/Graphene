@@ -202,26 +202,6 @@ uint64_t graphene_perf_counter_ns(void) {
 #endif
 }
 
-/* Deterministic scalar kernel used by the Encore rigid-body facade. Keeping
- * the integration and restitution math in the Graphene native runtime gives
- * us a stable ABI seam for a future SIMD/broadphase solver without changing
- * gameplay scripts. */
-float graphene_physics_floor_position(float position, float velocity,
-    float gravity, float delta_seconds, float radius) {
-    float next = position + (velocity + gravity * delta_seconds) * delta_seconds;
-    return next < radius ? radius : next;
-}
-
-float graphene_physics_floor_velocity(float position, float velocity,
-    float gravity, float delta_seconds, float radius, float restitution) {
-    float integrated = position + (velocity + gravity * delta_seconds) * delta_seconds;
-    if (integrated < radius && velocity + gravity * delta_seconds < 0.0f) {
-        float bounce = restitution < 0.0f ? 0.0f : restitution;
-        return -(velocity + gravity * delta_seconds) * bounce;
-    }
-    return velocity + gravity * delta_seconds;
-}
-
 #include "native/automation/bridge.inc"
 #include "native/blueprint/host.inc"
 

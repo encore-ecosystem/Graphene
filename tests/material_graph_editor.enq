@@ -1,17 +1,44 @@
 import core::option::Option
-import graphene::material_graph::*
-import graphene::material_graph::editor::{MaterialEditor, material_display_number}
-import luma::{Event, Rect, StyleSheet, Widget, layout_widget, event_pointer_down, event_pointer_up, widget_render_surface}
-import std::os::{read_file, mkdir_all, write_file_atomic}
+import core::vec::Vec
+
+import std::os::{mkdir_all, read_file, write_file_atomic}
 import std::time::perf_counter_ms
+
+import binary::{decode, encode}
+import graphene::material_graph::*
+import graphene::material_graph::cooked::CookedMaterialGraph
+import graphene::material_graph::editor::{MaterialEditor, material_display_number}
+import luma::{Event, Rect, StyleSheet, Widget, event_pointer_down, event_pointer_up, layout_widget, widget_render_surface}
 
 fn pointer(kind: u32, x: f32, y: f32, buttons: u32) -> Event {
     ret Event { kind, x, y, 0, 0, buttons, 0, 0, 0, 0, "", 0 }
 }
 fn main() -> u32 {
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sample = CookedMaterialGraph {
+        1_u32, "surface", "codec fixture", vec![("name", "payload")]
+    }
+    let bytes = match encode(sample) {
+        Ok(value) => value Err(_) => {
+            ret 91
+        }
+    }
+    let decoded = match decode[CookedMaterialGraph](bytes) {
+        Ok(value) => value Err(_) => {
+            ret 92
+        }
+    }
+    if decoded.variants.get(0).unwrap_or(("", "")).1 != "payload" {
+        ret 93
+    }
+
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     let mut editor = MaterialEditor::new()
-    let project = f "target/material-editor-test-{perf_counter_ms()}"
+    let project = f"target/material-editor-test-{perf_counter_ms()}"
     editor.open(project, sheet)
     // Restoring the Material tab precedes the asynchronous shader build.
     // A surface with no producer image makes the initial frame unpresentable.

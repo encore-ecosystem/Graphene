@@ -3,9 +3,11 @@ import mod::editor_gizmo_handle::gizmo_handle_label
 import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
+
 import linalg::Vec3
 import luma::{Color, DisplayList, DisplayPoint, Rect, Style, StyleSheet, Widget}
-import mod::editor_gesture::{GizmoGesture, gesture_axis, ring_basis, gizmo_sin, gizmo_cos}
+
+import mod::editor_gesture::{GizmoGesture, gesture_axis, gizmo_cos, gizmo_sin, ring_basis}
 
 fn abs(value: f32) -> f32 {
     ret if value < 0 {
@@ -93,7 +95,7 @@ impl for GizmoGuideStyle {
             styled(sheet, "g-gizmo-linear-shadow"), styled(sheet, "g-gizmo-linear-label")
         }
     }
-    fn axis(self: Self, axis: u32) -> Style {
+    pub fn axis(self: Self, axis: u32) -> Style {
         ret match axis {
             1 => self.x 2 => self.y _ => self.z
         }
@@ -487,16 +489,33 @@ pub fn gizmo_guides(gesture: GizmoGesture, radius: f32, bounds: Rect, world_valu
         if gesture.tool() == "move" && origin.x() >= 0 && origin.x() <= bounds.width() && origin.y() >= 0 && origin.y() <= bounds.height() && moved.x() >= 0 && moved.x() <= bounds.width() && moved.y() >= 0 && moved.y() <= bounds.height() {
             list.line(bounds.x() + origin.x(), bounds.y() + origin.y(), bounds.x() + moved.x(), bounds.y() + moved.y(), 1.5, style.text.foreground())
         }
-        let width = if bounds.width() < 320 { bounds.width() } else { 320_f32 }
+        let width = if bounds.width() < 320 {
+            bounds.width()
+        } else {
+            320_f32
+        }
         let x = bounds.x() + guide_clamp(moved.x() + 18, 4, bounds.width() - width - 4)
         let y = bounds.y() + guide_clamp(moved.y() + 18, 4, bounds.height() - 70)
         list.round_rect(Rect::new(x, y, width, 64), style.panel.radius(), faded(style.panel.background(), style.panel.opacity()), true)
         let delta = gesture.translation()
-        let value = if gesture.tool() == "move" { "Δ XYZ: " + scalar(delta.x()) + ", " + scalar(delta.y()) + ", " + scalar(delta.z()) }
-            else { "Factor: " + scalar(1 + gesture.applied()) }
-        list.styled_text(x + 10, y + 5, (if gesture.tool() == "move" { "Move " } else { "Scale " }) + gizmo_handle_label(gesture.axis()), style.text)
+        let value = if gesture.tool() == "move" {
+            "Δ XYZ: " + scalar(delta.x()) + ", " + scalar(delta.y()) + ", " + scalar(delta.z())
+        } else {
+            "Factor: " + scalar(1 + gesture.applied())
+        }
+        list.styled_text(x + 10, y + 5,(if gesture.tool() == "move" {
+                    "Move "
+                } else {
+                    "Scale "
+                }
+            ) + gizmo_handle_label(gesture.axis()), style.text)
         list.styled_text(x + 10, y + 25, value, style.text)
-        list.styled_text(x + 10, y + 45, (if gesture.snapping() { "step " + gizmo_step_label(gesture.step()) } else { "snap off" }) + " · Esc cancels", style.text)
+        list.styled_text(x + 10, y + 45,(if gesture.snapping() {
+                    "step " + gizmo_step_label(gesture.step())
+                } else {
+                    "snap off"
+                }
+            ) + " · Esc cancels", style.text)
         ret list
     }
     let label = if gesture.tool() == "rotate" {

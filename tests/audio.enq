@@ -87,7 +87,7 @@ fn main() -> u32 {
             ret 9
         }
     }
-    if decoded.version() != 6 || decoded.source_version() != 6 {
+    if decoded.version() != 7 || decoded.source_version() != 7 {
         ret 10
     }
     match decoded.actor_by_id(id) {

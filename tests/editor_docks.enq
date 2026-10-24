@@ -1,7 +1,8 @@
 //! Invisible dock hit targets keep their geometry through hover/focus and resize.
 import core::vec::Vec
-import luma::{ReactiveUi, Rect, StyleSheet, Widget, layout_widget}
 import std::os::read_file
+
+import luma::{ReactiveUi, Rect, StyleSheet, Widget, layout_widget}
 
 fn splitter(id: str, row: bool) -> Widget {
     ret Widget::button(id, "").with_classes(if row {
@@ -75,7 +76,12 @@ fn resize_lower(ui: mut ReactiveUi, height: f32) -> bool {
 }
 
 fn main() -> u32 {
-    let sheet = StyleSheet::parse(read_file("graphene.css"))
+    let sheet =(match StyleSheet::from_file("graphene.css") {
+            Ok(value) => value Err(_) => {
+                ret 90
+            }
+        }
+    )
     let root = editor(292)
     let mut ids = Vec[str]::new()
     ids.push("dock-splitter-outliner")

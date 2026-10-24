@@ -2,16 +2,19 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::{copy_file, file_exists, mkdir_all, read_file, write_file_atomic}
+import std::path::Path
+
 import mod::files::*
-import mod::model::{ContentBrowser, ContentAsset, ContentEdit, ContentMove}
-import mod::model::{content_contains, content_toggled}
+import mod::model::{ContentAsset, ContentBrowser, ContentEdit, ContentMove, content_contains, content_toggled}
 import refrain::automation_transport::automation_capability_token
 import refrain::blueprint::{BlueprintAsset, blueprint_parse, blueprint_stringify}
+import refrain::game_ui::asset::{ui_asset_parse, ui_asset_stringify}
+import refrain::game_ui::templates::ui_template
 import refrain::material_graph::{MaterialGraph, material_graph_stringify}
-import refrain::particles::presets::particle_template
 import refrain::particles::codec::particle_system_stringify
-import std::os::{file_exists, mkdir_all, copy_file, read_file, write_file_atomic}
-import std::path::Path
+import refrain::particles::presets::particle_template
 
 pub fn content_suffix(asset: ContentAsset) -> str {
     for suffix in vec![".obj.gmesh", ".gmesh", ".gtexture", ".gmaterial"] {
@@ -20,7 +23,7 @@ pub fn content_suffix(asset: ContentAsset) -> str {
         }
     }
     ret match asset.kind {
-        "particle-system"=>".graphene-particle.json" "mesh" => ".obj" "texture" => ".png" "script" => ".enq"
+        "ui" => ".graphene-ui.json" "particle-system" => ".graphene-particle.json" "mesh" => ".obj" "texture" => ".png" "script" => ".enq"
         "blueprint" => ".graphene-blueprint.json" "material" => ".graphene-material.json"
         "material-graph" => ".graphene-material-graph.json" "scene" => ".graphene.json"
         "folder" => "" _ => {
@@ -99,7 +102,11 @@ pub fn content_create(browser: mut ContentBrowser) ->() {
         browser.error = "Unable to create assets in this folder" browser.dirty = true ret()
     }
     let kind = browser.popup
-    let suffix = if kind=="particle" {".graphene-particle.json"} elif kind == "material" {
+    let suffix = if kind == "ui" {
+        ".graphene-ui.json"
+    } elif kind == "particle" {
+        ".graphene-particle.json"
+    } elif kind == "material" {
         ".graphene-material-graph.json"
     } elif kind == "blueprint" {
         ".graphene-blueprint.json"
@@ -118,7 +125,12 @@ pub fn content_create(browser: mut ContentBrowser) ->() {
             name, base.domain, base.nodes, base.links
         }
         success = write_file_atomic(browser.project + "/" + path, material_graph_stringify(graph, false) + "\n") == 0
-    } elif kind=="particle" {let mut asset=particle_template("Sparks") asset.name=name success=write_file_atomic(browser.project+"/"+path,particle_system_stringify(asset))==0_i32
+    } elif kind == "ui" {
+        let mut asset = ui_template("HUD") let token = automation_capability_token()
+        asset.id = "UI_" + token asset.name = name asset.graph.id = asset.id asset.graph.name = name
+        success = token != "" && write_file_atomic(browser.project + "/" + path, ui_asset_stringify(asset)) == 0
+    } elif kind == "particle" {
+        let mut asset = particle_template("Sparks") asset.name = name success = write_file_atomic(browser.project + "/" + path, particle_system_stringify(asset)) == 0_i32
     } elif kind == "blueprint" {
         let token = automation_capability_token()
         if token != "" {
@@ -179,9 +191,19 @@ pub fn content_duplicate(browser: mut ContentBrowser) ->() {
                                 Ok(original) => {
                                     let token = automation_capability_token()
                                     let copy = BlueprintAsset {
-                                        "BP_" + token, original.name + " Copy", original.components, original.properties, original.nodes, original.links
+                                        "BP_" + token, original.name + " Copy", original.components, original.properties, original.nodes, original.links, original.domain
                                     }
                                     ok = token != "" && write_file_atomic(browser.project + "/" + destination, blueprint_stringify(copy)) == 0
+                                }
+                                Err(_) => {
+                                }
+                            }
+                        } elif asset.kind == "ui" {
+                            match ui_asset_parse(read_file(browser.project + "/" + path)) {
+                                Ok(original) => {
+                                    let mut copy = original.snapshot() let token = automation_capability_token()
+                                    copy.id = "UI_" + token copy.name = original.name + " Copy" copy.graph.id = copy.id copy.graph.name = copy.name
+                                    ok = token != "" && write_file_atomic(browser.project + "/" + destination, ui_asset_stringify(copy)) == 0
                                 }
                                 Err(_) => {
                                 }

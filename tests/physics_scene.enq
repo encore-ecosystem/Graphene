@@ -1,0 +1,116 @@
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import graphene::{ActorCommand, ActorPhysicsCommand, DuplicateActorCommand, EditorState, GrapheneCommand, PhysicsComponent, RuntimeTransform, Scene, SceneActor, SceneAsset, Transform, World}
+import graphene::physics::scene::{PhysicsMesh, append_builtin_physics_mesh, scene_physics}
+import json::Json
+import linalg::Vec3
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let id = scene.create_entity("Box", Transform::identity())
+    let mut c = PhysicsComponent::defaults() c.mode = "dynamic" c.mass = 3_f32 c.friction = 0.7_f32
+    if !scene.set_physics(id, c) {
+        ret 1_u32
+    }
+    scene.rename(id, "Crate") scene.set_transform(id, Transform::identity().with_position(Vec3::new(0_f32, 3_f32, 0_f32)))
+    match scene.get(id) {
+        Some(e) => {
+            if e.physics().mass != 3_f32 || e.physics().mode != "dynamic" {
+                ret 2_u32
+            }
+        }
+        None => {
+            ret 3_u32
+        }
+    }
+    let mut asset = SceneAsset::new() asset.add(SceneActor::new("Crate", "cube", Transform::identity()).with_identity(id).with_physics(c))
+    match SceneAsset::parse(asset.stringify()) {
+        Some(loaded) => {
+            if loaded.version() != 7_u32 {
+                ret 4_u32
+            }
+            match loaded.actor(0) {
+                Some(a) => {
+                    if a.physics().mass != 3_f32 {
+                        ret 5_u32
+                    }
+                }
+                None => {
+                    ret 6_u32
+                }
+            }
+        }
+        None => {
+            ret 7_u32
+        }
+    }
+    if PhysicsComponent::from_json(Json::String("invalid")).is_some() {
+        ret 8_u32
+    }
+    let mut state = EditorState::new(scene)
+    c.mass = 7_f32
+    if !state.execute(GrapheneCommand::SetPhysics(ActorPhysicsCommand { id, c })).success() {
+        ret 9_u32
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 10_u32
+    }
+    match state.scene().get(id) {
+        Some(e) => {
+            if e.physics().mass != 3_f32 {
+                ret 11_u32
+            }
+        }
+        None => {
+            ret 12_u32
+        }
+    }
+    state.execute(GrapheneCommand::Redo)
+    state.execute(GrapheneCommand::DeleteActor(ActorCommand::new(id)))
+    state.execute(GrapheneCommand::Undo)
+    match state.scene().get(id) {
+        Some(e) => {
+            if e.physics().mass != 7_f32 {
+                ret 13_u32
+            }
+        }
+        None => {
+            ret 14_u32
+        }
+    }
+    let mut runtime = World::new() runtime.spawn_actor_with_id(id, "Crate", RuntimeTransform::identity().with_position(Vec3::new(0_f32, 3_f32, 0_f32)))
+    let mut physics = match scene_physics(state.scene(), Vec[PhysicsMesh]::new()) {
+        Ok(value) => value Err(_) => {
+            ret 17_u32
+        }
+    }
+    physics.step(runtime, 1_f32 / 60_f32)
+    match runtime.transform(id) {
+        Some(t) => {
+            if t.position().y() >= 3_f32 {
+                ret 15_u32
+            }
+        }
+        None => {
+            ret 16_u32
+        }
+    }
+    let mut plane_scene = Scene::new()
+    let plane = plane_scene.create_entity("Plane", Transform::identity())
+    let mut plane_settings = PhysicsComponent::defaults() plane_settings.mode = "static" plane_settings.shape = "mesh"
+    plane_scene.set_physics(plane, plane_settings)
+    let mut sources = Vec[PhysicsMesh]::new()
+    if !append_builtin_physics_mesh(sources, plane, "@plane") {
+        ret 18_u32
+    }
+    let baked = match scene_physics(plane_scene, sources) {
+        Ok(p) => p Err(_) => {
+            ret 19_u32
+        }
+    }
+    if baked.solver().raycast(Vec3::new(0_f32, 2_f32, 0_f32), Vec3::new(0_f32, - 1_f32, 0_f32), 4_f32, 4294967295_u32, 0_u64).is_none() {
+        ret 20_u32
+    }
+    ret 0_u32
+}

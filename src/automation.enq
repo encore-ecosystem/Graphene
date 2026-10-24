@@ -1,12 +1,15 @@
+import mod::physics::component::PhysicsComponent
 //! Transport-independent Graphene Automation API session.
 
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
+
 import mod::approval::ApprovalBroker
 import mod::command_bus::EditorState
-import mod::command_protocol::{command_registry_json, decode_scene_batch, decode_command_request, encode_command_response}
+import mod::command_protocol::{command_registry_json, decode_command_request, decode_scene_batch, encode_command_response}
 
 pub struct AutomationServer {
     state: EditorState
@@ -198,6 +201,7 @@ impl for AutomationServer {
             actor.push(field("visible", Json::Bool(entity.visible())))
             actor.push(field("componentKind", Json::String(entity.component().kind())))
             actor.push(field("component", entity.component().to_json()))
+            actor.push(field("physics", entity.physics().to_json()))
             match entity.parent() {
                 Option::Some(parent) => {
                     actor.push(field("parent", Json::Number(parent.fmt())))

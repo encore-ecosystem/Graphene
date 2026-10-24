@@ -1,104 +1,94 @@
+pub import mod::animation::asset::{load_animation_clip, load_skeletal_mesh, load_skeleton, save_animation_clip, save_skeletal_mesh, save_skeleton}
+pub import mod::animation::blend::{BoneMask, additive_poses, blend_poses}
+pub import mod::animation::blend_space::{BlendAxis, BlendSample, BlendSpace, BlendSpaceClock, BlendSpaceCursor, BlendSpacePlayback, BlendSpaceWorkspace, BlendTriangle, BlendWeights, CookedBlendSpace, cook_blend_space}
+pub import mod::animation::character::{CharacterAsset, import_character, load_character, save_character}
+pub import mod::animation::component::{SkeletalMeshComponent, character_path_valid}
+pub import mod::animation::controller::{AnimationController, ControllerEvent, ControllerFrame}
+pub import mod::animation::cook::{CookedSkeletalMesh, SkinGeometrySection, prepare_skeletal_geometry}
+pub import mod::animation::graph::{AnimationGraph, AnimationNode, AnimationParameter, AnimationProgram, AnimationWorkspace, BlendSpaceNode, NodeSampleTime, PoseOperation, compile_animation_graph}
+pub import mod::animation::ik::{FabrikSolution, TwoBoneSolution, solve_fabrik, solve_look_at, solve_two_bone}
+pub import mod::animation::math::{LocalTransform, PoseMatrix, PoseRotation, PoseVector}
+pub import mod::animation::model::{AnimationClip, AnimationKey, AnimationNotify, AnimationTrack, AnimationValue, KeyInterpolation, MorphDelta, MorphTarget, SkeletalMesh, Skeleton, SkeletonBone, SkeletonSocket, SkinInfluence, SkinSection, SkinVertex, TrackPath}
+pub import mod::animation::player::{AnimationEvent, ClipPlayer, PlaybackStep}
+pub import mod::animation::pose::{AnimationPose, model_pose, skin_palette}
+pub import mod::animation::root_motion::{RootMotionDelta, extract_root_motion}
+pub import mod::animation::runtime::{AnimationFailure, AnimationGraphId, AnimationInstanceId, AnimationLibraryId, AnimationStats, AnimationWorld, PoseSnapshot}
+pub import mod::animation::sample::{sample_clip, sample_track}
+pub import mod::animation::source::{AnimationSource, decode_animation_source}
+pub import mod::animation::state_machine::{AnimationState, AnimationStateMachine, AnimationTransition, StateBlend, StateMachinePlayer, TransitionComparison}
+pub import mod::anti_aliasing::AntiAliasingView
 pub import mod::approval::{ApprovalBroker, ApprovalRequest}
-pub import mod::audio::runtime::SceneAudio
-pub import mod::audio::panel::AudioPanel
-pub import mod::audio::model::{AudioSource, AudioSettings}
 pub import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
+pub import mod::audio::model::{AudioSettings, AudioSource}
+pub import mod::audio::panel::AudioPanel
+pub import mod::audio::runtime::SceneAudio
 pub import mod::automation::{AutomationScopes, AutomationServer}
 pub import mod::automation_transport::{AutomationListener, automation_capability_token, automation_request, automation_secure_file}
 pub import mod::blueprint::*
 pub import mod::blueprint::editor::BlueprintEditor
-pub import mod::command_bus::BlueprintActorCommand
-pub import mod::command_bus::{ActorCommand, ActorComponentCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, DuplicateActorCommand, AssetImportCommand, CommandResult, EditorState, GrapheneCommand, GrapheneDiagnostic, GrapheneEvent, GrapheneTask, OperationCompletionCommand, ProjectLoadedCommand, ProjectRequestCommand, SimulationCommand}
+pub import mod::command_bus::{ActorCommand, ActorComponentCommand, ActorNameCommand, ActorParentCommand, ActorPhysicsCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, AssetImportCommand, BlueprintActorCommand, CommandResult, DuplicateActorCommand, EditorState, GrapheneCommand, GrapheneDiagnostic, GrapheneEvent, GrapheneTask, OperationCompletionCommand, ProjectLoadedCommand, ProjectRequestCommand, SimulationCommand}
 pub import mod::command_console::{console_help, decode_console_command}
 pub import mod::command_protocol::{CommandEnvelope, ProtocolError, command_registry_json, decode_command_request, encode_command_response}
 pub import mod::content_search::{content_asset_matches, outliner_actor_matches, search_matches}
 pub import mod::dynamic_gi::{GpuDynamicGi, GpuGiResult, SdfBox, SdfBrickAllocation, SdfBrickCache, SdfSphere, SurfaceCacheSample, gpu_software_gi}
 pub import mod::editor_camera::EditorCameraState
-pub import mod::editor_gesture::{GizmoSnap, GizmoProjection, GizmoGesture, gesture_axis, gesture_axis_value, gesture_axis_add, gesture_roots, snap_delta, unwrap_angle}
+pub import mod::editor_gesture::{GizmoGesture, GizmoProjection, GizmoSnap, gesture_axis, gesture_axis_add, gesture_axis_value, gesture_roots, snap_delta, unwrap_angle}
 pub import mod::editor_guard::{action_needs_confirmation, guard_editor_action, guarded_action}
 pub import mod::editor_history::{ActorRecord, EditorActors, EditorEdit, ParentEdit, RenameEdit, TransformEdit, VisibilityEdit, editor_actors_from_scene}
 pub import mod::editor_input::{FlightInput, ViewportInputState}
+pub import mod::editor_performance::{PerformancePanel, profile_begin, profile_event_wait, profile_finish, profile_phase, profile_ui}
 pub import mod::editor_ui::EditorUiState
 pub import mod::editor_values::{EditorTransform, apply_editor_transform, gizmo_axis_drag_scalar, gizmo_move_delta, gizmo_rotation_from_drag, gizmo_scale_from_drag, parse_editor_scalar, resolve_editor_pointer_target}
+pub import mod::environment::model::{EnvironmentComponent, WeatherSample}
+pub import mod::environment::system::{EnvironmentFrame, EnvironmentSystem, WeatherVolume}
+pub import mod::game_ui::editor::UiEditor
+pub import mod::game_ui::model::{UiScreenAsset, UiWidget}
+pub import mod::game_ui::runtime::GameUi
 pub import mod::lod_budget::LodBudget
-pub import mod::lod_groups::{LodGroup, LodCurvePoint, LodGroups, LodInterpolation}
-pub import mod::material_asset::{load_material_asset_file, save_material_asset_file, edit_default_material, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color}
+pub import mod::lod_groups::{LodCurvePoint, LodGroup, LodGroups, LodInterpolation}
+pub import mod::material_asset::{edit_default_material, load_material_asset_file, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color, save_material_asset_file}
 pub import mod::material_graph::*
 pub import mod::mcp_gateway::GrapheneMcpGateway
+pub import mod::mesh_prepare::prepare_mesh_geometry
+pub import mod::native_asset::{NativeMesh, asset_source_stamp, load_native_material, load_native_mesh, load_native_texture, native_mesh_valid, save_native_material, save_native_mesh, save_native_texture}
+pub import mod::particles::asset::{CookedParticleSystem, load_particle_system, prepare_particle_system, save_particle_system}
+pub import mod::particles::codec::{particle_system_parse, particle_system_stringify}
+pub import mod::particles::compiler::compile_particle_emitter
+pub import mod::particles::document::ParticleDocument
+pub import mod::particles::events::{ParticleEvent, ParticleEventChannel, ParticleEventKind, decode_particle_events}
+pub import mod::particles::model::*
+pub import mod::particles::runtime::{ParticleEmitterHandle, ParticleParameters, ParticleStats, ParticleStopMode, ParticleSystemHandle, ParticleWorld}
 pub import mod::performance::{FrameStatistics, camera_step, camera_wheel_dolly, frame_statistics, navigation_delta_seconds, performance_counter_ns}
-pub import mod::preview::{ViewportRenderer, SceneGpuBinding}
+pub import mod::physics::component::PhysicsComponent
+pub import mod::preview::{SceneGpuBinding, ViewportRenderer}
 pub import mod::process::graphene_process_exit
-pub import mod::project_assets::{ImportedMeshAsset, add_actor_mesh_name, discover_obj_assets, import_obj_asset, load_obj_asset, project_mesh_autolod_enabled, project_mesh_autolod_path, project_mesh_directory, set_project_mesh_autolod}
+pub import mod::project_assets::{ImportedMeshAsset, add_actor_mesh_name, discover_obj_assets, import_mesh_asset, import_mesh_asset_as, import_obj_asset, load_obj_asset, model_source_supported, project_mesh_autolod_enabled, project_mesh_autolod_path, project_mesh_directory, set_project_mesh_autolod}
 pub import mod::render_graph::*
 pub import mod::render_policy::{DynamicGiPath, RenderFeaturePolicy, VirtualGeometryPath}
+pub import mod::render_settings::{AntiAliasingMethod, FrameGenerationMethod, RenderSettings, UpscalingQuality, anti_aliasing_methods, effective_anti_aliasing, effective_frame_generation, effective_reconstruction, upscaling_qualities}
 pub import mod::renderer::{ObjectUniforms, SceneRenderer}
 pub import mod::rhi::*
-pub import mod::runtime::{Actor, ActorComponent, InputBinding, InputMap, InputSnapshot, RuntimeClock, RuntimeConfig, RuntimeFrame, CollisionEvent, PhysicsWorld, RigidBody, RuntimeSession, RuntimeTransform, Subsystem, TickContext, TickGroup, World}
-pub import mod::runtime_bridge::runtime_transform_to_scene
-pub import mod::runtime_bridge::sync_runtime_world
+pub import mod::runtime::{Actor, ActorComponent, CollisionEvent, InputBinding, InputMap, InputSnapshot, PhysicsWorld, RigidBody, RuntimeClock, RuntimeConfig, RuntimeFrame, RuntimeSession, RuntimeTransform, Subsystem, TickContext, TickGroup, World}
+pub import mod::runtime::render_view::RuntimeRenderView
+pub import mod::runtime_bridge::{runtime_transform_to_scene, sync_runtime_world}
 pub import mod::scene::asset::{SceneActor, SceneAsset}
 pub import mod::scene::camera::PerspectiveCamera
-pub import mod::scene::component::{SceneComponent, LightComponent, CameraComponent}
+pub import mod::scene::component::{CameraComponent, LightComponent, SceneComponent}
 pub import mod::scene::light::DirectionalLight
 pub import mod::scene::obj::parse_obj
-pub import mod::scene::primitive::{MeshData, cube_mesh, plane_mesh, sphere_mesh, editor_grid_mesh, gizmo_ring_mesh, gizmo_tip_mesh}
+pub import mod::scene::primitive::{MeshData, cube_mesh, editor_grid_mesh, gizmo_ring_mesh, gizmo_tip_mesh, plane_mesh, sphere_mesh}
 pub import mod::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
 pub import mod::scene::transform::Transform
 pub import mod::scene::world::{Entity, Scene}
 pub import mod::shaders::*
 pub import mod::simulation_mode::{normalize_simulation_mode, simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message}
+pub import mod::source_model::{SourceModel, decode_source_model}
 pub import mod::texture_asset::{TextureImage, TextureLoad, decode_png, load_material_texture, texture_path_valid}
 pub import mod::texture_gpu::TextureUpload
 pub import mod::texture_loader::TextureLoader
 pub import mod::virtual_geometry::{ClusterHierarchyNode, GeometryCluster, GeometryLod, VirtualGeometry, build_cluster_hierarchy, build_virtual_geometry, build_virtual_geometry_lods, simplify_virtual_geometry_indices}
 pub import mod::virtual_geometry_archive::{GeometryPageArchive, geometry_page_archive_available, geometry_page_archive_bytes, geometry_page_archive_destroy, geometry_page_archive_prefetch, geometry_page_archive_triangles, geometry_page_archive_vertices}
-pub import mod::virtual_geometry_gpu::{GpuClusterCullResult, GpuVirtualGeometry, VirtualGeometryInstance, gpu_cull_clusters, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_archive_bytes, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pipeline, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_occlusion_counts, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_record, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_staging_bytes, gpu_virtual_geometry_traversal_instances}
+pub import mod::virtual_geometry_gpu::{GpuClusterCullResult, GpuVirtualGeometry, VirtualGeometryInstance, gpu_cull_clusters, gpu_virtual_geometry_archive_bytes, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_occlusion_counts, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pipeline, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_record, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_staging_bytes, gpu_virtual_geometry_traversal_instances}
 pub import mod::virtual_geometry_streaming::{GeometryPageAllocation, GeometryPageCache}
 
-pub import mod::native_asset::{NativeMesh, asset_source_stamp, native_mesh_valid, load_native_mesh, save_native_mesh, load_native_material, save_native_material, load_native_texture, save_native_texture}
-
-pub import mod::mesh_prepare::prepare_mesh_geometry
-pub import mod::project_assets::{import_mesh_asset, import_mesh_asset_as, model_source_supported}
-pub import mod::source_model::{SourceModel, decode_source_model}
-
-pub import mod::anti_aliasing::AntiAliasingView
-pub import mod::render_settings::{AntiAliasingMethod, RenderSettings, UpscalingQuality, FrameGenerationMethod, anti_aliasing_methods, upscaling_qualities, effective_anti_aliasing, effective_reconstruction, effective_frame_generation}
-
-pub import mod::editor_performance::{PerformancePanel, profile_begin, profile_phase, profile_finish, profile_event_wait, profile_ui}
-
-pub import mod::environment::model::{EnvironmentComponent, WeatherSample}
-pub import mod::environment::system::{EnvironmentSystem, EnvironmentFrame, WeatherVolume}
-
-pub import mod::particles::model::*
-pub import mod::particles::runtime::{ParticleWorld,ParticleSystemHandle,ParticleEmitterHandle,ParticleParameters,ParticleStats,ParticleStopMode}
-pub import mod::particles::compiler::compile_particle_emitter
-pub import mod::particles::codec::{particle_system_parse,particle_system_stringify}
-pub import mod::particles::asset::{CookedParticleSystem,load_particle_system,save_particle_system,prepare_particle_system}
-pub import mod::particles::document::ParticleDocument
-
-pub import mod::particles::events::{ParticleEvent,ParticleEventKind,ParticleEventChannel,decode_particle_events}
-
-pub import mod::animation::math::{PoseVector,PoseRotation,PoseMatrix,LocalTransform}
-pub import mod::animation::model::{Skeleton,SkeletonBone,SkeletonSocket,SkeletalMesh,SkinVertex,SkinInfluence,SkinSection,MorphTarget,MorphDelta,AnimationClip,AnimationTrack,AnimationKey,AnimationValue,AnimationNotify,TrackPath,KeyInterpolation}
-pub import mod::animation::pose::{AnimationPose,model_pose,skin_palette}
-pub import mod::animation::sample::{sample_track,sample_clip}
-pub import mod::animation::blend::{BoneMask,blend_poses,additive_poses}
-pub import mod::animation::player::{ClipPlayer,PlaybackStep,AnimationEvent}
-pub import mod::animation::root_motion::{RootMotionDelta,extract_root_motion}
-pub import mod::animation::runtime::{AnimationWorld,AnimationLibraryId,AnimationGraphId,AnimationInstanceId,PoseSnapshot,AnimationStats,AnimationFailure}
-pub import mod::animation::source::{AnimationSource,decode_animation_source}
-pub import mod::animation::asset::{save_skeleton,load_skeleton,save_skeletal_mesh,load_skeletal_mesh,save_animation_clip,load_animation_clip}
-
-pub import mod::animation::cook::{CookedSkeletalMesh,SkinGeometrySection,prepare_skeletal_geometry}
-pub import mod::animation::graph::{AnimationGraph,AnimationNode,AnimationParameter,PoseOperation,AnimationProgram,AnimationWorkspace,BlendSpaceNode,NodeSampleTime,compile_animation_graph}
-pub import mod::animation::state_machine::{AnimationStateMachine,AnimationState,AnimationTransition,TransitionComparison,StateMachinePlayer,StateBlend}
-pub import mod::animation::ik::{solve_two_bone,solve_fabrik,solve_look_at,TwoBoneSolution,FabrikSolution}
-
-pub import mod::animation::component::{SkeletalMeshComponent,character_path_valid}
-pub import mod::animation::character::{CharacterAsset,load_character,save_character,import_character}
-
-pub import mod::animation::blend_space::{BlendSample,BlendAxis,BlendTriangle,BlendSpace,CookedBlendSpace,BlendWeights,BlendSpaceCursor,BlendSpaceWorkspace,BlendSpaceClock,BlendSpacePlayback,cook_blend_space}
-
-pub import mod::animation::controller::{AnimationController,ControllerEvent,ControllerFrame}
-
-pub import mod::runtime::render_view::RuntimeRenderView
+pub import mod::terrain::model::{TerrainAsset, TerrainLayer}

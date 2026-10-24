@@ -148,3 +148,80 @@ large grass/rock source packs are excluded by `.gitignore`; their inventory is
 `Assets/external-assets.json`. Existing local demo projects were archived under
 ignored `target/` during repository cleanup. No large art pack is needed for
 the spheres example.
+
+Physics uses the companion [`Physics`](../Physics) library, implemented in Encore.
+The actor Details panel has a **Physics** section: Off / Static / Dynamic /
+Kinematic / Character, collider shape and dimensions, mass, friction and
+restitution. Character mode uses a capsule, WASD movement in world X/Z and Space
+to jump during Play. Physics settings are saved in scene version 7; versions
+1–6 remain readable. Play creates a disposable physics world and Stop restores
+authoring transforms. Only explicit scene colliders block motion. Physics
+actors currently must be scene roots; static mesh colliders use the original
+CPU mesh, independent of rendered AutoLOD.
+
+### Game UI (Play in Editor)
+
+Open **Window → UI Designer**. The Designer combines a widget palette, hierarchy,
+a scaled screen preview and compact Details. Canvas/Overlay children use anchors,
+offsets and alignment; Horizontal/Vertical/Scroll containers arrange their children.
+Drag to move, use the bottom-right handle to resize, and use MMB to pan or the wheel
+to zoom. A gesture is one Undo step. Designer and Graph share document history.
+
+HUD, Pause and Settings templates are editable. Save screens to
+`Content/UI/*.graphene-ui.json`; **Use as HUD/Pause/Settings** writes the screen
+assignment to `Config/UI.json`. Double-click UI screens in Content Browser to edit.
+The Graph tab reuses Blueprint editing and compiles Encore, including widget click
+and change events, typed widget properties, and named screen/settings actions.
+Widget IDs remain stable through rename and reparent. Broken references are
+reported rather than silently discarded.
+Image widgets accept project-relative `.gtexture` files and non-interlaced 8-bit
+RGB/RGBA PNGs; indexed PNGs and ICC profiles are not supported by the PNG decoder.
+The current UI image payload is sampled to 256 × 256 pixels.
+
+During Play, **Esc** opens/closes pause; **Shift+Esc** or **Stop** exits Play. UI
+renders after reconstruction and frame generation, clipped to the camera frame.
+Pause freezes gameplay, physics, animations, VFX and weather; UI remains responsive
+and the UI audio bus continues. Player settings cover AA/upscaling/frame generation,
+sharpness, mixer gains/mutes, HRTF, voice limit and output device. Apply saves local
+`.graphene/PlaySettings.json`; Back discards the draft and Reset uses project defaults.
+Stopping Play restores the editor's rendering/audio settings. Standalone and
+world-space UI are outside this first version.
+
+Terrain authoring is available from **Window → Terrain**. Create a 33, 65,
+129, 257 or 513 sample landscape; its scene actor references a versioned binary
+`Content/Terrain/*.gterrain` asset. Grid spacing is measured in metres.
+Raise, Lower, Smooth and Flatten operate on height samples; Paint blends Grass,
+Rock and Earth weights. Hold LMB for a stroke, Shift to reverse Raise/Lower or
+paint Grass, and Esc to cancel. Ctrl+Z/Shift+Ctrl+Z undo/redo one complete stroke.
+RMB, MMB and wheel remain available for camera navigation. Save Terrain writes
+modified terrain assets; Save Project also saves their actor references.
+
+Import heightmaps as unsigned little-endian `.raw16` or 8-bit RGB/RGBA PNG with
+the current landscape's square resolution. Height range maps black/zero to
+minus half the range and white/65535 to plus half. Material layers accept project
+PNG or `.gtexture` albedo paths and a tile size; this first authoring stage bakes
+their blended colors into mesh vertices. It does not yet provide per-pixel
+terrain PBR textures or world streaming.
+
+The Terrain panel also has a **Foliage** section with built-in Grass and Trees.
+Choose a species, adjust instances per square metre, random scale limits and
+minimum up-normal (slope filter), then paint with LMB. Shift erases only that
+species. A held brush does not stack duplicates; each complete gesture shares
+Terrain Undo/Redo and Esc cancellation. Plants follow the terrain height after
+sculpting and inherit the landscape actor's transform and visibility.
+
+Foliage is stored inside the GTR2 terrain asset, not as individual scene actors;
+GTR1 heightfields are migrated when loaded. Save Terrain and Save Project persist
+plants along with heights, weights and layer settings. This first implementation
+uses small built-in opaque meshes and the existing GPU instance path. It supports
+8,192 stored plants per terrain and at most 768 visible foliage instances within
+the renderer's existing 1,024-item scene budget; grass culls at 60 m, trees at 300 m.
+These are bounded authoring defaults, not a world-streaming foliage system.
+Individual decorative plants do not create physics bodies. Terrain collision
+continues to use the complete heightfield.
+
+Terrain uses 32-cell chunks, distance-based LOD with hysteresis, and shared
+full-resolution chunk borders. Editing invalidates affected chunks and their
+normal neighbours. Collision in Play always uses the full heightfield mesh,
+independently of rendering LOD. Terrain actors support the existing scene
+transforms, visibility, duplication, deletion and actor history.

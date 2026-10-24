@@ -1,12 +1,15 @@
 import core::option::Option
 import core::vec::Vec
+
 import json::{parse, stringify}
 import linalg::{Mat4, Vec3}
+
 import mod::component::SceneComponent
 import mod::renderable::{RenderItem, Renderable}
 import mod::transform::Transform
 import refrain::blueprint::codec::{blueprint_instance_json, blueprint_instance_parse}
 import refrain::blueprint::model::BlueprintInstance
+import refrain::physics::component::PhysicsComponent
 
 pub struct Entity {
     id: u64
@@ -17,6 +20,7 @@ pub struct Entity {
     renderable: Option[Renderable]
     blueprint_source: str
     component: SceneComponent
+    physics: PhysicsComponent
 }
 pub struct Scene {
     entities: Vec[Entity]
@@ -45,6 +49,9 @@ impl for Entity {
     }
     pub fn renderable(self: Self) -> Option[Renderable] {
         ret self.renderable
+    }
+    pub fn physics(self: Self) -> PhysicsComponent {
+        ret self.physics
     }
     pub fn blueprint(self: Self) -> Option[BlueprintInstance] {
         if self.blueprint_source == "" {
@@ -95,7 +102,7 @@ impl for Scene {
             ret false
         }
         self.entities.push(Entity {
-                id, name, transform, Option[u64]::None, true, Option[Renderable]::None, "", SceneComponent::None
+                id, name, transform, Option[u64]::None, true, Option[Renderable]::None, "", SceneComponent::None, PhysicsComponent::defaults()
             }
             ,
         )
@@ -176,7 +183,7 @@ impl for Scene {
                 }
                 remaining.push(Entity {
                         entity.id, entity.name, entity.transform, parent,
-                        entity.visible, entity.renderable, entity.blueprint_source, entity.component
+                        entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
                     }
                     ,)
             }
@@ -186,6 +193,24 @@ impl for Scene {
         }
         ret found
     }
+    pub fn set_physics(self: mut Self, id: u64, value: PhysicsComponent) -> bool {
+        if !value.valid() {
+            ret false
+        }
+        let i = self.index_of(id)
+        match self.entities.get(i) {
+            Some(e) => {
+                self.entities.set(i, Entity {
+                        e.id, e.name, e.transform, e.parent, e.visible, e.renderable, e.blueprint_source, e.component, value
+                    }
+                    ,
+                ) self.revision += 1_u64 ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
     pub fn set_transform(self: mut Self, id: u64, transform: Transform) -> bool {
         self.revision += 1_u64
         let mut index = self.index_of(id)
@@ -194,7 +219,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component
+                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
                             }
                             ,)
                         ret true
@@ -218,7 +243,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component
+                                entity.id, name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
                             }
                             ,)
                         ret true
@@ -239,7 +264,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component
+                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
                             }
                             ,)
                         ret true
@@ -316,7 +341,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component
+                                entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
                             }
                             ,)
                         ret true
@@ -505,7 +530,7 @@ impl for Scene {
                     if entity.id == id {
                         self.entities.set(index, Entity {
                                 entity.id, entity.name, entity.transform, entity.parent, entity.visible,
-                                renderable, entity.blueprint_source, entity.component
+                                renderable, entity.blueprint_source, entity.component, entity.physics
                             }
                             ,)
                         ret true
@@ -527,7 +552,7 @@ impl for Scene {
         for entity in self.entities {
             if entity.id == id {
                 self.entities.set(index, Entity {
-                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, source, entity.component
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, source, entity.component, entity.physics
                     }
                     ,
                 )
@@ -546,7 +571,7 @@ impl for Scene {
         match self.entities.get(index) {
             Some(entity) => {
                 self.entities.set(index, Entity {
-                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, component
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, component, entity.physics
                     }
                     ,
                 )

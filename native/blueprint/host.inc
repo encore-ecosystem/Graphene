@@ -1,5 +1,6 @@
 /* Host adapter. Module allocation and Encore graph runtimes never cross the ABI. */
 #include "abi.h"
+extern encore_str encore_str_from_buffer(const void *, size_t);
 #include <math.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -218,6 +219,16 @@ static bool graphene_bp_add_component_impl(uintptr_t handle, uint64_t id, uint64
     component->id = id; component->parent = parent; component->visible = visible;
     memcpy(component->transform, transform, sizeof(transform)); return true;
 }
+/* Generic host synchronization only. Physics integration and collision math
+ * live entirely in Encore; this copies the resulting pose for the next tick. */
+static bool graphene_bp_set_transform_impl(uintptr_t handle, uint64_t id,
+    float px, float py, float pz, float rx, float ry, float rz, float sx, float sy, float sz) {
+    graphene_bp_component *component = graphene_bp_component_find(graphene_bp_instance_find(handle), id);
+    if (!component) return false;
+    const float transform[3][3] = {{px, py, pz}, {rx, ry, rz}, {sx, sy, sz}};
+    for (size_t f = 0; f < 3; ++f) for (size_t a = 0; a < 3; ++a) if (!isfinite(transform[f][a])) return false;
+    memcpy(component->transform, transform, sizeof(transform)); return true;
+}
 static float graphene_bp_axis_impl(uintptr_t handle, uint64_t id, uint32_t field, uint32_t axis) {
     float value = 0; graphene_bp_read_transform(graphene_bp_instance_find(handle), id, field, axis, &value); return value;
 }
@@ -272,6 +283,8 @@ GBP_LOCKED(bool, destroy, (uintptr_t handle), (handle))
 GBP_LOCKED(bool, add_component, (uintptr_t handle, uint64_t id, uint64_t parent, float px, float py, float pz,
     float rx, float ry, float rz, float sx, float sy, float sz, bool visible),
     (handle, id, parent, px, py, pz, rx, ry, rz, sx, sy, sz, visible))
+GBP_LOCKED(bool, set_transform, (uintptr_t handle, uint64_t id, float px, float py, float pz,
+    float rx, float ry, float rz, float sx, float sy, float sz), (handle, id, px, py, pz, rx, ry, rz, sx, sy, sz))
 GBP_LOCKED(float, axis, (uintptr_t handle, uint64_t id, uint32_t field, uint32_t axis), (handle, id, field, axis))
 GBP_LOCKED(bool, has_component, (uintptr_t handle, uint64_t id), (handle, id))
 GBP_LOCKED(bool, is_visible, (uintptr_t handle, uint64_t id), (handle, id))
@@ -282,3 +295,41 @@ GBP_LOCKED(encore_str, instance_error, (uintptr_t handle), (handle))
 GBP_LOCKED(uint64_t, error_node, (uintptr_t handle), (handle))
 GBP_LOCKED(encore_str, take_log, (uintptr_t handle), (handle))
 #undef GBP_LOCKED
+
+/* Typed property reads copy values while the registry lock pins the instance.
+ * This is ABI marshaling only; screen policy remains in Encore. */
+static bool graphene_bp_property_value(uintptr_t handle, uint64_t id, gbp_value *value) {
+    graphene_bp_instance *instance = graphene_bp_instance_find(handle);
+    return instance && instance->module->api->get_property(instance->state, id, value);
+}
+uint32_t graphene_bp_property_type(uintptr_t handle, uint64_t id) {
+    graphene_bp_lock(); gbp_value value = {0};
+    uint32_t result = graphene_bp_property_value(handle, id, &value) ? value.type : 0;
+    graphene_bp_unlock(); return result;
+}
+bool graphene_bp_property_bool(uintptr_t handle, uint64_t id) {
+    graphene_bp_lock(); gbp_value value = {0};
+    bool result = graphene_bp_property_value(handle, id, &value) && value.type == 1 && value.boolean;
+    graphene_bp_unlock(); return result;
+}
+int32_t graphene_bp_property_i32(uintptr_t handle, uint64_t id) {
+    graphene_bp_lock(); gbp_value value = {0};
+    int32_t result = graphene_bp_property_value(handle, id, &value) && value.type == 2 ? value.integer : 0;
+    graphene_bp_unlock(); return result;
+}
+float graphene_bp_property_f32(uintptr_t handle, uint64_t id, uint32_t axis) {
+    graphene_bp_lock(); gbp_value value = {0};
+    float result = graphene_bp_property_value(handle, id, &value) && (value.type == 3 || value.type == 5) && axis < 3 ? value.vector[axis] : 0;
+    graphene_bp_unlock(); return result;
+}
+uint64_t graphene_bp_property_reference(uintptr_t handle, uint64_t id) {
+    graphene_bp_lock(); gbp_value value = {0};
+    uint64_t result = graphene_bp_property_value(handle, id, &value) && (value.type == 6 || value.type == 7) ? value.reference : 0;
+    graphene_bp_unlock(); return result;
+}
+encore_str graphene_bp_property_string(uintptr_t handle, uint64_t id) {
+    graphene_bp_lock(); gbp_value value = {0}; encore_str result = graphene_string("");
+    if (graphene_bp_property_value(handle, id, &value) && value.type == 4 && value.length <= 1048576 && (value.bytes || !value.length))
+        result = encore_str_from_buffer(value.bytes, value.length);
+    graphene_bp_unlock(); return result;
+}

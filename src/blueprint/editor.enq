@@ -3,16 +3,17 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
-import luma::{CanvasScene, CanvasView, Color, DisplayList, DisplayPoint, Event, Point, Rect, Style, StyleSheet, TextEditor, Widget, canvas_cubic, vertical, horizontal, event_pointer_down, event_pointer_move, event_pointer_up, event_key_down, event_text_input, event_scroll, event_focus_lost, key_delete, key_backspace, key_enter, key_left, key_right, key_home, key_end, key_escape}
-import luma::{IconManager, key_down, key_up, Size, WidgetLayout, anchored_popup_bounds, property_row}
-import mod::catalog::{blueprint_operations, operation_info, operation_types, operation_node, blueprint_default}
+import luma::{CanvasScene, CanvasView, Color, DisplayList, DisplayPoint, Event, IconManager, Point, Rect, Size, Style, StyleSheet, TextEditor, Widget, WidgetLayout, anchored_popup_bounds, canvas_cubic, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_scroll, event_text_input, horizontal, key_backspace, key_delete, key_down, key_end, key_enter, key_escape, key_home, key_left, key_right, key_up, property_row, vertical}
+
+import mod::catalog::{blueprint_default, blueprint_operations, operation_info, operation_node, operation_types}
 import mod::codec::{blueprint_value_json, blueprint_value_parse}
-import mod::document::{BlueprintCommand, BlueprintMove, BlueprintClipboard}
+import mod::document::{BlueprintClipboard, BlueprintCommand, BlueprintMove}
 import mod::files::BlueprintFile
 import mod::model::*
-import mod::validate::{validate_blueprint, blueprint_connection_error}
+import mod::validate::{blueprint_connection_error, validate_blueprint}
 import mod::visual::{BlueprintIcons, bp_style, grid_paint, node_bounds, node_paint, pin_point, wire_bounds, wire_paint}
 import refrain::command_bus::{EditorState, GrapheneCommand}
 import refrain::content_search::search_matches
@@ -141,8 +142,19 @@ fn themed(sheet: StyleSheet, class: str) -> Style {
 fn edit(state: mut EditorState, command: BlueprintCommand) -> bool {
     ret state.execute(GrapheneCommand::EditBlueprint(command)).success()
 }
-fn palette() -> Vec[str] {
-    ret blueprint_operations()
+fn palette(domain: str) -> Vec[str] {
+    let mut result = Vec[str]::new()
+    for key in blueprint_operations() {
+        let category = operation_info(key).category
+        if domain == "ui" {
+            if category != "Transform" && category != "Appearance" && key != "input-pressed" && key != "input-released" {
+                result.push(key)
+            }
+        } elif !key.contains("ui-") {
+            result.push(key)
+        }
+    }
+    ret result
 }
 fn default_value(kind: str) -> BlueprintValue {
     ret match kind {
@@ -352,6 +364,9 @@ impl for BlueprintEditor {
             index += 1
         }
     }
+    pub fn set_diagnostics(self: mut Self, diagnostics: Vec[BlueprintDiagnostic]) ->() {
+        self.diagnostics = diagnostics
+    }
     pub fn geometry_rebuilds(self: Self) ->(u64, u64) {
         ret(self.node_rebuilds, self.wire_rebuilds)
     }
@@ -392,7 +407,7 @@ impl for BlueprintEditor {
         let mut index = 0_usize
         for file in files {
             if self.asset_query.value() == "" || file.name.contains(self.asset_query.value()) {
-                list.push(self.button(f "bp-open-{index}", file.name, if file.error == "" {
+                list.push(self.button(f"bp-open-{index}", file.name, if file.error == "" {
                             "git-branch"
                         } else {
                             "circle-alert"
@@ -478,7 +493,7 @@ impl for BlueprintEditor {
             for axis in vec!["X", "Y", "Z"] {
                 let mut column = Widget::panel("").with_classes("bp-axis").with_direction(vertical())
                 column.push(Widget::label(axis).with_classes("bp-muted"))
-                column.push(self.entry(f "bp-value-axis-{index}", self.value_axes.get(index).unwrap_or(TextEditor::new("0")).value()))
+                column.push(self.entry(f"bp-value-axis-{index}", self.value_axes.get(index).unwrap_or(TextEditor::new("0")).value()))
                 axes.push(column) index += 1
             }
             controls.push(axes)
@@ -538,7 +553,7 @@ impl for BlueprintEditor {
                 } elif compiling {
                     "COMPILING"
                 } elif self.diagnostics.len() > 0 {
-                    f "{self.diagnostics.len()} issues"
+                    f"{self.diagnostics.len()} issues"
                 } elif state.blueprint_needs_compile() {
                     "NEEDS COMPILE"
                 } else {
@@ -553,16 +568,16 @@ impl for BlueprintEditor {
         let mut workspace = Widget::panel("bp-workspace").with_classes("bp-workspace").with_direction(horizontal())
         if self.left_open {
             let mut structure = Widget::panel("bp-structure").with_attribute("data-luma-scrollable", "true").with_classes("bp-sidebar bp-left").with_direction(vertical())
-            structure.push(self.button("bp-components-toggle", "Components", if self.components_open {
+            structure.push(self.button("bp-components-toggle", "Components", if self.components_open && asset.domain != "ui" {
                         "chevron-down"
                     } else {
                         "chevron-right"
                     }
                     ,
                 ).with_added_classes("bp-section"))
-            if self.components_open {
+            if self.components_open && asset.domain != "ui" {
                 for component in asset.components {
-                    structure.push(self.button(f "bp-component-{component.id}", component.name, if component.kind == "static-mesh" {
+                    structure.push(self.button(f"bp-component-{component.id}", component.name, if component.kind == "static-mesh" {
                                 "box"
                             } else {
                                 "circle-dot"
@@ -595,7 +610,7 @@ impl for BlueprintEditor {
             }
             if self.properties_open {
                 for property in asset.properties {
-                    structure.push(self.button(f "bp-property-{property.id}", property.name, "variable").with_added_classes(if self.property == property.id {
+                    structure.push(self.button(f"bp-property-{property.id}", property.name, "variable").with_added_classes(if self.property == property.id {
                                 "bp-selected"
                             } else {
                                 ""
@@ -637,10 +652,10 @@ impl for BlueprintEditor {
                                 let index = group * 3 + axis
                                 let mut column = Widget::panel("").with_classes("bp-axis").with_direction(vertical())
                                 column.push(Widget::label(label).with_classes("bp-muted"))
-                                column.push(self.entry(f "bp-axis-{index}", self.component_axes.get(index).unwrap_or(TextEditor::new("0")).value()))
+                                column.push(self.entry(f"bp-axis-{index}", self.component_axes.get(index).unwrap_or(TextEditor::new("0")).value()))
                                 axes.push(column) axis += 1
                             }
-                            inspector.push(property_row(f "bp-transform-row-{group}", if group == 0 {
+                            inspector.push(property_row(f"bp-transform-row-{group}", if group == 0 {
                                         "Position"
                                     } elif group == 1 {
                                         "Rotation"
@@ -682,7 +697,7 @@ impl for BlueprintEditor {
                         if node.operation == "get-variable" || node.operation == "set-variable" {
                             inspector.push(Widget::label("Variable").with_classes("bp-field-label"))
                             for property in asset.properties {
-                                inspector.push(self.button(f "bp-reference-{property.id}", property.name, "variable").with_added_classes(if node.reference == property.id {
+                                inspector.push(self.button(f"bp-reference-{property.id}", property.name, "variable").with_added_classes(if node.reference == property.id {
                                             "bp-selected"
                                         } else {
                                             ""
@@ -690,7 +705,7 @@ impl for BlueprintEditor {
                                     ).with_disabled(locked))
                             }
                         }
-                        if node.operation == "input-pressed" || node.operation == "input-released" {
+                        if node.operation == "input-pressed" || node.operation == "input-released" || node.operation == "ui-click" || node.operation == "ui-change" {
                             inspector.push(property_row("bp-action-name-row", "Action", self.entry("bp-action-name", self.value.value())))
                             for action in self.actions {
                                 inspector.push(self.button("bp-action-" + action, action, "keyboard").with_disabled(locked))
@@ -703,7 +718,7 @@ impl for BlueprintEditor {
                             inspector.push(Widget::label("Target").with_classes("bp-field-label"))
                             inspector.push(self.button("bp-target-self", "Self", "circle-dot").with_disabled(locked))
                             for component in asset.components {
-                                inspector.push(self.button(f "bp-target-{component.id}", component.name, "box").with_disabled(locked))
+                                inspector.push(self.button(f"bp-target-{component.id}", component.name, "box").with_disabled(locked))
                             }
                         }
                         inspector.push(self.button("bp-disconnect", "Disconnect Inputs", "split").with_disabled(locked))
@@ -715,7 +730,7 @@ impl for BlueprintEditor {
                 }
             } else {
                 inspector.push(Widget::label(if self.selection.len() > 1 {
-                            f "{self.selection.len()} nodes selected"
+                            f"{self.selection.len()} nodes selected"
                         } else {
                             "Select a node, component or variable."
                         }
@@ -734,7 +749,7 @@ impl for BlueprintEditor {
             let mut diagnostics = Widget::panel("bp-diagnostics").with_classes("bp-diagnostics").with_direction(vertical())
             let mut index = 0_usize
             for diagnostic in self.diagnostics {
-                diagnostics.push(self.button(f "bp-diagnostic-{index}", diagnostic.message +(if diagnostic.pin != "" {
+                diagnostics.push(self.button(f"bp-diagnostic-{index}", diagnostic.message +(if diagnostic.pin != "" {
                                 " · " + diagnostic.pin
                             } else {
                                 ""
@@ -749,7 +764,7 @@ impl for BlueprintEditor {
             log.push(Widget::label(self.build_log).with_classes("bp-build-output")) root.push(log)
         }
         let mut footer = Widget::panel("").with_classes("bp-footer").with_direction(horizontal())
-        footer.push(Widget::label(f "{asset.nodes.len()} nodes · {asset.links.len()} connections"))
+        footer.push(Widget::label(f"{asset.nodes.len()} nodes · {asset.links.len()} connections"))
         footer.push(Widget::spacer(1))
         if self.build_log != "" {
             footer.push(self.button("bp-toggle-log", "Build Log", "terminal"))
@@ -760,7 +775,7 @@ impl for BlueprintEditor {
     }
     fn candidates(self: Self) -> Vec[str] {
         let mut result = Vec[str]::new()
-        for key in palette() {
+        for key in palette(self.cached.domain) {
             let info = operation_info(key)
             let query = ascii_lower(self.query.value())
             let matches = query == "" || ascii_lower(info.title).contains(query) || key.contains(query) || ascii_lower(info.category).contains(query)
@@ -845,7 +860,7 @@ impl for BlueprintEditor {
                         }
                     }
                 }
-                results.push(self.button(f "bp-value-reference-{id}", name, "box").with_added_classes(if index == self.reference_index {
+                results.push(self.button(f"bp-value-reference-{id}", name, "box").with_added_classes(if index == self.reference_index {
                             "bp-selected"
                         } else {
                             ""
@@ -915,7 +930,7 @@ impl for BlueprintEditor {
     }
     fn load_node(self: mut Self, node: BlueprintNode) ->() {
         self.property = 0 self.component = 0 self.load_value(node.value)
-        if node.operation == "input-pressed" || node.operation == "input-released" {
+        if node.operation == "input-pressed" || node.operation == "input-released" || node.operation == "ui-click" || node.operation == "ui-change" {
             self.value = TextEditor::new(node.text) self.active_type = "action"
         }
     }
@@ -993,14 +1008,14 @@ impl for BlueprintEditor {
             _ => {
                 let mut index = 0_usize
                 for value in self.component_axes {
-                    if self.field == f "bp-axis-{index}" {
+                    if self.field == f"bp-axis-{index}" {
                         ret value
                     }
                     index += 1
                 }
                 index = 0
                 for value in self.value_axes {
-                    if self.field == f "bp-value-axis-{index}" {
+                    if self.field == f"bp-value-axis-{index}" {
                         ret value
                     }
                     index += 1
@@ -1035,14 +1050,14 @@ impl for BlueprintEditor {
             _ => {
                 let mut found = false let mut index = 0_usize
                 for value in self.component_axes {
-                    if self.field == f "bp-axis-{index}" {
+                    if self.field == f"bp-axis-{index}" {
                         self.component_axes.set(index, editor) found = true
                     }
                     index += 1
                 }
                 index = 0
                 for value in self.value_axes {
-                    if self.field == f "bp-value-axis-{index}" {
+                    if self.field == f"bp-value-axis-{index}" {
                         self.value_axes.set(index, editor) found = true
                     }
                     index += 1
@@ -1083,7 +1098,7 @@ impl for BlueprintEditor {
                 if event.key() == key_enter() {
                     match choices.get(self.reference_index) {
                         Some(id) => {
-                            self.action(state, f "bp-value-reference-{id}") self.reference_menu = false self.field = "" self.refresh(state.blueprint_asset(), sheet)
+                            self.action(state, f"bp-value-reference-{id}") self.reference_menu = false self.field = "" self.refresh(state.blueprint_asset(), sheet)
                         }
                         None => {
                         }
@@ -1586,14 +1601,14 @@ impl for BlueprintEditor {
             }
             if self.active_type == "actor" {
                 for actor in state.scene().entities() {
-                    if target == f "bp-value-reference-{actor.id()}" {
-                        self.value = TextEditor::new(f "{actor.id()}")
+                    if target == f"bp-value-reference-{actor.id()}" {
+                        self.value = TextEditor::new(f"{actor.id()}")
                     }
                 }
             } else {
                 for component in asset.components {
-                    if target == f "bp-value-reference-{component.id}" {
-                        self.value = TextEditor::new(f "{component.id}")
+                    if target == f"bp-value-reference-{component.id}" {
+                        self.value = TextEditor::new(f"{component.id}")
                     }
                 }
             }
@@ -1601,7 +1616,7 @@ impl for BlueprintEditor {
         }
         let mut diagnostic_index = 0_usize
         for diagnostic in self.diagnostics {
-            if target == f "bp-diagnostic-{diagnostic_index}" && diagnostic.node != 0 {
+            if target == f"bp-diagnostic-{diagnostic_index}" && diagnostic.node != 0 {
                 self.selection = vec![diagnostic.node] self.frame(true) self.right_open = true
                 match asset.node(diagnostic.node) {
                     Some(node) => {
@@ -1619,12 +1634,12 @@ impl for BlueprintEditor {
                     let _set = edit(state, BlueprintCommand::SetNode(node.with_reference(0))) ret()
                 }
                 for component in asset.components {
-                    if target == f "bp-target-{component.id}" {
+                    if target == f"bp-target-{component.id}" {
                         let _set = edit(state, BlueprintCommand::SetNode(node.with_reference(component.id))) ret()
                     }
                 }
                 for property in asset.properties {
-                    if target == f "bp-reference-{property.id}" {
+                    if target == f"bp-reference-{property.id}" {
                         let _set = edit(state, BlueprintCommand::SetNode(node.with_value(property.default_value).with_reference(property.id))) ret()
                     }
                 }
@@ -1641,7 +1656,7 @@ impl for BlueprintEditor {
             if target == "bp-new-property-" + kind {
                 let mut id = 1_u64
                 for property in asset.properties {
-                    if property.id >= id {
+                    if property.id >= id &&(asset.domain != "ui" || property.id < 999999) {
                         id = property.id + 1
                     }
                 }
@@ -1776,7 +1791,7 @@ impl for BlueprintEditor {
             }
             let _commit = edit(state, BlueprintCommand::CommitGesture)
         }
-        for operation in palette() {
+        for operation in palette(self.cached.domain) {
             if target == "bp-add-" + operation {
                 let position = self.view.world(self.menu_at.x() - self.viewport.x(), self.menu_at.y() - self.viewport.y())
                 let mut node = operation_node(asset.next_node_id(), operation).at(position.x(), position.y())
@@ -1799,7 +1814,7 @@ impl for BlueprintEditor {
                         }
                     }
                 }
-                if operation == "input-pressed" || operation == "input-released" {
+                if operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change" {
                     node = node.with_text(self.actions.get(0).unwrap_or(""))
                 }
                 let mut connection = Option[BlueprintLink]::None

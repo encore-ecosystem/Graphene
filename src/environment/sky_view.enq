@@ -2,7 +2,11 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::thread::JoinHandle
+
 import linalg::Vec3
+
 import mod::frame::*
 import mod::hdr::{HdrImage, HdrUpload, load_hdr}
 import mod::system::EnvironmentFrame
@@ -12,7 +16,6 @@ import refrain::scene::camera::PerspectiveCamera
 import refrain::shaders::aa_fullscreen::aa_fullscreen
 import refrain::texture_gpu::TextureUpload
 import refrain::texture_image::{TextureImage, texture_path_valid}
-import std::thread::JoinHandle
 extern fn graphene_environment_shader_length(shader: u32) -> u32
 extern fn graphene_environment_shader_word(shader: u32, index: u32) -> u32
 pub fn environment_spirv(shader: u32) -> Vec[u32] {
@@ -152,7 +155,7 @@ impl for EnvironmentView {
             device,
             device.create_bind_group_layout(vec![BindGroupLayoutEntry::uniform(0, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(1, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(2, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(3, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(4, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(5, shader_stage_fragment()), BindGroupLayoutEntry::texture_sampler(6, shader_stage_fragment())]),
             device.create_shader_module(aa_fullscreen(), shader_stage_vertex()),
-            device.create_mesh(vec![0.0_f32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], vec![0_u32, 1, 2]),
+            device.create_mesh(vec![0.0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32], vec![0_u32, 1_u32, 2_u32]),
             Vec[SkyPipeline]::new(), Vec[EnvironmentStage<H>]::new(), RuntimeMaterial::new(), RuntimeMaterial::new(), "", "", "", "", "", "", Option::None, Option::None, white_panorama(device), device.create_sampler(), 0, false,
             "", Vec[u32]::new(), "", Vec[u32]::new(), "", - 1, 0, false, Vec[f32]::new(), ""
         }
@@ -226,7 +229,7 @@ impl for EnvironmentView {
         let buffer = stage.uniforms.get(frame.slot() as usize).unwrap_or(GpuBuffer::unavailable())
         if selected == stage.groups.len() {
             stage.groups.push(EnvironmentBinding {
-                    frame.slot(), key, self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![576_u64], vec![1_u32, 2, 3, 4, 5, 6], textures, vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler, self.sampler])
+                    frame.slot(), key, self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![576_u64], vec![1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 6_u32], textures, vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler, self.sampler])
                 }
                 ,
             )
@@ -470,7 +473,7 @@ impl for EnvironmentView {
             let mut uniforms = Vec[GpuBuffer]::new() let mut groups = Vec[BindGroup]::new()
             for slot in 0..(target.frames_in_flight() as usize) {
                 let buffer = self.device.create_buffer(576, buffer_uniform(), true)
-                groups.push(self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![576_u64], vec![1_u32, 2, 3, 4, 5, 6], self.textures(self.history), vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler, self.sampler])) uniforms.push(buffer)
+                groups.push(self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![576_u64], vec![1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 6_u32], self.textures(self.history), vec![self.sampler, self.sampler, self.sampler, self.sampler, self.sampler, self.sampler])) uniforms.push(buffer)
             }
             self.pipelines.push(SkyPipeline {
                     target.handle(), target.render_signature(), self.generation, key, cloud, self.texture_key(self.history), shader, pipeline, uniforms, groups

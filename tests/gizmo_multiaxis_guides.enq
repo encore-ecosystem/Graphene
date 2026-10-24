@@ -1,12 +1,18 @@
 //! Compound handles show vector/factor telemetry instead of a false Z readout.
 import core::option::Option
-import graphene::editor_guides::{gizmo_guides, GizmoGuideStyle}
+import std::os::read_file
+
 import graphene::{GizmoGesture, GizmoProjection, GizmoSnap}
+import graphene::editor_guides::{GizmoGuideStyle, gizmo_guides}
 import linalg::Vec3
 import luma::{DisplayCommand, Rect, StyleSheet}
-import std::os::read_file
 fn main() -> u32 {
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     let style = GizmoGuideStyle::from_sheet(sheet)
     let projection = GizmoProjection::new(Vec3::from_spherical(0.65, 0.4).scale(8), 0.65, 0.4, 1.0471976, 800, 600)
     let screen = projection.project(Vec3::zero()).unwrap_or(Vec3::zero())

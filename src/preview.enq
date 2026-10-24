@@ -1,24 +1,31 @@
 import core::fmt::Debug
 import core::option::Option
 import core::vec::Vec
+
+import std::io::println
+import std::math::tan
+import std::path::Path
+
 import linalg::{Mat4, Vec3}
+import luma::Rect
+
 import mod::animation::component::CharacterMorphChoice
 import mod::animation::picking::{AnimationPick, pick_animation}
 import mod::animation::scene::SceneAnimation
-import mod::animation::scene_gpu::{SceneCharacters, CharacterRenderView}
+import mod::animation::scene_gpu::{CharacterRenderView, SceneCharacters}
 import mod::anti_aliasing::AntiAliasingView
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
 import mod::autolod_settings::AutoLodSettings
 import mod::dynamic_gi::{GpuDynamicGi, SdfBox, SdfSphere, SurfaceCacheSample}
 import mod::editor_gesture::gizmo_angle
-import mod::editor_gizmo_handle::{gizmo_extra_hit, gizmo_plane_handle_mesh, gizmo_handle_contains}
+import mod::editor_gizmo_handle::{gizmo_extra_hit, gizmo_handle_contains, gizmo_plane_handle_mesh}
 import mod::editor_selection_outline::SelectionOutline
 import mod::environment::frame::*
 import mod::environment::model::bounded
 import mod::environment::precipitation::PrecipitationView
 import mod::environment::sky_view::EnvironmentView
-import mod::environment::system::{EnvironmentSystem, EnvironmentFrame}
-import mod::lod_groups::{LodGroups, LodGroup}
+import mod::environment::system::{EnvironmentFrame, EnvironmentSystem}
+import mod::lod_groups::{LodGroup, LodGroups}
 import mod::mesh_prepare::prepare_mesh_geometry
 import mod::particles::scene::SceneParticles
 import mod::performance::performance_counter_ns
@@ -27,11 +34,10 @@ import mod::render_policy::RenderFeaturePolicy
 import mod::render_settings::{AntiAliasingMethod, RenderSettings}
 import mod::renderer::SceneRenderer
 import mod::rhi::*
-import mod::scene::camera::PerspectiveCamera
-import mod::scene::camera::camera_frame_extent
+import mod::scene::camera::{PerspectiveCamera, camera_frame_extent}
 import mod::scene::component::SceneComponent
 import mod::scene::light::DirectionalLight
-import mod::scene::lighting::{scene_sun, scene_light_values}
+import mod::scene::lighting::{scene_light_values, scene_sun}
 import mod::scene::primitive::{MeshData, cube_mesh, editor_grid_mesh, gizmo_ring_mesh, gizmo_tip_mesh}
 import mod::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
 import mod::scene::transform::Transform
@@ -40,11 +46,7 @@ import mod::shaders::{material_fragment_spirv, material_vertex_spirv}
 import mod::texture_asset::TextureImage
 import mod::texture_gpu::TextureUpload
 import mod::virtual_geometry::VirtualGeometry
-import mod::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, gpu_virtual_geometry_available, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_error, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_cluster_count, gpu_virtual_geometry_maximum_lod, gpu_virtual_geometry_selected_lod, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_target_ratio, gpu_virtual_geometry_minimum_ratio, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_available, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_traversal_instances}
-import mod::virtual_geometry_gpu::{gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_replace_texture_groups}
-import std::io::println
-import std::math::tan
-import std::path::Path
+import mod::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, gpu_virtual_geometry_available, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_cluster_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_error, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_maximum_lod, gpu_virtual_geometry_minimum_ratio, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_replace_texture_groups, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_selected_lod, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_target_ratio, gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_traversal_instances}
 
 /// Stable source entity identity to a renderer-owned mesh resource.
 pub struct SceneGpuBinding {
@@ -91,12 +93,14 @@ pub struct ViewportRenderer {
     indirect_ambient: Vec3
     scene: Scene
     frame_items: Vec[RenderItem]
+    foliage_items: Vec[RenderItem]
     frame_scene_revision: u64
     gizmo_scene: Scene
     cube_mesh: MeshId
     mesh_bounds_min: Vec[Vec3]
     mesh_bounds_max: Vec[Vec3]
     cube_material: MaterialId
+    terrain_material: MaterialId
     selected_material: MaterialId
     cube_unlit_material: MaterialId
     selected_unlit_material: MaterialId
@@ -443,6 +447,7 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     let unlit_material_id = materials.add(StandardMaterial::editor_default().with_unlit())
     let selected_unlit_material_id = materials.add(StandardMaterial::new(
             Vec3::new(0.38_f32, 0.42_f32, 0.48_f32), 0.08_f32, 0.42_f32,).with_unlit())
+    let terrain_material_id = materials.add(StandardMaterial::new(Vec3::new(1_f32, 1_f32, 1_f32), 0_f32, 0.85_f32))
     let selection_outline = SelectionOutline::create(device, swapchain, swapchain.width(), swapchain.height())
     let skybox_material_id = materials.add(StandardMaterial::new(
             Vec3::new(0.035_f32, 0.12_f32, 0.34_f32), 0.0_f32, 1.0_f32,).with_unlit().with_double_sided())
@@ -603,8 +608,8 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
             virtual_meshes, virtual_mesh_frame_ready, false,
             ray_tlas, Vec[f32]::new(), false,
             indirect_ambient,
-            scene, Vec[RenderItem]::new(), 0_u64, gizmo_scene, mesh_id, mesh_bounds_min,
-            mesh_bounds_max, material_id, selected_material_id,
+            scene, Vec[RenderItem]::new(), Vec[RenderItem]::new(), 0_u64, gizmo_scene, mesh_id, mesh_bounds_min,
+            mesh_bounds_max, material_id, terrain_material_id, selected_material_id,
             unlit_material_id, selected_unlit_material_id,
             selection_outline, Vec[u64]::new(), grid,
             gizmo_tip_mesh_id, gizmo_ring_mesh_id, gizmo_x_material, gizmo_y_material, gizmo_z_material,
@@ -1130,7 +1135,66 @@ impl for ViewportRenderer {
                 result.push(item)
             }
         }
+        for item in self.foliage_items {
+            result.push(item)
+        }
         ret result
+    }
+
+    pub fn foliage_budget(self: mut Self&) -> usize {
+        self.prepare_scene_snapshot()
+        ret if self.frame_items.len() < 1024_usize {
+            let available = 1024_usize - self.frame_items.len() if available > 768_usize {
+                768_usize
+            } else {
+                available
+            }
+        } else {
+            0_usize
+        }
+    }
+    pub fn foliage_item(self: Self&, identity: u64, mesh: MeshId, world: Mat4) -> RenderItem {
+        ret RenderItem::new(identity, Renderable::new(mesh, if self.shading_mode == 10 {
+                    self.cube_unlit_material
+                } else {
+                    self.terrain_material
+                }
+                ,
+            ), world)
+    }
+    pub fn set_foliage(self: mut Self&, items: Vec[RenderItem]) -> bool {
+        let mut equal = items.len() == self.foliage_items.len()
+        if equal {
+            for i in 0_usize..items.len() {
+                let a = items.get_unchecked_borrowed(i) let b = self.foliage_items.get_unchecked_borrowed(i)
+                if a.entity() != b.entity() || a.mesh().value() != b.mesh().value() || a.material().value() != b.material().value() {
+                    equal = false break
+                }
+                let av = a.world().values() let bv = b.world().values()
+                for j in 0_usize..16_usize {
+                    if av.get_unchecked_borrowed(j) != bv.get_unchecked_borrowed(j) {
+                        equal = false break
+                    }
+                }
+                if !equal {
+                    break
+                }
+            }
+        }
+        if equal {
+            ret false
+        }
+        self.foliage_items = items self.invalidate_anti_aliasing() ret true
+    }
+    fn temporal_scene_items(self: Self&) -> Vec[RenderItem] {
+        let mut items = Vec[RenderItem]::with_capacity(self.frame_items.len() + self.foliage_items.len())
+        for item in self.frame_items {
+            items.push(item)
+        }
+        for item in self.foliage_items {
+            items.push(item)
+        }
+        ret items
     }
 
     fn prepare_selection_outline(self: mut Self&, camera: PerspectiveCamera, width: u32, height: u32) -> bool {
@@ -1338,6 +1402,106 @@ impl for ViewportRenderer {
             }
         }
         ret self.cube_mesh
+    }
+
+    /// Interactive terrain uploads use the classic path and retain a stable mesh ID.
+    /// Both offscreen producers and Luma presentation consumers must finish first.
+    pub fn update_terrain_mesh(self: mut Self&, mesh: MeshId, data: MeshData) -> MeshId {
+        if mesh.valid() &&(!self.swapchain.wait_readback() ||
+            (self.consumer_swapchain != 0 && !Swapchain::borrow(self.consumer_swapchain).wait_readback())) {
+            ret MeshId::new(0_u64)
+        }
+        let values = data.vertices() let stride =(data.stride() / 4_u32) as usize
+        if stride < 3 || values.len() < stride {
+            ret MeshId::new(0_u64)
+        }
+        let mut minimum = Vec3::new(values.get_unchecked_borrowed(0), values.get_unchecked_borrowed(1), values.get_unchecked_borrowed(2)) let mut maximum = minimum
+        let mut i = 0_usize
+        while i + 2 < values.len() {
+            let x = values.get_unchecked_borrowed(i) let y = values.get_unchecked_borrowed(i + 1) let z = values.get_unchecked_borrowed(i + 2)
+            minimum = Vec3::new(if x < minimum.x() {
+                    x
+                } else {
+                    minimum.x()
+                }
+                , if y < minimum.y() {
+                    y
+                } else {
+                    minimum.y()
+                }
+                , if z < minimum.z() {
+                    z
+                } else {
+                    minimum.z()
+                }
+                ,
+            )
+            maximum = Vec3::new(if x > maximum.x() {
+                    x
+                } else {
+                    maximum.x()
+                }
+                , if y > maximum.y() {
+                    y
+                } else {
+                    maximum.y()
+                }
+                , if z > maximum.z() {
+                    z
+                } else {
+                    maximum.z()
+                }
+                ,
+            ) i += stride
+        }
+        let uploaded = self.meshes.update_editable(self.device, mesh, data)
+        if uploaded.valid() {
+            if mesh.valid() {
+                self.mesh_bounds_min.set((mesh.value() - 1_u64) as usize, minimum) self.mesh_bounds_max.set((mesh.value() - 1_u64) as usize, maximum)
+            } else {
+                self.mesh_bounds_min.push(minimum) self.mesh_bounds_max.push(maximum)
+            }
+            self.frame_scene_revision = 0_u64 self.invalidate_anti_aliasing()
+        }
+        ret uploaded
+    }
+    pub fn set_terrain_mesh(self: mut Self&, index: u32, mesh: MeshId) -> bool {
+        if index == 0 || index > self.cubes.len() as u32 {
+            ret false
+        }
+        match self.scene.get(self.cubes.get_unchecked_borrowed((index - 1_u32) as usize)) {
+            Some(entity) => {
+                match entity.renderable() {
+                    Some(r) => {
+                        if r.mesh().value() == mesh.value() &&(r.material().value() == self.terrain_material.value() ||(self.shading_mode == 10 && r.material().value() == self.cube_unlit_material.value())) {
+                            ret true
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if !self.set_cube_mesh(index, mesh) {
+            ret false
+        }
+        match self.cubes.get((index - 1_u32) as usize) {
+            Some(entity) => {
+                self.scene.set_renderable(entity, Option[Renderable]::Some(Renderable::new(mesh, if self.shading_mode == 10 {
+                                self.cube_unlit_material
+                            } else {
+                                self.terrain_material
+                            }
+                            ,
+                        )))
+            }
+            None => {
+                ret false
+            }
+        }
+        ret true
     }
 
     pub fn upload_mesh(self: mut Self&, data: MeshData) -> MeshId {
@@ -1750,6 +1914,14 @@ impl for ViewportRenderer {
     }
 
     /// Updates the retained viewport. No CPU pixel readback or swapchain copy.
+    pub fn game_ui_bounds(self: Self&, bounds: Rect) -> Rect {
+        let extent = camera_frame_extent(self.viewport_width, self.viewport_height, self.camera_override_aspect)
+        if self.viewport_width == 0 || self.viewport_height == 0 {
+            ret bounds
+        }
+        let sx = bounds.width() /(self.viewport_width as f32) let sy = bounds.height() /(self.viewport_height as f32)
+        ret Rect::new(bounds.x() +(((self.viewport_width - extent.0) / 2) as f32) * sx, bounds.y() +(((self.viewport_height - extent.1) / 2) as f32) * sy,(extent.0 as f32) * sx,(extent.1 as f32) * sy)
+    }
     pub fn set_camera_override(self: mut Self&, camera: Option[PerspectiveCamera], aspect: f32) ->() {
         self.camera_override = camera self.camera_override_aspect = aspect
     }
@@ -1797,6 +1969,9 @@ impl for ViewportRenderer {
             } else {
                 items.push(item)
             }
+        }
+        for item in self.foliage_items {
+            items.push(item)
         }
         self.preview_renderer.set_view_pipelines(self.preview_aa.solid_pipeline(), self.preview_aa.double_sided_pipeline(), self.preview_aa.method().temporal(), self.preview_aa.temporal())
         self.preview_renderer.set_indirect_ambient(self.indirect_ambient)
@@ -1987,7 +2162,7 @@ impl for ViewportRenderer {
         }
         frame.destroy()
         if submitted {
-            self.frames_since_resize += 1 self.aa.commit(self.frame_items, view)
+            self.frames_since_resize += 1 self.aa.commit(self.temporal_scene_items(), view)
             let now = performance_counter_ns() self.aa.begin_presentations(now - render_started, now)
         } else {
             self.aa.invalidate()
@@ -2035,8 +2210,8 @@ impl for ViewportRenderer {
         if axis_vector.length() < 0.000001_f32 {
             ret Vec3::zero()
         }
-        let center_x = self.viewport_width as f32* 0.5_f32
-        let center_y = self.viewport_height as f32* 0.5_f32
+        let center_x =(self.viewport_width as f32) * 0.5_f32
+        let center_y =(self.viewport_height as f32) * 0.5_f32
         let center_ray = self.camera_ray_from_position(center_x, center_y, position, yaw, pitch, fov)
         let mut plane_normal = center_ray.1.sub(axis_vector.scale(center_ray.1.dot(axis_vector)))
         if plane_normal.length() < 0.000001_f32 {
@@ -2437,7 +2612,7 @@ impl for ViewportRenderer {
                 Some(entity) => {
                     self.scene.set_parent(entity, Option[u64]::None)
                     self.scene.set_transform(entity, actor.transform())
-                    self.scene.set_component(entity, actor.component())
+                    self.scene.set_component(entity, actor.component()) self.scene.set_physics(entity, actor.physics())
                     self.scene.set_visible(entity, actor.visible())
                     let mut mesh = Option[MeshId]::None
                     for binding in bindings {
@@ -2577,7 +2752,7 @@ impl for ViewportRenderer {
     fn actor_circle(self: mut Self&, world: Mat4, radius: f32, z: f32, plane: u32, material: MaterialId) ->() {
         let mut previous = Vec3::zero()
         for index in 0_usize..33_usize {
-            let angle = index as f32* 6.2831855_f32 / 32.0_f32
+            let angle =(index as f32) * 6.2831855_f32 / 32.0_f32
             let point = Vec3::from_spherical(angle, 0.0_f32).scale(radius)
             let local = if plane == 0 {
                 Vec3::new(point.x(), point.z(), z)
@@ -2617,7 +2792,7 @@ impl for ViewportRenderer {
                 Some(actor) => {
                     match self.cubes.get(index) {
                         Some(id) => {
-                            self.scene.set_component(id, actor.component())
+                            self.scene.set_component(id, actor.component()) self.scene.set_physics(id, actor.physics())
                         }
                         None => {
                         }

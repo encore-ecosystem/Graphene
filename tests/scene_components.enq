@@ -1,10 +1,9 @@
 import core::option::Option
 import core::vec::Vec
-import graphene::EditorCameraState
-import graphene::editor_camera_actor::{scene_camera, load_scene_camera, piloted_transform}
+
+import graphene::{ActorCommand, ActorComponentCommand, AddActorCommand, BlueprintClass, BlueprintSimulation, CameraComponent, DuplicateActorCommand, EditorCameraState, EditorState, GrapheneCommand, LightComponent, Scene, SceneActor, SceneAsset, SceneComponent, Transform, blueprint_class_semantic}
+import graphene::editor_camera_actor::{load_scene_camera, piloted_transform, scene_camera}
 import graphene::scene::lighting::{scene_light_values, scene_sun}
-import graphene::{BlueprintSimulation, BlueprintClass, blueprint_class_semantic}
-import graphene::{Scene, SceneActor, SceneAsset, Transform, SceneComponent, LightComponent, CameraComponent, EditorState, GrapheneCommand, AddActorCommand, ActorComponentCommand, DuplicateActorCommand, ActorCommand}
 import linalg::Vec3
 
 fn main() -> u32 {
@@ -20,7 +19,7 @@ fn main() -> u32 {
             ret 1_u32
         }
     }
-    if decoded.version() != 6 || decoded.source_version() != 6 || decoded.len() != 2 {
+    if decoded.version() != 7 || decoded.source_version() != 7 || decoded.len() != 2 {
         ret 2_u32
     }
     match decoded.actor_by_id(5) {

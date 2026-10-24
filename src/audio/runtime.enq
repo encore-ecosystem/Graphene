@@ -3,15 +3,18 @@ import audio::{AudioConfig, AudioEngine, AudioError, AudioStats, Bus, Sound, Sou
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import linalg::Vec3
-import mod::asset::{load_sound, waveform}
-import mod::model::{AudioSource, AudioSettings}
-import refrain::native_asset::NativeSound
-import refrain::scene::component::SceneComponent
-import refrain::scene::world::Scene
+
 import std::os::{cwd, env, file_exists, read_file}
 import std::path::Path
 import std::thread::JoinHandle
+
+import linalg::Vec3
+
+import mod::asset::{load_sound, waveform}
+import mod::model::{AudioSettings, AudioSource}
+import refrain::native_asset::NativeSound
+import refrain::scene::component::SceneComponent
+import refrain::scene::world::Scene
 
 extern fn encore_os_executable_path() -> str
 #attr(safe)
@@ -89,12 +92,15 @@ pub struct SceneAudio {
     hrtf_available: bool
     attempted: bool
     generation: u64
+    device: str
+    game_paused: bool
+    resume_cursors: Vec[(u64, u64)]
 }
 
 impl for SceneAudio {
     pub fn new() -> Self {
         ret Self {
-            Option::None, Vec[Bus]::new(), Option::None, "", AudioSettings::defaults(), Vec[LoadedSound]::new(), Vec[str]::new(), Option::None, Vec[ActorVoice]::new(), false, false, "", Option::None, false, false, Vec3::zero(), false, "", false, false, 1_u64
+            Option::None, Vec[Bus]::new(), Option::None, "", AudioSettings::defaults(), Vec[LoadedSound]::new(), Vec[str]::new(), Option::None, Vec[ActorVoice]::new(), false, false, "", Option::None, false, false, Vec3::zero(), false, "", false, false, 1_u64, "", false, Vec[(u64, u64)]::new()
         }
     }
     pub fn close(self: mut Self) ->() {
@@ -107,8 +113,53 @@ impl for SceneAudio {
         }
         self.engine = Option[AudioEngine]::None self.buses.clear() self.preview_bus = Option[Bus]::None self.sounds.clear() self.queue.clear() self.voices.clear() self.preview_voice = Option[Voice]::None self.preview_path = "" self.preview_started = false self.preview_paused = false self.scene_preview = false self.playing = false self.listener_valid = false self.attempted = false
     }
+    /// Freezes scene voices while UI-bus audio continues on the same device.
+    pub fn set_game_paused(self: mut Self, paused: bool) ->() {
+        if paused == self.game_paused {
+            ret()
+        }
+        self.game_paused = paused
+        for item in self.voices {
+            if item.source.bus != "UI" {
+                if paused {
+                    item.voice.pause()
+                } else {
+                    item.voice.resume()
+                }
+            }
+        }
+    }
+    /// Stage device/HRTF changes before retiring the working mixer. Preserve
+    /// scene playback cursors across asynchronous sound reload and pause state.
+    pub fn apply_runtime_settings(self: mut Self, settings: AudioSettings, device: str) -> Result[(), str] {
+        if settings.max_voices < 1 || settings.max_voices > 1024 {
+            ret Result[(), str]::Err("Invalid voice limit")
+        }
+        if settings.headphones == self.settings.headphones && settings.max_voices == self.settings.max_voices && device == self.device {
+            self.settings = settings.snapshot() self.apply_mix() ret Result[(), str]::Ok(())
+        }
+        let mut candidate = SceneAudio::new()
+        candidate.configure(self.project, settings.snapshot()) candidate.device = device
+        if !candidate.initialize() ||(settings.headphones && !candidate.hrtf_available) {
+            let error = if candidate.message == "" {
+                "Requested audio configuration is unavailable"
+            } else {
+                candidate.message
+            }
+            candidate.close() ret Result[(), str]::Err(error)
+        }
+        let mut cursors = Vec[(u64, u64)]::new() for item in self.voices {
+            cursors.push((item.actor, item.voice.cursor()))
+        }
+        let playing = self.playing let paused = self.game_paused
+        self.close() self.generation += 1_u64
+        self.engine = candidate.engine self.buses = candidate.buses self.preview_bus = candidate.preview_bus
+        self.settings = settings.snapshot() self.device = device self.playing = playing self.game_paused = paused self.resume_cursors = cursors
+        self.attempted = true self.hrtf_available = candidate.hrtf_available self.message = ""
+        ret Result[(), str]::Ok(())
+    }
     pub fn configure(self: mut Self, project: str, settings: AudioSettings) ->() {
-        self.close() self.generation += 1_u64 self.project = project self.settings = settings self.message = ""
+        self.close() self.generation += 1_u64 self.project = project self.settings = settings self.message = "" self.device = read_file(project + "/.graphene/audio-device.txt")
     }
     pub fn busy(self: Self) -> bool {
         if self.worker.is_some() || self.queue.len() > 0 ||(self.preview_path != "" && !self.preview_started) {
@@ -140,7 +191,7 @@ impl for SceneAudio {
         }
         self.attempted = true
         let mut cfg = AudioConfig::defaults() cfg.max_voices = self.settings.max_voices cfg.hrtf = self.settings.headphones cfg.hrtf_library = audio_sdk_path()
-        cfg.device = read_file(self.project + "/.graphene/audio-device.txt")
+        cfg.device = self.device
         let mut opened: Result[AudioEngine, AudioError] = AudioEngine::open(cfg)
         self.hrtf_available = cfg.hrtf
         match opened {
@@ -514,7 +565,20 @@ impl for SceneAudio {
                                         }
                                         match engine.voice(sound, self.bus(c.bus), mode) {
                                             Ok(voice) => {
-                                                source_values(voice, c) voice.position(point(position), Position::zero()) voice.play() self.voices.push(ActorVoice {
+                                                source_values(voice, c) voice.position(point(position), Position::zero()) voice.play()
+                                                let mut pending_cursors = Vec[(u64, u64)]::new()
+                                                for saved in self.resume_cursors {
+                                                    if saved.0 == actor.id() {
+                                                        voice.seek(saved.1)
+                                                    } else {
+                                                        pending_cursors.push(saved)
+                                                    }
+                                                }
+                                                self.resume_cursors = pending_cursors
+                                                if self.game_paused && c.bus != "UI" {
+                                                    voice.pause()
+                                                }
+                                                self.voices.push(ActorVoice {
                                                         actor.id(), voice, c, position
                                                     }
                                                     ,

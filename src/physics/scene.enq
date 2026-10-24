@@ -1,0 +1,140 @@
+//! Scene-to-physics baking. Mesh triangles are sourced from imported CPU data,
+//! never read back from the GPU or approximated by their bounding spheres.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import linalg::Vec3
+import physics::{Body, CharacterConfig, Rotation, Shape, Triangle, TriangleMesh}
+
+import mod::component::PhysicsComponent
+import refrain::runtime::PhysicsWorld
+import refrain::scene::primitive::{MeshData, cube_mesh, plane_mesh, sphere_mesh}
+import refrain::scene::world::Scene
+
+pub struct PhysicsMesh {
+    actor: u64
+    mesh: MeshData
+}
+/// Uses the same builtin asset keys and source dimensions as the viewport.
+pub fn append_builtin_physics_mesh(meshes: mut Vec[PhysicsMesh], actor: u64, name: str) -> bool {
+    if name == "@plane" || name == "plane" {
+        meshes.push(PhysicsMesh { actor, plane_mesh(2_f32) }) ret true
+    }
+    if name == "@sphere" || name == "sphere" {
+        meshes.push(PhysicsMesh {
+                actor, sphere_mesh(0.6_f32, 20_u32, 32_u32)
+            }
+        ) ret true
+    }
+    if name == "" || name == "cube" {
+        meshes.push(PhysicsMesh { actor, cube_mesh(1_f32) }) ret true
+    }
+    ret false
+}
+fn abs(x: f32) -> f32 {
+    ret if x < 0_f32 {
+        - x
+    } else {
+        x
+    }
+}
+fn max(a: f32, b: f32) -> f32 {
+    ret if a > b {
+        a
+    } else {
+        b
+    }
+}
+fn scale_point(v: Vec[f32], i: usize, s: Vec3) -> Vec3 {
+    ret Vec3::new(v.get(i).unwrap_or(0_f32) * s.x(), v.get(i + 1_usize).unwrap_or(0_f32) * s.y(), v.get(i + 2_usize).unwrap_or(0_f32) * s.z())
+}
+pub fn mesh_collider(data: MeshData, scale: Vec3) -> Shape {
+    let stride =(data.stride() / 4_u32) as usize let vertices = data.vertices() let indices = data.indices()
+    let mut triangles = Vec[Triangle]::new() let mut i = 0_usize
+    if stride < 3_usize {
+        ret Shape::Mesh(TriangleMesh::new(triangles))
+    }
+    while i + 2_usize < indices.len() {
+        let a =(indices.get(i).unwrap_or(0_u32) as usize) * stride
+        let b =(indices.get(i + 1_usize).unwrap_or(0_u32) as usize) * stride
+        let c =(indices.get(i + 2_usize).unwrap_or(0_u32) as usize) * stride
+        if a + 2_usize < vertices.len() && b + 2_usize < vertices.len() && c + 2_usize < vertices.len() {
+            triangles.push(Triangle::new(scale_point(vertices, a, scale), scale_point(vertices, b, scale), scale_point(vertices, c, scale)))
+        }
+        i += 3_usize
+    }
+    ret Shape::Mesh(TriangleMesh::new(triangles))
+}
+pub fn scene_physics(scene: Scene, meshes: Vec[PhysicsMesh]) -> Result[PhysicsWorld, str] {
+    let mut physics = PhysicsWorld::without_floor(Vec3::new(0_f32, - 9.81_f32, 0_f32))
+    let mut characters = 0_usize
+    for entity in scene.entities() {
+        let c = entity.physics() if c.mode == "off" {
+            continue
+        }
+        if !c.valid() {
+            ret Result::Err("Invalid physics settings: " + entity.name())
+        }
+        // Runtime actors currently store local transforms. Reject unsupported
+        // hierarchies explicitly instead of simulating them in the wrong space.
+        if entity.parent().is_some() {
+            ret Result::Err("Physics actors must be scene roots: " + entity.name())
+        }
+        let t = entity.transform() let s = t.scale()
+        let scale = Vec3::new(abs(s.x()), abs(s.y()), abs(s.z()))
+        if scale.x() < 0.000001_f32 || scale.y() < 0.000001_f32 || scale.z() < 0.000001_f32 {
+            ret Result::Err("Physics collider has zero scale: " + entity.name())
+        }
+        if c.mode == "character" {
+            characters += 1_usize if characters > 1_usize {
+                ret Result::Err("Only one input-controlled character may be active")
+            }
+            let mut config = CharacterConfig {
+                c.character.radius, c.character.half_height, c.character.speed, c.character.jump_speed, c.character.gravity, c.character.slope_degrees, c.character.step_height, c.character.ground_snap, c.character.skin, c.character.mask
+            }
+            config.radius = c.radius * max(scale.x(), scale.z()) config.half_height = c.half_height * scale.y()
+            if !physics.add_character(entity.id(), t.position(), config) {
+                ret Result::Err("Invalid character capsule: " + entity.name())
+            }
+            continue
+        }
+        let mut shape = if c.shape == "sphere" {
+            Shape::Sphere(c.radius * max(scale.x(), max(scale.y(), scale.z())))
+        } elif c.shape == "capsule" {
+            Shape::capsule(c.radius * max(scale.x(), scale.z()), c.half_height * scale.y())
+        } else {
+            Shape::Box(Vec3::new(c.half_extents.x() * scale.x(), c.half_extents.y() * scale.y(), c.half_extents.z() * scale.z()))
+        }
+        if c.shape == "mesh" {
+            let mut found = false
+            for source in meshes {
+                if source.actor == entity.id() {
+                    shape = mesh_collider(source.mesh, s) found = true
+                }
+            }
+            if !found || !shape.valid() {
+                ret Result::Err("Static mesh collider source is missing or empty: " + entity.name())
+            }
+        }
+        let mut body = Body::new(entity.id(), shape, t.position(), if c.mode == "dynamic" {
+                c.mass
+            } else {
+                0_f32
+            }
+            ,
+        )
+        body.rotation = Rotation::from_euler(t.rotation()) body.motion = if c.mode == "kinematic" {
+            2_u32
+        } elif c.mode == "dynamic" {
+            1_u32
+        } else {
+            0_u32
+        }
+        body.friction = c.friction body.restitution = c.restitution body.gravity_scale = c.gravity_scale body.sensor = c.sensor
+        if !physics.add_native_body(body) {
+            ret Result::Err("Invalid physics body: " + entity.name())
+        }
+    }
+    ret Result::Ok(physics)
+}

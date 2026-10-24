@@ -1,9 +1,11 @@
 import core::option::Option
-import graphene::material_graph::*
-import graphene::material_graph::editor::MaterialEditor
-import luma::{Event, Rect, StyleSheet, Widget, layout_widget, event_pointer_down, event_pointer_up, WidgetLayout, vertical}
+
 import std::os::read_file
 import std::time::perf_counter_ms
+
+import graphene::material_graph::*
+import graphene::material_graph::editor::MaterialEditor
+import luma::{Event, Rect, StyleSheet, Widget, WidgetLayout, event_pointer_down, event_pointer_up, layout_widget, vertical}
 fn click() -> Event {
     ret Event { event_pointer_down(), 0, 0, 0, 0, 1, 0, 0, 0, 0, "", 0 }
 }
@@ -19,8 +21,13 @@ fn click_on(id: str, layout: WidgetLayout) -> Event {
     }
 }
 fn main() -> u32 {
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
-    let mut editor = MaterialEditor::new() editor.open(f "target/color-picker-test-{perf_counter_ms()}", sheet)
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
+    let mut editor = MaterialEditor::new() editor.open(f"target/color-picker-test-{perf_counter_ms()}", sheet)
     let bounds = Rect::new(0, 0, 850, 700) let preview = Rect::new(0, 0, 0, 0)
     let _select = editor.input(Event { event_pointer_down(), 100, 90, 0, 0, 1, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet)
     let _release = editor.input(Event { event_pointer_up(), 100, 90, 0, 0, 0, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet)

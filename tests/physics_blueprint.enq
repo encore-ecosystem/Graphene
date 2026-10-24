@@ -1,0 +1,101 @@
+//! Physics must survive successive Blueprint ticks and remain disposable on Stop.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::eprintln
+import std::path::Path
+
+import graphene::{PhysicsComponent, Scene, Transform}
+import graphene::blueprint::*
+import graphene::runtime::{InputSnapshot, PhysicsWorld, RigidBody, RuntimeConfig, RuntimeSession, RuntimeTransform, World}
+import linalg::Vec3
+fn actor_y(scene: Scene, id: u64) -> f32 {
+    match scene.get(id) {
+        Some(e) => {
+            ret e.transform().position().y()
+        }
+        None => {
+            ret 999_f32
+        }
+    }
+}
+fn main() -> u32 {
+    let asset = rotator_blueprint()
+    let compiler = blueprint_compiler_path()
+    let build = match prepare_blueprint_build(".", "native/blueprint", compiler, vec![asset]) {
+        Ok(b) => b Err(e) => {
+            eprintln(e) ret 1_u32
+        }
+    }
+    if !build.cached && run_blueprint_build(build.compiler, build.directory, build.library, build.receipt, build.key) != 0 {
+        ret 2_u32
+    }
+    let instance = BlueprintInstance {
+        "Content/Blueprints/Rotator.graphene-blueprint.json", Vec[BlueprintOverride]::new()
+    }
+    let module = match BlueprintModule::open(build.library) {
+        Ok(m) => m Err(e) => {
+            eprintln(e) ret 3_u32
+        }
+    }
+    let native = match module.instantiate(asset, instance, Transform::identity()) {
+        Ok(n) => n Err(_) => {
+            ret 4_u32
+        }
+    }
+    let pose = Transform::identity().with_position(Vec3::new(1_f32, 2_f32, 3_f32))
+    if !native.set_transform(0_u64, pose) {
+        ret 5_u32
+    }
+    match native.transform(0_u64) {
+        Some(t) => {
+            if t.position().y() != 2_f32 {
+                ret 6_u32
+            }
+        }
+        None => {
+            ret 7_u32
+        }
+    }
+    native.destroy() module.close()
+    if native.set_transform(0_u64, pose) {
+        ret 8_u32
+    }
+    let mut authoring = Scene::new()
+    let actor = authoring.create_entity("Falling Blueprint", Transform::identity().with_position(Vec3::new(0_f32, 3_f32, 0_f32)))
+    authoring.set_blueprint(actor, Option[BlueprintInstance]::Some(instance))
+    let mut c = PhysicsComponent::defaults() c.mode = "dynamic" c.shape = "sphere"
+    authoring.set_physics(actor, c)
+    let classes = vec![BlueprintClass { Path::new(instance.asset).resolve().as_str(), asset }]
+    let mut simulation = BlueprintSimulation::new()
+    match simulation.start(".", authoring, build.library, build.semantic, classes) {
+        Ok(_) => {
+        }
+        Err(e) => {
+            eprintln(e) ret 9_u32
+        }
+    }
+    simulation.tick(0.05_f32, InputSnapshot::empty())
+    let first = actor_y(simulation.scene(), actor)
+    simulation.tick(0.05_f32, InputSnapshot::empty())
+    let second = actor_y(simulation.scene(), actor)
+    let mut reference_world = World::new()
+    reference_world.spawn_actor_with_id(actor, "Reference", RuntimeTransform::identity().with_position(Vec3::new(0_f32, 3_f32, 0_f32)))
+    let mut reference_physics = PhysicsWorld::without_floor(Vec3::new(0_f32, - 9.81_f32, 0_f32))
+    reference_physics.add_body(RigidBody::dynamic(actor, 1_f32, 0.5_f32))
+    let mut reference = RuntimeSession::new(RuntimeConfig::defaults(), reference_world, reference_physics)
+    reference.tick(0.05_f32, InputSnapshot::empty()) reference.tick(0.05_f32, InputSnapshot::empty())
+    let expected = match reference.world().transform(actor) {
+        Some(t) => t.position().y() None => {
+            ret 12_u32
+        }
+    }
+    if first >= 3_f32 || second >= first || second - expected > 0.00001_f32 || expected - second > 0.00001_f32 {
+        ret 10_u32
+    }
+    simulation.stop()
+    if simulation.scene().len() != 0_usize || actor_y(authoring, actor) != 3_f32 {
+        ret 11_u32
+    }
+    ret 0_u32
+}

@@ -2,6 +2,7 @@
 
 import core::option::Option
 import core::vec::Vec
+
 import linalg::Vec3
 
 pub struct GeometryCluster {
@@ -621,7 +622,7 @@ struct GeometryQuadric {
 }
 
 impl for GeometryQuadric {
-    fn zero() -> Self {
+    pub fn zero() -> Self {
         ret Self {
             0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32,
             0.0_f32, 0.0_f32, 0.0_f32,
@@ -629,7 +630,7 @@ impl for GeometryQuadric {
             0.0_f32
         }
     }
-    fn plane(normal: Vec3, distance: f32) -> Self {
+    pub fn plane(normal: Vec3, distance: f32) -> Self {
         let x = normal.x() let y = normal.y() let z = normal.z()
         ret Self {
             x * x, x * y, x * z, x * distance,
@@ -638,7 +639,7 @@ impl for GeometryQuadric {
             1.0_f32
         }
     }
-    fn add(self: Self, other: Self) -> Self {
+    pub fn add(self: Self, other: Self) -> Self {
         ret Self {
             self.xx + other.xx, self.xy + other.xy,
             self.xz + other.xz, self.xw + other.xw,
@@ -648,10 +649,10 @@ impl for GeometryQuadric {
             self.planes + other.planes
         }
     }
-    fn plane_count(self: Self) -> f32 {
+    pub fn plane_count(self: Self) -> f32 {
         ret self.planes
     }
-    fn evaluate(self: Self, point: Vec3) -> f32 {
+    pub fn evaluate(self: Self, point: Vec3) -> f32 {
         let x = point.x() let y = point.y() let z = point.z()
         let value = self.xx * x * x + 2.0_f32 * self.xy * x * y +
         2.0_f32 * self.xz * x * z + 2.0_f32 * self.xw * x +
@@ -674,7 +675,7 @@ struct SimplifiedGeometryIndices {
 }
 
 impl for SimplifiedGeometryIndices {
-    fn parts(self: Self) ->(Vec[u32], f32) {
+    pub fn parts(self: Self) ->(Vec[u32], f32) {
         ret(self.indices, self.geometric_error)
     }
 }
@@ -928,19 +929,24 @@ fn canonical_geometry_indices(indices: Vec[u32],
 
 // Optional deformation-displacement samples are in mesh units, xyz triples.
 // Static meshes pass zero and retain their existing cost and welding policy.
-fn deformation_edge_error(attributes: Vec[f32],stride: usize,start: usize,a: u32,b: u32) -> f32 {
-    if start==0_usize {ret 0_f32}
-    let mut error=0_f32 let mut at=start
-    while at+2_usize<stride {
-        let x=attributes.get_unchecked_borrowed((a as usize)*stride+at)-attributes.get_unchecked_borrowed((b as usize)*stride+at)
-        let y=attributes.get_unchecked_borrowed((a as usize)*stride+at+1_usize)-attributes.get_unchecked_borrowed((b as usize)*stride+at+1_usize)
-        let z=attributes.get_unchecked_borrowed((a as usize)*stride+at+2_usize)-attributes.get_unchecked_borrowed((b as usize)*stride+at+2_usize)
-        let value=x*x+y*y+z*z if value>error{error=value} at+=3_usize
+fn deformation_edge_error(attributes: Vec[f32], stride: usize, start: usize, a: u32, b: u32) -> f32 {
+    if start == 0_usize {
+        ret 0_f32
+    }
+    let mut error = 0_f32 let mut at = start
+    while at + 2_usize < stride {
+        let x = attributes.get_unchecked_borrowed((a as usize) * stride + at) - attributes.get_unchecked_borrowed((b as usize) * stride + at)
+        let y = attributes.get_unchecked_borrowed((a as usize) * stride + at + 1_usize) - attributes.get_unchecked_borrowed((b as usize) * stride + at + 1_usize)
+        let z = attributes.get_unchecked_borrowed((a as usize) * stride + at + 2_usize) - attributes.get_unchecked_borrowed((b as usize) * stride + at + 2_usize)
+        let value = x * x + y * y + z * z if value > error {
+            error = value
+        }
+        at += 3_usize
     }
     ret error
 }
 fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
-    target_triangles: usize, attributes: Vec[f32], attribute_stride: usize,deformation_start: usize,) -> SimplifiedGeometryIndices {
+    target_triangles: usize, attributes: Vec[f32], attribute_stride: usize, deformation_start: usize,) -> SimplifiedGeometryIndices {
     if values.len() == 0_usize || indices.len() < 3_usize {
         ret SimplifiedGeometryIndices {
             Vec[u32]::new(), 0.0_f32
@@ -993,15 +999,15 @@ fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
                         geometry_quadric_at(quadrics, second),)
                     let first_locked = geometry_bool_at(locked, first)
                     let second_locked = geometry_bool_at(locked, second)
-                    let deformation_cost=deformation_edge_error(attributes,attribute_stride,deformation_start,first,second)*combined.plane_count()
-                    let first_cost = combined.evaluate(position(values, second))+deformation_cost
+                    let deformation_cost = deformation_edge_error(attributes, attribute_stride, deformation_start, first, second) * combined.plane_count()
+                    let first_cost = combined.evaluate(position(values, second)) + deformation_cost
                     if !first_locked && first_cost < best_cost &&
                     collapse_preserves_orientation(values, working_indices,
                         representatives, first, second,) {
                         best_removed = first best_retained = second best_cost = first_cost
                         best_plane_count = combined.plane_count()
                     }
-                    let second_cost = combined.evaluate(position(values, first))+deformation_cost
+                    let second_cost = combined.evaluate(position(values, first)) + deformation_cost
                     if !second_locked && second_cost < best_cost &&
                     collapse_preserves_orientation(values, working_indices,
                         representatives, second, first,) {
@@ -1050,13 +1056,15 @@ fn simplify_geometry_qem(values: Vec[Vec3], indices: Vec[u32],
         if delta.dot(delta) > maximum_error {
             maximum_error = delta.dot(delta)
         }
-        if deformation_start!=0_usize {
-            let mut at=deformation_start
-            while at+2_usize<attribute_stride {
-                let a=(original as usize)*attribute_stride+at let b=(retained as usize)*attribute_stride+at
-                let sampled=delta.add(Vec3::new(attributes.get_unchecked_borrowed(a)-attributes.get_unchecked_borrowed(b),attributes.get_unchecked_borrowed(a+1_usize)-attributes.get_unchecked_borrowed(b+1_usize),attributes.get_unchecked_borrowed(a+2_usize)-attributes.get_unchecked_borrowed(b+2_usize)))
-                if sampled.dot(sampled)>maximum_error {maximum_error=sampled.dot(sampled)}
-                at+=3_usize
+        if deformation_start != 0_usize {
+            let mut at = deformation_start
+            while at + 2_usize < attribute_stride {
+                let a =(original as usize) * attribute_stride + at let b =(retained as usize) * attribute_stride + at
+                let sampled = delta.add(Vec3::new(attributes.get_unchecked_borrowed(a) - attributes.get_unchecked_borrowed(b), attributes.get_unchecked_borrowed(a + 1_usize) - attributes.get_unchecked_borrowed(b + 1_usize), attributes.get_unchecked_borrowed(a + 2_usize) - attributes.get_unchecked_borrowed(b + 2_usize)))
+                if sampled.dot(sampled) > maximum_error {
+                    maximum_error = sampled.dot(sampled)
+                }
+                at += 3_usize
             }
         }
     }
@@ -1084,7 +1092,7 @@ pub fn simplify_virtual_geometry_indices(values: Vec[Vec3], indices: Vec[u32],
     let triangle_count = indices.len() / 3_usize
     let target_triangles =
     triangle_count * resolution as usize /(resolution as usize + 16_usize)
-    let result = simplify_geometry_qem(values, indices, target_triangles, Vec[f32]::new(), 0_usize,0_usize)
+    let result = simplify_geometry_qem(values, indices, target_triangles, Vec[f32]::new(), 0_usize, 0_usize)
     ret result.parts().0
 }
 
@@ -1171,14 +1179,16 @@ pub fn build_virtual_geometry_lods(values: Vec[Vec3], indices: Vec[u32],
 pub fn build_virtual_geometry_lods_with_attributes(values: Vec[Vec3], indices: Vec[u32],
     attributes: Vec[f32], attribute_stride: usize,
     max_vertices: usize, max_triangles: usize,) -> VirtualGeometry {
-    ret build_virtual_geometry_lods_with_deformation(values,indices,attributes,attribute_stride,0_usize,max_vertices,max_triangles)
+    ret build_virtual_geometry_lods_with_deformation(values, indices, attributes, attribute_stride, 0_usize, max_vertices, max_triangles)
 }
 /// Skin-aware QEM: retain source endpoints/influences while penalizing differences
 /// in sampled animation and morph displacement. Material sections cook separately.
 pub fn build_virtual_geometry_lods_with_deformation(values: Vec[Vec3], indices: Vec[u32],
-    attributes: Vec[f32], attribute_stride: usize,deformation_start: usize,
-    max_vertices: usize,max_triangles: usize) -> VirtualGeometry {
-    if deformation_start!=0_usize && (deformation_start<3_usize || deformation_start>attribute_stride || (attribute_stride-deformation_start)%3_usize!=0_usize){ret invalid_geometry("Invalid deformation attribute layout")}
+    attributes: Vec[f32], attribute_stride: usize, deformation_start: usize,
+    max_vertices: usize, max_triangles: usize,) -> VirtualGeometry {
+    if deformation_start != 0_usize &&(deformation_start < 3_usize || deformation_start > attribute_stride ||(attribute_stride - deformation_start) % 3_usize != 0_usize) {
+        ret invalid_geometry("Invalid deformation attribute layout")
+    }
 
     if attribute_stride != 0_usize &&(attribute_stride < 3_usize || attributes.len() / attribute_stride != values.len() || attributes.len() % attribute_stride != 0_usize) {
         ret invalid_geometry("Invalid AutoLOD vertex attributes")
@@ -1294,7 +1304,7 @@ pub fn build_virtual_geometry_lods_with_deformation(values: Vec[Vec3], indices: 
                 group_indices.push(local)
             }
             let simplified = simplify_geometry_qem(
-                group_values, group_indices, target_triangle_count, group_attributes, attribute_stride,deformation_start,)
+                group_values, group_indices, target_triangle_count, group_attributes, attribute_stride, deformation_start,)
             let simplified_parts = simplified.parts()
             let mut simplified_indices = Vec[u32]::with_capacity(simplified_parts.0.len())
             for local in simplified_parts.0 {

@@ -1,0 +1,360 @@
+//! Regular chunks with full-resolution shared borders. No skirts or hidden cracks.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::{Mat4, Vec3}
+
+import mod::model::{TerrainAsset, clamp}
+import refrain::scene::primitive::MeshData
+import refrain::texture_asset::TextureImage
+pub fn terrain_lod(distance: f32, threshold: f32, previous: u32) -> u32 {
+    let mut level = 0_u32 let mut boundary = threshold
+    while level < 4 && distance > boundary {
+        level += 1 boundary *= 2
+    }
+    // Hysteresis prevents hovering around a threshold from rebuilding every frame.
+    if level > previous && distance < threshold *((1_u32 << previous) as f32) * 1.1_f32 {
+        ret previous
+    }
+    if level < previous && previous > 0 && distance > threshold *((1_u32 <<(previous - 1)) as f32) * 0.9_f32 {
+        ret previous
+    }
+    ret level
+}
+fn layer_color(asset: TerrainAsset, images: Vec[TextureImage], x: u32, z: u32) -> Vec3 {
+    let w = asset.weights.get((z * asset.resolution + x) as usize).unwrap_or(Vec3::new(1_f32, 0_f32, 0_f32))
+    let mut color = Vec3::zero()
+    for i in 0_usize..3_usize {
+        let layer = asset.layers.get_unchecked_borrowed(i) let mut c = layer.color
+        match images.get(i) {
+            Some(image) => {
+                if image.width > 0 && image.height > 0 {
+                    let u =(x as f32) * asset.spacing / layer.tiling let v =(z as f32) * asset.spacing / layer.tiling
+                    let tx =((u -(u as u32 as f32)) *(image.width as f32)) as u32
+                    let tz =((v -(v as u32 as f32)) *(image.height as f32)) as u32
+                    let p = image.pixels.get((tz * image.width + tx) as usize).unwrap_or(4294967295_u32)
+                    // Vertex colors are linear; source albedo is sRGB.
+                    let r =((p & 255) as f32) / 255_f32 let g =(((p >> 8) & 255) as f32) / 255_f32 let b =(((p >> 16) & 255) as f32) / 255_f32
+                    c = Vec3::new(r * r, g * g, b * b)
+                }
+            }
+            None => {
+            }
+        }
+        let weight = if i == 0 {
+            w.x()
+        } elif i == 1 {
+            w.y()
+        } else {
+            w.z()
+        }
+        color = color.add(c.scale(weight))
+    }
+    ret color
+}
+fn vertex(values: mut Vec[f32], asset: TerrainAsset, images: Vec[TextureImage], x: u32, z: u32) -> u32 {
+    let index =(values.len() / 11_usize) as u32 let p = asset.point(x, z) let n = asset.normal(x, z) let c = layer_color(asset, images, x, z)
+    for v in vec![p.x(), p.y(), p.z(), n.x(), n.y(), n.z(), c.x(), c.y(), c.z(),(x as f32) /(asset.resolution as f32),(z as f32) /(asset.resolution as f32)] {
+        values.push(v)
+    }
+    ret index
+}
+pub fn terrain_chunk(asset: TerrainAsset, cx: u32, cz: u32, lod: u32, images: Vec[TextureImage]) -> MeshData {
+    let step = 1_u32 <<(if lod > 4 {
+            4_u32
+        } else {
+            lod
+        }
+    )
+    let x0 = cx * 32 let z0 = cz * 32 let x1 = x0 + 32 let z1 = z0 + 32
+    let mut values = Vec[f32]::new() let mut indices = Vec[u32]::new()
+    if x1 >= asset.resolution || z1 >= asset.resolution {
+        ret MeshData::new(values, indices, 44_u32)
+    }
+    // Fine LOD uses shared vertices; coarse cells retain every sample on chunk edges.
+    if step == 1 {
+        let terrain_start_z =(z0 as usize)
+        let terrain_end_z =((z1 + 1) as usize)
+        for terrain_index_z in terrain_start_z..terrain_end_z {
+            let z = terrain_index_z as u32
+            let terrain_start_x =(x0 as usize)
+            let terrain_end_x =((x1 + 1) as usize)
+            for terrain_index_x in terrain_start_x..terrain_end_x {
+                let x = terrain_index_x as u32
+                let _v = vertex(values, asset, images, x, z)
+            }
+        }
+        let terrain_start_z = 0_usize
+        let terrain_end_z = 32_usize
+        for terrain_index_z in terrain_start_z..terrain_end_z {
+            let z = terrain_index_z as u32
+            let terrain_start_x = 0_usize
+            let terrain_end_x = 32_usize
+            for terrain_index_x in terrain_start_x..terrain_end_x {
+                let x = terrain_index_x as u32
+
+                let a = z * 33 + x let b = a + 33 let c = b + 1 let d = a + 1
+                for i in vec![a, b, c, a, c, d] {
+                    indices.push(i)
+                }
+            }
+        }
+    } else {
+        let mut z = z0
+        while z < z1 {
+            let mut x = x0 while x < x1 {
+                let mut ring = Vec[u32]::new()
+                ring.push(vertex(values, asset, images, x, z))
+                let mut dz = if x == x0 {
+                    1_u32
+                } else {
+                    step
+                }
+                while dz <= step {
+                    ring.push(vertex(values, asset, images, x, z + dz)) dz += if x == x0 {
+                        1_u32
+                    } else {
+                        step
+                    }
+                }
+                let mut dx = if z + step == z1 {
+                    1_u32
+                } else {
+                    step
+                }
+                while dx <= step {
+                    ring.push(vertex(values, asset, images, x + dx, z + step)) dx += if z + step == z1 {
+                        1_u32
+                    } else {
+                        step
+                    }
+                }
+                dz = if x + step == x1 {
+                    1_u32
+                } else {
+                    step
+                }
+                while dz <= step {
+                    ring.push(vertex(values, asset, images, x + step, z + step - dz)) dz += if x + step == x1 {
+                        1_u32
+                    } else {
+                        step
+                    }
+                }
+                dx = if z == z0 {
+                    1_u32
+                } else {
+                    step
+                }
+                while dx < step {
+                    ring.push(vertex(values, asset, images, x + step - dx, z)) dx += if z == z0 {
+                        1_u32
+                    } else {
+                        step
+                    }
+                }
+                let middle = vertex(values, asset, images, x + step / 2, z + step / 2)
+                for j in 0_usize..ring.len() {
+                    indices.push(middle) indices.push(ring.get_unchecked_borrowed(j)) indices.push(ring.get_unchecked_borrowed((j + 1) % ring.len()))
+                }
+                x += step
+            }
+            z += step
+        }
+    }
+    ret MeshData::new(values, indices, 44_u32)
+}
+pub fn merge_terrain_chunks(chunks: Vec[MeshData]) -> MeshData {
+    let mut vertices = Vec[f32]::new() let mut indices = Vec[u32]::new()
+    for chunk in chunks {
+        let base =(vertices.len() / 11_usize) as u32
+        for v in chunk.vertices() {
+            vertices.push(v)
+        }
+        for i in chunk.indices() {
+            indices.push(base + i)
+        }
+    }
+    ret MeshData::new(vertices, indices, 44_u32)
+}
+pub fn terrain_collision(asset: TerrainAsset) -> MeshData {
+    let mut chunks = Vec[MeshData]::new() let count =(asset.resolution - 1) / 32
+    let terrain_start_z = 0_usize
+    let terrain_end_z =(count as usize)
+    for terrain_index_z in terrain_start_z..terrain_end_z {
+        let z = terrain_index_z as u32
+        let terrain_start_x = 0_usize
+        let terrain_end_x =(count as usize)
+        for terrain_index_x in terrain_start_x..terrain_end_x {
+            let x = terrain_index_x as u32
+            chunks.push(terrain_chunk(asset, x, z, 0_u32, Vec[TextureImage]::new()))
+        }
+    }
+    ret merge_terrain_chunks(chunks)
+}
+fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option[f32] {
+    let ab = b.sub(a) let ac = c.sub(a) let p = direction.cross(ac) let det = ab.dot(p)
+    if det > - 0.0000001_f32 && det < 0.0000001_f32 {
+        ret Option[f32]::None
+    }
+    let inv = 1 / det let t = origin.sub(a) let u = t.dot(p) * inv
+    if u < - 0.00001_f32 || u > 1.00001_f32 {
+        ret Option[f32]::None
+    }
+    let q = t.cross(ab) let v = direction.dot(q) * inv if v < - 0.00001_f32 || u + v > 1.00001_f32 {
+        ret Option[f32]::None
+    }
+    let distance = ac.dot(q) * inv ret if distance >= 0 {
+        Option[f32]::Some(distance)
+    } else {
+        Option[f32]::None
+    }
+}
+/// Inverse affine transform handles actor scale, rotation and parent transforms.
+pub fn terrain_local_ray(world: Mat4, origin: Vec3, direction: Vec3) -> Option[(Vec3, Vec3)] {
+    let p = world.transform_point(Vec3::zero())
+    let x = world.transform_point(Vec3::new(1_f32, 0_f32, 0_f32)).sub(p)
+    let y = world.transform_point(Vec3::new(0_f32, 1_f32, 0_f32)).sub(p)
+    let z = world.transform_point(Vec3::new(0_f32, 0_f32, 1_f32)).sub(p)
+    let det = x.dot(y.cross(z)) if det > - 0.0000001_f32 && det < 0.0000001_f32 {
+        ret Option[(Vec3, Vec3)]::None
+    }
+    let r = origin.sub(p)
+    ret Option[(Vec3, Vec3)]::Some((Vec3::new(r.dot(y.cross(z)) / det, r.dot(z.cross(x)) / det, r.dot(x.cross(y)) / det), Vec3::new(direction.dot(y.cross(z)) / det, direction.dot(z.cross(x)) / det, direction.dot(x.cross(y)) / det)))
+}
+/// Grid DDA visits at most 2*N cells; exact triangles match the full-detail collider.
+pub fn terrain_ray(asset: TerrainAsset, origin: Vec3, direction: Vec3) -> Option[Vec3] {
+    let half = asset.extent() * 0.5_f32 let mut start = 0_f32 let mut end = 1000000_f32
+    let terrain_start_axis = 0_usize
+    let terrain_end_axis = 2_usize
+    for terrain_index_axis in terrain_start_axis..terrain_end_axis {
+        let axis = terrain_index_axis as u32
+
+        let o = if axis == 0 {
+            origin.x()
+        } else {
+            origin.z()
+        }
+        let d = if axis == 0 {
+            direction.x()
+        } else {
+            direction.z()
+        }
+        if d > - 0.0000001_f32 && d < 0.0000001_f32 {
+            if o < - half || o > half {
+                ret Option[Vec3]::None
+            }
+        } else {
+            let a =( - half - o) / d let b =(half - o) / d let low = if a < b {
+                a
+            } else {
+                b
+            }
+            let high = if a > b {
+                a
+            } else {
+                b
+            }
+            if low > start {
+                start = low
+            }
+            if high < end {
+                end = high
+            }
+        }
+    }
+    if start > end || end < 0 {
+        ret Option[Vec3]::None
+    }
+    let initial = origin.add(direction.scale(start + 0.00001_f32))
+    let mut x = clamp((initial.x() + half) / asset.spacing, 0_f32,(asset.resolution - 2) as f32) as i32
+    let mut z = clamp((initial.z() + half) / asset.spacing, 0_f32,(asset.resolution - 2) as f32) as i32
+    let sx = if direction.x() > 0 {
+        1_i32
+    } else {
+        - 1_i32
+    }
+    let sz = if direction.z() > 0 {
+        1_i32
+    } else {
+        - 1_i32
+    }
+    let ax = if direction.x() < 0 {
+        - direction.x()
+    } else {
+        direction.x()
+    }
+    let az = if direction.z() < 0 {
+        - direction.z()
+    } else {
+        direction.z()
+    }
+    let dx = if ax < 0.0000001_f32 {
+        100000000_f32
+    } else {
+        asset.spacing / ax
+    }
+    let dz = if az < 0.0000001_f32 {
+        100000000_f32
+    } else {
+        asset.spacing / az
+    }
+    let mut tx = if ax < 0.0000001_f32 {
+        100000000_f32
+    } else {
+        ((((x + if sx > 0 {
+                            1_i32
+                        } else {
+                            0_i32
+                        }
+                    ) as f32) * asset.spacing - half) - origin.x()) / direction.x()
+    }
+    let mut tz = if az < 0.0000001_f32 {
+        100000000_f32
+    } else {
+        ((((z + if sz > 0 {
+                            1_i32
+                        } else {
+                            0_i32
+                        }
+                    ) as f32) * asset.spacing - half) - origin.z()) / direction.z()
+    }
+    let terrain_steps =(asset.resolution * 2 + 2) as usize
+    for _ in 0_usize..terrain_steps {
+        if x < 0 || z < 0 || x >=(asset.resolution - 1) as i32 || z >=(asset.resolution - 1) as i32 {
+            break
+        }
+        let a = asset.point(x as u32, z as u32) let b = asset.point(x as u32, z as u32 + 1) let c = asset.point(x as u32 + 1, z as u32 + 1) let d = asset.point(x as u32 + 1, z as u32)
+        let mut hit = ray_triangle(origin, direction, a, b, c)
+        match ray_triangle(origin, direction, a, c, d) {
+            Some(t) => {
+                if t < hit.unwrap_or(100000000_f32) {
+                    hit = Option[f32]::Some(t)
+                }
+            }
+            None => {
+            }
+        }
+        match hit {
+            Some(t) => {
+                if t >= start - 0.0001_f32 && t <= end + 0.0001_f32 {
+                    ret Option[Vec3]::Some(origin.add(direction.scale(t)))
+                }
+            }
+            None => {
+            }
+        }
+        if tx < tz {
+            if tx > end {
+                break
+            }
+            x += sx tx += dx
+        } else {
+            if tz > end {
+                break
+            }
+            z += sz tz += dz
+        }
+    }
+    ret Option[Vec3]::None
+}

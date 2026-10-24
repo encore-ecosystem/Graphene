@@ -1,7 +1,8 @@
 //! The editor's four live panels share Luma's movable tab/split workspace.
 import graphene::editor_docking::{create_editor_docks, editor_dock_shell}
-import luma::{Body, Html, DockNodeId, DockPlacement, PanelId, Rect, StyleSheet, UiBindings, UiContext, Widget, WindowId, layout_widget, vertical}
 import std::os::read_file
+
+import luma::{Body, DockNodeId, DockPlacement, Html, PanelId, Rect, StyleSheet, UiBindings, UiContext, Widget, WindowId, layout_widget, vertical}
 
 fn main() -> u32 {
     let main = WindowId::new(1)
@@ -38,7 +39,11 @@ fn main() -> u32 {
     }
     let viewport = PanelId::new("viewport")
     let content = workspace.location(PanelId::new("content")).unwrap_or(DockNodeId::empty())
-    let top = match workspace.window(main) { Some(window) => window.root() None => { ret 9 } }
+    let top = match workspace.window(main) {
+        Some(window) => window.root() None => {
+            ret 9
+        }
+    }
     let _enlarged = workspace.resize(top, 0.4)
     if !workspace.dock(viewport, content, DockPlacement::Center, 0) || !host.commit() ||
     !workspace.activate(PanelId::new("content")) || !host.commit() ||
@@ -46,13 +51,26 @@ fn main() -> u32 {
         ret 5
     }
     let snapshot = tree.snapshot(root).unwrap_or(shell)
-    let sheet = StyleSheet::default().merge(StyleSheet::parse(read_file("graphene.css")))
+    let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
+                Ok(value) => value Err(_) => {
+                    ret 90
+                }
+            }
+        ))
     let layout = layout_widget(sheet.apply(snapshot, "", "", ""), Rect::new(0, 0, 1440, 900))
     if layout.find_bounds("viewport-surface").is_some() || tree.find(root, "viewport-surface").is_none() {
         ret 6
     }
-    let panel = match layout.find_bounds("content-browser") { Some(bounds) => bounds None => { ret 10 } }
-    let container = match layout.find_bounds("luma-dock-panel-content") { Some(bounds) => bounds None => { ret 11 } }
+    let panel = match layout.find_bounds("content-browser") {
+        Some(bounds) => bounds None => {
+            ret 10
+        }
+    }
+    let container = match layout.find_bounds("luma-dock-panel-content") {
+        Some(bounds) => bounds None => {
+            ret 11
+        }
+    }
     if panel.height() <= 270 || panel.height() != container.height() || panel.width() != container.width() {
         ret 12
     }

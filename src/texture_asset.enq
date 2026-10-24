@@ -4,7 +4,8 @@ import mod::native_asset::{asset_source_stamp, load_native_texture, save_native_
 
 import core::result::Result
 import core::vec::Vec
-import std::os::{file_exists, mkdir_all, file_sha256, write_file_atomic}
+
+import std::os::{file_exists, file_sha256, mkdir_all, write_file_atomic}
 
 extern fn encore_text_sha256(contents: str) -> str
 extern fn encore_file_open(path: str, writing: bool) -> u64
@@ -58,7 +59,7 @@ struct Bits {
 }
 
 impl for Bits {
-    fn read(self: mut Self, count: u32) -> u32 {
+    pub fn read(self: mut Self, count: u32) -> u32 {
         if !self.valid || self.position + count as usize > self.end {
             self.valid = false
             ret 0
@@ -195,7 +196,7 @@ fn inflate(bytes: mut Vec[u8], limit: usize) -> Result[Vec[u8], str] {
                 if literals > 286 {
                     ret Result::Err("Invalid PNG Huffman alphabet")
                 }
-                let order = vec![16_u32, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+                let order = vec![16_u32, 17_u32, 18_u32, 0_u32, 8_u32, 7_u32, 9_u32, 6_u32, 10_u32, 5_u32, 11_u32, 4_u32, 12_u32, 3_u32, 13_u32, 2_u32, 14_u32, 1_u32, 15_u32]
                 let mut code_lengths = Vec[u32]::new()
                 for _ in 0..19 {
                     code_lengths.push(0)
@@ -253,10 +254,10 @@ fn inflate(bytes: mut Vec[u8], limit: usize) -> Result[Vec[u8], str] {
             }
             let literal_tree = huffman(lengths)
             let distance_tree = huffman(distances)
-            let length_base = vec![3_u32, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
-            let length_extra = vec![0_u32, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
-            let distance_base = vec![1_u32, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
-            let distance_extra = vec![0_u32, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+            let length_base = vec![3_u32, 4_u32, 5_u32, 6_u32, 7_u32, 8_u32, 9_u32, 10_u32, 11_u32, 13_u32, 15_u32, 17_u32, 19_u32, 23_u32, 27_u32, 31_u32, 35_u32, 43_u32, 51_u32, 59_u32, 67_u32, 83_u32, 99_u32, 115_u32, 131_u32, 163_u32, 195_u32, 227_u32, 258_u32]
+            let length_extra = vec![0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 1_u32, 1_u32, 1_u32, 1_u32, 2_u32, 2_u32, 2_u32, 2_u32, 3_u32, 3_u32, 3_u32, 3_u32, 4_u32, 4_u32, 4_u32, 4_u32, 5_u32, 5_u32, 5_u32, 5_u32, 0_u32]
+            let distance_base = vec![1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 7_u32, 9_u32, 13_u32, 17_u32, 25_u32, 33_u32, 49_u32, 65_u32, 97_u32, 129_u32, 193_u32, 257_u32, 385_u32, 513_u32, 769_u32, 1025_u32, 1537_u32, 2049_u32, 3073_u32, 4097_u32, 6145_u32, 8193_u32, 12289_u32, 16385_u32, 24577_u32]
+            let distance_extra = vec![0_u32, 0_u32, 0_u32, 0_u32, 1_u32, 1_u32, 2_u32, 2_u32, 3_u32, 3_u32, 4_u32, 4_u32, 5_u32, 5_u32, 6_u32, 6_u32, 7_u32, 7_u32, 8_u32, 8_u32, 9_u32, 9_u32, 10_u32, 10_u32, 11_u32, 11_u32, 12_u32, 12_u32, 13_u32, 13_u32]
             while bits.valid {
                 let symbol = decode_symbol(bits, literal_tree)
                 if symbol == 256 {
@@ -505,10 +506,28 @@ pub fn load_material_texture(project: str, source: str, importing: bool) -> send
         }
     }
     if !importing {
-        let native = if source_path.byte_len() > 9 && source_path.slice_bytes(source_path.byte_len() - 9, 9) == ".gtexture" { source_path } else { source_path + ".gtexture" }
-        match load_native_texture(native, if native == source_path { "" } else { asset_source_stamp(source_path) }) {
-            Result::Ok(image) => { ret TextureLoad { source, "", image } }
-            Result::Err(error) => { if native == source_path { ret TextureLoad { source, error, empty } } }
+        let native = if source_path.byte_len() > 9 && source_path.slice_bytes(source_path.byte_len() - 9, 9) == ".gtexture" {
+            source_path
+        } else {
+            source_path + ".gtexture"
+        }
+        match load_native_texture(native, if native == source_path {
+                ""
+            } else {
+                asset_source_stamp(source_path)
+            }
+            ,
+        ) {
+            Result::Ok(image) => {
+                ret TextureLoad { source, "", image }
+            }
+            Result::Err(error) => {
+                if native == source_path {
+                    ret TextureLoad {
+                        source, error, empty
+                    }
+                }
+            }
         }
     }
     let data = match read_texture_file(source_path) {

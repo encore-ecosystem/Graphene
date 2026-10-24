@@ -1,0 +1,51 @@
+//! Compiled screens mount before Play; modal input and local settings stay isolated.
+import core::vec::Vec
+import std::io::eprintln
+import std::os::mkdir_all
+import std::time::{perf_counter_ms, sleep_ms}
+
+import graphene::audio::model::AudioSettings
+import graphene::game_ui::runtime::GameUi
+import graphene::game_ui::templates::ui_template
+import graphene::render_settings::RenderSettings
+import luma::Event
+fn main() -> u32 {
+    let root = "target/ui-runtime-test"
+    mkdir_all(root)
+    let mut runtime = GameUi::new()
+    if !runtime.prepare(root, "", ui_template("HUD"), RenderSettings::defaults(), AudioSettings::defaults(), "") {
+        eprintln(runtime.message) ret 1
+    }
+    let start = perf_counter_ms()
+    while runtime.busy() && perf_counter_ms() - start < 30000_u64 {
+        runtime.poll() sleep_ms(10_u64)
+    }
+    if !runtime.ready() || !runtime.take_start() {
+        eprintln(runtime.message) ret 2
+    }
+    match runtime.begin() {
+        Ok(_) => {
+        }
+        Err(error) => {
+            eprintln(error) ret 3
+        }
+    }
+    if !runtime.active() || runtime.paused() || !runtime.take_apply() {
+        ret 4
+    }
+    runtime.accept_settings(false)
+    if !runtime.input(Event::key_down(27, 0)) || !runtime.paused() {
+        ret 5
+    }
+    if !runtime.input(Event::key_down(27, 0)) || runtime.paused() {
+        ret 6
+    }
+    if !runtime.input(Event::key_down(27, 1)) || !runtime.take_stop() || runtime.take_stop() {
+        ret 7
+    }
+    runtime.close() runtime.close()
+    if runtime.active() || runtime.ready() {
+        ret 8
+    }
+    ret 0
+}

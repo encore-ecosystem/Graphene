@@ -1,0 +1,303 @@
+//! Terrain math, watertight borders, bounded history and binary/heightmap round trips.
+import binary::encode
+import core::option::Option
+import core::vec::Vec
+
+import std::io::println
+import std::os::{mkdir_all, write_file_atomic}
+
+import graphene::{AddActorCommand, EditorState, GrapheneCommand, PhysicsComponent, RuntimeTransform, Scene, Transform, World}
+import graphene::physics::scene::{PhysicsMesh, scene_physics}
+import graphene::terrain::asset::{import_heightmap, load_terrain, save_terrain, terrain_bytes, terrain_decode}
+import graphene::terrain::brush::{TerrainBrush, apply_brush, brush_weight}
+import graphene::terrain::document::TerrainDocument
+import graphene::terrain::foliage::{FoliageBrush, foliage_mesh, paint_foliage}
+import graphene::terrain::geometry::{terrain_chunk, terrain_collision, terrain_local_ray, terrain_lod, terrain_ray}
+import graphene::terrain::model::{TerrainAsset, TerrainLayer}
+import graphene::texture_asset::TextureImage
+import linalg::Vec3
+struct LegacyTerrainFixture {
+    version: u32
+    resolution: u32
+    spacing: f32
+    heights: Vec[f32]
+    weights: Vec[Vec3]
+    layers: Vec[TerrainLayer]
+    lod_distance: f32
+}
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+#attr(safe)
+fn legacy_bytes(asset: TerrainAsset) -> str {
+    let old = LegacyTerrainFixture {
+        1_u32, asset.resolution, asset.spacing, asset.heights, asset.weights, asset.layers, asset.lod_distance
+    }
+    match encode(old) {
+        Ok(bytes) => {
+            unsafe {
+                ret "GTR1" + graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+            }
+        }
+        Err(_) => {
+            ret ""
+        }
+    }
+}
+fn near(a: f32, b: f32) -> bool {
+    ret a - b < 0.0001_f32 && b - a < 0.0001_f32
+}
+fn main() -> u32 {
+    let flat = TerrainAsset::flat(65_u32, 1_f32)
+    if !flat.valid() || !near(flat.extent(), 64_f32) || !near(flat.normal(0, 0).y(), 1_f32) {
+        ret 1
+    }
+    let mut copy = flat.copy() copy.heights.set(0, 5_f32)
+    if !near(flat.height(0, 0), 0_f32) || !near(copy.height(0, 0), 5_f32) {
+        ret 2
+    }
+    let mut brush = TerrainBrush::defaults() brush.radius = 4_f32 brush.strength = 10_f32
+    let center = Vec3::zero()
+    let mut doc = TerrainDocument::new(flat)
+    doc.begin()
+    if !doc.dab(brush, center, 0.05_f32, 0_f32, false) {
+        ret 3
+    }
+    doc.end(true)
+    if !doc.changed() || !doc.can_undo() || !near(doc.asset().height(32, 32), 0.5_f32) {
+        ret 4
+    }
+    doc.saved()
+    if doc.changed() || !doc.undo() || !doc.changed() || !near(doc.asset().height(32, 32), 0_f32) {
+        ret 5
+    }
+    if !doc.redo() || doc.changed() || !near(doc.asset().height(32, 32), 0.5_f32) {
+        ret 6
+    }
+    doc.begin() doc.dab(brush, center, 0.05_f32, 0_f32, false) doc.cancel()
+    if !near(doc.asset().height(32, 32), 0.5_f32) || doc.changed() {
+        ret 7
+    }
+    brush.tool = "paint" brush.layer = 1_u32
+    apply_brush(copy, brush, center, 0.05_f32, 0_f32, false)
+    let w = copy.weights.get((32 * 65 + 32) as usize).unwrap_or(Vec3::zero())
+    if !near(w.x() + w.y() + w.z(), 1_f32) || w.y() <= 0 {
+        ret 8
+    }
+    if brush_weight(4_f32, 4_f32, 0.7_f32) != 0 || brush_weight(0_f32, 4_f32, 1_f32) != 1 {
+        ret 9
+    }
+    brush.tool = "flatten" apply_brush(copy, brush, center, 0.05_f32, 2_f32, false)
+    if copy.height(32, 32) <= 0 {
+        ret 10
+    }
+    brush.tool = "smooth" apply_brush(copy, brush, center, 0.05_f32, 0_f32, false)
+    if !copy.valid() {
+        ret 11
+    }
+    let images = Vec[TextureImage]::new()
+    let fine = terrain_chunk(flat, 0_u32, 0_u32, 0_u32, images)
+    let coarse = terrain_chunk(flat, 1_u32, 0_u32, 4_u32, images)
+    if fine.index_count() != 6144 || coarse.index_count() >= fine.index_count() / 4 {
+        ret 12
+    }
+    // Every border position is present at both LODs, so no T-junction can open.
+    let vertices = coarse.vertices()
+    for z in 0_usize..33_usize {
+        let mut found = false let mut i = 0_usize
+        while i + 2 < vertices.len() {
+            if near(vertices.get_unchecked_borrowed(i), 0_f32) && near(vertices.get_unchecked_borrowed(i + 2),(z as f32) - 32_f32) {
+                found = true
+            }
+            i += 11
+        }
+        if !found {
+            ret 13
+        }
+    }
+    match terrain_ray(flat, Vec3::new(0_f32, 10_f32, 0_f32), Vec3::new(0_f32, - 1_f32, 0_f32)) {
+        Some(hit) => {
+            if !near(hit.y(), 0_f32) {
+                ret 14
+            }
+        }
+        None => {
+            ret 15
+        }
+    }
+    if terrain_ray(flat, Vec3::new(100_f32, 10_f32, 0_f32), Vec3::new(0_f32, - 1_f32, 0_f32)).is_some() {
+        ret 16
+    }
+    let t = Transform::identity().with_position(Vec3::new(5_f32, 2_f32, 1_f32)).with_scale(Vec3::new(2_f32, 3_f32, 2_f32))
+    match terrain_local_ray(t.matrix(), Vec3::new(5_f32, 32_f32, 1_f32), Vec3::new(0_f32, - 1_f32, 0_f32)) {
+        Some(ray) => {
+            match terrain_ray(flat, ray.0, ray.1) {
+                Some(hit) => {
+                    if !near(t.matrix().transform_point(hit).y(), 2_f32) {
+                        ret 17
+                    }
+                }
+                None => {
+                    ret 18
+                }
+            }
+        }
+        None => {
+            ret 19
+        }
+    }
+    if terrain_lod(0_f32, 48_f32, 0_u32) != 0 || terrain_lod(1000_f32, 48_f32, 0_u32) != 4 || terrain_lod(50_f32, 48_f32, 0_u32) != 0 {
+        ret 20
+    }
+    let encoded = match terrain_bytes(copy) {
+        Ok(value) => value Err(_) => {
+            ret 21
+        }
+    }
+    let loaded = match terrain_decode(encoded) {
+        Ok(value) => value Err(_) => {
+            ret 22
+        }
+    }
+    if loaded.resolution != 65 || !near(loaded.height(32, 32), copy.height(32, 32)) {
+        ret 23
+    }
+    if terrain_decode("broken").is_ok() {
+        ret 24
+    }
+    let root = "target/terrain-test" mkdir_all(root)
+    if !save_terrain(root + "/Landscape.gterrain", copy) || !load_terrain(root + "/Landscape.gterrain").is_ok() {
+        ret 25
+    }
+    if write_file_atomic(root + "/Height.raw16", encoded) != 0 {
+        ret 26
+    }
+    if import_heightmap(root + "/Height.raw16", copy, 64_f32).is_ok() {
+        ret 27
+    }
+    let collision = terrain_collision(copy)
+    if collision.index_count() != 4 * 6144 {
+        ret 28
+    }
+    let mut state = EditorState::new(Scene::new())
+    let added = state.execute(GrapheneCommand::AddActor(AddActorCommand::with_asset("Landscape", Transform::identity(), "@terrain:Content/Terrain/Landscape.gterrain")))
+    if !added.success() {
+        ret 29
+    }
+    let scene = state.scene() let actor = match scene.entities().get(0) {
+        Some(actor) => actor None => {
+            ret 32
+        }
+    }
+    if actor.physics().shape != "mesh" || actor.physics().mode != "static" {
+        ret 30
+    }
+    match scene_physics(scene, vec![PhysicsMesh { actor.id(), collision }]) {
+        Ok(_) => {
+        }
+        Err(_) => {
+            ret 31
+        }
+    }
+    let mut planted = flat.copy() let mut foliage = FoliageBrush::defaults()
+    if !paint_foliage(planted, foliage, Vec3::zero(), 8_f32, false) || planted.foliage.len() == 0 {
+        ret 33
+    }
+    let count = planted.foliage.len()
+    if paint_foliage(planted, foliage, Vec3::zero(), 8_f32, false) || planted.foliage.len() != count {
+        ret 34
+    }
+    let independent = planted.copy()
+    if !paint_foliage(planted, foliage, Vec3::zero(), 8_f32, true) || planted.foliage.len() != 0 || independent.foliage.len() != count {
+        ret 35
+    }
+    let mut history = TerrainDocument::new(flat)
+    history.begin() if !history.foliage(foliage, Vec3::zero(), 8_f32, false) {
+        ret 36
+    }
+    history.end(true)
+    if history.asset().foliage.len() != count || !history.undo() || history.asset().foliage.len() != 0 || !history.redo() || history.asset().foliage.len() != count {
+        ret 37
+    }
+    let packed = match terrain_bytes(history.asset()) {
+        Ok(bytes) => bytes Err(_) => {
+            ret 38
+        }
+    }
+    let unpacked = match terrain_decode(packed) {
+        Ok(asset) => asset Err(_) => {
+            ret 39
+        }
+    }
+    if unpacked.foliage.len() != count || !unpacked.valid() {
+        ret 40
+    }
+    foliage.minimum_scale = 2_f32 foliage.maximum_scale = 1_f32
+    if paint_foliage(planted, foliage, Vec3::zero(), 8_f32, false) {
+        ret 41
+    }
+    if foliage_mesh("grass").index_count() != 18 || foliage_mesh("tree").index_count() < 36 {
+        ret 42
+    }
+    let migrated = match terrain_decode(legacy_bytes(flat)) {
+        Ok(asset) => asset Err(_) => {
+            ret 43
+        }
+    }
+    if !migrated.valid() || migrated.version != 2 || migrated.foliage.len() != 0 || migrated.resolution != flat.resolution {
+        ret 44
+    }
+    let valid_brush = FoliageBrush::defaults()
+    if paint_foliage(planted, valid_brush, Vec3::zero(), 10000_f32, false) || planted.foliage.len() != 0 {
+        ret 45
+    }
+    for kind in vec!["grass", "tree"] {
+        let mesh = foliage_mesh(kind)
+        for index in mesh.indices() {
+            if index as usize >= mesh.vertex_count() {
+                ret 46
+            }
+        }
+        let values = mesh.vertices()
+        for vertex in 0_usize..mesh.vertex_count() {
+            let base = vertex * 11_usize
+            if values.get_unchecked_borrowed(base + 1_usize) < - 0.001_f32 || values.get_unchecked_borrowed(base + 1_usize) > 4.5_f32 {
+                ret 47
+            }
+        }
+    }
+    // The collider must use full height data, including the actor transform,
+    // rather than the default floor or a render-LOD approximation.
+    let mut raised = flat.copy()
+    for i in 0_usize..raised.heights.len() {
+        raised.heights.set(i, 2_f32)
+    }
+    let mut collision_scene = Scene::new()
+    let ground = collision_scene.create_entity("Terrain", Transform::identity().with_position(Vec3::new(0_f32, 3_f32, 0_f32)))
+    let mut ground_physics = PhysicsComponent::defaults() ground_physics.mode = "static" ground_physics.shape = "mesh"
+    collision_scene.set_physics(ground, ground_physics)
+    let ball = collision_scene.create_entity("Ball", Transform::identity().with_position(Vec3::new(0_f32, 9_f32, 0_f32)))
+    let mut ball_physics = PhysicsComponent::defaults() ball_physics.mode = "dynamic" ball_physics.shape = "sphere" ball_physics.radius = 0.5_f32 ball_physics.restitution = 0_f32
+    collision_scene.set_physics(ball, ball_physics)
+    let mut runtime = World::new() runtime.spawn_actor_with_id(ground, "Terrain", RuntimeTransform::identity().with_position(Vec3::new(0_f32, 3_f32, 0_f32))) runtime.spawn_actor_with_id(ball, "Ball", RuntimeTransform::identity().with_position(Vec3::new(0_f32, 9_f32, 0_f32)))
+    let mut physics = match scene_physics(collision_scene, vec![PhysicsMesh {
+                ground, terrain_collision(raised)
+            }
+        ]) {
+        Ok(value) => value Err(_) => {
+            ret 48
+        }
+    }
+    for _ in 0_usize..180_usize {
+        physics.step(runtime, 1_f32 / 60_f32)
+    }
+    match runtime.transform(ball) {
+        Some(transform) => {
+            if transform.position().y() < 5.45_f32 || transform.position().y() > 5.65_f32 {
+                ret 49
+            }
+        }
+        None => {
+            ret 50
+        }
+    }
+    ret 0
+}

@@ -1,0 +1,144 @@
+//! Editable screen assets. Stable widget identities survive rename and reparent.
+import core::option::Option
+import core::vec::Vec
+
+import refrain::blueprint::{BlueprintAsset, BlueprintComponent, BlueprintProperty, BlueprintValue}
+import refrain::blueprint::document::snapshot_blueprint
+
+pub struct UiWidget {
+    id: u64
+    parent: u64
+    name: str
+    kind: str
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+    anchor_x: f32
+    anchor_y: f32
+    anchor_right: f32
+    anchor_bottom: f32
+    align_x: f32
+    align_y: f32
+    gap: f32
+    padding: f32
+    fill: bool
+    text: str
+    image: str
+    value: f32
+    visible: bool
+    enabled: bool
+    color: str
+    font_size: f32
+    radius: f32
+    binding: str
+    options: Vec[str]
+}
+pub struct UiScreenAsset {
+    id: str
+    name: str
+    reference_width: f32
+    reference_height: f32
+    widgets: Vec[UiWidget]
+    graph: BlueprintAsset
+}
+pub fn ui_kinds() -> Vec[str] {
+    ret vec!["Canvas", "Overlay", "Horizontal", "Vertical", "Scroll", "Spacer", "Text", "Image", "Button", "Progress", "Slider", "Checkbox", "Select", "Input"]
+}
+pub fn ui_container(kind: str) -> bool {
+    ret kind == "Canvas" || kind == "Overlay" || kind == "Horizontal" || kind == "Vertical" || kind == "Scroll"
+}
+pub fn ui_property(id: u64, field: u64) -> u64 {
+    ret 1000000_u64 + id * 8_u64 + field
+}
+
+impl for UiWidget {
+    pub fn snapshot(self: Self) -> Self {
+        let mut options = Vec[str]::new() for option in self.options {
+            options.push(option)
+        }
+        ret Self {
+            self.id, self.parent, self.name, self.kind, self.x, self.y, self.width, self.height, self.anchor_x, self.anchor_y, self.anchor_right, self.anchor_bottom, self.align_x, self.align_y, self.gap, self.padding, self.fill, self.text, self.image, self.value, self.visible, self.enabled, self.color, self.font_size, self.radius, self.binding, options
+        }
+    }
+
+    pub fn new(id: u64, parent: u64, kind: str) -> Self {
+        ret Self {
+            id, parent, kind, kind, 24, 24, 240, 48, 0, 0, 0, 0, 0, 0, 12, 12, false, kind, "", 0.75_f32, true, true, "", 20, 8, "", vec!["Option 1", "Option 2"]
+        }
+    }
+}
+
+impl for UiScreenAsset {
+    pub fn snapshot(self: Self) -> Self {
+        let mut widgets = Vec[UiWidget]::new() for w in self.widgets {
+            widgets.push(w.snapshot())
+        }
+        ret Self {
+            self.id, self.name, self.reference_width, self.reference_height, widgets, snapshot_blueprint(self.graph)
+        }
+    }
+
+    pub fn new(id: str, name: str) -> Self {
+        let mut graph = BlueprintAsset::new(id, name)
+        graph.domain = "ui" graph.components = Vec[BlueprintComponent]::new()
+        let mut root = UiWidget::new(1, 0, "Canvas") root.name = "Root" root.width = 1920 root.height = 1080 root.x = 0 root.y = 0
+        ret Self { id, name, 1920, 1080, vec![root], graph }
+    }
+    pub fn widget(self: Self, id: u64) -> Option[UiWidget] {
+        for widget in self.widgets {
+            if widget.id == id {
+                ret Option[UiWidget]::Some(widget.snapshot())
+            }
+        }
+        ret Option[UiWidget]::None
+    }
+    pub fn next_id(self: Self) -> u64 {
+        let mut next = 1_u64 for widget in self.widgets {
+            if widget.id >= next {
+                next = widget.id + 1
+            }
+        }
+        ret next
+    }
+    /// Generated widget properties share the typed, compiled Blueprint property ABI.
+    /// User variables occupy IDs below 1,000,000. Layout is excluded from graph identity.
+    pub fn synchronized(self: Self) -> Self {
+        let mut result = self.snapshot()
+        let mut widgets = Vec[UiWidget]::new()
+        for source in self.widgets {
+            let mut w = source.snapshot() if w.parent == 0 {
+                w.width = self.reference_width w.height = self.reference_height
+            }
+            widgets.push(w)
+        }
+        result.widgets = widgets
+        let mut properties = Vec[BlueprintProperty]::new()
+        for property in self.graph.properties {
+            if property.id < 999999_u64 {
+                properties.push(property)
+            }
+        }
+        properties.push(BlueprintProperty { 999999, "Screen Action", BlueprintValue::I32(0) })
+        for widget in self.widgets {
+            properties.push(BlueprintProperty {
+                    ui_property(widget.id, 0), widget.name + ".Text", BlueprintValue::String(widget.text)
+                }
+            )
+            properties.push(BlueprintProperty {
+                    ui_property(widget.id, 1), widget.name + ".Value", BlueprintValue::F32(widget.value)
+                }
+            )
+            properties.push(BlueprintProperty {
+                    ui_property(widget.id, 2), widget.name + ".Visible", BlueprintValue::Bool(widget.visible)
+                }
+            )
+            properties.push(BlueprintProperty {
+                    ui_property(widget.id, 3), widget.name + ".Enabled", BlueprintValue::Bool(widget.enabled)
+                }
+            )
+        }
+        result.graph.properties = properties
+        ret result
+    }
+}

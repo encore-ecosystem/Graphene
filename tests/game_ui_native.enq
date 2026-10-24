@@ -1,0 +1,82 @@
+//! UI events lower to Encore, execute in isolated instances and expose typed state.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::eprintln
+
+import graphene::blueprint::{BlueprintInstance, BlueprintModule, BlueprintOverride, BlueprintValue, blueprint_compiler_path, prepare_blueprint_build, run_blueprint_build}
+import graphene::game_ui::model::ui_property
+import graphene::game_ui::templates::ui_template
+import graphene::scene::transform::Transform
+fn main() -> u32 {
+    let asset = ui_template("Pause")
+    let job = match prepare_blueprint_build(".", "native/blueprint", blueprint_compiler_path(), vec![asset.graph]) {
+        Ok(job) => job Err(error) => {
+            eprintln(error) ret 1
+        }
+    }
+    if !job.cached && run_blueprint_build(job.compiler, job.directory, job.library, job.receipt, job.key) != 0 {
+        eprintln(job.directory) ret 2
+    }
+    let module = match BlueprintModule::open(job.library) {
+        Ok(value) => value Err(error) => {
+            eprintln(error) ret 3
+        }
+    }
+    let instance = match module.instantiate(asset.graph, BlueprintInstance {
+            "", Vec[BlueprintOverride]::new()
+        }
+        , Transform::identity(),) {
+        Ok(value) => value Err(error) => {
+            eprintln(error) ret 4
+        }
+    }
+    if !instance.invoke("construction", "", 0) || !instance.invoke("begin-play", "", 0) {
+        ret 5
+    }
+    // Template's Resume button has stable widget ID 4.
+    if !instance.invoke("ui-click", "4", 0) {
+        eprintln(instance.error()) ret 6
+    }
+    match instance.property(999999) {
+        Some(value) => {
+            match value {
+                I32(action) => {
+                    if action != 1 {
+                        ret 7
+                    }
+                }
+                _ => {
+                    ret 8
+                }
+            }
+        }
+        None => {
+            ret 9
+        }
+    }
+    if !instance.set_property(ui_property(4, 0), BlueprintValue::String("Continue")) {
+        ret 10
+    }
+    match instance.property(ui_property(4, 0)) {
+        Some(value) => {
+            match value {
+                String(text) => {
+                    if text != "Continue" {
+                        ret 11
+                    }
+                }
+                _ => {
+                    ret 12
+                }
+            }
+        }
+        None => {
+            ret 13
+        }
+    }
+    if !instance.destroy() || instance.property(999999).is_some() || !module.close() {
+        ret 14
+    }
+    ret 0
+}

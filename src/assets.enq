@@ -1,11 +1,14 @@
-pub import mod::standard_material::StandardMaterial
-import mod::mesh_prepare::prepare_mesh_geometry
 import core::option::Option
 import core::vec::Vec
+
+import linalg::Vec3
+
+import mod::mesh_prepare::prepare_mesh_geometry
 import mod::rhi::{AccelerationStructure, GpuBuffer, GpuMesh, GraphicsDevice, RenderPassEncoder, buffer_acceleration_structure_input, buffer_shader_device_address, buffer_storage}
 import mod::scene::primitive::MeshData
 import mod::scene::renderable::{MaterialId, MeshId}
-import mod::virtual_geometry::{GeometryCluster, VirtualGeometry}
+pub import mod::standard_material::StandardMaterial
+import mod::virtual_geometry::{GeometryCluster, VirtualGeometry, build_virtual_geometry}
 import mod::virtual_geometry_gpu::GpuClusterCullResult
 
 struct MeshAssetEntry {
@@ -30,6 +33,7 @@ pub struct MaterialAssets {
     entries: Vec[MaterialAssetEntry]
     next_id: u64
 }
+
 impl for MeshAssets {
     pub fn new() -> MeshAssets {
         ret MeshAssets {
@@ -44,11 +48,11 @@ impl for MeshAssets {
     }
     /// Uploads an imported mesh without running the AutoLOD simplifier.
     pub fn upload_prepared(self: mut Self, device: GraphicsDevice, data: MeshData,
-        virtual_geometry: VirtualGeometry) -> MeshId {
+        virtual_geometry: VirtualGeometry,) -> MeshId {
         let data = data.with_uvs()
         let values = data.vertices()
         let indices = data.indices()
-        let stride = (data.stride() / 4) as usize
+        let stride =(data.stride() / 4) as usize
         if !virtual_geometry.valid() {
             ret MeshId::new(0_u64)
         }
@@ -56,7 +60,7 @@ impl for MeshAssets {
         let packed_triangle_indices = virtual_geometry.triangle_indices()
         let mut packed_values = Vec[f32]::new()
         for vertex in packed_vertex_indices {
-            let source = vertex as usize* stride
+            let source =(vertex as usize) * stride
             let mut component = 0_usize
             while component < stride {
                 match values.get(source + component) {
@@ -109,6 +113,36 @@ impl for MeshAssets {
             ,
         )
         ret id
+    }
+    /// Classic editable geometry bypasses mesh simplification and mesh-shader resources.
+    /// The caller must retire all frame consumers before replacing an existing mesh.
+    pub fn update_editable(self: mut Self, device: GraphicsDevice, id: MeshId, data: MeshData) -> MeshId {
+        let data = data.with_uvs()
+        let mesh = device.create_mesh(data.vertices(), data.indices())
+        if !mesh.available() {
+            ret MeshId::new(0_u64)
+        }
+        if id.valid() {
+            for i in 0_usize..self.entries.len() {
+                let mut entry = self.entries.get_unchecked_borrowed(i)
+                if entry.id.value() == id.value() {
+                    // Only entries created here may enter this path.
+                    if entry.virtual_mesh.available() {
+                        mesh.destroy() ret MeshId::new(0_u64)
+                    }
+                    entry.mesh.destroy() entry.mesh = mesh self.entries.set(i, entry) ret id
+                }
+            }
+            mesh.destroy() ret MeshId::new(0_u64)
+        }
+        let next = MeshId::new(self.next_id) self.next_id += 1_u64
+        self.entries.push(MeshAssetEntry {
+                next, mesh, GpuMesh::unavailable(),
+                build_virtual_geometry(Vec[Vec3]::new(), Vec[u32]::new(), 64, 126),
+                GpuBuffer::unavailable(), GpuBuffer::unavailable(), AccelerationStructure::unavailable()
+            }
+        )
+        ret next
     }
     pub fn contains(self: Self, id: MeshId) -> bool {
         if !id.valid() {
@@ -185,7 +219,7 @@ impl for MeshAssets {
             if !entry.mesh.destroy() {
                 destroyed = false
             }
-            if !entry.virtual_mesh.destroy() {
+            if entry.virtual_mesh.available() && !entry.virtual_mesh.destroy() {
                 destroyed = false
             }
         }
