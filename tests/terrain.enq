@@ -16,20 +16,28 @@ import graphene::terrain::geometry::{terrain_chunk, terrain_collision, terrain_l
 import graphene::terrain::model::{TerrainAsset, TerrainLayer}
 import graphene::texture_asset::TextureImage
 import linalg::Vec3
+struct LegacyLayerFixture {
+    name: str
+    color: Vec3
+    texture: str
+    tiling: f32
+}
 struct LegacyTerrainFixture {
     version: u32
     resolution: u32
     spacing: f32
     heights: Vec[f32]
     weights: Vec[Vec3]
-    layers: Vec[TerrainLayer]
+    layers: Vec[LegacyLayerFixture]
     lod_distance: f32
 }
 extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
 #attr(safe)
 fn legacy_bytes(asset: TerrainAsset) -> str {
+    let mut layers=Vec[LegacyLayerFixture]::new()
+    for layer in asset.layers {layers.push(LegacyLayerFixture {layer.name,layer.color,layer.texture,layer.tiling})}
     let old = LegacyTerrainFixture {
-        1_u32, asset.resolution, asset.spacing, asset.heights, asset.weights, asset.layers, asset.lod_distance
+        1_u32, asset.resolution, asset.spacing, asset.heights, asset.weights, layers, asset.lod_distance
     }
     match encode(old) {
         Ok(bytes) => {
@@ -242,7 +250,7 @@ fn main() -> u32 {
             ret 43
         }
     }
-    if !migrated.valid() || migrated.version != 2 || migrated.foliage.len() != 0 || migrated.resolution != flat.resolution {
+    if !migrated.valid() || migrated.version != 3 || migrated.foliage.len() != 0 || migrated.resolution != flat.resolution {
         ret 44
     }
     let valid_brush = FoliageBrush::defaults()

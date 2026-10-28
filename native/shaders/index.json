@@ -4,7 +4,7 @@
     "id": 2111262111
   },
   "cube_fragment_spirv": {
-    "count": 5006,
+    "count": 5046,
     "id": 1097370823
   },
   "cube_vertex_spirv": {
@@ -19,16 +19,68 @@
     "count": 188,
     "id": 4152115942
   },
+  "displacement_debug_spirv": {
+    "count": 148,
+    "id": 1220302136
+  },
+  "displacement_mesh_spirv": {
+    "count": 13066,
+    "id": 134585297
+  },
+  "displacement_ray_proxy_spirv": {
+    "count": 5792,
+    "id": 2818723001
+  },
+  "displacement_refine_spirv": {
+    "count": 4585,
+    "id": 2659756390
+  },
+  "displacement_selection_spirv": {
+    "count": 276,
+    "id": 3262440083
+  },
+  "displacement_skin_source_spirv": {
+    "count": 548,
+    "id": 1639979562
+  },
+  "displacement_topology_spirv": {
+    "count": 3472,
+    "id": 2991350411
+  },
+  "displacement_triangle_linear_spirv": {
+    "count": 591,
+    "id": 2283871198
+  },
+  "displacement_triangle_spirv": {
+    "count": 430,
+    "id": 3231301773
+  },
+  "displacement_triangle_temporal_spirv": {
+    "count": 771,
+    "id": 1774705883
+  },
+  "displacement_vertex_spirv": {
+    "count": 12688,
+    "id": 3039295477
+  },
   "double_words": {
     "count": 161,
     "id": 3843395869
+  },
+  "genai_preview_fragment_spirv": {
+    "count": 1381,
+    "id": 1586661300
+  },
+  "genai_preview_vertex_spirv": {
+    "count": 554,
+    "id": 1585205965
   },
   "gi_spatial_filter_spirv": {
     "count": 1087,
     "id": 777227442
   },
   "material_fragment_spirv": {
-    "count": 5610,
+    "count": 5739,
     "id": 1713454215
   },
   "material_vertex_spirv": {
@@ -39,9 +91,45 @@
     "count": 400,
     "id": 1294176720
   },
+  "ray_material_linear": {
+    "count": 7030,
+    "id": 3596993926
+  },
+  "ray_material_sdr": {
+    "count": 7011,
+    "id": 4277700180
+  },
+  "ray_material_temporal": {
+    "count": 7190,
+    "id": 1499064184
+  },
   "ray_query_gi_spirv": {
     "count": 1970,
     "id": 3920061503
+  },
+  "ray_terrain_linear": {
+    "count": 8865,
+    "id": 1808661919
+  },
+  "ray_terrain_sdr": {
+    "count": 8846,
+    "id": 205226446
+  },
+  "ray_terrain_temporal": {
+    "count": 9025,
+    "id": 3931851606
+  },
+  "ray_virtual_linear": {
+    "count": 7827,
+    "id": 789892733
+  },
+  "ray_virtual_sdr": {
+    "count": 7298,
+    "id": 2366027990
+  },
+  "ray_virtual_temporal": {
+    "count": 7987,
+    "id": 969146359
   },
   "screen_probe_place_spirv": {
     "count": 1348,
@@ -67,6 +155,30 @@
     "count": 1992,
     "id": 2643119173
   },
+  "terrain_fragment_spirv": {
+    "count": 7596,
+    "id": 1630687582
+  },
+  "terrain_linear_spirv": {
+    "count": 7828,
+    "id": 507530282
+  },
+  "terrain_ray_proxy_spirv": {
+    "count": 9980,
+    "id": 3981677338
+  },
+  "terrain_refine_spirv": {
+    "count": 5217,
+    "id": 2143937283
+  },
+  "terrain_temporal_spirv": {
+    "count": 7988,
+    "id": 3961039444
+  },
+  "terrain_vertex_spirv": {
+    "count": 22624,
+    "id": 1416019344
+  },
   "virtual_geometry_mesh_spirv": {
     "count": 1056,
     "id": 3912550431
@@ -80,11 +192,11 @@
     "id": 2744575276
   },
   "virtual_scene_fragment_spirv": {
-    "count": 5921,
+    "count": 6055,
     "id": 3961835268
   },
   "virtual_scene_mesh_spirv": {
-    "count": 3075,
+    "count": 3122,
     "id": 2568860078
   },
   "virtual_scene_post_cull_spirv": {
@@ -92,7 +204,7 @@
     "id": 2138051903
   },
   "virtual_scene_triangle_spirv": {
-    "count": 6082,
+    "count": 6211,
     "id": 3272378618
   }
 }

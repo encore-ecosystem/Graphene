@@ -1,0 +1,120 @@
+//! Shared barycentric refinement patterns. Edge bits identify a neighbour at twice
+//! this patch's subdivision level. Matching boundary samples prevent T-junctions.
+import core::vec::Vec
+
+pub struct RefinementPattern {
+    level: u32
+    edges: u32
+    first: u32
+    triangles: u32
+}
+pub struct RefinementTable {
+    words: Vec[u32]
+    patterns: Vec[RefinementPattern]
+}
+struct Coordinate {
+    u: u32
+    v: u32
+}
+fn packed(p: Coordinate) -> u32 {
+    ret p.u |(p.v << 16)
+}
+fn append_triangle(words: mut Vec[u32], a: Coordinate, b: Coordinate, c: Coordinate, denominator: u32) ->() {
+    words.push(packed(a)) words.push(packed(b)) words.push(packed(c)) words.push(denominator) ret()
+}
+fn boundary(a: Coordinate, b: Coordinate, side: u32, edges: u32) -> bool {
+    ret((edges & 1_u32) != 0 && a.u + a.v == side && b.u + b.v == side) ||
+    ((edges & 2_u32) != 0 && a.u == 0 && b.u == 0) ||
+    ((edges & 4_u32) != 0 && a.v == 0 && b.v == 0)
+}
+fn triangle(words: mut Vec[u32], a: Coordinate, b: Coordinate, c: Coordinate, n: u32, edges: u32) ->() {
+    let points = vec![a, b, c]
+    let mut polygon = Vec[Coordinate]::with_capacity(6)
+    for i in 0_usize..3_usize {
+        let p = points.get_unchecked_borrowed(i)
+        let q = points.get_unchecked_borrowed((i + 1) % 3)
+        polygon.push(Coordinate { p.u * 3, p.v * 3 })
+        if boundary(p, q, n * 2, edges) {
+            polygon.push(Coordinate {(p.u + q.u) * 3 / 2,(p.v + q.v) * 3 / 2 })
+        }
+    }
+    if polygon.len() == 3 {
+        append_triangle(words, polygon.get_unchecked_borrowed(0), polygon.get_unchecked_borrowed(1), polygon.get_unchecked_borrowed(2), n * 6)
+    } else {
+        let center = Coordinate { a.u + b.u + c.u, a.v + b.v + c.v }
+        for i in 0_usize..polygon.len() {
+            append_triangle(words, polygon.get_unchecked_borrowed(i), polygon.get_unchecked_borrowed((i + 1) % polygon.len()), center, n * 6)
+        }
+    }
+    ret()
+}
+pub fn refinement_table(maximum_level: u32) -> RefinementTable {
+    let maximum = if maximum_level > 8 {
+        8_u32
+    } else {
+        maximum_level
+    }
+    let mut words = Vec[u32]::new()
+    let mut patterns = Vec[RefinementPattern]::new()
+    for level_index in 0_usize..(maximum as usize) + 1 {
+        let level = level_index as u32
+        let n = 1_u32 << level
+        for edges_index in 0_usize..8_usize {
+            let edges = edges_index as u32
+            let first =(words.len() / 4) as u32
+            for yi in 0_usize..n as usize {
+                let y = yi as u32
+                for xi in 0_usize..(n - y) as usize {
+                    let x = xi as u32
+                    triangle(words, Coordinate { x * 2, y * 2 }, Coordinate {(x + 1) * 2, y * 2 }, Coordinate {
+                            x * 2,(y + 1) * 2
+                        }
+                        , n, edges,)
+                    if x + y + 1 < n {
+                        triangle(words, Coordinate {(x + 1) * 2, y * 2 }, Coordinate {
+                                (x + 1) * 2,(y + 1) * 2
+                            }
+                            , Coordinate {
+                                x * 2,(y + 1) * 2
+                            }
+                            , n, edges,)
+                    }
+                }
+            }
+            patterns.push(RefinementPattern {
+                    level, edges, first,(words.len() / 4) as u32 - first
+                }
+            )
+        }
+    }
+    ret RefinementTable { words, patterns }
+}
+
+/// Aggregate byte budget includes every frame in flight and preview consumers.
+pub struct DisplacementBudget {
+    limit: u64
+    reserved: u64
+}
+
+impl for DisplacementBudget {
+    pub fn new() -> DisplacementBudget<H> {
+        ret DisplacementBudget<H> { 268435456_u64, 0_u64 }
+    }
+    pub fn reserve(self: mut Self&, bytes: u64) -> bool {
+        if bytes > self.limit || self.reserved > self.limit - bytes {
+            ret false
+        }
+        self.reserved += bytes ret true
+    }
+    pub fn release(self: mut Self&, bytes: u64) ->() {
+        self.reserved = if bytes >= self.reserved {
+            0_u64
+        } else {
+            self.reserved - bytes
+        }
+        ret()
+    }
+    pub fn used(self: Self&) -> u64 {
+        ret self.reserved
+    }
+}

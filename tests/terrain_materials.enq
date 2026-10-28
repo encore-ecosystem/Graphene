@@ -1,0 +1,106 @@
+//! GTR3 keeps layer material references; historical GTR1/2 layouts stay readable.
+import binary::encode
+import core::vec::Vec
+
+import std::io::println
+import std::os::mkdir_all
+import std::time::perf_counter_ns
+
+import graphene::native_asset::save_native_height
+import graphene::terrain::asset::{import_heightmap, terrain_bytes, terrain_decode}
+import graphene::terrain::document::TerrainDocument
+import graphene::terrain::model::{FoliageInstance, TerrainAsset}
+import graphene::texture_image::HeightImage
+import linalg::Vec3
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+struct LayerV2 {
+    name: str
+    color: Vec3
+    texture: str
+    tiling: f32
+}
+struct TerrainV1 {
+    version: u32
+    resolution: u32
+    spacing: f32
+    heights: Vec[f32]
+    weights: Vec[Vec3]
+    layers: Vec[LayerV2]
+    lod_distance: f32
+}
+struct TerrainV2 {
+    version: u32
+    resolution: u32
+    spacing: f32
+    heights: Vec[f32]
+    weights: Vec[Vec3]
+    layers: Vec[LayerV2]
+    lod_distance: f32
+    foliage: Vec[FoliageInstance]
+}
+#attr(safe)
+fn text(bytes: Vec[u8]) -> str {
+    unsafe {
+        ret graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+    }
+}
+fn main() -> u32 {
+    let flat = TerrainAsset::flat(33, 1)
+    let mut layers = Vec[LayerV2]::new()
+    for layer in flat.layers {
+        layers.push(LayerV2 {
+                layer.name, layer.color, layer.texture, layer.tiling
+            }
+        )
+    }
+    let old1 = TerrainV1 { 1, 33, 1, flat.heights, flat.weights, layers, 48 }
+    let plant = FoliageInstance { 1, "grass", 0, 0, 0, 1 }
+    let old2 = TerrainV2 { 2, 33, 1, flat.heights, flat.weights, layers, 48, vec![plant] }
+    let a = terrain_decode("GTR1" + text(encode(old1).unwrap_or(Vec[u8]::new())))
+    let b = terrain_decode("GTR2" + text(encode(old2).unwrap_or(Vec[u8]::new())))
+    if a.is_err() || b.is_err() {
+        ret 1
+    }
+    let legacy1 = a.unwrap_or(flat) let legacy2 = b.unwrap_or(flat)
+    if legacy1.version != 3 || legacy1.layers.get_unchecked_borrowed(0).material != "" || legacy1.foliage.len() != 0 || legacy2.foliage.len() != 1 {
+        ret 2
+    }
+    let mut material = flat.copy() let mut layer = material.layers.get_unchecked_borrowed(1)
+    layer.material = "Content/Materials/Generated/Rock/Rock.gmaterial" material.layers.set(1, layer)
+    let bytes = terrain_bytes(material).unwrap_or("")
+    let loaded = terrain_decode(bytes).unwrap_or(flat)
+    if bytes.slice_bytes(0, 4) != "GTR3" || loaded.layers.get_unchecked_borrowed(1).material != layer.material {
+        ret 3
+    }
+    if terrain_decode("GTR2" + bytes.slice_bytes(4, bytes.byte_len() - 4)).is_ok() {
+        ret 4
+    }
+    let mut document = TerrainDocument::new(flat)
+    if !document.replace(material) || !document.undo() || document.asset().layers.get_unchecked_borrowed(1).material != "" || !document.redo() || document.asset().layers.get_unchecked_borrowed(1).material != layer.material {
+        ret 5
+    }
+    for path in vec!["Content/../Rock.gmaterial", "/tmp/Rock.gmaterial", "Content/Textures/Rock.png", "Content//Rock.gmaterial", "Content/./Rock.gmaterial", "Content/Materials/Bad\0.gmaterial"] {
+        let mut invalid = flat.copy() let mut bad = invalid.layers.get_unchecked_borrowed(0)
+        bad.material = path invalid.layers.set(0, bad)
+        if invalid.valid() || terrain_bytes(invalid).is_ok() {
+            ret 6
+        }
+    }
+    let root = "/tmp/graphene-terrain-r16-" + perf_counter_ns().fmt()
+    if mkdir_all(root) != 0 {
+        ret 7
+    }
+    let mut samples = Vec[u16]::new() for _ in 0_usize..1089_usize {
+        samples.push(32768_u16)
+    }
+    samples.set(1, 32769_u16)
+    if !save_native_height(root + "/Height.gtexture", "height", "", HeightImage { 33, 33, samples }) {
+        ret 8
+    }
+    let imported = import_heightmap(root + "/Height.gtexture", flat, 1).unwrap_or(flat)
+    let delta = imported.heights.get_unchecked_borrowed(1) - imported.heights.get_unchecked_borrowed(0)
+    if delta < 0.000015_f32 || delta > 0.000016_f32 {
+        ret 9
+    }
+    println("Terrain GTR1/GTR2 migration, GTR3 PBR references, undo/redo, R16 height precision: PASS") ret 0
+}

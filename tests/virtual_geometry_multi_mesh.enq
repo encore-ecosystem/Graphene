@@ -40,12 +40,12 @@ fn main() -> u32 {
                 buffer_storage(), true,)
             gi_scene.write_f32(0_u64, 0.0_f32)
             gi_history.write_f32(12_u64, 0.0_f32)
-            let cubes = OwnedVirtualScene<H> {
+            let mut cubes = OwnedVirtualScene<H> {
                 GpuVirtualGeometry::create_from_mesh(
                     device, target, cube_mesh(0.8_f32), 4_usize,
                     gi_scene, gi_surfaces, gi_history,)
             }
-            let spheres = OwnedVirtualScene<H> {
+            let mut spheres = OwnedVirtualScene<H> {
                 GpuVirtualGeometry::create_from_mesh(
                     device, target, sphere_mesh(0.45_f32, 12_u32, 16_u32), 4_usize,
                     gi_scene, gi_surfaces, gi_history,)

@@ -144,6 +144,15 @@ impl for MeshAssets {
         )
         ret next
     }
+    pub fn gpu_mesh(self: Self, id: MeshId) -> GpuMesh {
+        for entry in self.entries {if entry.id.value()==id.value() {ret entry.mesh}} ret GpuMesh::unavailable()
+    }
+    pub fn gpu_virtual_mesh(self: Self, id: MeshId) -> GpuMesh {
+        for entry in self.entries {if entry.id.value()==id.value() {ret entry.virtual_mesh}} ret GpuMesh::unavailable()
+    }
+    pub fn geometry(self: Self, id: MeshId) -> Option[VirtualGeometry] {
+        for entry in self.entries {if entry.id.value()==id.value() && entry.virtual_geometry.valid() {ret Option::Some(entry.virtual_geometry)}} ret Option::None
+    }
     pub fn contains(self: Self, id: MeshId) -> bool {
         if !id.valid() {
             ret false

@@ -49,7 +49,7 @@ fn main() -> u32 {
             let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
             gi_scene.write_f32(0_u64, 0.0_f32)
             gi_history.write_f32(12_u64, 0.0_f32)
-            let virtual_scene = GpuVirtualGeometry::create(
+            let mut virtual_scene = GpuVirtualGeometry::create(
                 device, target, geometry, vertices, 4_usize,
                 gi_scene, gi_surfaces, gi_history,)
             let target_ready = target.available()

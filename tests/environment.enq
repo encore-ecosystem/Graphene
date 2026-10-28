@@ -1,9 +1,9 @@
 //! Weather changes never mutate authored scene state.
 import core::option::Option
-import graphene::environment::codec::{environment_json, environment_parse, environment_identity}
+import graphene::{EnvironmentComponent, EnvironmentSystem, Scene, SceneActor, SceneAsset, SceneComponent, Transform, WeatherSample}
+import graphene::environment::codec::{environment_identity, environment_json, environment_parse}
 import graphene::environment::preset::{parse_weather_preset, parse_weather_sequence}
 import graphene::environment::system::WeatherVolume
-import graphene::{Scene, SceneAsset, SceneActor, SceneComponent, EnvironmentComponent, WeatherSample, EnvironmentSystem, Transform}
 import linalg::Vec3
 
 fn main() -> u32 {
@@ -63,7 +63,7 @@ fn main() -> u32 {
     asset.add(SceneActor::new("Sky", "sky-atmosphere", Transform::identity()).with_identity(sky).with_component(SceneComponent::Environment(a)))
     match SceneAsset::parse(asset.stringify()) {
         Some(parsed) => {
-            if parsed.len() != 1 || parsed.version() != 7 {
+            if parsed.len() != 1 || parsed.version() != 8 {
                 ret 10
             }
         }

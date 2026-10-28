@@ -47,6 +47,7 @@ pub import mod::game_ui::runtime::GameUi
 pub import mod::lod_budget::LodBudget
 pub import mod::lod_groups::{LodCurvePoint, LodGroup, LodGroups, LodInterpolation}
 pub import mod::material_asset::{edit_default_material, load_material_asset_file, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color, save_material_asset_file}
+pub import mod::material_schema::*
 pub import mod::material_graph::*
 pub import mod::mcp_gateway::GrapheneMcpGateway
 pub import mod::mesh_prepare::prepare_mesh_geometry

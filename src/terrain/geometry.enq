@@ -54,7 +54,7 @@ fn layer_color(asset: TerrainAsset, images: Vec[TextureImage], x: u32, z: u32) -
 }
 fn vertex(values: mut Vec[f32], asset: TerrainAsset, images: Vec[TextureImage], x: u32, z: u32) -> u32 {
     let index =(values.len() / 11_usize) as u32 let p = asset.point(x, z) let n = asset.normal(x, z) let c = layer_color(asset, images, x, z)
-    for v in vec![p.x(), p.y(), p.z(), n.x(), n.y(), n.z(), c.x(), c.y(), c.z(),(x as f32) /(asset.resolution as f32),(z as f32) /(asset.resolution as f32)] {
+    for v in vec![p.x(), p.y(), p.z(), n.x(), n.y(), n.z(), c.x(), c.y(), c.z(),(x as f32) /((asset.resolution - 1) as f32),(z as f32) /((asset.resolution - 1) as f32)] {
         values.push(v)
     }
     ret index

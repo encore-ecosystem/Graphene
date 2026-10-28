@@ -1,0 +1,225 @@
+import core::fmt::Debug
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::io::println
+
+import graphene::displacement::gpu::{GpuPatchInitializer, GpuPatchSource, GpuPatchView, GpuRefinementTable}
+import graphene::displacement::patterns::DisplacementBudget
+import graphene::rhi::*
+import graphene::scene::primitive::MeshData
+import graphene::shaders::displacement::{displacement_debug_spirv, displacement_mesh_spirv, displacement_vertex_spirv}
+import graphene::standard_material::DisplacementSettings
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::HeightImage
+import graphene::virtual_geometry::build_virtual_geometry_lods
+import linalg::{Mat4, Vec3}
+extern fn encore_str_from_buffer(data: u8*, count: usize) -> str
+fn run(virtual_source: bool) -> u32 {
+    let instance = GraphicsInstance::create()
+    let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 1
+        }
+    }
+    let device = instance.create_device_with_features(adapter, DeviceFeatures::none(), DeviceFeatures::mesh_shader())
+    if !device.available() {
+        ret 2
+    }
+    let target = device.create_offscreen_target(128, 128)
+    let mut budget = DisplacementBudget::new()
+    let table = match GpuRefinementTable::create(device, budget) {
+        Ok(t) => t Err(e) => {
+            println(e) ret 3
+        }
+    }
+    let mut vertices = Vec[f32]::new()
+    for p in vec![Vec3::new( - 1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, 1_f32, 0_f32), Vec3::new( - 1_f32, 1_f32, 0_f32)] {
+        for f in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1_f32) * 0.5_f32,(p.y() + 1_f32) * 0.5_f32] {
+            vertices.push(f)
+        }
+    }
+    let indices = vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32]
+    let positions = vec![Vec3::new( - 1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, 1_f32, 0_f32), Vec3::new( - 1_f32, 1_f32, 0_f32)]
+    let geometry = build_virtual_geometry_lods(positions, indices, 3, 1)
+    if virtual_source &&(!geometry.valid() || geometry.lods().len() != 2) {
+        ret 21
+    }
+    let mut packed = Vec[f32]::new()
+    for index in geometry.vertex_indices() {
+        for component in 0_usize..11_usize {
+            packed.push(vertices.get_unchecked_borrowed((index as usize) * 11 + component))
+        }
+    }
+    let mesh = if virtual_source {
+        device.create_mesh(packed, geometry.triangle_indices())
+    } else {
+        device.create_mesh(vertices, indices)
+    }
+    let built = if virtual_source {
+        GpuPatchInitializer::create_virtual(device, mesh, geometry, budget)
+    } else {
+        GpuPatchInitializer::create(device, mesh, budget)
+    }
+    let mut initializer = match built {
+        Ok(v) => v Err(e) => {
+            println(e) ret 4
+        }
+    }
+    let source = initializer.source
+
+    let upload = match TextureUpload::begin_height(device, HeightImage {
+            2, 2, vec![65535_u16, 65534_u16, 65535_u16, 65534_u16]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 5
+        }
+    }
+    if !upload.wait() {
+        ret 6
+    }
+    let height = upload.finish()
+    let sampler = device.create_repeat_sampler()
+    let mut view = match GpuPatchView::create(device, source, table, height, sampler, GpuBuffer::unavailable(), 1, 16384, target.frames_in_flight(), budget) {
+        Ok(v) => v Err(e) => {
+            println(e) ret 7
+        }
+    }
+    let vertex = device.create_shader_module(displacement_vertex_spirv(), shader_stage_vertex())
+    let fragment = device.create_shader_module(displacement_debug_spirv(), shader_stage_fragment())
+    let pipeline = device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::new(0, Vec[VertexAttribute]::new()), view.layout, RenderPipelineOptions::depth())
+    if !pipeline.available() {
+        println(pipeline.error()) ret 8
+    }
+    let mesh_shader = if device.enabled_features().contains(DeviceFeatures::mesh_shader()) {
+        device.create_shader_module(displacement_mesh_spirv(), shader_stage_mesh())
+    } else {
+        ShaderModule::unavailable()
+    }
+    let mesh_pipeline = if mesh_shader.available() {
+        device.create_mesh_pipeline_with_bind_group(target, mesh_shader, fragment, view.layout)
+    } else {
+        RenderPipeline::unavailable()
+    }
+    let vp = Mat4::perspective(1_f32, 1_f32, 0.1_f32, 100_f32)
+    let mut areas = Vec[usize]::new() let mut counts = Vec[u32]::new()
+    for i in 0_usize..4_usize {
+        let model = Mat4::translation(Vec3::new(0_f32, 0_f32, if i == 3 {
+                    - 90_f32
+                } else {
+                    - 3_f32
+                }
+                ,
+            ))
+        let mut rows = Vec[f32]::new()
+        for _ in 0_usize..2_usize {
+            for v in model.values() {
+                rows.push(v)
+            }
+        }
+        let lod = source.lods.get_unchecked_borrowed(if virtual_source && i == 3 {
+                1_usize
+            } else {
+                0_usize
+            }
+        )
+        for v in vec![1_f32, 1_f32, 1_f32, 1_f32, 0_f32, 0.5_f32, 0_f32, 0_f32, 1_f32, 1_f32, 0_f32, 0_f32, lod.first as f32, lod.count as f32, 0_f32, 0_f32] {
+            rows.push(v)
+        }
+        let frame = target.acquire_frame()
+        if i == 0 && !initializer.record(frame) {
+            ret 18
+        }
+        if !view.record(frame, vp, vp, vec![0_f32, 0_f32, 0_f32], 128, 128, DisplacementSettings {
+                true, if i == 0 {
+                    0_f32
+                } else {
+                    0.6_f32
+                }
+                , 0.5_f32, 1
+            }
+            , 1_f32, 1_f32, rows, 0,) {
+            ret 9
+        }
+        let slot = match view.slot(frame.slot() as usize) {
+            Some(s) => s None => {
+                ret 10
+            }
+        }
+        let use_mesh = i == 2 && mesh_pipeline.available()
+        let pass = frame.begin_render_pass(if use_mesh {
+                mesh_pipeline
+            } else {
+                pipeline
+            }
+            , 0_f32, 0_f32, 0_f32, 1_f32,)
+        if !pass.bind_group(slot.group) {
+            ret 11
+        }
+        let drawn = if use_mesh {
+            pass.draw_mesh_tasks_indirect(slot.state, 16)
+        } else {
+            pass.bind_index_buffer(table.indices) && pass.draw_indexed_indirect_count(slot.state, 28, slot.state, 48, 1)
+        }
+        if !drawn || !pass.end() || !frame.present() || !target.wait_readback() {
+            println(frame.error()) ret 12
+        }
+        let samples = unsafe {
+            encore_str_from_buffer(target.pixels() as u8*, 65536)
+        }
+        let mut colored = 0_usize
+        for pixel in 0_usize..16384_usize {
+            if samples.byte_at(pixel * 4 + 1) > 20 {
+                colored += 1
+            }
+        }
+        areas.push(colored) counts.push(slot.state.read_u32(52))
+        println("Displacement " +(if virtual_source {
+                    "virtual"
+                } else {
+                    "classic"
+                }
+            ) + " frame " + i.fmt() + ": pixels=" + colored.fmt() + " triangles=" + slot.state.read_u32(52).fmt() + " jobs=" + slot.state.read_u32(0).fmt())
+        if slot.state.read_u32(56) != 0 || slot.state.read_u32(0) > 16384 {
+            ret 13
+        }
+        frame.destroy()
+    }
+    if counts.get_unchecked_borrowed(0) != 2 || counts.get_unchecked_borrowed(1) <= 2 || counts.get_unchecked_borrowed(3) >= counts.get_unchecked_borrowed(1) {
+        ret 14
+    }
+    if areas.get_unchecked_borrowed(0) == 0 || areas.get_unchecked_borrowed(1) <= areas.get_unchecked_borrowed(0) || areas.get_unchecked_borrowed(1) != areas.get_unchecked_borrowed(2) {
+        ret 15
+    }
+    if initializer.status.read_u32(0) != 0 {
+        ret 19
+    }
+    if !initializer.destroy(budget) {
+        ret 20
+    }
+    if !view.destroy(budget) {
+        ret 16
+    }
+    pipeline.destroy() if mesh_pipeline.available() {
+        mesh_pipeline.destroy()
+    }
+    if mesh_shader.available() {
+        mesh_shader.destroy()
+    }
+    vertex.destroy() fragment.destroy()
+    sampler.destroy() height.destroy() source.destroy(budget) mesh.destroy() table.destroy(budget)
+    if budget.used() != 0 {
+        ret 17
+    }
+    target.destroy() device.destroy() instance.destroy() ret 0
+}
+
+fn main() -> u32 {
+    let classic = run(false) if classic != 0 {
+        ret classic
+    }
+    ret run(true)
+}

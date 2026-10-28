@@ -106,7 +106,7 @@ fn copy_scene(source: Scene) -> Scene {
         scene.create_entity_with_id(entity.id(), entity.name(), entity.transform())
         scene.set_visible(entity.id(), entity.visible()) scene.set_renderable(entity.id(), entity.renderable())
         scene.set_blueprint(entity.id(), entity.blueprint())
-        scene.set_component(entity.id(), entity.component()) scene.set_physics(entity.id(), entity.physics())
+        scene.set_component(entity.id(), entity.component()) scene.set_physics(entity.id(), entity.physics()) scene.set_material_path(entity.id(), entity.material_path())
     }
     for entity in source.entities() {
         scene.set_parent(entity.id(), entity.parent())

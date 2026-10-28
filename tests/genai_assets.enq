@@ -1,0 +1,47 @@
+//! Import publication is one reversible transaction, including internal references.
+import core::vec::Vec
+import std::os::{file_exists, mkdir_all, write_file}
+import std::time::perf_counter_ns
+
+import graphene::content_browser::ContentBrowser
+import graphene::content_browser::files::scan_content
+import graphene::content_browser::operations::{content_history, content_publish_generated}
+fn main() -> u32 {
+    let root = "/tmp/graphene-genai-history-" + perf_counter_ns().fmt()
+    let staging = ".graphene/Trash/GenAI-test"
+    let folder = "Content/Materials/Generated/Proof"
+    let textures = folder + "/Textures"
+    let material = folder + "/Proof.gmaterial"
+    if mkdir_all(root + "/" + staging + "/Textures") != 0 {
+        ret 1
+    }
+    if write_file(root + "/" + staging + "/Textures/basecolor.gtexture", "test pixels") != 0 || write_file(root + "/" + staging + "/Proof.gmaterial", textures + "/basecolor.gtexture") != 0 {
+        ret 2
+    }
+    let mut browser = ContentBrowser::new() browser.project = root
+    if !content_publish_generated(browser, staging, folder, staging + "/Proof.gmaterial", material) {
+        ret 3
+    }
+    if !file_exists(root + "/" + material) || !file_exists(root + "/" + textures + "/basecolor.gtexture") || browser.undo.len() != 1 {
+        ret 4
+    }
+    browser.entries = scan_content(root).entries
+    content_history(browser, false, vec![material])
+    if !file_exists(root + "/" + material) || browser.undo.len() != 1 {
+        ret 5
+    }
+    content_history(browser, false, Vec[str]::new())
+    if file_exists(root + "/" + material) || file_exists(root + "/" + textures + "/basecolor.gtexture") || browser.undo.len() != 0 || browser.redo.len() != 1 {
+        ret 6
+    }
+    browser.entries = scan_content(root).entries
+    content_history(browser, true, Vec[str]::new())
+    if !file_exists(root + "/" + material) || !file_exists(root + "/" + textures + "/basecolor.gtexture") || browser.undo.len() != 1 {
+        ret 7
+    }
+    // Existing destinations must never be overwritten.
+    if content_publish_generated(browser, staging, folder, staging + "/Proof.gmaterial", material) {
+        ret 8
+    }
+    ret 0
+}

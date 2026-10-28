@@ -1,0 +1,72 @@
+//! Adjacency and seam correspondence are immutable, shared by every GPU view.
+import core::vec::Vec
+import core::result::Result
+import refrain::scene::primitive::MeshData
+
+pub struct PatchTopology {
+    neighbours: Vec[u32]
+    weld_heads: Vec[u32]
+    weld_next: Vec[u32]
+}
+fn table_size(count: usize) -> usize {
+    let mut size = 8_usize
+    while size < count * 2 { size *= 2 }
+    ret size
+}
+fn filled(count: usize) -> Vec[u32] {
+    let mut out = Vec[u32]::with_capacity(count)
+    for _ in 0_usize..count { out.push(4294967295_u32) }
+    ret out
+}
+fn position_hash(vertices: Vec[f32], index: usize) -> u64 {
+    let x = (vertices.get_unchecked_borrowed(index * 11) * 10000_f32) as i64
+    let y = (vertices.get_unchecked_borrowed(index * 11 + 1) * 10000_f32) as i64
+    let z = (vertices.get_unchecked_borrowed(index * 11 + 2) * 10000_f32) as i64
+    ret ((x as u64) * 73856093_u64) ^ ((y as u64) * 19349663_u64) ^ ((z as u64) * 83492791_u64)
+}
+fn same_position(vertices: Vec[f32], a: usize, b: usize) -> bool {
+    for i in 0_usize..3_usize {
+        let delta = vertices.get_unchecked_borrowed(a * 11 + i) - vertices.get_unchecked_borrowed(b * 11 + i)
+        if delta < -0.000001_f32 || delta > 0.000001_f32 { ret false }
+    }
+    ret true
+}
+fn edge_vertices(indices: Vec[u32], canonical: Vec[u32], edge: usize) -> (u32, u32) {
+    let side = edge % 3 let base = edge - side
+    let a = canonical.get_unchecked_borrowed(indices.get_unchecked_borrowed(base + (side + 1) % 3) as usize)
+    let b = canonical.get_unchecked_borrowed(indices.get_unchecked_borrowed(base + (side + 2) % 3) as usize)
+    ret if a < b { (a,b) } else { (b,a) }
+}
+pub fn patch_topology(source: MeshData) -> Result[PatchTopology, str] {
+    let data = source.with_uvs() let vertices = data.vertices() let indices = data.indices()
+    let count = data.vertex_count()
+    if count == 0 || count > 4194304 || indices.len() % 3 != 0 || indices.len() > 12582912 { ret Result::Err("Displacement topology exceeds the source budget") }
+    for index in indices { if index as usize >= count { ret Result::Err("Invalid displacement triangle index") } }
+    let mut slots = filled(table_size(count))
+    let mut canonical = filled(count) let mut next = filled(count)
+    for vertex in 0_usize..count {
+        for component in 0_usize..3_usize {
+            let value = vertices.get_unchecked_borrowed(vertex * 11 + component)
+            if !(value >= -1000000000_f32 && value <= 1000000000_f32) { ret Result::Err("Displacement source positions are invalid") }
+        }
+        let mut slot = (position_hash(vertices, vertex) as usize) & (slots.len() - 1)
+        while slots.get_unchecked_borrowed(slot) != 4294967295_u32 && !same_position(vertices, vertex, slots.get_unchecked_borrowed(slot) as usize) { slot = (slot + 1) & (slots.len() - 1) }
+        let head = slots.get_unchecked_borrowed(slot)
+        if head == 4294967295_u32 { slots.set(slot, vertex as u32) canonical.set(vertex, vertex as u32) }
+        else { canonical.set(vertex, head) next.set(vertex, next.get_unchecked_borrowed(head as usize)) next.set(head as usize, vertex as u32) }
+    }
+    let mut edge_slots = filled(table_size(indices.len()))
+    let mut neighbours = filled(indices.len())
+    for edge in 0_usize..indices.len() {
+        let pair = edge_vertices(indices, canonical, edge)
+        let mut slot = (((pair.0 as u64) * 73856093_u64 ^ (pair.1 as u64) * 19349663_u64) as usize) & (edge_slots.len() - 1)
+        while edge_slots.get_unchecked_borrowed(slot) != 4294967295_u32 && edge_vertices(indices, canonical, edge_slots.get_unchecked_borrowed(slot) as usize) != pair { slot = (slot + 1) & (edge_slots.len() - 1) }
+        let other = edge_slots.get_unchecked_borrowed(slot)
+        if other == 4294967295_u32 { edge_slots.set(slot, edge as u32) }
+        else {
+            if neighbours.get_unchecked_borrowed(other as usize) != 4294967295_u32 { ret Result::Err("Displacement needs manifold edges; split non-manifold geometry before import") }
+            neighbours.set(edge, other) neighbours.set(other as usize, edge as u32)
+        }
+    }
+    ret Result::Ok(PatchTopology { neighbours, canonical, next })
+}

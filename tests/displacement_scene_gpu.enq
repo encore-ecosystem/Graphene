@@ -1,0 +1,170 @@
+//! Shared budget, PBR descriptors, camera view and displaced selection masks.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::println
+import std::os::write_file
+
+import graphene::displacement::renderer::DisplacementRenderer
+import graphene::rhi::*
+import graphene::scene::camera::PerspectiveCamera
+import graphene::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
+import graphene::standard_material::{DisplacementSettings, StandardMaterial}
+import graphene::temporal_view::TemporalView
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::{HeightImage, TextureImage}
+import linalg::{Mat4, Vec3}
+extern fn encore_str_from_buffer(data: u8*, count: usize) -> str
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 1
+        }
+    }
+    let device = instance.create_device(adapter)
+    if !device.available() {
+        ret 2
+    }
+    let mut targets = Vec[Swapchain]::new()
+    for _ in 0_usize..4_usize {
+        targets.push(device.create_offscreen_target(128, 128))
+    }
+    let upload = match TextureUpload::begin_linear(device, TextureImage {
+            1, 1, vec![4294967295_u32]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 3
+        }
+    }
+    if !upload.wait() {
+        ret 4
+    }
+    let white = upload.finish()
+    let height_upload = match TextureUpload::begin_height(device, HeightImage {
+            2, 2, vec![65535_u16, 65534_u16, 65535_u16, 65534_u16]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 5
+        }
+    }
+    if !height_upload.wait() {
+        ret 6
+    }
+    let height = height_upload.finish()
+    let sampler = device.create_repeat_sampler()
+    let textures = vec![white, white, white, height]
+    let mut vertices = Vec[f32]::new()
+    for p in vec![Vec3::new( - 1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, 1_f32, 0_f32), Vec3::new( - 1_f32, 1_f32, 0_f32)] {
+        for v in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1_f32) * 0.5_f32,(p.y() + 1_f32) * 0.5_f32] {
+            vertices.push(v)
+        }
+    }
+    let mesh = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
+    let camera = PerspectiveCamera::new(Vec3::new(0, 0, 3), Vec3::zero(), 1, 0.1_f32, 100)
+    let primary = RenderItem::new(1, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::identity())
+    let occluder = RenderItem::new(2, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::translation(Vec3::new(0.6_f32, 0, 1)).mul(Mat4::scale(Vec3::new(0.3_f32, 0.3_f32, 0.3_f32))))
+    let history = TemporalView::new()
+    let mut renderer = DisplacementRenderer::new()
+    let mut areas = Vec[usize]::new() let mut uniforms = Vec[GpuBuffer]::new() let mut zeros = Vec[f32]::new()
+    for _ in 0_usize..3172_usize {
+        zeros.push(0_f32)
+    }
+    let dummy = device.create_buffer(16, buffer_storage(), true) dummy.write_f32s(0, vec![0_f32, 0_f32, 0_f32, 0_f32])
+    for view in 0_usize..4_usize {
+        let target = targets.get_unchecked_borrowed(view)
+        let mut buffers = Vec[Vec[GpuBuffer]]::new()
+        for _ in 0_usize..target.frames_in_flight() as usize {
+            let uniform = device.create_buffer(12688, buffer_uniform(), true) uniform.write_f32s(0, zeros) uniforms.push(uniform)
+            buffers.push(vec![uniform, dummy, dummy, dummy, dummy])
+        }
+        let material = StandardMaterial::new(Vec3::new(0.2, 1, 0.2), 0, 1).with_unlit().with_double_sided().with_displacement(DisplacementSettings {
+                true, if view == 0 {
+                    0_f32
+                } else {
+                    0.6_f32
+                }
+                , 0.5_f32, 1
+            }
+        )
+        let items = if view < 2 {
+            vec![primary]
+        } else {
+            vec![primary, occluder]
+        }
+        let lods = if view < 2 {
+            vec![0_u32]
+        } else {
+            vec![0_u32, 0_u32]
+        }
+        if view == 0 {
+            // Dropping a recording frame delegates its submission to the backend.
+            let abandoned = target.acquire_frame()
+            renderer.begin(0)
+            if !renderer.prepare_batch(device, abandoned, target, "abandoned", 0, 1, mesh, Option::None, material, textures, sampler, white, buffers, items, lods, camera.position(), camera.view_projection(1), history, 128, 128, false, false, 1, vec![1_u64], Option::None) {
+                ret 12
+            }
+            abandoned.destroy() renderer.collect()
+        }
+        if view == 1 {
+            renderer.invalidate_mesh(1)
+        }
+        let frame = target.acquire_frame()
+        renderer.begin(view as u32)
+        if items.len() == 0 {
+            ret 14
+        }
+        if !renderer.prepare_batch(device, frame, target, "view-" + view.fmt(), view as u32, 1, mesh, Option::None, material, textures, sampler, white, buffers, items, lods, camera.position(), camera.view_projection(1), history, 128, 128, false, false, 1, vec![1_u64], Option::None) {
+            println(renderer.error()) ret 7
+        }
+        // The controller has a pipeline before drawing. A compatible empty
+        // pass starts with the batch pipeline and preserves the shared depth.
+        let pipeline = renderer.pipeline(view as u32)
+        let pass = frame.begin_render_pass(pipeline, 0, 0, 0, 1)
+        if !renderer.draw(pass, frame.slot(), view as u32) || !pass.end() || !frame.present() || !target.wait_readback() {
+            println(frame.error()) ret 8
+        }
+        let image = unsafe {
+            encore_str_from_buffer(target.pixels() as u8*, 65536)
+        }
+        write_file("target/displacement-proof-" + view.fmt() + ".bgra", image)
+        let mut area = 0_usize
+        for i in 0_usize..16384_usize {
+            if image.byte_at(i * 4 + if view < 2 {
+                    1_usize
+                } else {
+                    2_usize
+                }
+            ) > 100 {
+                area += 1
+            }
+        }
+        areas.push(area) println("Displaced scene view " + view.fmt() + ": pixels=" + area.fmt() + " bytes=" + renderer.memory_bytes().fmt())
+        if !renderer.handles(1, view as u32) {
+            ret 9
+        }
+        frame.destroy()
+    }
+    if areas.get_unchecked_borrowed(0) == 0 || areas.get_unchecked_borrowed(1) <= areas.get_unchecked_borrowed(0) || areas.get_unchecked_borrowed(2) >= areas.get_unchecked_borrowed(3) || areas.get_unchecked_borrowed(3) != areas.get_unchecked_borrowed(1) {
+        ret 10
+    }
+    let mut preview = DisplacementRenderer::with_budget(renderer.budget())
+    if !preview.destroy() || renderer.memory_bytes() == 0 {
+        ret 13
+    }
+    if !renderer.destroy() || renderer.memory_bytes() != 0 {
+        ret 11
+    }
+    for uniform in uniforms {
+        uniform.destroy()
+    }
+    dummy.destroy() mesh.destroy() sampler.destroy() height.destroy() white.destroy()
+    for target in targets {
+        target.destroy()
+    }
+    device.destroy() instance.destroy() ret 0
+}

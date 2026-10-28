@@ -26,7 +26,7 @@ pub struct EditorUiState {
 impl for EditorUiState {
     pub fn new() -> Self {
         ret Self {
-            McpSettings::load(), RenderSettings::defaults(), 1_u32, 0_u32, "", ContentBrowser::new(), ActorDetails::new(), MeshDetails::new(), LodGroupEditor::new(), vec!["ui-section-autolod", "ui-section-component", "ui-section-transform", "ui-section-surface"], "", "", ""
+            McpSettings::load(), RenderSettings::defaults(), 1_u32, 0_u32, "", ContentBrowser::new(), ActorDetails::new(), MeshDetails::new(), LodGroupEditor::new(), vec!["ui-section-autolod", "ui-section-component", "ui-section-transform", "ui-section-surface", "ui-section-mesh"], "", "", ""
         }
     }
     pub fn expanded(self: Self, id: str) -> bool {

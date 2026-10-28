@@ -1,0 +1,33 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_GOOGLE_include_directive : require
+#include "render.glsl"
+layout(local_size_x=32) in;
+layout(triangles,max_vertices=63,max_primitives=21) out;
+layout(location=0) out vec3 world_normal[];
+layout(location=1) out vec3 color[];
+layout(location=2) flat out vec4 material_base_color[];
+layout(location=3) flat out vec4 material_surface[];
+layout(location=4) out vec3 world_position[];
+layout(location=5) out vec2 texture_uv[];
+layout(location=6) flat out vec4 material_texture[];
+layout(location=7) noperspective out vec3 triangle_barycentric[];
+layout(location=8) flat out uint triangle_identity[];
+layout(location=13) out vec4 current_clip[];
+layout(location=14) out vec4 previous_clip[];
+layout(location=15) flat out float temporal_valid[];
+void main() {
+    uint jobIndex=gl_WorkGroupID.x+gl_WorkGroupID.y*65535u;
+    uint count=jobIndex<patchState.data[0]?min(21u,patchJobs.data[jobIndex].w-patchJobs.data[jobIndex].z):0u;
+    SetMeshOutputsEXT(count*3u,count);
+    for(uint vertex=gl_LocalInvocationIndex;vertex<count*3u;vertex+=32u) {
+        DisplacedVertex v=displacedVertex(jobIndex,vertex);PatchInstance item=patchInstances.data[v.instance];
+        gl_MeshVerticesEXT[vertex].gl_Position=v.clip;
+        world_position[vertex]=v.position;world_normal[vertex]=v.normal;color[vertex]=v.color;
+        material_base_color[vertex]=item.tint;material_surface[vertex]=item.surface;material_texture[vertex]=item.textureFlags;texture_uv[vertex]=v.uv;
+        current_clip[vertex]=v.clip;previous_clip[vertex]=v.previousClip;temporal_valid[vertex]=float(item.geometry.w);
+        triangle_barycentric[vertex]=vec3(0);triangle_barycentric[vertex][vertex%3u]=1;
+        triangle_identity[vertex]=displacedTriangleIdentity(jobIndex,vertex);
+    }
+    if(gl_LocalInvocationIndex<count)gl_PrimitiveTriangleIndicesEXT[gl_LocalInvocationIndex]=uvec3(gl_LocalInvocationIndex*3u,gl_LocalInvocationIndex*3u+1u,gl_LocalInvocationIndex*3u+2u);
+}

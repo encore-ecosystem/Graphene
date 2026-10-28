@@ -1,0 +1,255 @@
+//! Skin/morph output feeds GPU patch refinement without a CPU-deformed mesh.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::println
+
+import graphene::animation::gpu::{SkinFrameInstance, SkinGpuCache}
+import graphene::animation::math::PoseMatrix
+import graphene::animation::pose::{AnimationPose, model_pose, skin_palette}
+import graphene::animation::sample::sample_clip
+import graphene::animation::source::decode_animation_source
+import graphene::displacement::gpu::GpuPatchInitializer
+import graphene::displacement::patterns::DisplacementBudget
+import graphene::displacement::ray_scene::DisplacementRayScene
+import graphene::displacement::renderer::DisplacementRenderer
+import graphene::displacement::skin_source::{DisplacementSkin, GpuSkinPatchSource}
+import graphene::dynamic_gi::{GpuDynamicGi, SurfaceCacheSample}
+import graphene::rhi::*
+import graphene::scene::camera::PerspectiveCamera
+import graphene::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
+import graphene::standard_material::{DisplacementSettings, StandardMaterial}
+import graphene::temporal_view::TemporalView
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::{HeightImage, TextureImage}
+import graphene::virtual_geometry::build_virtual_geometry_lods
+import linalg::{Mat4, Vec3}
+extern fn encore_str_from_buffer(data: u8*, count: usize) -> str
+extern fn graphene_animation_f32_bits(value: f32) -> u32
+#attr(safe)
+fn bits(value: f32) -> u32 {
+    ret graphene_animation_f32_bits(value)
+}
+fn check_welds(device: GraphicsDevice) -> bool {
+    let positions = vec![Vec3::new(0, 0, 0), Vec3::new(1, 0, 0), Vec3::new(0, 1, 0), Vec3::new(0, 0, 0), Vec3::new(1, 0, 0), Vec3::new(0, 1, 0)]
+    let geometry = build_virtual_geometry_lods(positions, vec![0_u32, 1_u32, 2_u32, 3_u32, 4_u32, 5_u32], 64, 126)
+    let mut words = Vec[u32]::new()
+    for i in 0_usize..6_usize {
+        let p = positions.get_unchecked_borrowed(i)
+        for k in 0_usize..32_usize {
+            words.push(if k == 0 {
+                    bits(p.x())
+                } elif k == 1 {
+                    bits(p.y())
+                } elif k == 2 {
+                    bits(p.z())
+                } elif k == 6 || k == 24 {
+                    bits(1)
+                } elif k == 16 && i == 4 {
+                    1_u32
+                } else {
+                    0_u32
+                }
+            )
+        }
+    }
+    let source = device.create_buffer(768, buffer_storage(), true) source.write_u32s(0, words)
+    let spans = device.create_buffer(48, buffer_storage(), true) spans.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 1_u32])
+    let deltas = device.create_buffer(64, buffer_storage(), true) let mut delta = Vec[u32]::new()
+    for k in 0_usize..16_usize {
+        delta.push(if k == 0 {
+                bits(0.25_f32)
+            } else {
+                0_u32
+            }
+        )
+    }
+    deltas.write_u32s(0, delta)
+    let mut budget = DisplacementBudget::new()
+    let mut converted = match GpuSkinPatchSource::create(device, source, geometry, budget) {
+        Ok(s) => s Err(_) => {
+            ret false
+        }
+    }
+    let mut topology = match GpuPatchInitializer::create_skinned(device, converted.mesh, geometry, vec![source, spans, deltas], budget) {
+        Ok(t) => t Err(_) => {
+            ret false
+        }
+    }
+    let bytes = topology.source.weld.size() let readback = device.create_buffer(bytes, buffer_transfer_destination(), true)
+    let target = device.create_offscreen_target(8, 8) let frame = target.acquire_frame()
+    if !converted.record(frame) || !topology.record(frame) || !frame.copy_buffer(topology.source.weld, readback, 0, 0, bytes) || !frame.present() || !target.wait_readback() {
+        ret false
+    }
+    let mut heads = Vec[u32]::new() for _ in 0_usize..6_usize {
+        heads.push(4294967295_u32)
+    }
+    let ids = geometry.vertex_indices() let clusters = geometry.clusters() let lod = geometry.lods().get_unchecked_borrowed(0)
+    let start = lod.first_cluster() let end = start + lod.cluster_count()
+    for c in start..end {
+        let cluster = clusters.get_unchecked_borrowed(c) let first = cluster.vertex_offset() let last = first + cluster.vertex_count()
+        for v in first..last {
+            heads.set(ids.get_unchecked_borrowed(v) as usize, readback.read_u32((v as u64) * 8))
+        }
+    }
+    let valid = topology.status.read_u32(0) == 0 && heads.get_unchecked_borrowed(0) != 4294967295_u32 && heads.get_unchecked_borrowed(0) == heads.get_unchecked_borrowed(3) && heads.get_unchecked_borrowed(1) != heads.get_unchecked_borrowed(4) && heads.get_unchecked_borrowed(2) != heads.get_unchecked_borrowed(5)
+    frame.destroy() topology.destroy(budget) topology.source.destroy(budget) converted.destroy(budget)
+    readback.destroy() source.destroy() spans.destroy() deltas.destroy() target.destroy()
+    if valid && budget.used() == 0 {
+        println("GPU welds: UV splits share edges; bone and morph discontinuities stay separate: PASS") ret true
+    }
+    ret false
+}
+fn main() -> u32 {
+    let source = match decode_animation_source("FIXTURE_ROOT/fixtures/rig.glb", "displacement") {
+        Ok(s) => s Err(e) => {
+            println(e) ret 1
+        }
+    }
+    let instance = GraphicsInstance::create()
+    let mut chosen = Option[AdapterInfo]::None
+    for adapter in instance.adapters() {
+        if adapter.capabilities().ray_query() {
+            chosen = Option[AdapterInfo]::Some(adapter)
+        }
+    }
+    let adapter = match chosen {
+        Some(a) => a None => {
+            println("SKIP: hardware ray query unavailable") ret 77
+        }
+    }
+    let device = instance.create_device_with_features(adapter, DeviceFeatures::ray_query(), DeviceFeatures::none())
+    if !check_welds(device) {
+        ret 16
+    }
+    let target = device.create_offscreen_target(128, 128)
+    let mut cache = match SkinGpuCache::create(device, source.skeleton, source.mesh, 1) {
+        Ok(c) => c Err(e) => {
+            println(e) ret 3
+        }
+    }
+    let mut positions = Vec[Vec3]::new()
+    for vertex in source.mesh.vertices {
+        positions.push(Vec3::new(vertex.position.x, vertex.position.y, vertex.position.z))
+    }
+    let geometry = build_virtual_geometry_lods(positions, source.mesh.indices, 64, 126)
+    let upload = match TextureUpload::begin_linear(device, TextureImage {
+            1, 1, vec![4294967295_u32]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 4
+        }
+    }
+    if !upload.wait() {
+        ret 5
+    }
+    let white = upload.finish()
+    let height_upload = match TextureUpload::begin_height(device, HeightImage {
+            1, 1, vec![65535_u16]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 6
+        }
+    }
+    if !height_upload.wait() {
+        ret 7
+    }
+    let height = height_upload.finish()
+    let sampler = device.create_repeat_sampler() let textures = vec![white, white, white, height]
+    let uniform = device.create_buffer(12688, buffer_uniform(), true) let mut zeros = Vec[f32]::new()
+    for _ in 0_usize..3172_usize {
+        zeros.push(0_f32)
+    }
+    uniform.write_f32s(0, zeros)
+    let dummy = device.create_buffer(16, buffer_storage(), true) dummy.write_f32s(0, vec![0_f32, 0_f32, 0_f32, 0_f32])
+    let mut buffers = Vec[Vec[GpuBuffer]]::new()
+    for _ in 0_usize..target.frames_in_flight() as usize {
+        buffers.push(vec![uniform, dummy, dummy, dummy, dummy])
+    }
+    let material = StandardMaterial::new(Vec3::new(0.2, 1, 0.2), 0, 1).with_unlit().with_double_sided().with_displacement(DisplacementSettings {
+            true, 0.2_f32, 0.5_f32, 1
+        }
+    )
+    let camera = PerspectiveCamera::new(Vec3::new(1.5_f32, 0.5_f32, 5), Vec3::new(1.5_f32, 0.5_f32, 0), 1, 0.1_f32, 100)
+    let history = TemporalView::new() let mut renderer = DisplacementRenderer::new()
+    let mut ray_scene = DisplacementRayScene::new() let mut gi = GpuDynamicGi::create(device, 8, 8) let mut visibility = Vec[f32]::new()
+    let item = RenderItem::new(1, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::identity())
+    let mut centroids = Vec[usize]::new()
+    for step in 0_usize..3_usize {
+        let time = if step == 0 {
+            0_f32
+        } else {
+            1_f32
+        }
+        let mut rest = AnimationPose::rest(source.skeleton, source.mesh.morphs.len())
+        let pose = sample_clip(source.clips.get_unchecked_borrowed(0), time, rest).unwrap_or(AnimationPose::rest(source.skeleton, source.mesh.morphs.len()))
+        let mut model = Vec[PoseMatrix]::new()
+        model = model_pose(source.skeleton, pose, model).unwrap_or(model)
+        let mut palette = Vec[PoseMatrix]::new()
+        palette = skin_palette(model, source.mesh, palette).unwrap_or(palette)
+        if cache.stage(step as u64, vec![SkinFrameInstance { 1, palette, model, vec![time], true }]).is_err() {
+            ret 8
+        }
+        let frame = target.acquire_frame()
+        if !cache.record_all(frame) {
+            ret 9
+        }
+        let skin = DisplacementSkin {
+            cache.source_buffer(), cache.cache_buffer(), cache.morph_span_buffer(), cache.morph_delta_buffer(), source.mesh.vertices.len() as u32, vec![0_u32], vec![Mat4::identity()], vec![step > 0]
+        }
+        renderer.begin(0)
+        if !renderer.prepare_batch(device, frame, target, "skin", 0, 1, GpuMesh::unavailable(), Option::Some(geometry), material, textures, sampler, white, buffers, vec![item], vec![0_u32], camera.position(), camera.view_projection(1), history, 128, 128, false, false, 1, Vec[u64]::new(), Option::Some(skin)) {
+            println(renderer.error()) ret 10
+        }
+        let proxies = renderer.ray_instances(device, frame)
+        if proxies.len() != 1 {
+            println(renderer.error()) ret 17
+        }
+        let proxy = proxies.get_unchecked_borrowed(0)
+        let tlas = ray_scene.prepare(device, frame, vec![proxy.acceleration], vec![proxy.world], proxy.generation, renderer.budget())
+        if !tlas.available() || !gi.bind_ray_scene(tlas) || !gi.record_ray_query(frame, vec![SurfaceCacheSample::world_probe(Vec3::new(0.3_f32, 0.3_f32, 2))], Vec3::new(1, 1, 1), 3, 0) {
+            println(ray_scene.error()) ret 18
+        }
+        let pass = frame.begin_render_pass(renderer.pipeline(0), 0, 0, 0, 1)
+        if !renderer.draw(pass, frame.slot(), 0) || !pass.end() || !frame.present() || !target.wait_readback() {
+            println(frame.error()) ret 11
+        }
+        visibility.push(gi.radiance(0).x()) println("Skinned displaced GI frame " + step.fmt() + ": " + gi.radiance(0).x().fmt())
+        let pixels = unsafe {
+            encore_str_from_buffer(target.pixels() as u8*, 65536)
+        }
+        let mut area = 0_usize let mut sum = 0_usize
+        for p in 0_usize..16384_usize {
+            if pixels.byte_at(p * 4 + 1) > 100 {
+                area += 1 sum += p % 128
+            }
+        }
+        if area == 0 {
+            ret 12
+        }
+        centroids.push(sum / area)
+        renderer.collect() let statistics = renderer.statistics(0)
+        if statistics.pending || statistics.triangles == 0 {
+            ret 13
+        }
+        println("Skinned displacement frame " + step.fmt() + ": centroid=" +(sum / area).fmt() + " triangles=" + statistics.triangles.fmt())
+        frame.destroy()
+    }
+    if centroids.get_unchecked_borrowed(1) <= centroids.get_unchecked_borrowed(0) + 15 || centroids.get_unchecked_borrowed(1) != centroids.get_unchecked_borrowed(2) {
+        ret 14
+    }
+    if visibility.len() != 3 || visibility.get_unchecked_borrowed(0) > 0.85_f32 || visibility.get_unchecked_borrowed(1) < 0.99_f32 || visibility.get_unchecked_borrowed(2) < 0.99_f32 {
+        ret 19
+    }
+    if !gi.destroy() || !ray_scene.destroy(renderer.budget()) {
+        ret 20
+    }
+    if !renderer.destroy() || renderer.memory_bytes() != 0 || !cache.destroy() {
+        ret 15
+    }
+    dummy.destroy() uniform.destroy() sampler.destroy() white.destroy() height.destroy() target.destroy() device.destroy() instance.destroy() ret 0
+}

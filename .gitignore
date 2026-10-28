@@ -21,7 +21,6 @@ __pycache__/
 
 # Rebuildable import sidecars. Keep native assets and AutoLOD settings in general.
 *.obj.gmesh
-*.graphene-material.json.gmaterial
 *.graphene-weather.json.gweather
 /tests/fixtures/obj_texture/Plane.gtexture
 **/Config/LODGroups.before-distance*.json

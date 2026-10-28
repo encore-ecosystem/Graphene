@@ -1,0 +1,46 @@
+.genai-panel { flex-direction: column; background: var(--graphene-surface); padding: 8px; gap: 7px; min-width: 0; }
+.genai-toolbar,.genai-row { flex-direction: row; align-items: center; gap: 5px; min-width: 0; flex-wrap: wrap; }
+.genai-heading { color: var(--graphene-muted); font-size: 11px; font-weight: 600; flex-grow: 1; }
+.genai-body { flex-direction: row; gap: 12px; overflow-y: auto; flex-grow: 1; min-height: 0; flex-wrap: wrap; }
+.genai-settings { flex-direction: column; width: 320px; min-width: 260px; gap: 5px; }
+.genai-result { flex-direction: column; flex-grow: 1; min-width: 340px; gap: 6px; }
+.genai-button { min-width: 0; height: 26px; padding: 4px 8px; border-radius: 4px; background: var(--graphene-control); border: 1px solid var(--graphene-border-hover); color: var(--graphene-text-strong); font-size: 12px; cursor: pointer; }
+.genai-button.is-hovered { background: var(--graphene-control-hover); }
+.genai-button.is-active { background: #285b7e; border: 1px solid var(--graphene-accent-hover); }
+.genai-button.is-pressed { background: #44647d; }
+.genai-button:focus,.genai-input:focus,.genai-prompt:focus { outline: 2px solid var(--graphene-focus); outline-offset: 1px; }
+.genai-button:disabled,.genai-input:disabled,.genai-prompt:disabled { opacity: 0.45; }
+.genai-property { flex-direction: row; align-items: center; gap: 6px; min-width: 0; }
+.genai-label { width: 78px; flex-shrink: 0; color: #bac4d1; font-size: 12px; }
+.genai-input,.genai-prompt { background: var(--graphene-bg); color: var(--graphene-text-strong); border: 1px solid var(--graphene-border-hover); border-radius: 3px; padding: 4px 6px; height: 26px; min-width: 0; flex-grow: 1; cursor: text; }
+.genai-prompt { height: 88px; width: 100%; }
+.genai-preview { min-height: 220px; height: 260px; flex-grow: 1; background: #101419; border: 1px solid #3b4552; border-radius: 4px; overflow: hidden; }
+.genai-placeholder { color: var(--graphene-muted); text-align: center; padding: 20px; }
+.genai-status { color: var(--graphene-text); font-size: 12px; min-height: 20px; line-height: 1.4; }
+
+.genai-reference { width: 128px; height: 128px; border: 1px solid var(--graphene-border-hover); border-radius: 4px; }
+
+.genai-button.is-active.is-hovered { background: #316f94; }
+.genai-button:disabled { cursor: default; }
+
+/* Dock content keeps its intrinsic control sizes and scrolls as whole sections. */
+.genai-panel { flex: 1 1 0px; min-height: 0; height: 100%; overflow: hidden; }
+.genai-toolbar { flex: 0 0 32px; height: 32px; min-height: 32px; flex-wrap: nowrap; }
+.genai-heading { flex: 1 1 120px; min-width: 70px; }
+.genai-toolbar .genai-button { flex: 0 0 88px; width: 88px; }
+.genai-body { flex: 1 1 0px; min-width: 0; min-height: 0; align-items: flex-start; align-content: flex-start; overflow-x: hidden; overflow-y: auto; }
+.genai-settings { flex: 0 0 320px; width: 320px; min-width: 280px; height: 480px; min-height: 480px; }
+.genai-result { flex: 1 1 360px; min-width: 340px; height: 480px; min-height: 480px; }
+.genai-row { flex: 0 0 28px; height: 28px; min-height: 28px; flex-wrap: nowrap; }
+.genai-button { flex: 0 0 28px; height: 28px; min-height: 28px; white-space: nowrap; }
+.genai-row .genai-button { flex: 1 1 0px; min-width: 0; }
+#genai-provider-add,#genai-provider-remove { flex: 0 0 28px; width: 28px; }
+.genai-property { flex: 0 0 28px; height: 28px; min-height: 28px; }
+.genai-label { flex: 0 0 78px; width: 78px; min-width: 78px; }
+.genai-input { flex: 1 1 0px; height: 26px; min-height: 26px; min-width: 0; }
+.genai-prompt { flex: 1 1 0px; height: 88px; min-height: 88px; }
+.genai-prompt-property { flex: 0 0 112px; height: 112px; min-height: 112px; flex-direction: column; align-items: stretch; }
+.genai-prompt-property .genai-label { flex: 0 0 18px; height: 18px; min-height: 18px; width: auto; }
+.genai-preview { flex: 1 1 280px; width: 100%; min-width: 0; min-height: 220px; max-width: var(--genai-preview-limit); max-height: var(--genai-preview-limit); align-self: center; }
+.genai-status { flex: 0 0 24px; height: 24px; min-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.genai-reference { flex: 0 0 128px; height: 128px; min-height: 128px; width: 128px; }

@@ -1,0 +1,251 @@
+//! Bounded GPU-evaluated RT geometry. The caller retains the patch source and
+//! slot until the producer frame retires, and touches every TLAS consumer.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import vulkan::{native_acceleration_structure_memory_bytes, native_acceleration_structure_release_build_resources, native_frame_build_triangle_blas}
+
+import mod::gpu::{DisplacementLod, GpuPatchSource, GpuRefinementTable, PatchGpuSlot, patch_layout_entries}
+import mod::patterns::DisplacementBudget
+import mod::terrain_source::{GpuTerrainPatchBindings, terrain_layout_entries}
+import refrain::rhi::*
+
+pub struct RayProxyShape {
+    first: u32
+    faces: u32
+    level: u32
+    triangles: u32
+}
+pub fn ray_proxy_shape(lods: Vec[DisplacementLod], quality: u32) -> Result[RayProxyShape, str] {
+    let limit = if quality == 0 {
+        16384_u32
+    } elif quality == 1 {
+        65536_u32
+    } else {
+        131072_u32
+    }
+    let mut chosen = Option[DisplacementLod]::None
+    for lod in lods {
+        if lod.count > 0 && lod.count <= limit {
+            chosen = Option[DisplacementLod]::Some(lod) break
+        }
+    }
+    let lod = match chosen {
+        Some(l) => l None => {
+            ret Result::Err("No source LOD fits the ray proxy triangle limit")
+        }
+    }
+    let mut level = 0_u32 let mut triangles = lod.count
+    while level < 8 && triangles <= limit / 4 {
+        level += 1 triangles *= 4
+    }
+    ret Result::Ok(RayProxyShape { lod.first, lod.count, level, triangles })
+}
+pub struct GpuRayProxy {
+    acceleration: AccelerationStructure
+    points: GpuBuffer
+    indices: GpuBuffer
+    config: GpuBuffer
+    layout: BindGroupLayout
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    group: BindGroup
+    producer: GpuCompletion
+    consumers: Vec[GpuCompletion]
+    transient: u64
+    persistent: u64
+    submitted: bool
+    invalid: bool
+    error: str
+    triangles: u32
+}
+
+impl for GpuRayProxy {
+    pub fn create(device: GraphicsDevice, frame: RenderFrame, source: GpuPatchSource, table: GpuRefinementTable,
+        slot: PatchGpuSlot, height: GpuTexture, sampler: GpuSampler, skin: GpuBuffer,
+        terrain: Option[GpuTerrainPatchBindings], instance: u32, quality: u32, words: Vec[u32], budget: mut DisplacementBudget&,) -> Result[GpuRayProxy<H>, str] {
+        let mut shape = ray_proxy_shape(source.lods, quality)?
+        // Trace geometry follows height-map detail, rather than expanding every tiny
+        // source triangle all the way to the absolute safety ceiling.
+        let texels = if quality == 0 {
+            8_u64
+        } elif quality == 1 {
+            4_u64
+        } else {
+            2_u64
+        }
+        let mut samples =(height.width() as u64) *(height.height() as u64)
+        match terrain {
+            Some(t) => {
+                samples =(t.material.weights.width() as u64) *(t.material.weights.height() as u64)
+                for i in vec![3_usize, 7_usize, 11_usize] {
+                    let texture = t.material.textures.get_unchecked_borrowed(i)
+                    let count =(texture.width() as u64) *(texture.height() as u64)
+                    if count > samples {
+                        samples = count
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        let target = samples * 2 /(texels * texels)
+        while shape.level > 0 &&(shape.triangles as u64) > target {
+            shape.level -= 1 shape.triangles /= 4
+        }
+        if !skin.available() || !height.available() || !frame.available() {
+            ret Result::Err("Missing ray proxy source bindings")
+        }
+        let transient =(shape.triangles as u64) * 60 + 16
+        if !budget.reserve(transient) {
+            ret Result::Err("Ray displacement proxy budget exhausted")
+        }
+        let usage = buffer_storage() | buffer_acceleration_structure_input() | buffer_shader_device_address()
+        let count = shape.triangles * 3
+        let points = device.create_buffer((count as u64) * 16, usage, false)
+        let indices = device.create_buffer((count as u64) * 4, usage, false)
+        let config = device.create_buffer(16, buffer_uniform(), true)
+        let mut entries = patch_layout_entries()
+        match terrain {
+            Some(_) => {
+                for entry in terrain_layout_entries() {
+                    entries.push(entry)
+                }
+            }
+            None => {
+            }
+        }
+        entries.push(BindGroupLayoutEntry::storage(45, shader_stage_compute()))
+        entries.push(BindGroupLayoutEntry::storage(46, shader_stage_compute()))
+        entries.push(BindGroupLayoutEntry::uniform(47, shader_stage_compute()))
+        let layout = device.create_bind_group_layout(entries)
+        let shader = device.create_shader_module(words, shader_stage_compute())
+        let pipeline = device.create_compute_pipeline(shader, layout)
+        let mut bindings = Vec[u32]::new() let mut buffers = Vec[GpuBuffer]::new() let mut offsets = Vec[u64]::new() let mut ranges = Vec[u64]::new()
+        slot.append(source, table, skin, bindings, buffers, offsets, ranges)
+        let mut texture_bindings = vec![31_u32] let mut textures = vec![height] let mut samplers = vec![sampler]
+        match terrain {
+            Some(t) => {
+                t.append(bindings, buffers, offsets, ranges) for binding in t.texture_bindings() {
+                    texture_bindings.push(binding)
+                }
+                for texture in t.textures() {
+                    textures.push(texture) samplers.push(sampler)
+                }
+            }
+            None => {
+            }
+        }
+        for i in 0_usize..3_usize {
+            let b = vec![points, indices, config].get_unchecked_borrowed(i) bindings.push(45_u32 +(i as u32)) buffers.push(b) offsets.push(0) ranges.push(b.size())
+        }
+        let group = device.create_buffer_textures_bind_group_many(layout, bindings, buffers, offsets, ranges, texture_bindings, textures, samplers)
+        let mut result = GpuRayProxy<H> {
+            AccelerationStructure::unavailable(), points, indices, config, layout, shader, pipeline, group, GpuCompletion::unavailable(), Vec[GpuCompletion]::new(), transient, 0, false, false, "", shape.triangles
+        }
+        if !points.available() || !indices.available() || !config.available() || !layout.available() || !shader.available() || !pipeline.available() || !group.available() || !config.write_u32s(0, vec![shape.first, shape.faces, shape.level, instance]) {
+            let error = "Unable to allocate ray displacement proxy: " + pipeline.error() + " " + group.error()
+            result.destroy(budget) ret Result::Err(error)
+        }
+        result.producer = frame.completion()
+        if !result.producer.available() {
+            result.destroy(budget) ret Result::Err("Missing ray proxy producer completion")
+        }
+        // After recording starts, even failure returns an owned object: its partial
+        // commands and resources may only be retired after the producer completion.
+        result.submitted = true
+        if !frame.dispatch_compute(pipeline, group,(shape.triangles + 63) / 64, 1, 1) || !frame.compute_barrier() {
+            result.invalid = true result.error = "Unable to record ray displacement geometry" ret Result::Ok(result)
+        }
+        result.acceleration = AccelerationStructure {
+            native_frame_build_triangle_blas(frame.handle(), points.handle(), 16, count, indices.handle(), count, budget.limit - budget.used())
+        }
+        result.persistent = native_acceleration_structure_memory_bytes(result.acceleration.handle)
+        // The native build checks this quota before allocating any AS or scratch.
+        if !budget.reserve(result.persistent) {
+            result.invalid = true result.error = "Ray proxy native allocation exceeded its quota"
+        }
+        if !result.acceleration.available() {
+            result.invalid = true result.error = result.acceleration.error()
+        }
+        ret Result::Ok(result)
+    }
+    pub fn producer_complete(self: Self&) -> bool {
+        ret !self.submitted || self.producer.ready()
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn available(self: Self&) -> bool {
+        ret !self.invalid && self.acceleration.available()
+    }
+    pub fn structure(self: Self&) -> AccelerationStructure {
+        ret self.acceleration
+    }
+    pub fn ordered(self: Self&, frame: RenderFrame) -> bool {
+        let token = frame.completion() let result = self.producer.same_submission(token) || self.producer.submitted() || self.producer.succeeded()
+        token.destroy() ret self.available() && result
+    }
+    pub fn touch(self: mut Self&, frame: RenderFrame) -> bool {
+        if !self.ordered(frame) {
+            ret false
+        }
+        self.collect_consumers() let token = frame.completion()
+        if !token.available() {
+            ret false
+        }
+        for prior in self.consumers {
+            if prior.same_submission(token) {
+                token.destroy() ret true
+            }
+        }
+        self.consumers.push(token) ret true
+    }
+    fn collect_consumers(self: mut Self&) ->() {
+        let mut pending = Vec[GpuCompletion]::new()
+        for token in self.consumers {
+            if token.ready() {
+                token.destroy()
+            } else {
+                pending.push(token)
+            }
+        }
+        self.consumers = pending ret()
+    }
+    pub fn collect(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        self.collect_consumers()
+        if self.submitted && !self.producer.ready() {
+            ret false
+        }
+        if self.submitted && !self.producer.succeeded() {
+            self.invalid = true
+        }
+        if self.transient > 0 {
+            self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy()
+            self.points.destroy() self.indices.destroy() self.config.destroy()
+            budget.release(self.transient) self.transient = 0
+        }
+        if self.acceleration.available() && native_acceleration_structure_release_build_resources(self.acceleration.handle) {
+            let current = native_acceleration_structure_memory_bytes(self.acceleration.handle)
+            if current <= self.persistent {
+                budget.release(self.persistent - current) self.persistent = current
+            }
+        }
+        ret self.consumers.len() == 0
+    }
+    pub fn destroy(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        if !self.collect(budget) {
+            ret false
+        }
+        if self.acceleration.handle != 0 && !self.acceleration.destroy() {
+            ret false
+        }
+        self.acceleration = AccelerationStructure::unavailable()
+        budget.release(self.persistent) self.persistent = 0
+        if self.producer.available() {
+            self.producer.destroy() self.producer = GpuCompletion::unavailable()
+        }
+        ret true
+    }
+}

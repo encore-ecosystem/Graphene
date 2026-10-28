@@ -1,4 +1,4 @@
-import mod::native_asset::{asset_source_stamp, load_native_texture, save_native_texture}
+import mod::native_asset::{asset_source_stamp, load_native_height, load_native_texture, save_native_texture}
 //! Bounded PNG decoding and project-owned textures, without native codecs.
 // PNG: W3C PNG specification. Zlib/DEFLATE: RFC 1950 and RFC 1951.
 
@@ -23,7 +23,7 @@ fn texture_digest(contents: str) -> str {
 // Uses the existing system runtime: this version of index@std does not yet
 // re-export checked File. Handles remain worker-local and are always closed.
 #attr(safe)
-fn read_texture_file(path: str) -> Result[str, str] {
+pub fn read_texture_file(path: str) -> Result[str, str] {
     unsafe {
         let file = encore_file_open(path, false)
         if file == 0 {
@@ -42,7 +42,7 @@ fn read_texture_file(path: str) -> Result[str, str] {
     }
 }
 
-pub import mod::texture_image::{TextureImage, texture_path_valid}
+pub import mod::texture_image::{HeightImage, TextureImage, texture_path_valid}
 
 /// The worker owns its result until the UI joins it. Failed loads never replace a material.
 pub struct TextureLoad {
@@ -356,8 +356,20 @@ fn paeth(left: u32, above: u32, corner: u32) -> u32 {
     }
 }
 
-/// Decodes static 8-bit RGB/RGBA PNG. Bounds cover compressed and decoded data.
+/// Decodes static RGB/RGBA and grayscale PNG. Grayscale 16-bit masks are
+/// normalized to RGBA8 here; decode_height_png retains every authored height bit.
 pub fn decode_png(data: str) -> Result[TextureImage, str] {
+    ret decode_png_samples(data, false)
+}
+pub fn decode_height_png(data: str) -> Result[HeightImage, str] {
+    let decoded = decode_png_samples(data, true)?
+    let mut samples = Vec[u16]::with_capacity(decoded.pixels.len())
+    for p in decoded.pixels {
+        samples.push(p as u16)
+    }
+    ret Result::Ok(HeightImage { decoded.width, decoded.height, samples })
+}
+fn decode_png_samples(data: str, height_only: bool) -> Result[TextureImage, str] {
     if data.byte_len() < 33 || data.byte_len() > 67108864 ||
     be32(data, 0) != 2303741511 || be32(data, 4) != 218765834 {
         ret Result::Err("Not a supported PNG file (maximum file size: 64 MiB)")
@@ -365,6 +377,8 @@ pub fn decode_png(data: str) -> Result[TextureImage, str] {
     let mut width = 0_u32
     let mut height = 0_u32
     let mut channels = 0_usize
+    let mut depth = 8_u8
+    let mut grayscale = false
     let mut compressed = Vec[u8]::new()
     let mut offset = 8_usize
     let mut header = false
@@ -393,17 +407,27 @@ pub fn decode_png(data: str) -> Result[TextureImage, str] {
             width = be32(data, offset + 8)
             height = be32(data, offset + 12)
             let color = data.byte_at(offset + 17)
+            depth = data.byte_at(offset + 16)
             if width == 0 || height == 0 || width > 4096 || height > 4096 {
                 ret Result::Err("PNG dimensions must be between 1 and 4096")
             }
-            if data.byte_at(offset + 16) != 8 ||(color != 2 && color != 6) ||
+            grayscale = color == 0 || color == 4
+            if (!(depth == 8 &&(color == 2 || color == 6 || grayscale)) && !(depth == 16 && color == 0)) ||
             data.byte_at(offset + 18) != 0 || data.byte_at(offset + 19) != 0 || data.byte_at(offset + 20) != 0 {
-                ret Result::Err("Use an 8-bit RGB or RGBA PNG without interlace")
+                ret Result::Err("Use RGB/RGBA8 or grayscale PNG without interlace")
             }
-            channels = if color == 6 {
-                4
+            channels = if color == 0 {
+                if depth == 16 {
+                    2_usize
+                } else {
+                    1_usize
+                }
+            } elif color == 4 {
+                2_usize
+            } elif color == 6 {
+                4_usize
             } else {
-                3
+                3_usize
             }
             header = true
         } elif kind == "IDAT" {
@@ -479,6 +503,34 @@ pub fn decode_png(data: str) -> Result[TextureImage, str] {
         }
         for x in 0..(width as usize) {
             let index = start + 1 + x * channels
+            if height_only {
+                let value =(raw.get(index).unwrap_or(0) as u32) * if depth == 16 {
+                    256_u32
+                } else {
+                    257_u32
+                }
+                pixels.push(value + if depth == 16 {
+                        raw.get(index + 1).unwrap_or(0) as u32
+                    } else {
+                        0_u32
+                    }
+                )
+                continue
+            }
+            if grayscale {
+                let value = raw.get(index).unwrap_or(0) as u32
+                let gray = if depth == 16 {
+                    (value * 256 +(raw.get(index + 1).unwrap_or(0) as u32) + 128) / 257
+                } else {
+                    value
+                }
+                let alpha = if depth == 8 && channels == 2 {
+                    raw.get(index + 1).unwrap_or(255) as u32
+                } else {
+                    255_u32
+                }
+                pixels.push(gray |(gray << 8) |(gray << 16) |(alpha << 24)) continue
+            }
             let alpha = if channels == 4 {
                 raw.get(index + 3).unwrap_or(255) as u32
             } else {
@@ -561,4 +613,19 @@ pub fn load_material_texture(project: str, source: str, importing: bool) -> send
     let saved_path = project + "/" + relative
     let _saved = save_native_texture(saved_path + ".gtexture", relative, asset_source_stamp(saved_path), image)
     ret TextureLoad { relative, "", image }
+}
+
+/// Native R16 or authored PNG heights, preserving source precision.
+pub fn load_height_texture(project: str, source: str) -> Result[HeightImage, str] {
+    if source == "" {
+        ret Result::Ok(HeightImage { 1, 1, vec![32768_u16] })
+    }
+    if !texture_path_valid(source) {
+        ret Result::Err("Invalid project height texture path")
+    }
+    let path = project + "/" + source
+    if source.byte_len() >= 9 && source.slice_bytes(source.byte_len() - 9, 9) == ".gtexture" {
+        ret load_native_height(path, "")
+    }
+    ret decode_height_png(read_texture_file(path)?)
 }

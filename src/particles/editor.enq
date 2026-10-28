@@ -77,39 +77,11 @@ fn vfx_clip(bounds: Rect, viewport: Rect) -> Rect {
     )
 }
 fn vfx_display(raw: str) -> str {
-    let value = match parse_number(raw) {
-        Some(value) => value None => {
-            ret raw
-        }
+    ret match parse_number(raw) {
+        Some(number) => luma::format_decimal(number, 4_u32) None => raw
     }
-    if value > 1000000 || value < - 1000000 {
-        ret raw
-    }
-    let magnitude = if value < 0 {
-        - value
-    } else {
-        value
-    }
-    let scaled =(magnitude * 1000_f32 + 0.5_f32) as u64
-    if scaled == 0_u64 && magnitude > 0_f32 {
-        ret raw
-    }
-    let sign = if value < 0_f32 {
-        "-"
-    } else {
-        ""
-    }
-    let whole =(scaled / 1000_u64).fmt()
-    let remainder = scaled % 1000_u64
-    if remainder == 0_u64 {
-        ret sign + whole
-    }
-    let mut fraction =(remainder + 1000_u64).fmt().slice_bytes(1_usize, 3_usize)
-    while fraction.byte_at(fraction.byte_len() - 1_usize) == 48_u8 {
-        fraction = fraction.slice_bytes(0_usize, fraction.byte_len() - 1_usize)
-    }
-    ret sign + whole + "." + fraction
 }
+
 fn vfx_curve_sample(points: Vec[ParticleCurvePoint], time: f32) -> ParticleValue {
     let first = points.get(0_usize).unwrap_or(ParticleCurvePoint { 0, ParticleValue::scalar(0) })
     let mut previous = first
@@ -565,7 +537,7 @@ impl for ParticleEditor {
             } else {
                 ""
             }
-        ).with_checked(active).with_disabled(disabled).with_focus(self.focus == id).with_attribute("aria-pressed", if active {
+        ).with_checked(active).with_disabled(disabled).with_focus(self.focus == id).with_cursor(self.editor.cursor()).with_selection(self.editor.selection_start(), self.editor.selection_end()).with_attribute("aria-pressed", if active {
                 "true"
             } else {
                 "false"
@@ -650,7 +622,7 @@ impl for ParticleEditor {
                             vfx_display(self.field_value(id))
                         }
                         ,
-                    ).with_classes("bp-input").with_focus(self.focus == id)))
+                    ).with_classes("bp-input").with_focus(self.focus == id).with_cursor(self.editor.cursor()).with_selection(self.editor.selection_start(), self.editor.selection_end())))
         }
         if self.selection != 0_u64 {
             let n = self.selected_node() sidebar.push(Widget::label("NODE · " + n.operation).with_classes("bp-section-label")) for item in vec!["x", "y", "z", "w"] {
@@ -660,7 +632,7 @@ impl for ParticleEditor {
                                 vfx_display(self.field_value(id))
                             }
                             ,
-                        ).with_classes("bp-input").with_focus(self.focus == id)))
+                        ).with_classes("bp-input").with_focus(self.focus == id).with_cursor(self.editor.cursor()).with_selection(self.editor.selection_start(), self.editor.selection_end())))
             }
             for row in vec![("attribute", "Attribute · 0…7"),("parameter", "Parameter name")] {
                 let id = "vfx-" + row.0 sidebar.push(property_row("vfx-node-" + row.0, row.1, Widget::input(id, if self.focus == id {
@@ -669,7 +641,7 @@ impl for ParticleEditor {
                                 vfx_display(self.field_value(id))
                             }
                             ,
-                        ).with_classes("bp-input").with_focus(self.focus == id)))
+                        ).with_classes("bp-input").with_focus(self.focus == id).with_cursor(self.editor.cursor()).with_selection(self.editor.selection_start(), self.editor.selection_end())))
             }
             sidebar.push(self.button("vfx-copy", "Duplicate node", false, false)) sidebar.push(self.button("vfx-delete", "Delete node", false, false))
         }
@@ -694,7 +666,7 @@ impl for ParticleEditor {
                                 vfx_display(p.value.values().get(c).unwrap_or(0).fmt())
                             }
                             ,
-                        ).with_classes("bp-input").with_focus(self.focus == id)))
+                        ).with_classes("bp-input").with_focus(self.focus == id).with_cursor(self.editor.cursor()).with_selection(self.editor.selection_start(), self.editor.selection_end())))
             }
         }
         sidebar.push(self.button("vfx-add-parameter", "+ Parameter", false, asset.parameters.len() >= 64_usize))
@@ -904,7 +876,15 @@ impl for ParticleEditor {
         }
         self.seek = destination self.seeking = true self.stopped = false self.last_tick = 0_u64 self.dirty = true
     }
-    pub fn input(self: mut Self&, event: Event, target: str, layout: WidgetLayout) -> bool {
+    pub fn input(self: mut Self&, event: Event, target: str, layout: WidgetLayout, window: Window) -> bool {
+        if self.focus != "" &&(self.editor.pointer_handles(event, target, self.focus) || luma::text_edit_key(event)) && luma::editable_text_field(layout, self.focus) {
+            if self.editor.pointer_handles(event, target, self.focus) {
+                self.editor = self.editor.pointer_input(event, layout, self.focus, window) self.dirty = true ret true
+            }
+            if luma::text_edit_key(event) {
+                self.editor = self.editor.key_input(event, window) self.dirty = true ret true
+            }
+        }
         if self.scrubbing &&(event.kind() == event_pointer_move() || event.kind() == event_pointer_up()) {
             match layout.find_bounds("vfx-timeline") {
                 Some(bounds) => {
@@ -990,7 +970,7 @@ impl for ParticleEditor {
             }
             self.focus = target
             if self.field_value(target) != "" || target == "vfx-parameter" {
-                self.editor = TextEditor::new(self.field_value(target)).select_all() self.dirty = true ret true
+                self.editor = TextEditor::new(self.field_value(target)) self.editor = self.editor.with_cursor(0).pointer_input(event, layout, target, window) self.dirty = true ret true
             }
             if target == "vfx-search" {
                 self.dirty = true ret true

@@ -1,0 +1,593 @@
+//! Fence-owned patch jobs. Mesh and vertex backends evaluate the same templates;
+//! refinement never expands the complete scene into a resident vertex mesh.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import linalg::Mat4
+
+import mod::patterns::{DisplacementBudget, refinement_table}
+import mod::terrain_source::{GpuTerrainPatchBindings, TerrainPatchMaterial, terrain_layout_entries}
+import mod::topology::patch_topology
+import refrain::rhi::*
+import refrain::scene::primitive::MeshData
+import refrain::shaders::displacement::{displacement_refine_spirv, displacement_topology_spirv}
+import refrain::shaders::terrain::terrain_refine_spirv
+import refrain::standard_material::DisplacementSettings
+import refrain::virtual_geometry::VirtualGeometry
+
+pub struct GpuRefinementTable {
+    patterns: GpuBuffer
+    ranges: GpuBuffer
+    indices: GpuBuffer
+    bytes: u64
+}
+fn words_buffer(device: GraphicsDevice, words: Vec[u32], usage: u32) -> GpuBuffer {
+    let buffer = device.create_buffer(if words.len() == 0 {
+            16_u64
+        } else {
+            (words.len() as u64) * 4
+        }
+        , usage, true,)
+    if !buffer.available() ||(words.len() > 0 && !buffer.write_u32s(0, words)) {
+        buffer.destroy() ret GpuBuffer::unavailable()
+    }
+    ret buffer
+}
+
+impl for GpuRefinementTable {
+    pub fn create(device: GraphicsDevice, budget: mut DisplacementBudget&) -> Result[Self, str] {
+        let table = refinement_table(8)
+        let mut ranges = Vec[u32]::new()
+        for pattern in table.patterns {
+            ranges.push(pattern.first) ranges.push(pattern.triangles)
+        }
+        let mut indices = Vec[u32]::new() for i in 0_usize..63_usize {
+            indices.push(i as u32)
+        }
+        let bytes =((table.words.len() + ranges.len() + indices.len()) as u64) * 4
+        if !budget.reserve(bytes) {
+            ret Result::Err("Displacement pattern budget exhausted")
+        }
+        let patterns = words_buffer(device, table.words, buffer_storage())
+        let ranges = words_buffer(device, ranges, buffer_storage())
+        let index_buffer = words_buffer(device, indices, buffer_index())
+        if !patterns.available() || !ranges.available() || !index_buffer.available() {
+            patterns.destroy() ranges.destroy() index_buffer.destroy() budget.release(bytes)
+            ret Result::Err("Unable to allocate shared displacement patterns")
+        }
+        ret Result::Ok(Self { patterns, ranges, index_buffer, bytes })
+    }
+    pub fn destroy(self: Self, budget: mut DisplacementBudget&) ->() {
+        self.patterns.destroy() self.ranges.destroy() self.indices.destroy() budget.release(self.bytes) ret()
+    }
+}
+pub struct DisplacementLod {
+    first: u32
+    count: u32
+}
+pub struct GpuPatchSource {
+    vertices: GpuBuffer
+    indices: GpuBuffer
+    neighbours: GpuBuffer
+    weld: GpuBuffer
+    vertex_count: u32
+    triangle_count: u32
+    owns_vertices: bool
+    owns_indices: bool
+    lods: Vec[DisplacementLod]
+    bytes: u64
+}
+
+impl for GpuPatchSource {
+    pub fn create(device: GraphicsDevice, source: MeshData, budget: mut DisplacementBudget&) -> Result[Self, str] {
+        let data = source.with_uvs() let topology = patch_topology(data)?
+        let mut weld = Vec[u32]::with_capacity(data.vertex_count() * 2)
+        for i in 0_usize..data.vertex_count() {
+            weld.push(topology.weld_heads.get_unchecked_borrowed(i)) weld.push(topology.weld_next.get_unchecked_borrowed(i))
+        }
+        let bytes =((data.vertices().len() + data.indices().len() + topology.neighbours.len() + weld.len()) as u64) * 4
+        if !budget.reserve(bytes) {
+            ret Result::Err("Displacement source budget exhausted")
+        }
+        let vertices = device.create_buffer((data.vertices().len() as u64) * 4, buffer_storage(), true)
+        let indices = words_buffer(device, data.indices(), buffer_storage())
+        let neighbours = words_buffer(device, topology.neighbours, buffer_storage())
+        let welded = words_buffer(device, weld, buffer_storage())
+        if !vertices.available() || !vertices.write_f32s(0, data.vertices()) || !indices.available() || !neighbours.available() || !welded.available() {
+            vertices.destroy() indices.destroy() neighbours.destroy() welded.destroy() budget.release(bytes)
+            ret Result::Err("Unable to upload displacement topology")
+        }
+        ret Result::Ok(Self {
+                vertices, indices, neighbours, welded, data.vertex_count() as u32,(data.indices().len() / 3) as u32, true, true, vec![DisplacementLod {
+                        0,(data.indices().len() / 3) as u32
+                    }
+                ], bytes
+            }
+        )
+    }
+    pub fn destroy(self: Self, budget: mut DisplacementBudget&) ->() {
+        if self.owns_vertices {
+            self.vertices.destroy()
+        }
+        if self.owns_indices {
+            self.indices.destroy()
+        }
+        self.neighbours.destroy() self.weld.destroy() budget.release(self.bytes) ret()
+    }
+}
+pub struct PatchGpuSlot {
+    config: GpuBuffer
+    instances: GpuBuffer
+    levels: GpuBuffer
+    offsets: GpuBuffer
+    blocks: GpuBuffer
+    jobs: GpuBuffer
+    state: GpuBuffer
+    group: BindGroup
+}
+pub struct PatchStatistics {
+    triangles: u32
+    jobs: u32
+    reduction: u32
+    errors: u32
+    ready: bool
+}
+struct PatchUse {
+    completion: GpuCompletion
+    slot: usize
+}
+pub struct GpuPatchView {
+    layout: BindGroupLayout
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    source: GpuPatchSource
+    table: GpuRefinementTable
+    slots: Vec[PatchGpuSlot]
+    dummy_skin: GpuBuffer
+    terrain: Option[GpuTerrainPatchBindings]
+    uses: Vec[PatchUse]
+    statistics: PatchStatistics
+    maximum_instances: u32
+    maximum_jobs: u32
+    bytes: u64
+}
+fn scratch(device: GraphicsDevice, size: u64, extra: u32) -> GpuBuffer {
+    ret device.create_buffer(if size < 16 {
+            16_u64
+        } else {
+            size
+        }
+        , buffer_storage() | buffer_transfer_destination() | extra, false,)
+}
+/// Build correspondence directly from an existing GPU mesh. CPU geometry is not
+/// retained simply because a material may later enable displacement.
+pub struct GpuPatchInitializer {
+    source: GpuPatchSource
+    layout: BindGroupLayout
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    group: BindGroup
+    hash: GpuBuffer
+    config: GpuBuffer
+    status: GpuBuffer
+    original_indices: GpuBuffer
+    vertex_lods: GpuBuffer
+    clusters: GpuBuffer
+    cluster_count: u32
+    skinned: bool
+    vertex_slots: u32
+    edge_slots: u32
+    completion: GpuCompletion
+    bytes: u64
+}
+fn hash_capacity(count: u32) -> u32 {
+    let mut capacity = 8_u32 while capacity < count * 2 {
+        capacity *= 2
+    }
+    ret capacity
+}
+
+impl for GpuPatchInitializer {
+    pub fn create(device: GraphicsDevice, mesh: GpuMesh, budget: mut DisplacementBudget&) -> Result[GpuPatchInitializer<H>, str] {
+        ret Self::create_internal(device, mesh, Option[VirtualGeometry]::None, Vec[GpuBuffer]::new(), budget)
+    }
+    pub fn create_virtual(device: GraphicsDevice, mesh: GpuMesh, geometry: VirtualGeometry, budget: mut DisplacementBudget&) -> Result[GpuPatchInitializer<H>, str] {
+        ret Self::create_internal(device, mesh, Option[VirtualGeometry]::Some(geometry), Vec[GpuBuffer]::new(), budget)
+    }
+    pub fn create_skinned(device: GraphicsDevice, mesh: GpuMesh, geometry: VirtualGeometry, source: Vec[GpuBuffer], budget: mut DisplacementBudget&) -> Result[GpuPatchInitializer<H>, str] {
+        if source.len() != 3 {
+            ret Result::Err("Missing skeletal weld correspondence")
+        }
+        ret Self::create_internal(device, mesh, Option::Some(geometry), source, budget)
+    }
+    fn create_internal(device: GraphicsDevice, mesh: GpuMesh, geometry: Option[VirtualGeometry], skin: Vec[GpuBuffer], budget: mut DisplacementBudget&) -> Result[GpuPatchInitializer<H>, str] {
+        let vertices = mesh.vertex_buffer() let original_indices = mesh.index_buffer()
+        let vertex_count =(vertices.size() / 44) as u32 let index_count = mesh.index_count()
+        if vertex_count == 0 || vertices.size() % 44 != 0 || vertex_count > 4194304 || index_count == 0 || index_count > 12582912 || index_count % 3 != 0 {
+            ret Result::Err("Invalid displacement GPU source")
+        }
+        let vertex_slots = hash_capacity(vertex_count) let edge_slots = hash_capacity(index_count)
+        let mut cluster_words = Vec[u32]::new() let mut lods = Vec[DisplacementLod]::new()
+        match geometry {
+            Some(g) => {
+                if !g.valid() || g.vertex_indices().len() != vertex_count as usize || g.triangle_indices().len() != index_count as usize {
+                    ret Result::Err("Invalid displacement virtual correspondence")
+                }
+                let clusters = g.clusters() let mut level = 0_u32
+                for lod in g.lods() {
+                    let first = clusters.get_unchecked_borrowed(lod.first_cluster()).triangle_offset()
+                    let mut count = 0_usize
+                    let first_cluster = lod.first_cluster() let end_cluster = first_cluster + lod.cluster_count()
+                    for i in first_cluster..end_cluster {
+                        let c = clusters.get_unchecked_borrowed(i)
+                        cluster_words.push(c.vertex_offset() as u32) cluster_words.push(c.vertex_count() as u32 |(level << 16)) cluster_words.push(c.triangle_offset() as u32) cluster_words.push(c.triangle_count() as u32) count += c.triangle_count()
+                    }
+                    lods.push(DisplacementLod {(first / 3) as u32, count as u32 }) level += 1
+                }
+            }
+            None => {
+                lods.push(DisplacementLod { 0, index_count / 3 })
+            }
+        }
+        let virtual_source = geometry.is_some()
+        let permanent =(vertex_count as u64) * 8 +(index_count as u64) * if virtual_source {
+            8_u64
+        } else {
+            4_u64
+        }
+        let temporary =((vertex_slots as u64) +(edge_slots as u64)) * 4 + 48 + if virtual_source {
+            (vertex_count as u64) * 4 +(cluster_words.len() as u64) * 4
+        } else {
+            32_u64
+        }
+        if !budget.reserve(permanent + temporary) {
+            ret Result::Err("Displacement topology budget exhausted")
+        }
+        let indices = if virtual_source {
+            scratch(device,(index_count as u64) * 4, 0)
+        } else {
+            original_indices
+        }
+        let vertex_lods = scratch(device, if virtual_source {
+                (vertex_count as u64) * 4
+            } else {
+                16_u64
+            }
+            , 0,)
+        let cluster_count =(cluster_words.len() / 4) as u32
+        let clusters = words_buffer(device, cluster_words, buffer_storage())
+        let neighbours = scratch(device,(index_count as u64) * 4, buffer_transfer_source())
+        let weld = scratch(device,(vertex_count as u64) * 8, buffer_transfer_source())
+        let hash = scratch(device,((vertex_slots as u64) +(edge_slots as u64)) * 4, 0)
+        let config = device.create_buffer(32, buffer_uniform() | buffer_transfer_destination(), false)
+        let status = device.create_buffer(16, buffer_storage() | buffer_transfer_destination(), true)
+        let mut entries = Vec[BindGroupLayoutEntry]::new()
+        for i in 0_usize..13_usize {
+            entries.push(if i == 5 {
+                    BindGroupLayoutEntry::uniform(5, shader_stage_compute())
+                } else {
+                    BindGroupLayoutEntry::storage(i as u32, shader_stage_compute())
+                }
+            )
+        }
+        let layout = device.create_bind_group_layout(entries)
+        let shader = device.create_shader_module(displacement_topology_spirv(), shader_stage_compute())
+        let pipeline = device.create_compute_pipeline(shader, layout)
+        let buffers = vec![vertices, indices, weld, neighbours, hash, config, status, vertex_lods, original_indices, clusters, skin.get(0).unwrap_or(vertices), skin.get(1).unwrap_or(vertices), skin.get(2).unwrap_or(vertices)]
+        let mut bindings = Vec[u32]::new() let mut starts = Vec[u64]::new() let mut sizes = Vec[u64]::new()
+        let mut available = mesh.available() && layout.available() && shader.available() && pipeline.available()
+        for i in 0_usize..buffers.len() {
+            bindings.push(i as u32) starts.push(0) let b = buffers.get_unchecked_borrowed(i) sizes.push(b.size()) available = available && b.available()
+        }
+        let group = device.create_buffer_bind_group_many(layout, bindings, buffers, starts, sizes)
+        let source = GpuPatchSource {
+            vertices, indices, neighbours, weld, vertex_count, index_count / 3, false, virtual_source, lods, permanent
+        }
+        let mut result = GpuPatchInitializer<H> {
+            source, layout, shader, pipeline, group, hash, config, status, original_indices, vertex_lods, clusters, cluster_count, skin.len() == 3, vertex_slots, edge_slots, GpuCompletion::unavailable(), temporary
+        }
+        if !available || !group.available() {
+            result.destroy(budget) source.destroy(budget) ret Result::Err("Unable to allocate GPU topology builder")
+        }
+        ret Result::Ok(result)
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame) -> bool {
+        if self.completion.available() {
+            self.completion.destroy()
+        }
+        self.completion = frame.completion()
+        let virtual_flag = if self.cluster_count > 0 {
+            1_u32
+        } else {
+            0_u32
+        }
+        let skin_flag = if self.skinned {
+            1_u32
+        } else {
+            0_u32
+        }
+        if !frame.fill_buffer(self.hash, 0, self.hash.size(), 4294967295) || !frame.fill_buffer(self.source.weld, 0, self.source.weld.size(), 4294967295) || !frame.fill_buffer(self.source.neighbours, 0, self.source.neighbours.size(), 4294967295) || !frame.fill_buffer(self.status, 0, 16, 0) || !frame.update_u32s(self.config, 0, vec![self.source.vertex_count, self.source.triangle_count * 3, self.vertex_slots, self.edge_slots, 2_u32, virtual_flag, self.cluster_count, skin_flag]) || !frame.transfer_storage_barrier() {
+            ret false
+        }
+        if self.cluster_count > 0 &&(!frame.dispatch_compute(self.pipeline, self.group,(self.cluster_count + 127) / 128, 1, 1) || !frame.compute_barrier()) {
+            ret false
+        }
+        if !frame.update_u32s(self.config, 16, vec![0_u32, virtual_flag, 0_u32, skin_flag]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, self.group,(self.source.vertex_count + 127) / 128, 1, 1) || !frame.compute_barrier() || !frame.update_u32s(self.config, 16, vec![1_u32, virtual_flag, 0_u32, skin_flag]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, self.group,(self.source.triangle_count * 3 + 127) / 128, 1, 1) || !frame.compute_barrier() {
+            ret false
+        }
+        ret true
+    }
+    pub fn destroy(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        if self.completion.available() {
+            if !self.completion.ready() {
+                ret false
+            }
+            self.completion.destroy() self.completion = GpuCompletion::unavailable()
+        }
+        self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy() self.hash.destroy() self.config.destroy() self.status.destroy() self.vertex_lods.destroy() self.clusters.destroy() budget.release(self.bytes) ret true
+    }
+}
+
+impl for PatchGpuSlot {
+    pub fn append(self: Self, source: GpuPatchSource, table: GpuRefinementTable, skin: GpuBuffer, bindings: mut Vec[u32], buffers: mut Vec[GpuBuffer], offsets: mut Vec[u64], ranges: mut Vec[u64]) ->() {
+        let values = vec![self.config, source.vertices, source.indices, source.neighbours, table.patterns, table.ranges, self.levels, self.offsets, self.blocks, self.jobs, self.state, skin, source.weld, self.instances]
+        for i in 0_usize..values.len() {
+            let b = values.get_unchecked_borrowed(i)
+            bindings.push((20 + i + if i >= 11 {
+                        1_usize
+                    } else {
+                        0_usize
+                    }
+                ) as u32)
+            buffers.push(b) offsets.push(0_u64) ranges.push(b.size())
+        }
+        ret()
+    }
+    /// Render shaders do not consume the refinement scan buffers (26–28).
+    pub fn append_render(self: Self, source: GpuPatchSource, table: GpuRefinementTable, skin: GpuBuffer, bindings: mut Vec[u32], buffers: mut Vec[GpuBuffer], offsets: mut Vec[u64], ranges: mut Vec[u64]) ->() {
+        self.append(source, table, skin, bindings, buffers, offsets, ranges)
+        let mut kept = 0_usize
+        for i in 0_usize..bindings.len() {
+            let binding = bindings.get_unchecked_borrowed(i)
+            if binding >= 26 && binding <= 28 {
+                continue
+            }
+            bindings.set(kept, binding) buffers.set(kept, buffers.get_unchecked_borrowed(i)) offsets.set(kept, offsets.get_unchecked_borrowed(i)) ranges.set(kept, ranges.get_unchecked_borrowed(i)) kept += 1
+        }
+        while bindings.len() > kept {
+            bindings.pop() buffers.pop() offsets.pop() ranges.pop()
+        }
+    }
+    pub fn destroy(self: Self) ->() {
+        self.group.destroy() self.config.destroy() self.instances.destroy() self.levels.destroy() self.offsets.destroy() self.blocks.destroy() self.jobs.destroy() self.state.destroy() ret()
+    }
+}
+pub fn patch_layout_entries() -> Vec[BindGroupLayoutEntry] {
+    let stages = shader_stage_compute() | shader_stage_vertex() | shader_stage_mesh()
+    let mut entries = vec![BindGroupLayoutEntry::uniform(20, stages)]
+    for binding in 21_usize..35_usize {
+        if binding == 31 {
+            entries.push(BindGroupLayoutEntry::texture_sampler(31, stages))
+        } else {
+            entries.push(BindGroupLayoutEntry::storage(binding as u32, stages))
+        }
+    }
+    ret entries
+}
+
+impl for GpuPatchView {
+    pub fn create(device: GraphicsDevice, source: GpuPatchSource, table: GpuRefinementTable, height: GpuTexture, sampler: GpuSampler, skin: GpuBuffer, maximum_instances: u32, maximum_jobs: u32, frames: u32, budget: mut DisplacementBudget&) -> Result[GpuPatchView<H>, str] {
+        ret Self::create_internal(device, source, table, height, sampler, skin, Option[TerrainPatchMaterial]::None, maximum_instances, maximum_jobs, frames, budget)
+    }
+    pub fn create_terrain(device: GraphicsDevice, source: GpuPatchSource, table: GpuRefinementTable, height: GpuTexture, sampler: GpuSampler, terrain: TerrainPatchMaterial, maximum_instances: u32, maximum_jobs: u32, frames: u32, budget: mut DisplacementBudget&) -> Result[GpuPatchView<H>, str] {
+        ret Self::create_internal(device, source, table, height, sampler, GpuBuffer::unavailable(), Option::Some(terrain), maximum_instances, maximum_jobs, frames, budget)
+    }
+    fn create_internal(device: GraphicsDevice, source: GpuPatchSource, table: GpuRefinementTable, height: GpuTexture, sampler: GpuSampler, skin: GpuBuffer, terrain: Option[TerrainPatchMaterial], maximum_instances: u32, maximum_jobs: u32, frames: u32, budget: mut DisplacementBudget&) -> Result[GpuPatchView<H>, str] {
+        if maximum_instances == 0 || frames == 0 || frames > 4 || maximum_jobs < source.triangle_count * maximum_instances {
+            ret Result::Err("Invalid displacement view capacity")
+        }
+        let patches =(source.triangle_count as u64) *(maximum_instances as u64)
+        let level_bytes = if patches * 8 < 16 {
+            16_u64
+        } else {
+            patches * 8
+        }
+        let block_bytes = if ((patches + 127) / 128) * 8 < 16 {
+            16_u64
+        } else {
+            ((patches + 127) / 128) * 8
+        }
+        let bytes =(208_u64 +(maximum_instances as u64) * 192 + level_bytes + patches * 16 + block_bytes +(maximum_jobs as u64) * 16 + 64) *(frames as u64) + 80
+        if !budget.reserve(bytes) {
+            ret Result::Err("Displacement frame budget exhausted")
+        }
+        let mut entries = patch_layout_entries()
+        let terrain_bindings = match terrain {
+            Some(material) => {
+                let bindings = match GpuTerrainPatchBindings::create(device, material, budget) {
+                    Ok(b) => b Err(e) => {
+                        budget.release(bytes) ret Result::Err(e)
+                    }
+                }
+                for entry in terrain_layout_entries() {
+                    entries.push(entry)
+                }
+                Option[GpuTerrainPatchBindings]::Some(bindings)
+            }
+            None => Option[GpuTerrainPatchBindings]::None
+        }
+        let layout = device.create_bind_group_layout(entries)
+        let shader = device.create_shader_module(if terrain.is_some() {
+                terrain_refine_spirv()
+            } else {
+                displacement_refine_spirv()
+            }
+            , shader_stage_compute(),)
+        let pipeline = device.create_compute_pipeline(shader, layout)
+        let dummy = scratch(device, 80, 0)
+        let mut result = GpuPatchView<H> {
+            layout, shader, pipeline, source, table, Vec[PatchGpuSlot]::new(), dummy, terrain_bindings, Vec[PatchUse]::new(), PatchStatistics {
+                0, 0, 0, 0, false
+            }
+            , maximum_instances, maximum_jobs, bytes
+        }
+        let used_skin = if skin.available() {
+            skin
+        } else {
+            dummy
+        }
+        let mut available = layout.available() && shader.available() && pipeline.available() && dummy.available()
+        for _ in 0_usize..frames as usize {
+            let config = device.create_buffer(208, buffer_uniform() | buffer_transfer_destination(), false)
+            let instances = scratch(device,(maximum_instances as u64) * 192, 0)
+            let levels = scratch(device, patches * 8, 0)
+            let offsets = scratch(device, patches * 16, 0)
+            let blocks = scratch(device,((patches + 127) / 128) * 8, 0)
+            let jobs = scratch(device,(maximum_jobs as u64) * 16, 0)
+            let state = device.create_buffer(64, buffer_storage() | buffer_indirect() | buffer_transfer_destination() | buffer_transfer_source(), true)
+            let mut slot = PatchGpuSlot {
+                config, instances, levels, offsets, blocks, jobs, state, BindGroup::unavailable()
+            }
+            let mut bindings = Vec[u32]::new() let mut buffers = Vec[GpuBuffer]::new() let mut starts = Vec[u64]::new() let mut sizes = Vec[u64]::new()
+            slot.append(source, table, used_skin, bindings, buffers, starts, sizes)
+            let mut texture_bindings = vec![31_u32] let mut textures = vec![height] let mut samplers = vec![sampler]
+            match terrain_bindings {
+                Some(terrain) => {
+                    terrain.append(bindings, buffers, starts, sizes) for binding in terrain.texture_bindings() {
+                        texture_bindings.push(binding)
+                    }
+                    for texture in terrain.textures() {
+                        textures.push(texture) samplers.push(sampler)
+                    }
+                }
+                None => {
+                }
+            }
+            slot.group = device.create_buffer_textures_bind_group_many(layout, bindings, buffers, starts, sizes, texture_bindings, textures, samplers)
+            available = available && config.available() && instances.available() && levels.available() && offsets.available() && blocks.available() && jobs.available() && state.available() && slot.group.available()
+            result.slots.push(slot)
+        }
+        if !available {
+            result.destroy(budget) ret Result::Err("Unable to allocate GPU displacement view")
+        }
+        ret Result::Ok(result)
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame, view_projection: Mat4, previous: Mat4, camera: Vec[f32], width: u32, height: u32, settings: DisplacementSettings, tiling: f32, height_range: f32, instances: Vec[f32], skin_vertices: u32) -> bool {
+        if !settings.valid() || instances.len() % 48 != 0 || instances.len() / 48 > self.maximum_instances as usize || camera.len() != 3 || width == 0 || height == 0 {
+            ret false
+        }
+        let slot_index = frame.slot() as usize
+        let slot = match self.slots.get(slot_index) {
+            Some(s) => s None => {
+                ret false
+            }
+        }
+        self.collect() self.uses.push(PatchUse { frame.completion(), slot_index })
+        let count =(instances.len() / 48) as u32
+        let mut config = Vec[f32]::new()
+        for v in view_projection.values() {
+            config.push(v)
+        }
+        for v in previous.values() {
+            config.push(v)
+        }
+        for v in camera {
+            config.push(v)
+        }
+        config.push(1_f32)
+        for v in vec![width as f32, height as f32, settings.target_pixels(), 1_f32, settings.magnitude, settings.center, tiling, height_range] {
+            config.push(v)
+        }
+        if !frame.update_f32s(slot.config, 0, config) || !frame.update_u32s(slot.config, 176, vec![self.source.triangle_count, count, self.maximum_jobs, 8_u32]) || !frame.update_f32s(slot.instances, 0, instances) {
+            ret false
+        }
+        let groups =(self.source.triangle_count * count + 127) / 128
+        if !frame.update_u32s(slot.config, 192, vec![0_u32, 0_u32, 0_u32, skin_vertices]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, slot.group, if groups == 0 {
+                1_u32
+            } else {
+                groups
+            }
+            , 1, 1,) || !frame.compute_barrier() {
+            ret false
+        }
+        for pass in 0_usize..8_usize {
+            if !frame.update_u32s(slot.config, 192, vec![1_u32,(pass % 2) as u32, 0_u32, skin_vertices]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, slot.group, if groups == 0 {
+                    1_u32
+                } else {
+                    groups
+                }
+                , 1, 1,) || !frame.compute_barrier() {
+                ret false
+            }
+        }
+        // Reducing every level by the same amount preserves neighbour balance.
+        for _ in 0_usize..9_usize {
+            if !frame.update_u32s(slot.config, 192, vec![2_u32, 0_u32, 0_u32, skin_vertices]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, slot.group, if groups == 0 {
+                    1_u32
+                } else {
+                    groups
+                }
+                , 1, 1,) || !frame.compute_barrier() || !frame.update_u32s(slot.config, 192, vec![3_u32, 0_u32, 0_u32, skin_vertices]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, slot.group, 1, 1, 1) || !frame.compute_barrier() {
+                ret false
+            }
+        }
+        if !frame.update_u32s(slot.config, 192, vec![4_u32, 0_u32, 0_u32, skin_vertices]) || !frame.transfer_storage_barrier() || !frame.dispatch_compute(self.pipeline, slot.group, if groups == 0 {
+                1_u32
+            } else {
+                groups
+            }
+            , 1, 1,) || !frame.compute_barrier() {
+            ret false
+        }
+        ret true
+    }
+    pub fn slot(self: Self&, index: usize) -> Option[PatchGpuSlot] {
+        ret self.slots.get(index)
+    }
+    pub fn statistics(self: Self&) -> PatchStatistics {
+        ret self.statistics
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut count = 0_usize
+        for i in 0_usize..self.uses.len() {
+            let entry = self.uses.get_unchecked_borrowed(i)
+            if entry.completion.ready() {
+                let mut latest = true let next = i + 1
+                for j in next..self.uses.len() {
+                    if self.uses.get_unchecked_borrowed(j).slot == entry.slot {
+                        latest = false break
+                    }
+                }
+                if latest && entry.completion.succeeded() {
+                    let slot = self.slots.get_unchecked_borrowed(entry.slot)
+                    self.statistics = PatchStatistics {
+                        slot.state.read_u32(52), slot.state.read_u32(0), slot.state.read_u32(4), slot.state.read_u32(56), true
+                    }
+                }
+                entry.completion.destroy()
+            } else {
+                self.uses.set(count, entry) count += 1
+            }
+        }
+        while self.uses.len() > count {
+            self.uses.pop()
+        }
+        ret()
+    }
+    pub fn destroy(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        self.collect() if self.uses.len() > 0 {
+            ret false
+        }
+        for slot in self.slots {
+            slot.destroy()
+        }
+        self.dummy_skin.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy()
+        match self.terrain {
+            Some(terrain) => terrain.destroy(budget) None => {
+            }
+        }
+        self.terrain = Option[GpuTerrainPatchBindings]::None
+        budget.release(self.bytes) ret true
+    }
+}

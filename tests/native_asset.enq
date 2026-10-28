@@ -10,6 +10,9 @@ import graphene::{MeshData, NativeMesh, StandardMaterial, TextureImage, asset_so
 import graphene::content_browser::files::{content_move, scan_content}
 import graphene::content_browser::model::ContentAsset
 import graphene::content_browser::operations::content_suffix
+import graphene::native_asset::{load_native_height, save_native_height}
+import graphene::standard_material::DisplacementSettings
+import graphene::texture_image::HeightImage
 import linalg::Vec3
 
 extern fn encore_str_from_buffer(bytes: u8*, length: usize) -> str
@@ -27,6 +30,18 @@ struct Header {
     revision: str
     payload_sha256: str
 }
+struct LegacyMaterialFixture {
+    base_color: Vec3
+    metallic: f32
+    roughness: f32
+    unlit: bool
+    double_sided: bool
+    base_color_texture: str
+    normal_texture: str
+    normal_scale: f32
+    normal_flip_y: bool
+}
+extern fn encore_text_sha256(contents: str) -> str
 fn main() -> u32 {
     let root = "/tmp/graphene-native-assets-" + perf_counter_ns().fmt()
     if mkdir_all(root) != 0 {
@@ -245,6 +260,68 @@ fn main() -> u32 {
         }
         None => {
             ret 50
+        }
+    }
+    // Decode the exact pre-v2 payload, rather than roundtripping the new struct.
+    let legacy_payload = text(encode(LegacyMaterialFixture {
+                Vec3::new(0.2, 0.3, 0.4), 0.7, 0.25, false, true, "Content/Textures/color.png", "Content/Textures/normal.png", 2.5, true
+            }
+        ).unwrap_or(Vec[u8]::new()))
+    let legacy_header = encode(Header {
+            1_u32, "material", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "legacy", "", encore_text_sha256(legacy_payload)
+        }
+    ).unwrap_or(Vec[u8]::new())
+    let mut legacy_prefix = vec![71_u8, 65_u8, 83_u8, 49_u8]
+    for shift in 0_usize..4_usize {
+        legacy_prefix.push(((legacy_header.len() as u32) >>((shift as u32) * 8)) as u8)
+    }
+    if write_file(root + "/Legacy.gmaterial", text(legacy_prefix) + text(legacy_header) + legacy_payload) != 0 {
+        ret 51
+    }
+    match load_native_material(root + "/Legacy.gmaterial", "") {
+        Ok(old) => {
+            if old.metallic() != 0.7_f32 || old.roughness() != 0.25_f32 || old.normal_scale() != 2.5_f32 || !old.normal_flip_y() || old.roughness_texture() != "" || old.metallic_texture() != "" || old.height_texture() != "" {
+                ret 52
+            }
+        }
+        Err(_) => {
+            ret 53
+        }
+    }
+    let samples = vec![0_u16, 1_u16, 32767_u16, 32768_u16, 65534_u16, 65535_u16]
+    if !save_native_height(root + "/Height.gtexture", "height", "r16", HeightImage { 3, 2, samples }) {
+        ret 54
+    }
+    match load_native_height(root + "/Height.gtexture", "r16") {
+        Ok(decoded) => {
+            if decoded.width != 3 || decoded.height != 2 {
+                ret 55
+            }
+            for i in 0_usize..6_usize {
+                if decoded.samples.get_unchecked_borrowed(i) != samples.get_unchecked_borrowed(i) {
+                    ret 56
+                }
+            }
+        }
+        Err(_) => {
+            ret 57
+        }
+    }
+    let pbr = material.with_ao_texture("Content/Materials/Stone/Textures/AO.gtexture").with_ao_strength(0.6_f32).with_height_texture("Content/Materials/Stone/Textures/Height.gtexture").with_displacement(DisplacementSettings {
+            true, 0.12_f32, 0.3_f32, 2
+        }
+    )
+    if !save_native_material(root + "/Pbr.gmaterial", "pbr", "", pbr) {
+        ret 58
+    }
+    match load_native_material(root + "/Pbr.gmaterial", "") {
+        Ok(decoded) => {
+            if decoded.ao_texture() != pbr.ao_texture() || decoded.ao_strength() != pbr.ao_strength() || decoded.height_texture() != pbr.height_texture() || !decoded.displacement().enabled || decoded.displacement().magnitude != 0.12_f32 || decoded.displacement().center != 0.3_f32 || decoded.displacement().quality != 2 {
+                ret 59
+            }
+        }
+        Err(_) => {
+            ret 60
         }
     }
     ret 0

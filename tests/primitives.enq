@@ -1,5 +1,6 @@
 import core::option::Option
 import core::vec::Vec
+
 import graphene::{cube_mesh, plane_mesh, sphere_mesh}
 import linalg::Vec3
 
@@ -70,6 +71,40 @@ fn main() -> u32 {
             }
         ) {
             ret 9
+        }
+    }
+    if sphere.stride() != 44 {
+        ret 13
+    }
+    // The duplicate geometric seam must span the texture, rather than sampling
+    // a constant texel. Every authored UV triangle must have nonzero area.
+    for ring in 0..9_usize {
+        let first = ring * 13_usize
+        let last = first + 12_usize
+        if sphere.vertices().get(first * 11 + 9).unwrap_or( - 1) != 0_f32 ||
+        sphere.vertices().get(last * 11 + 9).unwrap_or( - 1) != 1_f32 ||
+        sphere.vertices().get(first * 11 + 10).unwrap_or( - 1) != sphere.vertices().get(last * 11 + 10).unwrap_or( - 2) {
+            ret 14
+        }
+    }
+    for vertex in 0..sphere.vertex_count() {
+        for component in 9..11_usize {
+            let uv = sphere.vertices().get(vertex * 11 + component).unwrap_or( - 1)
+            if uv < 0_f32 || uv > 1_f32 {
+                ret 15
+            }
+        }
+    }
+    for triangle in 0..sphere.index_count() / 3 {
+        let a = sphere.indices().get(triangle * 3).unwrap_or(0) as usize
+        let b = sphere.indices().get(triangle * 3 + 1).unwrap_or(0) as usize
+        let c = sphere.indices().get(triangle * 3 + 2).unwrap_or(0) as usize
+        let au = sphere.vertices().get(a * 11 + 9).unwrap_or(0) let av = sphere.vertices().get(a * 11 + 10).unwrap_or(0)
+        let bu = sphere.vertices().get(b * 11 + 9).unwrap_or(0) let bv = sphere.vertices().get(b * 11 + 10).unwrap_or(0)
+        let cu = sphere.vertices().get(c * 11 + 9).unwrap_or(0) let cv = sphere.vertices().get(c * 11 + 10).unwrap_or(0)
+        let area =(bu - au) *(cv - av) -(cu - au) *(bv - av)
+        if area > - 0.000001_f32 && area < 0.000001_f32 {
+            ret 16
         }
     }
     // Outward winding must agree with authored normals on every sphere face.

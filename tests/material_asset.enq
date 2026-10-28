@@ -1,5 +1,7 @@
 import core::option::Option
+
 import graphene::{StandardMaterial, edit_default_material, material_asset_parse, material_asset_stringify}
+import graphene::standard_material::DisplacementSettings
 import linalg::Vec3
 
 fn main() -> u32 {
@@ -119,6 +121,35 @@ fn main() -> u32 {
     }
     if material_asset_parse("{\"format\":\"graphene-material\",\"version\":4,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,\"normal_flip_y\":1}").is_some() {
         ret 25
+    }
+    let pbr = source.with_ao_texture("Content/Materials/Generated/Stone/Textures/AO.gtexture").with_ao_strength(0.7_f32)
+    .with_height_texture("Content/Materials/Generated/Stone/Textures/Height.gtexture")
+    .with_displacement(DisplacementSettings { true, 0.25_f32, 0.4_f32, 2 })
+    match material_asset_parse(material_asset_stringify(pbr)) {
+        Some(decoded) => {
+            if decoded.ao_texture() != pbr.ao_texture() || decoded.ao_strength() != 0.7_f32 || decoded.height_texture() != pbr.height_texture() || !decoded.displacement().enabled || decoded.displacement().magnitude != 0.25_f32 || decoded.displacement().center != 0.4_f32 || decoded.displacement().quality != 2 {
+                ret 26
+            }
+        }
+        None => {
+            ret 27
+        }
+    }
+    match material_asset_parse(legacy) {
+        Some(decoded) => {
+            if decoded.ao_texture() != "" || decoded.ao_strength() != 1_f32 || decoded.displacement().enabled {
+                ret 28
+            }
+        }
+        None => {
+            ret 29
+        }
+    }
+    let base = "{\"format\":\"graphene-material\",\"version\":6,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":1,"
+    for field in vec!["\"ao_strength\":-0.1}", "\"ao_strength\":2}", "\"ao_texture\":\"Content/../bad.gtexture\"}", "\"displacement\":{\"enabled\":true,\"magnitude\":-1,\"center\":0.5,\"quality\":1}}", "\"displacement\":{\"enabled\":true,\"magnitude\":1,\"center\":2,\"quality\":1}}", "\"displacement\":{\"enabled\":true,\"magnitude\":1,\"center\":0.5,\"quality\":3}}"] {
+        if material_asset_parse(base + field).is_some() {
+            ret 30
+        }
     }
     ret 0_u32
 }

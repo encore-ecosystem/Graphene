@@ -5,7 +5,7 @@ import std::os::read_file
 import graphene::{Scene, SceneComponent, Transform}
 import graphene::editor_actor_details::ActorDetails
 import graphene::scene::camera::camera_frame_extent
-import luma::{Rect, StyleSheet, Widget, layout_widget, property_section, vertical}
+import luma::{Rect, StyleSheet, SvgDocument, Widget, layout_widget, property_section, vertical}
 
 fn main() -> u32 {
     let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
@@ -50,6 +50,48 @@ fn main() -> u32 {
     }
     if camera_frame_extent(1280, 720, 0.0_f32) !=(1280_u32, 720_u32) {
         ret 5_u32
+    }
+    let mut scene = Scene::new()
+    let mesh = scene.create_entity("Mesh", Transform::identity())
+    let mut details = ActorDetails::new()
+    details.sync(scene, mesh, false)
+    if details.material_path() != "Content/Materials/Default.gmaterial" {
+        ret 6_u32
+    }
+    for path in vec!["Content/Materials/MI_Coral.gmaterial", "Content/Materials/M_Textured.gmaterial", "Content/Materials/A Very Long Assigned Material Name.gmaterial"] {
+        if !scene.set_material_path(mesh, path) {
+            ret 7_u32
+        }
+        details.sync(scene, mesh, false)
+        if details.material_path() != path {
+            ret 8_u32
+        }
+        for width in vec![240_f32, 280_f32, 320_f32] {
+            let widget = Widget::panel("mesh-component").with_classes("g-property-content").with_direction(vertical()).with_child(details.material_widget(SvgDocument::parse(""), true))
+            let layout = layout_widget(sheet.apply(widget, "", "", ""), Rect::new(0, 0, width, 60))
+            let button = layout.find_bounds("actor-material-open").unwrap_or(Rect::new(0, 0, 0, 0))
+            if button.width() < 72 || button.height() < 20 || button.right() > width || button.bottom() > 60 {
+                ret 9_u32
+            }
+        }
+    }
+    details.sync(scene, mesh, true)
+    if !details.material_widget(SvgDocument::parse(""), true).find("actor-material-open").unwrap_or(Widget::panel("")).disabled() {
+        ret 10_u32
+    }
+    details.sync(scene, mesh, false)
+    if !details.material_widget(SvgDocument::parse(""), false).find("actor-material-open").unwrap_or(Widget::panel("")).disabled() {
+        ret 11_u32
+    }
+    details.sync(scene, 0_u64, false)
+    if details.material_path() != "" {
+        ret 12_u32
+    }
+    let camera = scene.create_entity("Camera", Transform::identity())
+    scene.set_component(camera, SceneComponent::for_kind("camera"))
+    details.sync(scene, camera, false)
+    if details.material_path() != "" {
+        ret 13_u32
     }
     ret 0_u32
 }

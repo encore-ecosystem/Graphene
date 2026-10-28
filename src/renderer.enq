@@ -7,12 +7,27 @@ import std::io::println
 import linalg::{Mat4, Vec3}
 
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
+import mod::material_program::{MaterialPipelines, MaterialProgram, material_program_fallback}
+import mod::ray_lighting::{RayLightingView, RayPipelineSet}
 import mod::rhi::*
 import mod::scene::camera::PerspectiveCamera
 import mod::scene::light::DirectionalLight
 import mod::scene::renderable::{MeshId, RenderItem}
 import mod::scene::world::Scene
 import mod::temporal_view::TemporalView
+
+struct SceneMaterialProgram {
+    id: u64
+    program: MaterialProgram<H>
+}
+struct SceneMaterialPipelines {
+    key: str
+    pipelines: MaterialPipelines<H>
+}
+struct MaterialTextureGroups {
+    id: u64
+    groups: Vec[BindGroup]
+}
 
 pub struct ObjectUniforms {
     buffers: Vec[GpuBuffer]
@@ -40,6 +55,11 @@ pub struct SceneRenderer {
     temporal_view: TemporalView<H>
     sky_entity: u64
     shelter_texture: GpuTexture
+    material_groups: Vec[MaterialTextureGroups]
+    ray: RayPipelineSet<H>
+    material_programs: Vec[SceneMaterialProgram]
+    material_pipelines: Vec[SceneMaterialPipelines]
+    material_bindings: bool
 }
 
 impl for ObjectUniforms {
@@ -142,15 +162,16 @@ impl for SceneRenderer {
             device, layout, frame_count, frame_buffers, instance_buffers, groups,
             solid_pipeline, double_sided_pipeline, 0_usize, available,
             Vec3::new(0.28_f32, 0.28_f32, 0.28_f32),
-            Vec[f32]::with_capacity(32_usize), Vec[f32]::new(), Vec[GpuBuffer]::new(), Vec[f32]::new(), false, TemporalView::new(), 0_u64, GpuTexture::unavailable()
+            Vec[f32]::with_capacity(32_usize), Vec[f32]::new(), Vec[GpuBuffer]::new(), Vec[f32]::new(), false, TemporalView::new(), 0_u64, GpuTexture::unavailable(), Vec[MaterialTextureGroups]::new(), RayPipelineSet::new(), Vec[SceneMaterialProgram]::new(), Vec[SceneMaterialPipelines]::new(), false
         }
     }
-    pub fn create_with_gi(device: GraphicsDevice, layout: BindGroupLayout,
-        frame_count: u32, solid_pipeline: RenderPipeline,
-        double_sided_pipeline: RenderPipeline,
-        gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer,
-        texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler,) ->
-    SceneRenderer {
+    pub fn create_with_gi(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32, solid_pipeline: RenderPipeline, double_sided_pipeline: RenderPipeline, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer, texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler) -> SceneRenderer {
+        ret Self::create_with_gi_mode(device, layout, frame_count, solid_pipeline, double_sided_pipeline, gi_scene, gi_surfaces, gi_history, texture, normal, sampler, false)
+    }
+    pub fn create_with_material_programs(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32, solid_pipeline: RenderPipeline, double_sided_pipeline: RenderPipeline, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer, texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler) -> SceneRenderer {
+        ret Self::create_with_gi_mode(device, layout, frame_count, solid_pipeline, double_sided_pipeline, gi_scene, gi_surfaces, gi_history, texture, normal, sampler, true)
+    }
+    fn create_with_gi_mode(device: GraphicsDevice, layout: BindGroupLayout, frame_count: u32, solid_pipeline: RenderPipeline, double_sided_pipeline: RenderPipeline, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer, texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler, material_bindings: bool) -> SceneRenderer {
         let mut frame_buffers = Vec[GpuBuffer]::new()
         let mut instance_buffers = Vec[GpuBuffer]::new()
         let mut groups = Vec[BindGroup]::new()
@@ -175,8 +196,13 @@ impl for SceneRenderer {
             ranges.push(12752_u64) ranges.push(196608_u64)
             ranges.push(gi_scene.size()) ranges.push(gi_surfaces.size())
             ranges.push(gi_history.size())
-            let group = device.create_buffer_textures_bind_group_many(
-                layout, bindings, buffers, offsets, ranges, vec![5_u32, 6_u32, 7_u32], vec![texture, normal, texture], vec![sampler, sampler, sampler],)
+            let mut texture_bindings = vec![5_u32, 6_u32, 7_u32, 8_u32]
+            let mut textures = vec![texture, normal, texture, texture]
+            let mut samplers = vec![sampler, sampler, sampler, sampler]
+            if material_bindings {
+                material_program_fallback(frame_buffer, texture, sampler, bindings, buffers, offsets, ranges, texture_bindings, textures, samplers)
+            }
+            let group = device.create_buffer_textures_bind_group_many(layout, bindings, buffers, offsets, ranges, texture_bindings, textures, samplers)
             if !frame_buffer.available() || !instance_buffer.available() ||
             !group.available() {
                 available = false
@@ -190,7 +216,7 @@ impl for SceneRenderer {
             device, layout, frame_count, frame_buffers, instance_buffers, groups,
             solid_pipeline, double_sided_pipeline, 0_usize, available,
             Vec3::new(0.28_f32, 0.28_f32, 0.28_f32),
-            Vec[f32]::with_capacity(32_usize), Vec[f32]::new(), vec![gi_scene, gi_surfaces, gi_history], Vec[f32]::new(), false, TemporalView::new(), 0_u64, texture
+            Vec[f32]::with_capacity(32_usize), Vec[f32]::new(), vec![gi_scene, gi_surfaces, gi_history], Vec[f32]::new(), false, TemporalView::new(), 0_u64, texture, Vec[MaterialTextureGroups]::new(), RayPipelineSet::new(), Vec[SceneMaterialProgram]::new(), Vec[SceneMaterialPipelines]::new(), material_bindings
         }
     }
     /// Prepares replacement descriptor sets without mutating in-flight ones.
@@ -198,6 +224,12 @@ impl for SceneRenderer {
         self.shelter_texture = texture
     }
     pub fn texture_groups(self: Self, texture: GpuTexture, normal: GpuTexture, sampler: GpuSampler) -> Vec[BindGroup] {
+        ret self.pbr_groups(texture, normal, texture, sampler)
+    }
+    pub fn pbr_groups(self: Self, texture: GpuTexture, normal: GpuTexture, orm: GpuTexture, sampler: GpuSampler) -> Vec[BindGroup] {
+        ret self.program_groups(texture, normal, orm, sampler, Option::None)
+    }
+    pub fn program_groups(self: Self, texture: GpuTexture, normal: GpuTexture, orm: GpuTexture, sampler: GpuSampler, program: Option[MaterialProgram<H>]) -> Vec[BindGroup] {
         let mut groups = Vec[BindGroup]::new()
         for slot in 0..self.groups.len() {
             let mut buffers = Vec[GpuBuffer]::new()
@@ -213,8 +245,17 @@ impl for SceneRenderer {
                 bindings.push(index as u32) offsets.push(0)
                 ranges.push(buffers.get(index).unwrap_or(GpuBuffer::unavailable()).size())
             }
-            let group = self.device.create_buffer_textures_bind_group_many(
-                self.layout, bindings, buffers, offsets, ranges, vec![5_u32, 6_u32, 7_u32], vec![texture, normal, self.shelter_texture], vec![sampler, sampler, sampler],)
+            let mut texture_bindings = vec![5_u32, 6_u32, 7_u32, 8_u32]
+            let mut textures = vec![texture, normal, self.shelter_texture, orm]
+            let mut samplers = vec![sampler, sampler, sampler, sampler]
+            match program {
+                Some(program) => program.append(bindings, buffers, offsets, ranges, texture_bindings, textures, samplers, sampler) None => {
+                    if self.material_bindings {
+                        material_program_fallback(self.frame_buffers.get_unchecked_borrowed(slot), texture, sampler, bindings, buffers, offsets, ranges, texture_bindings, textures, samplers)
+                    }
+                }
+            }
+            let group = self.device.create_buffer_textures_bind_group_many(self.layout, bindings, buffers, offsets, ranges, texture_bindings, textures, samplers)
             if !group.available() {
                 group.destroy()
                 for previous in groups {
@@ -225,6 +266,29 @@ impl for SceneRenderer {
             groups.push(group)
         }
         ret groups
+    }
+    pub fn register_material_groups(self: mut Self, id: u64, groups: Vec[BindGroup]) -> bool {
+        if groups.len() != self.groups.len() {
+            ret false
+        }
+        self.material_groups.push(MaterialTextureGroups { id, groups }) ret true
+    }
+    pub fn replace_material_groups(self: mut Self, id: u64, groups: Vec[BindGroup]) -> Vec[BindGroup] {
+        for i in 0_usize..self.material_groups.len() {
+            let old = self.material_groups.get_unchecked_borrowed(i)
+            if old.id == id {
+                self.material_groups.set(i, MaterialTextureGroups { id, groups }) ret old.groups
+            }
+        }
+        self.material_groups.push(MaterialTextureGroups { id, groups }) ret Vec[BindGroup]::new()
+    }
+    fn bind_material(self: Self, pass: RenderPassEncoder, slot: u32, id: u64) -> bool {
+        for entry in self.material_groups {
+            if entry.id == id {
+                ret pass.bind_group(entry.groups.get(slot as usize).unwrap_or(BindGroup::unavailable()))
+            }
+        }
+        ret pass.bind_group(self.groups.get(slot as usize).unwrap_or(BindGroup::unavailable()))
     }
     pub fn replace_texture_groups(self: mut Self, groups: Vec[BindGroup]) -> Vec[BindGroup] {
         let previous = self.groups self.groups = groups ret previous
@@ -245,6 +309,14 @@ impl for SceneRenderer {
         self.indirect_ambient = value
         ret()
     }
+    /// Borrowed frame/GI storage used by the procedural displacement pipelines.
+    pub fn frame_bindings(self: Self, slot: usize) -> Vec[GpuBuffer] {
+        let mut buffers = vec![self.frame_buffers.get(slot).unwrap_or(GpuBuffer::unavailable()), self.instance_buffers.get(slot).unwrap_or(GpuBuffer::unavailable())]
+        for buffer in self.gi_buffers {
+            buffers.push(buffer)
+        }
+        ret buffers
+    }
     pub fn render_scene(self: mut Self, scene: Scene, camera: PerspectiveCamera, light: DirectionalLight,
         meshes: MeshAssets, materials: MaterialAssets, pass: RenderPassEncoder,
         frame_slot: u32, aspect: f32,) -> bool {
@@ -258,9 +330,6 @@ impl for SceneRenderer {
         if !self.available || !pass.available() || frame_slot >= self.frame_count {
             println("Graphene scene render: unavailable renderer, pass, or frame slot")
             ret false
-        }
-        if items.len() == 0_usize {
-            ret true
         }
         if items.len() > 1024_usize {
             ret false
@@ -342,7 +411,7 @@ impl for SceneRenderer {
                 match self.instance_buffers.get(frame_slot as usize) {
                     Option::Some(instance_buffer) => {
                         let frame_uploaded = frame_buffer.write_f32s(0_u64, self.frame_values)
-                        let instances_uploaded = instance_buffer.write_f32s(0_u64, self.instance_values)
+                        let instances_uploaded = self.instance_values.len() == 0 || instance_buffer.write_f32s(0_u64, self.instance_values)
                         if !frame_uploaded {
                             println("Graphene scene render: frame uniform write failed")
                         }
@@ -375,6 +444,7 @@ impl for SceneRenderer {
                 ret false
             }
         }
+        let mut batch_material = 0_u64
         let mut batch_mesh = MeshId::new(0_u64)
         let mut batch_double_sided = false
         let mut batch_first = 0_u32
@@ -388,16 +458,13 @@ impl for SceneRenderer {
                 }
             }
             let changes = batch_count >= 64_u32 ||
-            (batch_count > 0_u32 &&(item.mesh().value() != batch_mesh.value() ||
+            (batch_count > 0_u32 &&(item.mesh().value() != batch_mesh.value() || item.material().value() != batch_material ||
                     material.double_sided() != batch_double_sided)
             )
             if changes {
-                if !pass.bind_pipeline(if batch_double_sided {
-                        self.double_sided_pipeline
-                    } else {
-                        self.solid_pipeline
-                    }
-                ) ||
+                if !pass.bind_pipeline(self.material_pipeline(batch_material, batch_double_sided)
+                ) || !self.bind_material_lighting(pass, batch_material) ||
+                !self.bind_material(pass, frame_slot, batch_material) ||
                 !meshes.draw_instanced(pass, batch_mesh, batch_count, batch_first) {
                     println("Graphene scene render: instanced batch draw failed")
                     ret false
@@ -406,6 +473,7 @@ impl for SceneRenderer {
                 batch_count = 0_u32
             }
             if batch_count == 0_u32 {
+                batch_material = item.material().value()
                 batch_mesh = item.mesh()
                 batch_double_sided = material.double_sided()
             }
@@ -413,20 +481,27 @@ impl for SceneRenderer {
             item_index = item_index + 1_u32
         }
         if batch_count > 0_u32 &&
-        (!pass.bind_pipeline(if batch_double_sided {
-                    self.double_sided_pipeline
-                } else {
-                    self.solid_pipeline
-                }
-            ) ||
+        (!pass.bind_pipeline(self.material_pipeline(batch_material, batch_double_sided)
+            ) || !self.bind_material_lighting(pass, batch_material) ||
+            !self.bind_material(pass, frame_slot, batch_material) ||
             !meshes.draw_instanced(pass, batch_mesh, batch_count, batch_first)) {
             println("Graphene scene render: final instanced batch draw failed")
             ret false
         }
         ret true
     }
-    pub fn destroy(self: Self) -> bool {
-        let mut destroyed = true
+    pub fn destroy(self: mut Self) -> bool {
+        let mut destroyed = self.ray.destroy()
+        for entry in self.material_pipelines {
+            destroyed = entry.pipelines.destroy() && destroyed
+        }
+        for entry in self.material_groups {
+            for group in entry.groups {
+                if !group.destroy() {
+                    destroyed = false
+                }
+            }
+        }
         for group in self.groups {
             if !group.destroy() {
                 destroyed = false
@@ -447,6 +522,100 @@ impl for SceneRenderer {
 }
 
 impl for SceneRenderer {
+    pub fn prepare_ray_lighting(self: mut Self, target: Swapchain, frame: RenderFrame, vertex: ShaderModule, vertex_layout: VertexBufferLayout, variant: u32, lighting: RayLightingView) -> bool {
+        self.collect_material_pipelines()
+        if !self.ray.prepare(self.device, target, frame, vertex, self.layout, vertex_layout, self.solid_pipeline, 0, variant, true, lighting) {
+            ret false
+        }
+        for entry in self.material_programs {
+            let key = entry.program.key()
+            let mut pipeline = Option[MaterialPipelines<H>]::None
+            for known in self.material_pipelines {
+                if known.key == key {
+                    pipeline = Option[MaterialPipelines<H>]::Some(known.pipelines)
+                }
+            }
+            let mut pipelines = match pipeline {
+                Some(value) => value None => {
+                    let mut value = MaterialPipelines::new() self.material_pipelines.push(SceneMaterialPipelines {
+                            key, value
+                        }
+                    ) value
+                }
+            }
+            entry.program.use_frame(frame)
+            if !pipelines.prepare(self.device, target, frame, vertex, self.layout, vertex_layout, entry.program, if variant == 2 {
+                    1_usize
+                } elif variant == 1 {
+                    0_usize
+                } else {
+                    6_usize
+                }
+                , true, lighting,) {
+                ret false
+            }
+        }
+        ret true
+    }
+    fn collect_material_pipelines(self: mut Self) ->() {
+        let mut retained = Vec[SceneMaterialPipelines]::new()
+        for pipeline in self.material_pipelines {
+            let mut used = false
+            for program in self.material_programs {
+                if program.program.key() == pipeline.key {
+                    used = true break
+                }
+            }
+            if used {
+                pipeline.pipelines.collect() retained.push(pipeline)
+            } elif !pipeline.pipelines.destroy() {
+                retained.push(pipeline)
+            }
+        }
+        self.material_pipelines = retained
+    }
+    pub fn set_material_program(self: mut Self, id: u64, program: Option[MaterialProgram<H>]) ->() {
+        let mut next = Vec[SceneMaterialProgram]::new()
+        for entry in self.material_programs {
+            if entry.id != id {
+                next.push(entry)
+            }
+        }
+        match program {
+            Some(program) => next.push(SceneMaterialProgram { id, program }) None => {
+            }
+        }
+        self.material_programs = next
+    }
+    fn material_pipeline(self: Self, id: u64, double_sided: bool) -> RenderPipeline {
+        for entry in self.material_programs {
+            if entry.id == id {
+                for known in self.material_pipelines {
+                    if known.key == entry.program.key() {
+                        ret known.pipelines.pipeline(double_sided)
+                    }
+                }
+            }
+        }
+        ret self.ray.pipeline(if double_sided {
+                self.double_sided_pipeline
+            } else {
+                self.solid_pipeline
+            }
+            , double_sided,)
+    }
+    fn bind_material_lighting(self: Self, pass: RenderPassEncoder, id: u64) -> bool {
+        for entry in self.material_programs {
+            if entry.id == id {
+                for known in self.material_pipelines {
+                    if known.key == entry.program.key() {
+                        ret known.pipelines.bind(pass)
+                    }
+                }
+            }
+        }
+        ret self.ray.bind(pass)
+    }
     pub fn set_view_pipelines(self: mut Self, solid: RenderPipeline, double_sided: RenderPipeline, temporal: bool, view: TemporalView<H>) ->() {
         self.solid_pipeline = solid self.double_sided_pipeline = double_sided self.temporal = temporal self.temporal_view.copy_from(view)
     }

@@ -1,0 +1,227 @@
+//! Validate the complete set before publishing any material or texture.
+import core::vec::Vec
+import core::result::Result
+
+import std::os::{mkdir_all}
+
+import json::{Json, stringify}
+
+import mod::model::{list, manifest_valid, roles, text, value}
+import refrain::automation_transport::automation_capability_token
+import refrain::native_asset::{save_native_height, save_native_material, save_native_texture}
+import refrain::project_files::project_file_info
+import refrain::standard_material::StandardMaterial
+import refrain::texture_asset::{TextureImage, decode_height_png, decode_png}
+
+extern fn encore_text_sha256(contents: str) -> str
+pub import mod::maps::GeneratedMap
+pub struct PreparedMaterial {
+    textures_from: str
+    textures_to: str
+    material_from: str
+    material_to: str
+    error: str
+    project: str
+}
+pub fn validate_maps(manifest: Json, maps: Vec[GeneratedMap]) -> str {
+    if !manifest_valid(manifest) {
+        ret "Provider returned an incompatible PBR manifest"
+    }
+    if maps.len() != list(manifest, "maps").len() {
+        ret "Generated map set is incomplete"
+    }
+    let mut width = 0_u32 let mut height = 0_u32
+    for role in vec!["basecolor", "normal", "roughness", "metallic"] {
+        let mut found = false
+        for map in maps {
+            if map.role == role {
+                found = true if width == 0 {
+                    width = map.image.width height = map.image.height
+                }
+                if map.image.width != width || map.image.height != height {
+                    ret "PBR maps have different dimensions"
+                }
+            }
+        }
+        if !found {
+            ret "Missing PBR map: " + role
+        }
+    }
+    let mut seen = Vec[str]::new()
+    for map in maps {
+        if map.image.width != width || map.image.height != height {
+            ret "PBR maps have different dimensions"
+        }
+        for previous in seen {
+            if previous == map.role {
+                ret "Duplicate PBR map"
+            }
+        }
+        seen.push(map.role)
+        let mut declared = false
+        for entry in list(manifest, "maps") {
+            if text(entry, "role") == map.role {
+                declared = true
+            }
+        }
+        if !declared {
+            ret "Unexpected generated map"
+        }
+    }
+    ret ""
+}
+pub fn decoded_map(role: str, bytes: str, manifest: Json) -> Result[GeneratedMap, str] {
+    if bytes.byte_len() > 16777216 {
+        ret Result::Err("Generated map exceeds 16 MiB")
+    }
+    let image = if role == "height" {
+        let height = decode_height_png(bytes)? let mut pixels = Vec[u32]::with_capacity(height.samples.len())
+        for sample in height.samples {
+            let gray =(sample as u32) / 257 pixels.push(4278190080_u32 | gray |(gray << 8) |(gray << 16))
+        }
+        TextureImage { height.width, height.height, pixels }
+    } else {
+        decode_png(bytes)?
+    }
+    let mut matched = false
+    for entry in list(manifest, "maps") {
+        if text(entry, "role") == role {
+            if text(entry, "sha256") != encore_text_sha256(bytes) {
+                ret Result::Err("Generated map checksum mismatch")
+            }
+            let width = entry.get("width").unwrap_or(Json::Null).as_number().unwrap_or("")
+            let height = entry.get("height").unwrap_or(Json::Null).as_number().unwrap_or("")
+            if width != image.width.fmt() || height != image.height.fmt() {
+                ret Result::Err("Generated map dimensions disagree with its manifest")
+            }
+            matched = true
+        }
+    }
+    if !matched {
+        ret Result::Err("Unexpected generated map")
+    }
+    ret Result::Ok(GeneratedMap { role, bytes, image })
+}
+/// Immutable transfer DTO: image bytes cross threads, mutable pixel graphs do not.
+pub struct MaterialSource {
+    manifest: str
+    basecolor: str
+    normal: str
+    roughness: str
+    metallic: str
+    height: str
+    ao: str
+}
+fn source_bytes(maps: Vec[GeneratedMap], role: str) -> str {
+    for map in maps {
+        if map.role == role {
+            ret map.bytes
+        }
+    }
+    ret ""
+}
+pub fn material_source(manifest: Json, maps: Vec[GeneratedMap]) -> MaterialSource {
+    ret MaterialSource {
+        stringify(manifest), source_bytes(maps, "basecolor"), source_bytes(maps, "normal"), source_bytes(maps, "roughness"), source_bytes(maps, "metallic"), source_bytes(maps, "height"), source_bytes(maps, "ao")
+    }
+}
+pub fn prepare_material(project: str, name: str, source: MaterialSource) -> sending PreparedMaterial {
+    let manifest = value(source.manifest)
+    let mut maps = Vec[GeneratedMap]::new()
+    let encoded = vec![source.basecolor, source.normal, source.roughness, source.metallic, source.height, source.ao]
+    for i in 0_usize..encoded.len() {
+        let bytes = encoded.get_unchecked_borrowed(i)
+        if bytes.byte_len() > 0 {
+            match decoded_map(roles().get_unchecked_borrowed(i), bytes, manifest) {
+                Ok(map) => maps.push(map)
+                Err(error) => {
+                    ret PreparedMaterial { "", "", "", "", error, project }
+                }
+            }
+        }
+    }
+    let invalid = validate_maps(manifest, maps) if invalid != "" {
+        ret PreparedMaterial {
+            "", "", "", "", invalid, project
+        }
+    }
+    let mut label = "" for i in 0_usize..name.byte_len() {
+        let c = name.byte_at(i) if (c >= 65 && c <= 90) ||(c >= 97 && c <= 122) ||(c >= 48 && c <= 57) || c == 95 || c == 45 {
+            label += name.slice_bytes(i, 1)
+        } elif c == 32 {
+            label += "_"
+        }
+    }
+    if label.byte_len() == 0 || label.byte_len() > 64 {
+        ret PreparedMaterial {
+            "", "", "", "", "Use a material name of 1..64 ASCII letters or digits", project
+        }
+    }
+    let token = automation_capability_token() if token.byte_len() < 16 {
+        ret PreparedMaterial {
+            "", "", "", "", "Random source unavailable", project
+        }
+    }
+    let mut suffix = label
+    let mut number = 2_usize
+    while project_file_info(project, "Content/Materials/Generated/" + suffix) != 0 {
+        suffix = label + "_" + number.fmt() number += 1
+        if number > 10000 {
+            ret PreparedMaterial {
+                "", "", "", "", "Too many materials with this name", project
+            }
+        }
+    }
+    let staging = ".graphene/Trash/GenAI-" + token
+    let folder = "Content/Materials/Generated/" + suffix
+    let texture_dir = folder + "/Textures"
+    let material_path = folder + "/" + suffix + ".gmaterial"
+    if mkdir_all(project + "/" + staging + "/Textures") != 0 || project_file_info(project, staging + "/Textures") != 2 {
+        ret PreparedMaterial { "", "", "", "", "Unable to prepare generated assets", project }
+    }
+    let mut material = StandardMaterial::default().with_metallic(1_f32).with_roughness(1_f32).with_normal_flip_y(text(manifest, "normal_convention") == "directx")
+    for map in maps {
+        let path = texture_dir + "/" + map_filename(map.role) + ".gtexture"
+        let destination = project + "/" + staging + "/Textures/" + map_filename(map.role) + ".gtexture"
+        let saved = if map.role == "height" {
+            match decode_height_png(map.bytes) {
+                Ok(height) => save_native_height(destination, "genai:" + text(manifest, "model"), encore_text_sha256(map.bytes), height) Err(_) => false
+            }
+        } else {
+            save_native_texture(destination, "genai:" + text(manifest, "model"), encore_text_sha256(map.bytes), map.image)
+        }
+        if !saved {
+            ret PreparedMaterial {
+                "", "", "", "", "Unable to encode generated texture", project
+            }
+        }
+        if map.role == "basecolor" {
+            material = material.with_base_color_texture(path)
+        } elif map.role == "normal" {
+            material = material.with_normal_texture(path)
+        } elif map.role == "roughness" {
+            material = material.with_roughness_texture(path)
+        } elif map.role == "metallic" {
+            material = material.with_metallic_texture(path)
+        } elif map.role == "ao" {
+            material = material.with_ao_texture(path)
+        } elif map.role == "height" {
+            material = material.with_height_texture(path)
+        }
+    }
+    let metadata = stringify(manifest)
+    if !save_native_material(project + "/" + staging + "/" + suffix + ".gmaterial", "genai:" + text(manifest, "model"), encore_text_sha256(metadata), material) {
+        ret PreparedMaterial {
+            "", "", "", "", "Unable to encode generated material", project
+        }
+    }
+    ret PreparedMaterial {
+        staging, folder, staging + "/" + suffix + ".gmaterial", material_path, "", project
+    }
+}
+
+fn map_filename(role: str) -> str {
+    ret match role {
+        "basecolor" => "BaseColor" "normal" => "Normal" "roughness" => "Roughness" "metallic" => "Metallic" "height" => "Height" "ao" => "AO" _ => role
+    }
+}

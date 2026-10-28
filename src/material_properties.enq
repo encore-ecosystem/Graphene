@@ -1,0 +1,1141 @@
+import luma::WidgetLayout
+//! PBR asset properties with atomic persistence and an independent undo history.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all}
+import std::path::Path
+import std::thread::JoinHandle
+
+import linalg::Vec3
+import luma::{ColorPicker, Event, PickerColor, Point, PreparedFrame, ReactiveUi, Rect, Style, SvgDocument, TextEditor, Widget, Window, anchored_popup_bounds, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_text_input, horizontal, vertical}
+
+import mod::content_browser::files::content_unique_path
+import mod::displacement::patterns::DisplacementBudget
+import mod::material_images::{MaterialImages, PbrMapImport, import_pbr_map, load_material_images_for_material, load_material_preview}
+// Encore #169: import the owner of transitively accessed graph fields.
+import mod::material_graph::model::MaterialGraph
+import mod::material_schema::*
+import mod::native_asset::{apply_material_instance, read_native_material_asset, resolve_material_parent, resolve_native_material, save_native_material_asset}
+import mod::pbr_preview::PbrPreview
+import mod::scene::json_value::parse_number
+import mod::standard_material::{DisplacementSettings, StandardMaterial}
+import mod::texture_image::texture_path_valid
+
+pub struct PbrMaterialEditor {
+    project: str
+    path: str
+    material: StandardMaterial
+    undo: Vec[MaterialInstance]
+    redo: Vec[MaterialInstance]
+    changed: str
+    error: str
+    focus: str
+    editing: str
+    text: TextEditor
+    owns_focus: bool
+    hovered: str
+    pressed: str
+    dirty: bool
+    budget: Option[DisplacementBudget<H>]
+    preview: Option[PbrPreview<H>]
+    worker: Option[JoinHandle[MaterialImages]]
+    requested_project: str
+    requested_path: str
+    preview_pending: bool
+    plane: bool
+    tiled: bool
+    preview_limit: f32
+    pick_request: str
+    pick_role: str
+    map_importer: Option[JoinHandle[PbrMapImport]]
+    import_project: str
+    import_target: str
+    import_role: str
+    imported: str
+    reveal_pending: bool
+    instance: MaterialInstance
+    resolved: Option[ResolvedMaterial]
+    document_dirty: bool
+    parent_request: str
+    saved: MaterialInstance
+    picker: ColorPicker
+    picker_open: bool
+    picker_parameter: u64
+    picker_previous: MaterialInstance
+    popup_dirty: bool
+    compact: bool
+    parent_resolved: Option[ResolvedMaterial]
+    check_icon: SvgDocument
+    reset_icon: SvgDocument
+}
+/// Follow the visible parameter groups and skip inherited, disabled values.
+fn focus_controls(widget: Widget, ids: mut Vec[str]) ->() {
+    if widget.disabled() {
+        ret()
+    }
+    let id = widget.id()
+    if id.byte_len() >= 4 && id.slice_bytes(0_usize, 4_usize) == "pbr-" &&(widget.kind() == luma::widget_button() || widget.kind() == luma::widget_icon_button() || widget.kind() == luma::widget_input() || widget.kind() == luma::widget_color_picker()) {
+        ids.push(id)
+    }
+    for child in widget.children() {
+        focus_controls(child, ids)
+    }
+}
+fn field_key(id: str) -> str {
+    ret if id.byte_len() > 10 && id.slice_bytes(0, 10) == "pbr-field-" {
+        id.slice_bytes(10, id.byte_len() - 10)
+    } else {
+        ""
+    }
+}
+
+impl for PbrMaterialEditor {
+    pub fn new() -> Self {
+        ret Self {
+            "", "", StandardMaterial::default(), Vec[MaterialInstance]::new(), Vec[MaterialInstance]::new(), "", "", "", "", TextEditor::new(""), false, "", "", true, Option::None, Option::None, Option::None, "", "", false, false, false, 640_f32, "", "", Option::None, "", "", "", "", false, MaterialInstance::new(standard_pbr_parent()), Option::None, false, "", MaterialInstance::new(standard_pbr_parent()), ColorPicker::new("pbr-picker", PickerColor::linear(1_f32, 1_f32, 1_f32)), false, 0_u64, MaterialInstance::new(standard_pbr_parent()), false, false, Option[ResolvedMaterial]::None, SvgDocument::empty(), SvgDocument::empty()
+        }
+    }
+    /// Reuse parsed theme icons; rebuilding rows never reloads or reparses SVG.
+    pub fn with_icons(self: mut Self, check: SvgDocument, reset: SvgDocument) -> Self {
+        self.check_icon = check self.reset_icon = reset ret self
+    }
+    pub fn open(self: mut Self, project: str, path: str) -> bool {
+        if self.project == project && self.path == path {
+            ret true
+        }
+        if self.document_dirty {
+            self.error = "Save the open instance before opening another asset" self.dirty = true ret false
+        }
+        let instance = match read_native_material_asset(project + "/" + path) {
+            Ok(asset) => match asset {
+                Instance(value) => value Definition(_) => {
+                    self.error = "Open this material in the Material Editor" self.dirty = true ret false
+                }
+            }
+            Err(error) => {
+                self.error = error self.dirty = true ret false
+            }
+        }
+        let parent = match resolve_material_parent(project, path, instance) {
+            Ok(value) => value Err(error) => {
+                self.error = error self.dirty = true ret false
+            }
+        }
+        match apply_material_instance(parent, instance) {
+            Ok(resolved) => {
+                self.parent_resolved = Option[ResolvedMaterial]::Some(parent) self.project = project self.path = path self.instance = instance self.saved = instance self.resolved = Option[ResolvedMaterial]::Some(resolved) self.material = resolved.surface self.undo.clear() self.redo.clear() self.editing = "" self.focus = "" self.owns_focus = false self.error = "" self.dirty = true self.preview_pending = true self.document_dirty = false ret true
+            }
+            Err(error) => {
+                self.error = error self.dirty = true ret false
+            }
+        }
+    }
+    pub fn unsaved(self: Self) -> bool {
+        ret self.document_dirty
+    }
+    pub fn take_parent_request(self: mut Self) -> str {
+        let path = self.parent_request self.parent_request = "" ret path
+    }
+    pub fn save(self: mut Self) -> bool {
+        self.commit()
+        if self.path == "" {
+            ret true
+        }
+        if !save_native_material_asset(self.project + "/" + self.path, "", "", MaterialAsset::Instance(self.instance)) {
+            self.error = "Unable to save material instance" self.dirty = true ret false
+        }
+        self.document_dirty = false self.saved = self.instance self.changed = self.path self.dirty = true ret true
+    }
+    pub fn summary(self: Self, project: str, path: str) -> Widget {
+        let mut root = Widget::panel("details-panel").with_classes("pbr-properties").with_direction(vertical())
+        root.push(Widget::label(Path::new(path).file_name().unwrap_or("Material")).with_classes("pbr-heading"))
+        match read_native_material_asset(if path == "@engine/Materials/M_StandardPBR.gmaterial" {
+                standard_pbr_parent()
+            } else {
+                project + "/" + path
+            }
+        ) {
+            Ok(asset) => {
+                match asset {
+                    Instance(instance) => {
+                        root.push(Widget::label("Material Instance").with_classes("pbr-label")) root.push(Widget::label("Parent: " + Path::new(instance.parent).file_name().unwrap_or(instance.parent)).with_text_wrap(true))
+                    }
+                    Definition(_) => {
+                        root.push(Widget::label("Material · Surface Graph").with_classes("pbr-label"))
+                    }
+                }
+            }
+            Err(error) => root.push(Widget::label(error).with_text_wrap(true))
+        }
+        root.push(Widget::button("pbr-open-asset", "Edit Material").with_classes("pbr-button"))
+        ret root
+    }
+    pub fn reload_parent(self: mut Self, path: str) ->() {
+        let mut affected = false
+        match self.resolved {
+            Some(resolved) => {
+                for dependency in resolved.dependencies {
+                    if dependency == path || self.project + "/" + dependency == path {
+                        affected = true break
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if !affected {
+            ret()
+        }
+        let parent = match resolve_material_parent(self.project, self.path, self.instance) {
+            Ok(value) => value Err(error) => {
+                self.error = error self.dirty = true ret()
+            }
+        }
+        match apply_material_instance(parent, self.instance) {
+            Ok(resolved) => {
+                self.parent_resolved = Option[ResolvedMaterial]::Some(parent) self.resolved = Option[ResolvedMaterial]::Some(resolved) self.material = resolved.surface self.preview_pending = true self.error = ""
+            }
+            Err(error) => {
+                self.error = error
+            }
+        }
+        self.dirty = true
+    }
+    pub fn configure(self: mut Self, project: str) ->() {
+        if self.project != project {
+            self.project = project self.path = "" self.changed = "" self.document_dirty = false self.resolved = Option[ResolvedMaterial]::None self.parent_resolved = Option[ResolvedMaterial]::None self.preview_pending = false self.editing = "" self.owns_focus = false self.pick_role = "" self.pick_request = "" self.imported = "" self.error = "" self.dirty = true
+        }
+    }
+    pub fn focused(self: Self) -> str {
+        ret if self.owns_focus {
+            self.focus
+        } else {
+            ""
+        }
+    }
+    pub fn take_imported(self: mut Self) -> str {
+        let path = self.imported self.imported = "" ret path
+    }
+    pub fn displacement_budget(self: mut Self, budget: DisplacementBudget<H>) ->() {
+        self.budget = Option[DisplacementBudget<H>]::Some(budget)
+    }
+    pub fn needs_tick(self: Self) -> bool {
+        ret self.map_importer.is_some() || self.worker.is_some() || self.preview_pending || match self.preview {
+            Some(preview) => preview.busy() None => false
+        }
+    }
+    pub fn take_pick(self: mut Self) -> str {
+        let request = self.pick_request self.pick_request = "" ret request
+    }
+    pub fn picking(self: Self) -> bool {
+        ret self.pick_role != ""
+    }
+    pub fn cancel_pick(self: mut Self) ->() {
+        self.pick_role = "" self.pick_request = ""
+    }
+    pub fn import_map(self: mut Self, source: str) -> bool {
+        if self.map_importer.is_some() || self.pick_role == "" {
+            ret false
+        }
+        self.import_project = self.project self.import_target = self.path self.import_role = self.pick_role
+        self.map_importer = Option[JoinHandle[PbrMapImport]]::Some(spawn import_pbr_map(self.project, source, self.pick_role == "height")) self.pick_role = "" self.pick_request = "" self.error = "" self.dirty = true ret true
+    }
+    fn assign_map(self: mut Self, key: str, path: str) -> bool {
+        match self.parameter(key) {
+            Some(p) => {
+                let next = self.instance.set(p.id, MaterialValue::texture(path), true) ret self.store_instance(next, true)
+            }
+            None => {
+            }
+        }
+        if self.value(key) == path {
+            ret false
+        }
+        let m = self.material
+        let material = match key {
+            "basecolor" => m.with_base_color_texture(path) "normal" => m.with_normal_texture(path) "roughness-map" => m.with_roughness_texture(path) "metallic-map" => m.with_metallic_texture(path) "ao" => m.with_ao_texture(path) "height" => m.with_height_texture(path) _ => {
+                ret false
+            }
+        }
+        ret self.store(material, true)
+    }
+    pub fn poll(self: mut Self, window: Window) ->() {
+        match self.map_importer {
+            Some(worker) => {
+                if worker.is_finished() {
+                    let imported = worker.join() self.map_importer = Option[JoinHandle[PbrMapImport]]::None
+                    if self.import_project == self.project && imported.error == "" {
+                        self.imported = imported.path
+                    }
+                    if self.import_project == self.project && self.import_target == self.path {
+                        if imported.error != "" {
+                            self.error = imported.error
+                        } else {
+                            self.assign_map(self.import_role, imported.path)
+                        }
+                        self.dirty = true
+                    }
+                }
+            }
+            None => {
+            }
+        }
+
+        let density = window.pixel_density() let limit = if density > 0 {
+            1020_f32 / density
+        } else {
+            640_f32
+        }
+        if self.preview_limit != limit {
+            self.preview_limit = limit self.dirty = true
+        }
+        let ready = match self.preview {
+            Some(preview) => preview.ready() None => true
+        }
+        match self.worker {
+            Some(worker) => {
+                if worker.is_finished() && ready {
+                    let data = worker.join() self.worker = Option[JoinHandle[MaterialImages]]::None
+                    if self.requested_project == self.project && self.requested_path == self.path && !self.preview_pending {
+                        if data.error != "" {
+                            self.error = data.error
+                        } else {
+                            match PbrPreview::create(window, self.budget.unwrap_or(DisplacementBudget::new()), data) {
+                                Ok(preview) => {
+                                    match self.preview {
+                                        Some(old) => old.destroy() None => {
+                                        }
+                                    }
+                                    preview.mode(self.plane, self.tiled) self.preview = Option[PbrPreview<H>]::Some(preview) self.error = ""
+                                }
+                                Err(error) => {
+                                    self.error = error
+                                }
+                            }
+                        }
+                        self.dirty = true
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if self.preview_pending && self.worker.is_none() && self.path != "" {
+            self.preview_pending = false self.requested_project = self.project self.requested_path = self.path
+            self.worker = match self.resolved {
+                Some(resolved) => Option[JoinHandle[MaterialImages]]::Some(spawn load_material_preview(self.project, self.path, resolved.worker_snapshot())) None => Option[JoinHandle[MaterialImages]]::Some(spawn load_material_images_for_material(self.project, self.path, self.material))
+            }
+        }
+    }
+    pub fn compose(self: mut Self, frame: mut PreparedFrame) -> bool {
+        ret match self.preview {
+            Some(preview) => {
+                let ready = preview.compose(frame, "pbr-preview-surface") if preview.error() != "" && self.error != preview.error() {
+                    self.error = preview.error() self.dirty = true
+                }
+                ready
+            }
+            None => true
+        }
+    }
+    pub fn reveal_focus(self: mut Self, ui: mut ReactiveUi) -> bool {
+        if !self.reveal_pending {
+            ret false
+        }
+        self.reveal_pending = false
+        if !self.owns_focus || self.focus == "" {
+            ret false
+        }
+        let layout = ui.layout()
+        match layout.find_bounds("pbr-parameters") {
+            Some(body) => {
+                match layout.find_bounds(self.focus) {
+                    Some(focus) => {
+                        let delta = if focus.bottom() > body.bottom() {
+                            focus.bottom() - body.bottom() + 4_f32
+                        } elif focus.y() < body.y() {
+                            focus.y() - body.y() - 4_f32
+                        } else {
+                            0_f32
+                        }
+                        if delta != 0 {
+                            ret ui.scroll_at(body.x() + body.width() * 0.5_f32, body.y() + body.height() * 0.5_f32, delta)
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret false
+    }
+    pub fn destroy(self: mut Self) ->() {
+        match self.worker {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        match self.preview {
+            Some(preview) => preview.destroy() None => {
+            }
+        }
+        match self.map_importer {
+            Some(worker) => {
+                let _result = worker.join()
+            }
+            None => {
+            }
+        }
+        self.map_importer = Option[JoinHandle[PbrMapImport]]::None
+        self.worker = Option[JoinHandle[MaterialImages]]::None self.preview = Option[PbrPreview<H>]::None
+    }
+    pub fn path(self: Self) -> str {
+        ret self.path
+    }
+    pub fn take_changed(self: mut Self) -> str {
+        let path = self.changed self.changed = "" ret path
+    }
+    pub fn take_dirty(self: mut Self) -> bool {
+        let dirty = self.dirty self.dirty = false ret dirty
+    }
+    fn parameter_key(self: Self, p: MaterialParameter) -> str {
+        ret match p.binding {
+            "base_color_texture" => "basecolor" "normal_texture" => "normal" "roughness_texture" => "roughness-map" "metallic_texture" => "metallic-map" "ao_texture" => "ao" "height_texture" => "height" "metallic" => "metallic" "roughness" => "roughness" "normal_scale" => "normal-strength" "ao_strength" => "ao-strength" "displacement_magnitude" => "magnitude" "displacement_center" => "center" _ => "parameter-" + p.id.fmt()
+        }
+    }
+    fn parameter(self: Self, key: str) -> Option[MaterialParameter] {
+        match self.resolved {
+            Some(resolved) => {
+                for p in resolved.definition.parameters {
+                    if self.parameter_key(p) == key {
+                        ret Option::Some(p)
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret Option::None
+    }
+    fn effective(self: Self, p: MaterialParameter) -> MaterialValue {
+        match self.resolved {
+            Some(resolved) => {
+                for value in resolved.values {
+                    if value.parameter == p.id {
+                        ret value.value
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret p.value
+    }
+    fn overridden(self: Self, p: MaterialParameter) -> bool {
+        ret match self.instance.override_value(p.id) {
+            Some(value) => value.enabled && value.value.kind == p.value.kind None => false
+        }
+    }
+    fn override_button(self: Self, p: MaterialParameter) -> Widget {
+        ret self.button("override-" + p.id.fmt(), if self.overridden(p) {
+                "X"
+            } else {
+                ""
+            }
+            , self.overridden(p), false,).with_added_classes("pbr-override").with_attribute("role", "checkbox").with_attribute("aria-label", "Override " + p.name).with_attribute("aria-checked", if self.overridden(p) {
+                "true"
+            } else {
+                "false"
+            }
+            ,
+        ).with_attribute("title", if self.overridden(p) {
+                "Use inherited value"
+            } else {
+                "Override parent value"
+            }
+            ,
+        )
+    }
+    fn reset_button(self: Self, p: MaterialParameter) -> Widget {
+        ret self.button("reset-" + p.id.fmt(), "R", false, !self.overridden(p)).with_added_classes("pbr-override").with_attribute("aria-label", "Reset " + p.name + " to inherited value").with_attribute("title", "Reset " + p.name + " to inherited value")
+    }
+    fn value(self: Self, key: str) -> str {
+        match self.parameter(key) {
+            Some(p) => {
+                let v = self.effective(p) ret if v.kind == "texture" {
+                    v.path
+                } elif v.kind == "color" {
+                    PickerColor::linear(v.vector.x(), v.vector.y(), v.vector.z()).hex()
+                } elif v.kind == "bool" {
+                    if v.flag {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                } else {
+                    luma::format_decimal(v.number, 4_u32)
+                }
+            }
+            None => {
+            }
+        }
+        let m = self.material let d = m.displacement()
+        ret match key {
+            "basecolor" => m.base_color_texture() "normal" => m.normal_texture() "roughness-map" => m.roughness_texture() "metallic-map" => m.metallic_texture() "ao" => m.ao_texture() "height" => m.height_texture()
+            "metallic" => luma::format_decimal(m.metallic(), 4_u32) "roughness" => luma::format_decimal(m.roughness(), 4_u32) "normal-strength" => luma::format_decimal(m.normal_scale(), 4_u32) "ao-strength" => luma::format_decimal(m.ao_strength(), 4_u32) "magnitude" => luma::format_decimal(d.magnitude, 4_u32) "center" => luma::format_decimal(d.center, 4_u32) _ => ""
+        }
+    }
+    fn store_instance(self: mut Self, next: MaterialInstance, history: bool) -> bool {
+        let parent = if next.parent == self.instance.parent {
+            match self.parent_resolved {
+                Some(value) => value None => {
+                    self.error = "The material parent is not loaded" self.dirty = true ret false
+                }
+            }
+        } else {
+            match resolve_material_parent(self.project, self.path, next) {
+                Ok(value) => value Err(error) => {
+                    self.error = error self.dirty = true ret false
+                }
+            }
+        }
+        let resolved = match apply_material_instance(parent, next) {
+            Ok(value) => value Err(error) => {
+                self.error = error self.dirty = true ret false
+            }
+        }
+        if history {
+            if self.undo.len() >= 64 {
+                let mut kept = Vec[MaterialInstance]::new() for i in 1_usize..self.undo.len() {
+                    kept.push(self.undo.get_unchecked_borrowed(i))
+                }
+                self.undo = kept
+            }
+            self.undo.push(self.instance) self.redo.clear()
+        }
+        self.parent_resolved = Option[ResolvedMaterial]::Some(parent) self.instance = next self.resolved = Option[ResolvedMaterial]::Some(resolved) self.material = resolved.surface self.document_dirty = !material_instances_equal(self.instance, self.saved) self.error = "" self.dirty = true self.preview_pending = true ret true
+    }
+    fn store(self: mut Self, next: StandardMaterial, history: bool) -> bool {
+        let mut instance = self.instance
+        let before = standard_pbr_parameters(self.material)
+        match self.resolved {
+            Some(resolved) => {
+                for incoming in standard_pbr_parameters(next) {
+                    for previous in before {
+                        if incoming.binding == previous.binding && !incoming.value.same(previous.value) {
+                            for parameter in resolved.definition.parameters {
+                                if parameter.binding == incoming.binding && parameter.value.kind == incoming.value.kind {
+                                    instance = instance.set(parameter.id, incoming.value, true)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                ret false
+            }
+        }
+        ret self.store_instance(instance, history)
+    }
+    fn copy_parent(self: mut Self) ->() {
+        self.commit()
+        match self.resolved {
+            Some(resolved) => {
+                if mkdir_all(self.project + "/Content/Materials") != 0 {
+                    self.error = "Unable to create Materials folder" self.dirty = true ret()
+                }
+                let path = content_unique_path(self.project, "Content/Materials", resolved.definition.graph.name, ".gmaterial")
+                let mut definition = resolved.definition.snapshot()
+                definition.graph.name = Path::new(path).stem().unwrap_or("M_Material")
+                if path == "" || !save_native_material_asset(self.project + "/" + path, "", "", MaterialAsset::Definition(definition)) {
+                    self.error = "Unable to save editable parent" self.dirty = true ret()
+                }
+                let instance = MaterialInstance { path, self.instance.overrides }
+                if self.store_instance(instance, true) && self.save() {
+                    self.parent_request = path
+                }
+            }
+            None => {
+            }
+        }
+    }
+    fn commit(self: mut Self) ->() {
+        let key = self.editing if key == "" {
+            ret()
+        }
+        let text = self.text.value() self.editing = "" self.dirty = true
+        if text == self.value(key) {
+            ret()
+        }
+        match self.parameter(key) {
+            Some(p) => {
+                let old = self.effective(p)
+                let value = if p.value.kind == "texture" {
+                    if !texture_path_valid(text) ||(text != "" && !file_exists(self.project + "/" + text)) {
+                        self.error = "Choose an existing project texture, or clear its path" ret()
+                    }
+                    MaterialValue::texture(text)
+                } else {
+                    let number = match parse_number(text) {
+                        Some(n) => n None => {
+                            self.error = "Enter a finite number" ret()
+                        }
+                    }
+                    let value = MaterialValue::scalar(number)
+                    if !value.valid() {
+                        self.error = "Enter a finite number" ret()
+                    }
+                    value
+                }
+                if !old.same(value) {
+                    let next = self.instance.set(p.id, value, true) self.store_instance(next, true)
+                }
+                ret()
+            }
+            None => {
+            }
+        }
+        let m = self.material let mut next = m
+        if key == "basecolor" || key == "normal" || key == "roughness-map" || key == "metallic-map" || key == "ao" || key == "height" {
+            if !texture_path_valid(text) ||(text != "" && !file_exists(self.project + "/" + text)) {
+                self.error = "Choose an existing project texture, or clear the path" ret()
+            }
+            next = match key {
+                "basecolor" => m.with_base_color_texture(text) "normal" => m.with_normal_texture(text) "roughness-map" => m.with_roughness_texture(text) "metallic-map" => m.with_metallic_texture(text) "ao" => m.with_ao_texture(text) _ => m.with_height_texture(text)
+            }
+        } else {
+            let number = match parse_number(text) {
+                Some(n) => n None => {
+                    self.error = "Enter a finite number" ret()
+                }
+            }
+            if !(number >= - 1000000_f32 && number <= 1000000_f32) {
+                self.error = "Enter a finite number" ret()
+            }
+            let mut d = m.displacement()
+            if key == "metallic" || key == "roughness" || key == "ao-strength" || key == "center" {
+                if number < 0 || number > 1 {
+                    self.error = "Use a value between 0 and 1" ret()
+                }
+            }
+            if key == "normal-strength" &&(number < 0 || number > 4) {
+                self.error = "Normal strength must be between 0 and 4" ret()
+            }
+            if key == "magnitude" && number < 0 {
+                self.error = "Displacement magnitude must be non-negative" ret()
+            }
+            next = match key {
+                "metallic" => m.with_metallic(number) "roughness" => m.with_roughness(number) "normal-strength" => m.with_normal_scale(number) "ao-strength" => m.with_ao_strength(number)
+                "magnitude" => {
+                    d.magnitude = number m.with_displacement(d)
+                }
+                "center" => {
+                    d.center = number m.with_displacement(d)
+                }
+                _ => m
+            }
+        }
+        if key == "height" && text == "" {
+            let mut settings = next.displacement() settings.enabled = false next = next.with_displacement(settings)
+        }
+        self.store(next, true) ret()
+    }
+    fn action(self: mut Self, id: str) ->() {
+        self.commit() let m = self.material let mut d = m.displacement()
+        match self.resolved {
+            Some(resolved) => {
+                for p in resolved.definition.parameters {
+                    if id == "pbr-bool-" + p.id.fmt() {
+                        let next = self.instance.set(p.id, MaterialValue::boolean(!self.effective(p).flag), true) self.store_instance(next, true) ret()
+                    }
+                    if id == "pbr-color-" + p.id.fmt() {
+                        let value = self.effective(p) self.picker = ColorPicker::new("pbr-picker", PickerColor::linear(value.vector.x(), value.vector.y(), value.vector.z())).with_compact() self.picker_parameter = p.id self.picker_previous = self.instance self.picker_open = true self.popup_dirty = true ret()
+                    }
+                    if id == "pbr-reset-" + p.id.fmt() {
+                        let next = self.instance.reset(p.id) self.store_instance(next, true) ret()
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if id == "pbr-save" {
+            self.save() ret()
+        }
+        if id == "pbr-undo" {
+            self.history(false) ret()
+        }
+        if id == "pbr-redo" {
+            self.history(true) ret()
+        }
+        if id == "pbr-parent-open" {
+            self.parent_request = self.instance.parent ret()
+        }
+        if id == "pbr-parent-copy" {
+            self.copy_parent() ret()
+        }
+        if id.byte_len() > 13 && id.slice_bytes(0, 13) == "pbr-override-" {
+            match self.resolved {
+                Some(resolved) => {
+                    for parameter in resolved.definition.parameters {
+                        if id == "pbr-override-" + parameter.id.fmt() {
+                            let enabled = self.overridden(parameter)
+                            let mut value = parameter.value for effective in resolved.values {
+                                if effective.parameter == parameter.id {
+                                    value = effective.value
+                                }
+                            }
+                            // A disabled override retains its local value until Reset.
+                            if !enabled {
+                                match self.instance.override_value(parameter.id) {
+                                    Some(previous) => {
+                                        if previous.value.kind == parameter.value.kind {
+                                            value = previous.value
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            let next = self.instance.set(parameter.id, value, !enabled) self.store_instance(next, true) ret()
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        if id.byte_len() > 9 && id.slice_bytes(0, 9) == "pbr-pick-" {
+            self.pick_role = id.slice_bytes(9, id.byte_len() - 9) self.pick_request = self.pick_role self.dirty = true
+        } elif id == "pbr-preview-sphere" || id == "pbr-preview-plane" || id == "pbr-preview-tile" {
+            if id == "pbr-preview-tile" {
+                self.tiled = !self.tiled
+            } else {
+                self.plane = id == "pbr-preview-plane"
+            }
+            match self.preview {
+                Some(preview) => preview.mode(self.plane, self.tiled) None => {
+                }
+            }
+            self.dirty = true
+        } elif id == "pbr-flip" {
+            self.store(m.with_normal_flip_y(!m.normal_flip_y()), true)
+        } elif id == "pbr-displace" {
+            if m.height_texture() != "" {
+                d.enabled = !d.enabled self.store(m.with_displacement(d), true)
+            }
+        } elif id == "pbr-quality" {
+            d.quality =(d.quality + 1) % 3 self.store(m.with_displacement(d), true)
+        } elif id == "pbr-unlit" {
+            self.store(m.with_unlit_value(!m.unlit()), true)
+        } elif id == "pbr-double-sided" {
+            self.store(m.with_double_sided_value(!m.double_sided()), true)
+        }
+        ret()
+    }
+    fn history(self: mut Self, redo: bool) ->() {
+        self.editing = "" let source = if redo {
+            self.redo
+        } else {
+            self.undo
+        }
+        if source.len() == 0 {
+            ret()
+        }
+        let next = source.get_unchecked_borrowed(source.len() - 1) let previous = self.instance
+        if self.store_instance(next, false) {
+            if redo {
+                self.redo.pop() self.undo.push(previous)
+            } else {
+                self.undo.pop() self.redo.push(previous)
+            }
+        }
+        ret()
+    }
+    fn button(self: Self, key: str, label: str, active: bool, disabled: bool) -> Widget {
+        let id = "pbr-" + key
+        let icon = if key.byte_len() >= 6 && key.slice_bytes(0_usize, 6_usize) == "reset-" {
+            self.reset_icon
+        } elif active && key.byte_len() >= 9 && key.slice_bytes(0_usize, 9_usize) == "override-" {
+            self.check_icon
+        } else {
+            SvgDocument::empty()
+        }
+        let control = if icon.valid() {
+            Widget::icon_button(id, "", icon)
+        } else {
+            Widget::button(id, label)
+        }
+        ret control.with_classes("pbr-button" + if active {
+                " is-active"
+            } else {
+                ""
+            }
+            + if self.hovered == id {
+                " is-hovered"
+            } else {
+                ""
+            }
+            + if self.pressed == id {
+                " is-pressed"
+            } else {
+                ""
+            }
+        ).with_checked(active).with_focus(self.owns_focus && self.focus == id).with_disabled(disabled).with_attribute("title", label)
+    }
+    fn field(self: Self, key: str, label: str) -> Widget {
+        let id = "pbr-field-" + key let value = if self.editing == key {
+            self.text.value()
+        } else {
+            self.value(key)
+        }
+        let mut row = Widget::panel("").with_classes("pbr-row").with_direction(horizontal())
+        match self.parameter(key) {
+            Some(p) => row.push(self.override_button(p)) None => {
+            }
+        }
+        row.push(Widget::label(label).with_classes("pbr-label"))
+        row.push(Widget::input(id, value).with_classes("pbr-input").with_focus(self.owns_focus && self.focus == id).with_cursor(if self.editing == key {
+                    self.text.cursor()
+                } else {
+                    value.char_len()
+                }
+            ).with_selection(if self.editing == key {
+                    self.text.selection_start()
+                } else {
+                    0_usize
+                }
+                , if self.editing == key {
+                    self.text.selection_end()
+                } else {
+                    0_usize
+                }
+                ,
+            ).with_attribute("aria-label", label).with_attribute("title", value).with_disabled(match self.parameter(key) {
+                    Some(p) => !self.overridden(p) None => false
+                }
+            ))
+        if match self.parameter(key) {
+            Some(parameter) => parameter.value.kind == "texture" None => false
+        }
+        {
+            row.push(self.button("pick-" + key, "…", false, self.map_importer.is_some() || match self.parameter(key) {
+                        Some(parameter) => !self.overridden(parameter) None => false
+                    }
+                    ,
+                ).with_added_classes("pbr-map-pick").with_attribute("aria-label", "Choose " + label + " texture").with_attribute("title", "Choose " + label + " texture"))
+        }
+        match self.parameter(key) {
+            Some(p) => row.push(self.reset_button(p)) None => {
+            }
+        }
+        ret row
+    }
+    pub fn widget(self: Self) -> Widget {
+        let mut root = Widget::panel("material-instance-editor").with_classes("pbr-properties pbr-instance-editor").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        root = root.with_css_variable("--pbr-preview-limit", self.preview_limit.fmt() + "px")
+        root.push(Widget::label(Path::new(self.path).file_name().unwrap_or("Material Instance") + if self.document_dirty {
+                    " *"
+                } else {
+                    ""
+                }
+            ).with_classes("pbr-heading"))
+        let mut toolbar = Widget::panel("").with_classes("pbr-preview-controls").with_direction(horizontal())
+        toolbar.push(self.button("save", "Save", false, self.path == "")) toolbar.push(self.button("undo", "Undo", false, self.undo.len() == 0)) toolbar.push(self.button("redo", "Redo", false, self.redo.len() == 0)) root.push(toolbar)
+        root.push(Widget::label("Parent: " + Path::new(self.instance.parent).file_name().unwrap_or(self.instance.parent)).with_text_wrap(true))
+        let mut parent = Widget::panel("").with_classes("pbr-preview-controls").with_direction(horizontal())
+        parent.push(self.button("parent-open", "Open Parent", false, self.path == ""))
+        parent.push(self.button("parent-copy", "Create Editable Copy", false, self.path == "" || self.instance.parent != standard_pbr_parent())) root.push(parent)
+        let mut workspace = Widget::panel("pbr-instance-workspace").with_classes("pbr-instance-workspace" + if self.compact {
+                " compact"
+            } else {
+                ""
+            }
+        ).with_direction(if self.compact {
+                vertical()
+            } else {
+                horizontal()
+            }
+        )
+        let mut preview_column = Widget::panel("pbr-preview-column").with_classes("pbr-preview-column").with_direction(vertical())
+        let preview_error = match self.preview {
+            Some(preview) => preview.error() None => self.error
+        }
+        preview_column.push((if self.preview.is_some() && preview_error == "" {
+                    Widget::render_surface("pbr-preview-surface")
+                } else {
+                    Widget::panel("pbr-preview-surface").with_children(vec![Widget::label(if preview_error != "" {
+                                    preview_error
+                                } else {
+                                    "Loading material preview…"
+                                }
+                            ).with_text_wrap(true)])
+                }
+            ).with_classes("pbr-preview"))
+        let mut shapes = Widget::panel("").with_classes("pbr-preview-controls").with_direction(horizontal())
+        shapes.push(self.button("preview-sphere", "Sphere", !self.plane, self.preview.is_none())) shapes.push(self.button("preview-plane", "Plane", self.plane, self.preview.is_none())) shapes.push(self.button("preview-tile", "3 × 3", self.tiled, self.preview.is_none())) preview_column.push(shapes)
+        workspace.push(preview_column)
+        let mut properties = Widget::panel("pbr-parameters").with_classes("pbr-parameters").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
+        match self.resolved {
+            Some(resolved) => {
+                let mut groups = Vec[str]::new()
+                for parameter in resolved.definition.parameters {
+                    let mut known = false for group in groups {
+                        if group == parameter.group {
+                            known = true break
+                        }
+                    }
+                    if !known {
+                        groups.push(parameter.group)
+                    }
+                }
+                for group in groups {
+                    properties.push(Widget::label(group).with_classes("pbr-group"))
+                    for p in resolved.definition.parameters {
+                        if p.group != group {
+                            continue
+                        }
+                        let value = self.effective(p)
+                        if value.kind == "scalar" || value.kind == "texture" {
+                            properties.push(self.field(self.parameter_key(p), p.name))
+                        } else {
+                            let mut row = Widget::panel("").with_classes("pbr-row").with_direction(horizontal())
+                            row.push(self.override_button(p)) row.push(Widget::label(p.name).with_classes("pbr-label").with_attribute("title", p.name))
+                            if value.kind == "color" {
+                                let color = PickerColor::linear(value.vector.x(), value.vector.y(), value.vector.z()) row.push(Widget::color_picker("pbr-color-" + p.id.fmt(), color.hex(), color.display()).with_classes("pbr-button pbr-parameter-value").with_focus(self.owns_focus && self.focus == "pbr-color-" + p.id.fmt()).with_disabled(!self.overridden(p)))
+                            } else {
+                                row.push(self.button("bool-" + p.id.fmt(), if value.flag {
+                                            "On"
+                                        } else {
+                                            "Off"
+                                        }
+                                        , value.flag, !self.overridden(p),).with_added_classes("pbr-parameter-value"))
+                            }
+                            row.push(self.reset_button(p)) properties.push(row)
+                        }
+                    }
+                }
+                for diagnostic in resolved.diagnostics {
+                    properties.push(Widget::label(diagnostic).with_classes("pbr-error").with_text_wrap(true))
+                }
+            }
+            None => {
+            }
+        }
+        properties.push(Widget::label(self.error).with_classes("pbr-error").with_text_wrap(true)) workspace.push(properties) root.push(workspace) ret root
+    }
+    pub fn popup_open(self: Self) -> bool {
+        ret self.picker_open
+    }
+    pub fn take_popup_dirty(self: mut Self) -> bool {
+        let dirty = self.popup_dirty self.popup_dirty = false ret dirty
+    }
+    pub fn popup(self: Self, width: f32, height: f32, layout: WidgetLayout) -> Widget {
+        let owner = layout.find_bounds("pbr-color-" + self.picker_parameter.fmt()).unwrap_or(Rect::new(8_f32, 8_f32, 0_f32, 0_f32))
+        let bounds = anchored_popup_bounds(owner, self.picker.preferred_size(), Rect::new(8_f32, 8_f32, width - 16_f32, height - 16_f32))
+        ret self.picker.widget(width, height).with_computed_style(Style::default().with_left(bounds.x()).with_top(bounds.y()).with_width(bounds.width()).with_max_height(bounds.height()))
+    }
+    fn color_input(self: mut Self, event: Event, target: str, layout: WidgetLayout, window: Window) -> bool {
+        if event.kind() == 0 {
+            ret false
+        }
+        let outside = event.kind() == event_pointer_down() && !layout.find_bounds("pbr-picker").unwrap_or(Rect::new(0_f32, 0_f32, 0_f32, 0_f32)).contains(Point::new(event.x(), event.y()))
+        let outcome = if outside {
+            3_u32
+        } else {
+            self.picker.input_with_text(event, target, layout, window)
+        }
+        self.popup_dirty = true
+        if outcome == 3 {
+            let previous = self.picker_previous self.store_instance(previous, false) self.picker_open = false
+        }
+        if outcome == 1 || outcome == 2 {
+            let color = self.picker.color()
+            let value = MaterialValue::color(Vec3::new(color.red(), color.green(), color.blue()))
+            let next = self.instance.set(self.picker_parameter, value, true) self.store_instance(next, false)
+            if outcome == 2 {
+                if !material_instances_equal(self.picker_previous, self.instance) {
+                    self.undo.push(self.picker_previous) self.redo.clear()
+                }
+                self.picker_open = false
+            }
+        }
+        ret true
+    }
+    pub fn input(self: mut Self, event: Event, target: str, visible: bool, locked: bool, window: Window, layout: WidgetLayout) -> bool {
+        match layout.find_bounds("material-instance-editor") {
+            Some(bounds) => {
+                let compact = bounds.width() < 580_f32 if self.compact != compact {
+                    self.compact = compact self.dirty = true
+                }
+            }
+            None => {
+            }
+        }
+        if self.picker_open && !locked {
+            ret self.color_input(event, target, layout, window)
+        }
+        if !visible || locked {
+            self.commit() self.owns_focus = false self.pressed = "" ret false
+        }
+        let text_field_id = if self.editing != "" {
+            "pbr-field-" + self.editing
+        } else {
+            ""
+        }
+        if text_field_id != "" && self.owns_focus {
+            if self.text.pointer_handles(event, target, text_field_id) {
+                self.text = self.text.pointer_input(event, layout, text_field_id, window) self.dirty = true ret true
+            }
+            if luma::text_edit_key(event) {
+                self.text = self.text.key_input(event, window) self.dirty = true ret true
+            }
+        }
+        let own = target.byte_len() >= 4 && target.slice_bytes(0, 4) == "pbr-" let kind = event.kind()
+        if kind == event_pointer_move() {
+            let hover = if own {
+                target
+            } else {
+                ""
+            }
+            if hover != self.hovered {
+                self.hovered = hover self.dirty = true
+            }
+        }
+        if kind == event_focus_lost() {
+            self.commit() self.owns_focus = false self.pressed = "" self.dirty = true ret false
+        }
+        if kind == event_pointer_up() && self.pressed != "" {
+            let id = self.pressed self.pressed = "" if target == id {
+                self.action(id)
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_pointer_down() {
+            match self.widget().find(target) {
+                Some(widget) => {
+                    if widget.disabled() {
+                        ret true
+                    }
+                }
+                None => {
+                }
+            }
+            self.commit()
+            if !own {
+                self.owns_focus = false self.dirty = true ret false
+            }
+            match self.widget().find(target) {
+                Some(w) => {
+                    if w.disabled() {
+                        ret true
+                    }
+                }
+                None => {
+                }
+            }
+            self.focus = target self.owns_focus = true self.reveal_pending = false self.editing = field_key(target)
+            if self.editing != "" {
+                self.text = TextEditor::new(self.value(self.editing))
+                self.text = self.text.with_cursor(0).pointer_input(event, layout, target, window)
+            } else {
+                self.pressed = target
+            }
+            self.dirty = true ret true
+        }
+        if !self.owns_focus {
+            ret false
+        }
+        if kind == event_text_input() && self.editing != "" {
+            self.text = self.text.insert(event.text()) self.dirty = true ret true
+        }
+        if kind != event_key_down() {
+            ret false
+        }
+        let key = event.key()
+        if event.control() && key == 115 {
+            self.save() self.dirty = true ret true
+        }
+        if event.control() && key == 122 {
+            self.history(event.shift()) self.dirty = true ret true
+        }
+        if key == 9 {
+            self.commit() let mut ids = Vec[str]::new()
+            focus_controls(self.widget(), ids)
+            if ids.len() == 0_usize {
+                ret true
+            }
+            let mut current = 0_usize for i in 0_usize..ids.len() {
+                if ids.get_unchecked_borrowed(i) == self.focus {
+                    current = i
+                }
+            }
+            let controls = self.widget()
+            for step in 1_usize..ids.len() + 1 {
+                let i = if event.shift() {
+                    (current + ids.len() - step % ids.len()) % ids.len()
+                } else {
+                    (current + step) % ids.len()
+                }
+                let id = ids.get_unchecked_borrowed(i) match controls.find(id) {
+                    Some(w) => {
+                        if !w.disabled() {
+                            self.focus = id self.reveal_pending = true self.editing = field_key(id)
+                            if self.editing != "" {
+                                self.text = TextEditor::new(self.value(self.editing)).select_all()
+                            }
+                            self.dirty = true ret true
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            ret true
+        }
+        if self.editing != "" {
+            if key == 13 {
+                self.commit()
+            } elif key == 27 {
+                self.editing = ""
+            } elif event.control() && key == 97 {
+                self.text = self.text.select_all()
+            } elif event.control() && key == 118 {
+                self.text = self.text.paste(window.clipboard_text())
+            } elif event.control() &&(key == 99 || key == 120) {
+                window.set_clipboard(self.text.selected_text()) if key == 120 {
+                    self.text = self.text.cut()
+                }
+            } elif key == 8 {
+                self.text = self.text.backspace()
+            } elif key == 127 {
+                self.text = self.text.delete()
+            } elif key == 1073741904 {
+                self.text = self.text.move_left(event.shift())
+            } elif key == 1073741903 {
+                self.text = self.text.move_right(event.shift())
+            } elif key == 1073741898 {
+                self.text = self.text.move_home(event.shift())
+            } elif key == 1073741901 {
+                self.text = self.text.move_end(event.shift())
+            }
+            self.dirty = true ret true
+        }
+        if key == 13 || key == 32 {
+            let field = field_key(self.focus) if field != "" {
+                self.editing = field self.text = TextEditor::new(self.value(field))
+            } else {
+                self.action(self.focus)
+            }
+            self.dirty = true ret true
+        }
+        ret false
+    }
+}

@@ -6,4 +6,4 @@ readme = "README.md"
 licence = "MIT"
 build = "build.enq"
 encore = ">=0.1.6"
-dependencies = ["index@std@>=0.0.5", "index@json@>=0.0.3", "index@linalg@>=0.0.1", "index@binary@>=0.1.0", "index@vulkan@>=0.1.1", "path@../Luma", "index@sdl@>=0.1.0", "index@gpu@>=0.1.1", "path@../Audio", "index@serialize", "path@../Blaze", "path@../Physics"]
+dependencies = ["index@std@>=0.0.5", "index@json@>=0.0.3", "index@linalg@>=0.0.1", "index@binary@>=0.1.0", "index@vulkan@>=0.1.2", "path@../Luma", "index@sdl@>=0.1.0", "index@gpu@>=0.1.2", "path@../Audio", "index@serialize", "path@../Blaze", "path@../Physics"]

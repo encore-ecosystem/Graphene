@@ -1,0 +1,898 @@
+//! Shared displacement resources and bounded, fence-owned draw batches.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import linalg::{Mat4, Vec3}
+
+import mod::gpu::{GpuPatchInitializer, GpuPatchSource, GpuPatchView, GpuRefinementTable, patch_layout_entries}
+import mod::patterns::DisplacementBudget
+import mod::ray_proxy::GpuRayProxy
+import mod::skin_source::{DisplacementSkin, GpuSkinPatchSource}
+import mod::terrain_source::{TerrainPatchMaterial, terrain_layout_entries}
+import refrain::material_program::{MaterialPipelines, MaterialProgram, material_program_fallback, material_program_layout}
+import refrain::ray_lighting::{RayLightingView, RayPipelineSet}
+import refrain::rhi::*
+import refrain::scene::renderable::RenderItem
+import refrain::shaders::aa_linear_fragment::aa_linear_fragment
+import refrain::shaders::aa_temporal_fragment::aa_temporal_fragment
+import refrain::shaders::displacement::{displacement_ray_proxy_spirv, displacement_selection_spirv, displacement_triangle_linear_spirv, displacement_triangle_spirv, displacement_triangle_temporal_spirv, displacement_vertex_spirv, terrain_ray_proxy_spirv}
+import refrain::shaders::material_fragment_spirv
+import refrain::shaders::terrain::{terrain_fragment_spirv, terrain_linear_spirv, terrain_temporal_spirv, terrain_vertex_spirv}
+import refrain::standard_material::StandardMaterial
+import refrain::temporal_view::TemporalView
+import refrain::virtual_geometry::VirtualGeometry
+
+struct PatchSourceEntry {
+    mesh: u64
+    source: GpuPatchSource
+    initializer: GpuPatchInitializer<H>
+    recorded: bool
+    retired: bool
+    valid: bool
+    skin: Option[GpuSkinPatchSource<H>]
+}
+struct PatchDrawBatch {
+    key: str
+    source: usize
+    view: GpuPatchView<H>
+    layout: BindGroupLayout
+    vertex: ShaderModule
+    fragment: ShaderModule
+    pipeline: RenderPipeline
+    groups: Vec[BindGroup]
+    items: Vec[RenderItem]
+    lods: Vec[u32]
+    active: bool
+    consumer: u32
+    triangles: bool
+    height: GpuTexture
+    sampler: GpuSampler
+    material: StandardMaterial
+    skin_buffer: GpuBuffer
+    ray: RayPipelineSet<H>
+    ray_family: u32
+    ray_variant: u32
+    program: Option[MaterialProgram<H>]
+    program_pipelines: MaterialPipelines<H>
+}
+struct RayProxyEntry {
+    key: str
+    proxy: GpuRayProxy<H>
+    serial: u64
+    generation: u64
+}
+pub struct DisplacementRayInstance {
+    entity: u64
+    mesh: u64
+    acceleration: AccelerationStructure
+    world: Mat4
+    generation: str
+}
+pub struct DisplacementRenderer {
+    budget: DisplacementBudget<H>
+    table: Option[GpuRefinementTable]
+    sources: Vec[PatchSourceEntry<H>]
+    batches: Vec[PatchDrawBatch<H>]
+    serial: u64
+    ray_serial: u64
+    ray_proxies: Vec[RayProxyEntry<H>]
+    error: str
+    triangles: bool
+    programs: Vec[(usize, MaterialProgram<H>)]
+}
+pub struct DisplacementStatistics {
+    source_triangles: u64
+    triangles: u64
+    jobs: u64
+    pending: bool
+}
+
+fn render_layout(terrain: bool) -> Vec[BindGroupLayoutEntry] {
+    let mut entries = vec![BindGroupLayoutEntry::uniform(0, shader_stage_fragment())]
+    for i in 2_usize..5_usize {
+        entries.push(BindGroupLayoutEntry::storage(i as u32, shader_stage_fragment()))
+    }
+    for i in 5_usize..9_usize {
+        entries.push(BindGroupLayoutEntry::texture_sampler(i as u32, shader_stage_fragment()))
+    }
+    for entry in patch_layout_entries() {
+        if entry.binding >= 26 && entry.binding <= 28 {
+            continue
+        }
+        entries.push(entry)
+    }
+    if terrain {
+        for entry in terrain_layout_entries() {
+            entries.push(entry)
+        }
+    }
+    if !terrain {
+        for entry in material_program_layout() {
+            entries.push(entry)
+        }
+    }
+    ret entries
+}
+
+impl for DisplacementRenderer {
+    pub fn new() -> DisplacementRenderer<H> {
+        ret DisplacementRenderer<H> {
+            DisplacementBudget::new(), Option[GpuRefinementTable]::None, Vec[PatchSourceEntry<H>]::new(), Vec[PatchDrawBatch<H>]::new(), 0, 0, Vec[RayProxyEntry<H>]::new(), "", false, Vec[(usize, MaterialProgram<H>)]::new()
+        }
+    }
+    /// Additional preview controllers share the same global allocation limit.
+    pub fn set_material_program(self: mut Self&, texture: usize, program: Option[MaterialProgram<H>]) ->() {
+        let mut next = Vec[(usize, MaterialProgram<H>)]::new()
+        for entry in self.programs {
+            if entry.0 != texture {
+                next.push(entry)
+            }
+        }
+        match program {
+            Some(program) => next.push((texture, program)) None => {
+            }
+        }
+        self.programs = next self.invalidate()
+    }
+    pub fn with_budget(budget: DisplacementBudget<H>) -> DisplacementRenderer<H> {
+        ret DisplacementRenderer<H> {
+            budget, Option[GpuRefinementTable]::None, Vec[PatchSourceEntry<H>]::new(), Vec[PatchDrawBatch<H>]::new(), 0, 0, Vec[RayProxyEntry<H>]::new(), "", false, Vec[(usize, MaterialProgram<H>)]::new()
+        }
+    }
+    /// Selection and material-preview consumers retain their own shading.
+    pub fn show_triangles(self: mut Self&, enabled: bool) ->() {
+        self.triangles = enabled ret()
+    }
+    pub fn retirement_pending(self: Self&) -> bool {
+        for entry in self.ray_proxies {
+            if !entry.proxy.producer_complete() {
+                ret true
+            }
+        }
+        for batch in self.batches {
+            if !batch.active {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn memory_bytes(self: Self&) -> u64 {
+        ret self.budget.used()
+    }
+    pub fn statistics(self: Self&, consumer: u32) -> DisplacementStatistics {
+        ret self.mesh_statistics(0, consumer)
+    }
+    pub fn mesh_statistics(self: Self&, mesh: u64, consumer: u32) -> DisplacementStatistics {
+        let mut source_triangles = 0_u64 let mut triangles = 0_u64 let mut jobs = 0_u64 let mut pending = false
+        for batch in self.batches {
+            if !batch.active || batch.consumer != consumer {
+                continue
+            }
+            let source = self.sources.get_unchecked_borrowed(batch.source).source
+            if mesh != 0 && self.sources.get_unchecked_borrowed(batch.source).mesh != mesh {
+                continue
+            }
+            for lod in batch.lods {
+                source_triangles += source.lods.get_unchecked_borrowed(lod as usize).count as u64
+            }
+            let statistics = batch.view.statistics()
+            triangles += statistics.triangles as u64 jobs += statistics.jobs as u64 pending = pending || !statistics.ready
+        }
+        ret DisplacementStatistics { source_triangles, triangles, jobs, pending }
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn budget(self: Self&) -> DisplacementBudget<H> {
+        ret self.budget
+    }
+    pub fn invalidate(self: mut Self&) ->() {
+        for i in 0_usize..self.batches.len() {
+            let mut batch = self.batches.get_unchecked_borrowed(i) batch.active = false
+        }
+    }
+    pub fn invalidate_mesh(self: mut Self&, mesh: u64) ->() {
+        for i in 0_usize..self.sources.len() {
+            let mut source = self.sources.get_unchecked_borrowed(i) if source.mesh == mesh {
+                source.valid = false
+            }
+        }
+        for i in 0_usize..self.batches.len() {
+            let mut batch = self.batches.get_unchecked_borrowed(i)
+            if self.sources.get_unchecked_borrowed(batch.source).mesh == mesh {
+                batch.active = false
+            }
+        }
+        self.collect()
+    }
+    pub fn begin(self: mut Self&, consumer: u32) ->() {
+        self.serial += 1 self.error = ""
+        for i in 0_usize..self.batches.len() {
+            let mut batch = self.batches.get_unchecked_borrowed(i)
+            if batch.consumer == consumer {
+                batch.active = false batch.items = Vec[RenderItem]::new()
+            }
+        }
+    }
+    fn ensure_source(self: mut Self&, device: GraphicsDevice, frame: RenderFrame, mesh: u64, gpu: GpuMesh, geometry: Option[VirtualGeometry], skin: Option[DisplacementSkin]) -> Result[usize, str] {
+        for i in 0_usize..self.sources.len() {
+            let mut entry = self.sources.get_unchecked_borrowed(i)
+            if entry.mesh == mesh && !entry.retired && entry.valid {
+                if entry.recorded {
+                    if entry.initializer.completion.status() == GpuCompletionStatus::Cancelled {
+                        entry.valid = false continue
+                    }
+                    let current = frame.completion()
+                    let ordered = entry.initializer.completion.same_submission(current) || entry.initializer.completion.submitted()
+                    current.destroy()
+                    if !ordered {
+                        ret Result::Err("Displacement topology producer is not submitted")
+                    }
+                }
+                ret Result::Ok(i)
+            }
+        }
+        if self.table.is_none() {
+            self.table = Option[GpuRefinementTable]::Some(GpuRefinementTable::create(device, self.budget)?)
+        }
+        let mut owner = Option[GpuSkinPatchSource<H>]::None
+        let source_mesh = match skin {
+            Some(data) => {
+                let g = match geometry {
+                    Some(g) => g None => {
+                        ret Result::Err("Missing skeletal displacement topology")
+                    }
+                }
+                let made = GpuSkinPatchSource::create(device, data.source, g, self.budget)?
+                owner = Option[GpuSkinPatchSource<H>]::Some(made) made.mesh
+            }
+            None => gpu
+        }
+        let built = match geometry {
+            Some(g) => match skin {
+                Some(data) => GpuPatchInitializer::create_skinned(device, source_mesh, g, vec![data.source, data.morph_spans, data.morph_deltas], self.budget) None => GpuPatchInitializer::create_virtual(device, source_mesh, g, self.budget)
+            }
+            None => GpuPatchInitializer::create(device, source_mesh, self.budget)
+        }
+        let mut initializer = match built {
+            Ok(i) => i Err(e) => {
+                let _released = match owner {
+                    Some(o) => o.destroy(self.budget) None => true
+                }
+                ret Result::Err(e)
+            }
+        }
+        let converted = match owner {
+            Some(o) => o.record(frame) None => true
+        }
+        if !converted || !initializer.record(frame) {
+            // Keep the owner alive until even a partially recorded command has
+            // retired; its buffers must not be released by the error path.
+            self.sources.push(PatchSourceEntry<H> {
+                    mesh, initializer.source, initializer, true, false, false, owner
+                }
+            )
+            ret Result::Err("Unable to record displacement topology")
+        }
+        let index = self.sources.len()
+        self.sources.push(PatchSourceEntry<H> {
+                mesh, initializer.source, initializer, true, false, true, owner
+            }
+        )
+        ret Result::Ok(index)
+    }
+    /// Key includes material revision, target and all sampled resources. Callers
+    /// can edit a material while earlier frames retain their old bind groups.
+    pub fn prepare_batch(self: mut Self&, device: GraphicsDevice, frame: RenderFrame, target: Swapchain, key: str,
+        consumer: u32, mesh: u64, gpu: GpuMesh, geometry: Option[VirtualGeometry], material: StandardMaterial,
+        textures: Vec[GpuTexture], sampler: GpuSampler, shelter: GpuTexture, scene_buffers: Vec[Vec[GpuBuffer]],
+        items: Vec[RenderItem], lods: Vec[u32], camera: Vec3, view_projection: Mat4, history: TemporalView&, width: u32, height: u32,
+        temporal: bool, linear: bool, height_range: f32, selected: Vec[u64], skin: Option[DisplacementSkin],) -> bool {
+        ret self.prepare_internal(device, frame, target, key, consumer, mesh, gpu, geometry, material, textures, sampler, shelter, scene_buffers, items, lods, camera, view_projection, history, width, height, temporal, linear, height_range, selected, skin, Option[TerrainPatchMaterial]::None)
+    }
+    pub fn prepare_terrain_batch(self: mut Self&, device: GraphicsDevice, frame: RenderFrame, target: Swapchain, key: str,
+        consumer: u32, mesh: u64, gpu: GpuMesh, geometry: Option[VirtualGeometry], material: StandardMaterial,
+        textures: Vec[GpuTexture], sampler: GpuSampler, shelter: GpuTexture, scene_buffers: Vec[Vec[GpuBuffer]],
+        items: Vec[RenderItem], lods: Vec[u32], camera: Vec3, view_projection: Mat4, history: TemporalView&, width: u32, height: u32,
+        temporal: bool, linear: bool, height_range: f32, selected: Vec[u64], skin: Option[DisplacementSkin], terrain: TerrainPatchMaterial,) -> bool {
+        ret self.prepare_internal(device, frame, target, key, consumer, mesh, gpu, geometry, material, textures, sampler, shelter, scene_buffers, items, lods, camera, view_projection, history, width, height, temporal, linear, height_range, selected, skin, Option::Some(terrain))
+    }
+    fn prepare_internal(self: mut Self&, device: GraphicsDevice, frame: RenderFrame, target: Swapchain, key: str,
+        consumer: u32, mesh: u64, gpu: GpuMesh, geometry: Option[VirtualGeometry], material: StandardMaterial,
+        textures: Vec[GpuTexture], sampler: GpuSampler, shelter: GpuTexture, scene_buffers: Vec[Vec[GpuBuffer]],
+        items: Vec[RenderItem], lods: Vec[u32], camera: Vec3, view_projection: Mat4, history: TemporalView&, width: u32, height: u32,
+        temporal: bool, linear: bool, height_range: f32, selected: Vec[u64], skin: Option[DisplacementSkin], terrain: Option[TerrainPatchMaterial],) -> bool {
+        if items.len() == 0 {
+            ret true
+        }
+        if items.len() != lods.len() || textures.len() != 4 || !material.displacement().enabled {
+            ret false
+        }
+        let mut material_program = Option[MaterialProgram<H>]::None
+        if consumer != 2 && consumer != 3 && !self.triangles && terrain.is_none() {
+            for program in self.programs {
+                if program.0 == textures.get_unchecked_borrowed(0_usize).native_handle() {
+                    material_program = Option[MaterialProgram<H>]::Some(program.1)
+                }
+            }
+        }
+        let source_index = match self.ensure_source(device, frame, mesh, gpu, geometry, skin) {
+            Ok(i) => i Err(e) => {
+                self.error = e ret false
+            }
+        }
+        let triangles = self.triangles && consumer <= 1
+        let source = self.sources.get_unchecked_borrowed(source_index).source
+        let skin_buffer = match skin {
+            Some(data) => data.output None => GpuBuffer::unavailable()
+        }
+        let skin_count = match skin {
+            Some(data) => data.vertex_count None => 0_u32
+        }
+        let table = match self.table {
+            Some(t) => t None => {
+                ret false
+            }
+        }
+        // Scratch scales with source patches, so large source meshes use
+        // smaller batches. Additional instances are split by the caller.
+        let capacity = Self::instance_capacity(source.triangle_count)
+        if items.len() > capacity as usize {
+            self.error = "Displacement instance batch exceeds its bounded capacity" ret false
+        }
+        // A recycled target address can have different MSAA/color attachments.
+        // Render-pass compatibility belongs to this cache, not its callers.
+        let render_key = key + match material_program {
+            Some(program) => program.generation() None => ""
+        }
+        + ":target:" + target.render_signature().fmt()
+        let mut index = self.batches.len()
+        for i in 0_usize..self.batches.len() {
+            let batch = self.batches.get_unchecked_borrowed(i)
+            if batch.key == render_key && batch.consumer == consumer && batch.source == source_index && batch.triangles == triangles {
+                index = i break
+            }
+        }
+        if index == self.batches.len() {
+            let mut jobs = source.triangle_count * capacity
+            if jobs < 32768 {
+                jobs = 32768
+            }
+            let created = match terrain {
+                Some(terrain) => GpuPatchView::create_terrain(device, source, table, textures.get_unchecked_borrowed(3), sampler, terrain, capacity, jobs, target.frames_in_flight(), self.budget) None => GpuPatchView::create(device, source, table, textures.get_unchecked_borrowed(3), sampler, skin_buffer, capacity, jobs, target.frames_in_flight(), self.budget)
+            }
+            let mut view = match created {
+                Ok(v) => v Err(e) => {
+                    self.error = e ret false
+                }
+            }
+            let layout = device.create_bind_group_layout(render_layout(terrain.is_some()))
+            let vertex = device.create_shader_module(if terrain.is_some() {
+                    terrain_vertex_spirv()
+                } else {
+                    displacement_vertex_spirv()
+                }
+                , shader_stage_vertex(),)
+            let fragment = device.create_shader_module(if consumer == 2 || consumer == 3 {
+                    displacement_selection_spirv()
+                } elif triangles {
+                    if temporal {
+                        displacement_triangle_temporal_spirv()
+                    } elif linear {
+                        displacement_triangle_linear_spirv()
+                    } else {
+                        displacement_triangle_spirv()
+                    }
+                } elif terrain.is_some() {
+                    if temporal {
+                        terrain_temporal_spirv()
+                    } elif linear {
+                        terrain_linear_spirv()
+                    } else {
+                        terrain_fragment_spirv()
+                    }
+                } elif temporal {
+                    aa_temporal_fragment()
+                } elif linear {
+                    aa_linear_fragment()
+                } else {
+                    material_fragment_spirv()
+                }
+                , shader_stage_fragment(),)
+            let options = if material.double_sided() {
+                RenderPipelineOptions::depth()
+            } else {
+                RenderPipelineOptions::depth().with_backface_culling()
+            }
+            let pipeline = device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::empty(), layout, options)
+            let mut groups = Vec[BindGroup]::new()
+            let mut available = layout.available() && vertex.available() && fragment.available() && pipeline.available()
+            for i in 0_usize..target.frames_in_flight() as usize {
+                let slot = match view.slot(i) {
+                    Some(s) => s None => {
+                        ret false
+                    }
+                }
+                let scene = scene_buffers.get(i).unwrap_or(Vec[GpuBuffer]::new())
+                let mut bindings = Vec[u32]::new() let mut buffers = Vec[GpuBuffer]::new() let mut offsets = Vec[u64]::new() let mut ranges = Vec[u64]::new()
+                if scene.len() != 5 {
+                    available = false
+                } else {
+                    for b in 0_usize..5_usize {
+                        if b != 1 {
+                            let buffer = scene.get_unchecked_borrowed(b) bindings.push(b as u32) buffers.push(buffer) offsets.push(0) ranges.push(buffer.size())
+                        }
+                    }
+                }
+                slot.append_render(source, table, if skin_buffer.available() {
+                        skin_buffer
+                    } else {
+                        view.dummy_skin
+                    }
+                    , bindings, buffers, offsets, ranges,)
+                let mut texture_bindings = vec![5_u32, 6_u32, 7_u32, 8_u32, 31_u32]
+                let mut images = vec![textures.get_unchecked_borrowed(0), textures.get_unchecked_borrowed(1), shelter, textures.get_unchecked_borrowed(2), textures.get_unchecked_borrowed(3)]
+                let mut samplers = vec![sampler, sampler, sampler, sampler, sampler]
+                match view.terrain {
+                    Some(terrain) => {
+                        terrain.append(bindings, buffers, offsets, ranges) for binding in terrain.texture_bindings() {
+                            texture_bindings.push(binding)
+                        }
+                        for texture in terrain.textures() {
+                            images.push(texture) samplers.push(sampler)
+                        }
+                    }
+                    None => {
+                    }
+                }
+                match material_program {
+                    Some(program) => program.append(bindings, buffers, offsets, ranges, texture_bindings, images, samplers, sampler) None => {
+                        if view.terrain.is_none() {
+                            material_program_fallback(scene.get_unchecked_borrowed(0_usize), textures.get_unchecked_borrowed(0_usize), sampler, bindings, buffers, offsets, ranges, texture_bindings, images, samplers)
+                        }
+                    }
+                }
+                let group = device.create_buffer_textures_bind_group_many(layout, bindings, buffers, offsets, ranges, texture_bindings, images, samplers)
+                available = available && group.available() groups.push(group)
+            }
+            if !available {
+                let error = "Unable to create displacement PBR pipeline: " + pipeline.error() + " " + layout.error() + " " + vertex.error() + " " + fragment.error()
+                for group in groups {
+                    group.destroy()
+                }
+                pipeline.destroy() fragment.destroy() vertex.destroy() layout.destroy() view.destroy(self.budget)
+                self.error = error ret false
+            }
+            self.batches.push(PatchDrawBatch<H> {
+                    render_key, source_index, view, layout, vertex, fragment, pipeline, groups, Vec[RenderItem]::new(), Vec[u32]::new(), false, consumer, triangles, textures.get_unchecked_borrowed(3), sampler, material, skin_buffer, RayPipelineSet::new(), if terrain.is_some() {
+                        2_u32
+                    } else {
+                        0_u32
+                    }
+                    , if temporal {
+                        2_u32
+                    } elif linear {
+                        1_u32
+                    } else {
+                        0_u32
+                    }
+                    , material_program, MaterialPipelines::new()
+                }
+            )
+        }
+        let mut batch = self.batches.get_unchecked_borrowed(index)
+        batch.material = material
+        let mut values = Vec[f32]::with_capacity(items.len() * 48)
+        for i in 0_usize..items.len() {
+            let item = items.get_unchecked_borrowed(i)
+            let lod_index = lods.get_unchecked_borrowed(i) as usize
+            let lod = source.lods.get(lod_index).unwrap_or(source.lods.get_unchecked_borrowed(0))
+            let previous = match skin {
+                Some(data) =>(data.previous.get(i).unwrap_or(item.world()), data.history.get(i).unwrap_or(false))
+                None => history.previous(item)
+            }
+            // Topology transitions invalidate history for this instance.
+            let old_lod = batch.lods.get(i).unwrap_or(4294967295)
+            for value in item.world().values() {
+                values.push(value)
+            }
+            for value in previous.0.values() {
+                values.push(value)
+            }
+            let uniform = material.uniform_values()
+            let mut chosen = false for entity in selected {
+                if item.entity() == entity {
+                    chosen = true break
+                }
+            }
+            for k in 0_usize..uniform.len() {
+                values.push(if (consumer == 2 || consumer == 3) && k < 4 {
+                        if k == 0 {
+                            if chosen {
+                                1_f32
+                            } else {
+                                0_f32
+                            }
+                        } elif k == 1 {
+                            if consumer == 3 {
+                                1_f32
+                            } else {
+                                0_f32
+                            }
+                        } elif k == 3 {
+                            1_f32
+                        } else {
+                            0_f32
+                        }
+                    } else {
+                        uniform.get_unchecked_borrowed(k)
+                    }
+                )
+            }
+            for value in material.texture_uniform_values() {
+                values.push(value)
+            }
+            values.push(lod.first as f32) values.push(lod.count as f32) values.push(match skin {
+                    Some(data) => data.instances.get(i).unwrap_or(0) as f32 None => 0_f32
+                }
+            ) values.push(if previous.1 && old_lod == lod_index as u32 {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            )
+        }
+        batch.active = batch.view.record(frame, view_projection, history.view_projection(), vec![camera.x(), camera.y(), camera.z()], width, height, material.displacement(), 1, height_range, values, skin_count)
+        if batch.active {
+            batch.items = items batch.lods = lods
+        } else {
+            self.error = "Unable to record displacement refinement"
+        }
+        ret batch.active
+    }
+    /// Stable local-space proxies are shared by instances. Terrain includes the
+    /// world transform because layer UVs use world XZ; skins rebuild per pose.
+    pub fn ray_instances(self: mut Self&, device: GraphicsDevice, frame: RenderFrame) -> Vec[DisplacementRayInstance] {
+        ret self.ray_instances_for(device, frame, 0)
+    }
+    pub fn ray_instances_for(self: mut Self&, device: GraphicsDevice, frame: RenderFrame, consumer: u32) -> Vec[DisplacementRayInstance] {
+        self.ray_serial += 1
+        let mut result = Vec[DisplacementRayInstance]::new()
+        let table = match self.table {
+            Some(t) => t None => {
+                ret result
+            }
+        }
+        for batch in self.batches {
+            if !batch.active || batch.consumer != consumer {
+                continue
+            }
+            let source = self.sources.get_unchecked_borrowed(batch.source).source
+            let mesh = self.sources.get_unchecked_borrowed(batch.source).mesh
+            let slot = match batch.view.slot(frame.slot() as usize) {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            let settings = batch.material.displacement()
+            let base_key = "ray:" + batch.source.fmt() + ":" + batch.height.native_handle().fmt() + ":" + settings.magnitude.fmt() + ":" + settings.center.fmt() + ":" + settings.quality.fmt()
+            for i in 0_usize..batch.items.len() {
+                let item = batch.items.get_unchecked_borrowed(i)
+                let mut key = base_key
+                if batch.skin_buffer.available() {
+                    key += ":skin:" + batch.key + ":pose:" + self.ray_serial.fmt() + ":" + i.fmt()
+                }
+                match batch.view.terrain {
+                    Some(terrain) => {
+                        key += ":" + terrain.material.key() for value in item.world().values() {
+                            key += ":" + value.fmt()
+                        }
+                    }
+                    None => {
+                    }
+                }
+                let mut found = self.ray_proxies.len()
+                for j in 0_usize..self.ray_proxies.len() {
+                    let entry = self.ray_proxies.get_unchecked_borrowed(j)
+                    if entry.key == key && entry.proxy.available() {
+                        found = j break
+                    }
+                }
+                if found == self.ray_proxies.len() {
+                    let skin = if batch.skin_buffer.available() {
+                        batch.skin_buffer
+                    } else {
+                        batch.view.dummy_skin
+                    }
+                    let words = if batch.view.terrain.is_some() {
+                        terrain_ray_proxy_spirv()
+                    } else {
+                        displacement_ray_proxy_spirv()
+                    }
+                    match GpuRayProxy::create(device, frame, source, table, slot, batch.height, batch.sampler, skin, batch.view.terrain, i as u32, settings.quality, words, self.budget) {
+                        Ok(proxy) => self.ray_proxies.push(RayProxyEntry<H> {
+                                key, proxy, self.ray_serial, self.ray_serial
+                            }
+                        )
+                        Err(e) => {
+                            self.error = e continue
+                        }
+                    }
+                }
+                let mut entry = self.ray_proxies.get_unchecked_borrowed(found)
+                entry.serial = self.ray_serial
+                if entry.proxy.touch(frame) {
+                    result.push(DisplacementRayInstance {
+                            item.entity(), mesh, entry.proxy.structure(), item.world(), key + ":generation:" + entry.generation.fmt()
+                        }
+                    )
+                } else {
+                    self.error = entry.proxy.error()
+                }
+            }
+        }
+        ret result
+    }
+    pub fn retain_ray_frame(self: mut Self&, frame: RenderFrame) -> bool {
+        for i in 0_usize..self.ray_proxies.len() {
+            let mut entry = self.ray_proxies.get_unchecked_borrowed(i)
+            if entry.serial == self.ray_serial && entry.proxy.available() && !entry.proxy.touch(frame) {
+                ret false
+            }
+        }
+        ret true
+    }
+    pub fn prepare_ray_lighting(self: mut Self&, device: GraphicsDevice, target: Swapchain, frame: RenderFrame, consumer: u32, lighting: RayLightingView) -> bool {
+        for batch in self.batches {
+            if !batch.active || batch.consumer != consumer {
+                continue
+            }
+            match batch.program {
+                Some(program) => {
+                    program.use_frame(frame)
+                    if !batch.program_pipelines.prepare(device, target, frame, batch.vertex, batch.layout, VertexBufferLayout::empty(), program, if batch.ray_variant == 2 {
+                            1_usize
+                        } elif batch.ray_variant == 1 {
+                            0_usize
+                        } else {
+                            6_usize
+                        }
+                        , !batch.material.double_sided(), lighting,) {
+                        self.error = batch.program_pipelines.error() ret false
+                    }
+                    continue
+                }
+                None => {
+                }
+            }
+            if !batch.ray.prepare(device, target, frame, batch.vertex, batch.layout, VertexBufferLayout::empty(), batch.pipeline, batch.ray_family, batch.ray_variant, !batch.material.double_sided(), if batch.triangles || consumer == 2 || consumer == 3 {
+                    RayLightingView::unavailable()
+                } else {
+                    lighting
+                }
+                ,
+            ) {
+                self.error = batch.ray.error() ret false
+            }
+        }
+        ret true
+    }
+    pub fn instance_capacity(triangles: u32) -> u32 {
+        let capacity = if triangles == 0 {
+            1_u32
+        } else {
+            16384_u32 / triangles
+        }
+        ret if capacity == 0 {
+            1_u32
+        } elif capacity > 64 {
+            64_u32
+        } else {
+            capacity
+        }
+    }
+    pub fn select_lod(geometry: VirtualGeometry, ratio: f32) -> u32 {
+        let lods = geometry.lods() let clusters = geometry.clusters()
+        let mut original = 0_usize let mut best = 0_u32 let mut difference = 340282346638528859811704183484516925440_f32
+        for i in 0_usize..lods.len() {
+            let lod = lods.get_unchecked_borrowed(i)
+            let first = lod.first_cluster() let end = first + lod.cluster_count()
+            let mut count = 0_usize
+            for c in first..end {
+                count += clusters.get_unchecked_borrowed(c).triangle_count()
+            }
+            if i == 0 {
+                original = count
+            }
+            let target =(original as f32) * ratio
+            let distance = if count as f32 > target {
+                count as f32 - target
+            } else {
+                target - count as f32
+            }
+            if distance < difference {
+                difference = distance best = i as u32
+            }
+        }
+        ret best
+    }
+    pub fn handles(self: Self&, entity: u64, consumer: u32) -> bool {
+        for batch in self.batches {
+            if batch.active && batch.consumer == consumer {
+                for item in batch.items {
+                    if item.entity() == entity {
+                        ret true
+                    }
+                }
+            }
+        }
+        ret false
+    }
+    pub fn handles_mesh(self: Self&, entity: u64, mesh: u64, consumer: u32) -> bool {
+        for batch in self.batches {
+            if !batch.active || batch.consumer != consumer || self.sources.get_unchecked_borrowed(batch.source).mesh != mesh {
+                continue
+            }
+            for item in batch.items {
+                if item.entity() == entity {
+                    ret true
+                }
+            }
+        }
+        ret false
+    }
+    pub fn pipeline(self: Self&, consumer: u32) -> RenderPipeline {
+        for batch in self.batches {
+            if batch.active && batch.consumer == consumer {
+                ret batch.pipeline
+            }
+        }
+        ret RenderPipeline::unavailable()
+    }
+    pub fn draw(self: Self&, pass: RenderPassEncoder, slot: u32, consumer: u32) -> bool {
+        let table = match self.table {
+            Some(t) => t None => {
+                ret true
+            }
+        }
+        for batch in self.batches {
+            if !batch.active || batch.consumer != consumer {
+                continue
+            }
+            let state = match batch.view.slot(slot as usize) {
+                Some(s) => s.state None => {
+                    ret false
+                }
+            }
+            let group = batch.groups.get(slot as usize).unwrap_or(BindGroup::unavailable())
+            if !pass.bind_pipeline(if batch.program.is_some() {
+                    batch.program_pipelines.pipeline(batch.material.double_sided())
+                } else {
+                    batch.ray.pipeline(batch.pipeline, batch.material.double_sided())
+                }
+            ) || !(if batch.program.is_some() {
+                    batch.program_pipelines.bind(pass)
+                } else {
+                    batch.ray.bind(pass)
+                }
+            ) || !pass.bind_group(group) || !pass.bind_index_buffer(table.indices) || !pass.draw_indexed_indirect_count(state, 28, state, 48, 1) {
+                ret false
+            }
+        }
+        ret true
+    }
+    /// Release stale pipelines only when their own producer fences have retired.
+    /// Called before the owner releases old sampled material textures.
+    pub fn collect(self: mut Self&) ->() {
+        let mut rays = 0_usize
+        for i in 0_usize..self.ray_proxies.len() {
+            let mut entry = self.ray_proxies.get_unchecked_borrowed(i)
+            entry.proxy.collect(self.budget)
+            if entry.serial != self.ray_serial && entry.proxy.destroy(self.budget) {
+                continue
+            }
+            self.ray_proxies.set(rays, entry) rays += 1
+        }
+        while self.ray_proxies.len() > rays {
+            self.ray_proxies.pop()
+        }
+
+        for i in 0_usize..self.sources.len() {
+            let mut source = self.sources.get_unchecked_borrowed(i)
+            if source.recorded && source.initializer.completion.status() == GpuCompletionStatus::Cancelled {
+                source.valid = false
+            }
+            if !source.valid {
+                for j in 0_usize..self.batches.len() {
+                    let mut batch = self.batches.get_unchecked_borrowed(j) if batch.source == i {
+                        batch.active = false
+                    }
+                }
+            }
+        }
+        let mut count = 0_usize
+        for i in 0_usize..self.batches.len() {
+            let mut batch = self.batches.get_unchecked_borrowed(i)
+            batch.view.collect()
+            if !batch.active && batch.view.destroy(self.budget) {
+                for group in batch.groups {
+                    group.destroy()
+                }
+                batch.program_pipelines.destroy() batch.ray.destroy() batch.pipeline.destroy() batch.vertex.destroy() batch.fragment.destroy() batch.layout.destroy()
+            } else {
+                self.batches.set(count, batch) count += 1
+            }
+        }
+        while self.batches.len() > count {
+            self.batches.pop()
+        }
+        for i in 0_usize..self.sources.len() {
+            let mut entry = self.sources.get_unchecked_borrowed(i)
+            if entry.recorded {
+                if entry.initializer.destroy(self.budget) {
+                    entry.recorded = false
+                }
+            }
+            let skin_ready = match entry.skin {
+                Some(owner) => owner.collect(self.budget) None => true
+            }
+            let mut retained = false
+            for batch in self.batches {
+                if batch.source == i {
+                    retained = true break
+                }
+            }
+            if !retained && !entry.recorded && !entry.retired && skin_ready {
+                entry.source.destroy(self.budget)
+                let _released = match entry.skin {
+                    Some(owner) => owner.destroy(self.budget) None => true
+                }
+                entry.retired = true
+            }
+        }
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        for i in 0_usize..self.ray_proxies.len() {
+            let mut entry = self.ray_proxies.get_unchecked_borrowed(i) if !entry.proxy.destroy(self.budget) {
+                ret false
+            }
+        }
+        self.ray_proxies.clear()
+
+        for i in 0_usize..self.batches.len() {
+            let mut batch = self.batches.get_unchecked_borrowed(i) batch.active = false
+        }
+        self.collect() if self.batches.len() != 0 {
+            ret false
+        }
+        for i in 0_usize..self.sources.len() {
+            let mut entry = self.sources.get_unchecked_borrowed(i)
+            if entry.recorded && !entry.initializer.destroy(self.budget) {
+                ret false
+            }
+            let skin_ready = match entry.skin {
+                Some(owner) => owner.collect(self.budget) None => true
+            }
+            if !skin_ready {
+                ret false
+            }
+            if !entry.retired {
+                entry.source.destroy(self.budget)
+                let _released = match entry.skin {
+                    Some(owner) => owner.destroy(self.budget) None => true
+                }
+                entry.retired = true
+            }
+        }
+        self.sources.clear()
+        match self.table {
+            Some(table) => {
+                table.destroy(self.budget)
+            }
+            None => {
+            }
+        }
+        self.table = Option[GpuRefinementTable]::None ret true
+    }
+}

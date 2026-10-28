@@ -1,0 +1,105 @@
+//! Builtin and imported mesh policy share one inspector and project catalog.
+import core::vec::Vec
+import std::io::println
+import std::os::{file_exists, mkdir_all}
+import std::time::perf_counter_ns
+
+import graphene::autolod_settings::AutoLodSettings
+import graphene::editor_lod_groups::LodGroupEditor
+import graphene::editor_mesh_details::MeshDetails
+import graphene::lod_groups::{LodGroup, LodGroups}
+import graphene::mesh_prepare::prepare_mesh_geometry
+import graphene::project_assets::ImportedMeshAsset
+import graphene::scene::primitive::cube_mesh
+import graphene::scene::renderable::MeshId
+import luma::Widget
+
+fn main() -> u32 {
+    let project = "/tmp/graphene-builtin-lod-" + perf_counter_ns().fmt()
+    let other = project + "-other"
+    if mkdir_all(project) != 0 || mkdir_all(other) != 0 {
+        ret 1
+    }
+    let meshes = vec![MeshId::new(1), MeshId::new(2), MeshId::new(3)]
+    let triangles = vec![12_usize, 2_usize, 1216_usize]
+    let names = vec!["Cube", "Plane", "Sphere"]
+    let actors = vec!["", "@plane", "@sphere"]
+    let selections = vec!["asset-cube", "asset-plane", "asset-sphere"]
+    let assets = Vec[ImportedMeshAsset]::new() let uploaded = Vec[MeshId]::new()
+    let mut details = MeshDetails::new()
+    for index in 0_usize..3_usize {
+        details.sync(project, assets, uploaded, meshes, triangles, "", actors.get_unchecked_borrowed(index), true, false)
+        if !details.available() || details.name != names.get_unchecked_borrowed(index) || details.mesh.value() != meshes.get_unchecked_borrowed(index).value() || details.source_triangles != triangles.get_unchecked_borrowed(index) || !details.settings.enabled {
+            ret 2
+        }
+        details.sync(project, assets, uploaded, meshes, triangles, selections.get_unchecked_borrowed(index), "@camera", true, false)
+        if !details.available() || details.name != names.get_unchecked_borrowed(index) {
+            ret 3
+        }
+    }
+    let saved = AutoLodSettings { false, "test-detail" }
+    if !details.save_settings(saved) || !file_exists(project + "/Config/BuiltinMeshes/Sphere.autolod") {
+        ret 4
+    }
+    let mut restored = MeshDetails::new()
+    restored.sync(project, assets, uploaded, meshes, triangles, "", "@sphere", true, false)
+    if restored.settings.enabled || restored.settings.group_id != saved.group_id {
+        ret 5
+    }
+    let disabled = restored.widget(LodGroups::defaults())
+    if !disabled.find("ui-autolod-group").unwrap_or(Widget::panel("")).disabled() || disabled.find("autolod-enabled").unwrap_or(Widget::panel("")).disabled() {
+        ret 6
+    }
+    restored.sync(other, assets, uploaded, meshes, triangles, "", "@sphere", true, true)
+    if !restored.settings.enabled || restored.settings.group_id != "default" || !restored.widget(LodGroups::defaults()).find("autolod-enabled").unwrap_or(Widget::panel("")).disabled() {
+        ret 7
+    }
+    restored.sync(project, assets, uploaded, meshes, triangles, "", "@camera", true, false)
+    if restored.available() {
+        ret 8
+    }
+    restored.sync(project, assets, uploaded, meshes, triangles, "", "", false, false)
+    if restored.available() {
+        ret 9
+    }
+    restored.sync(project, assets, uploaded, meshes, triangles, "asset-material", "@sphere", true, false)
+    if restored.available() {
+        ret 10
+    }
+    restored.sync("", assets, uploaded, meshes, triangles, "asset-sphere", "", false, false)
+    if restored.available() || saved.save_builtin(project, "../Sphere") || saved.save_builtin("", "Sphere") {
+        ret 11
+    }
+    let mut catalog = LodGroups::defaults()
+    catalog.groups.push(LodGroup::constant("test-detail", "Test detail", 0.25_f32))
+    if !catalog.save(project) {
+        ret 12
+    }
+    let mut editor = LodGroupEditor::new()
+    editor.sync(project, assets) editor.begin("test-detail") editor.action("lod-delete")
+    if editor.draft.find("test-detail").is_none() {
+        ret 13
+    }
+    // The primitive-only project must participate in group usage tracking.
+    if editor.asset_paths.len() != 3 {
+        ret 14
+    }
+    let data = cube_mesh(1)
+    let imported = ImportedMeshAsset {
+        "Imported", project + "/Imported.obj", project + "/Imported.gmesh", data,
+        vec![4294967295_u32], 1, 1, "test", prepare_mesh_geometry(data)
+    }
+    if !saved.save(imported.project_path()) {
+        ret 15
+    }
+    restored.sync(project, vec![imported], vec![MeshId::new(4)], meshes, triangles, "asset-imported-mesh-0", "", false, false)
+    if !restored.available() || restored.builtin_project != "" || restored.settings.enabled || restored.settings.group_id != saved.group_id || restored.source_triangles != 12 {
+        ret 16
+    }
+    restored.sync(project, vec![imported], vec![MeshId::new(4)], meshes, triangles, "", "Imported", true, false)
+    if restored.name != "Imported" || restored.mesh.value() != 4 {
+        ret 17
+    }
+    println("Builtin AutoLOD inspector, persistence, project isolation, disabled controls and group usage: PASS")
+    ret 0
+}

@@ -19,7 +19,7 @@ fn main() -> u32 {
             ret 1_u32
         }
     }
-    if decoded.version() != 7 || decoded.source_version() != 7 || decoded.len() != 2 {
+    if decoded.version() != 8 || decoded.source_version() != 8 || decoded.len() != 2 {
         ret 2_u32
     }
     match decoded.actor_by_id(5) {

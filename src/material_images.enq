@@ -1,0 +1,400 @@
+//! CPU-only PBR decoding shared by scene uploads, terrain and material previews.
+import core::vec::Vec
+import core::option::Option
+
+import std::os::{file_sha256, mkdir_all}
+
+import linalg::Vec3
+
+import mod::native_asset::{load_native_height, load_native_texture, save_native_height, save_native_texture}
+import mod::texture_asset::{decode_height_png, decode_png, read_texture_file}
+extern fn encore_text_sha256(value: str) -> str
+
+import core::result::Result
+
+import std::os::file_exists
+
+import mod::material_asset::load_material_asset_file
+import mod::material_schema::*
+import mod::native_asset::{load_native_height_preview, load_native_texture_preview, resolve_native_material}
+import mod::standard_material::StandardMaterial
+import mod::texture_asset::{TextureImage, load_height_texture, load_material_texture}
+import mod::texture_image::HeightImage
+
+pub struct MaterialImageRequest {
+    path: str
+    material: Option[StandardMaterial]
+}
+pub struct MaterialImages {
+    path: str
+    material: StandardMaterial
+    images: Vec[TextureImage]
+    error: str
+    height: HeightImage
+    height_range: f32
+    program: Option[ResolvedMaterial]
+    extra: Vec[TextureImage]
+}
+fn empty() -> TextureImage {
+    ret TextureImage { 1_u32, 1_u32, vec![4294967295_u32] }
+}
+pub fn pack_orm(rough: TextureImage, metal: TextureImage, width: u32, height: u32) -> TextureImage {
+    ret pack_orm_ao(empty(), rough, metal, width, height, 1_f32)
+}
+pub fn pack_orm_ao(ao: TextureImage, rough: TextureImage, metal: TextureImage, width: u32, height: u32, strength: f32) -> TextureImage {
+    let mut pixels = Vec[u32]::with_capacity((width as usize) *(height as usize))
+    for y in 0_usize..height as usize {
+        for x in 0_usize..width as usize {
+            let r = rough.pixels.get_unchecked_borrowed((y *(rough.height as usize) /(height as usize)) *(rough.width as usize) + x *(rough.width as usize) /(width as usize)) & 255_u32
+            let m = metal.pixels.get_unchecked_borrowed((y *(metal.height as usize) /(height as usize)) *(metal.width as usize) + x *(metal.width as usize) /(width as usize)) & 255_u32
+            let sample = ao.pixels.get_unchecked_borrowed((y *(ao.height as usize) /(height as usize)) *(ao.width as usize) + x *(ao.width as usize) /(width as usize)) & 255_u32
+            let a =(255_f32 +((sample as f32) - 255_f32) * strength) as u32
+            pixels.push(4278190080_u32 | a |(r << 8) |(m << 16))
+        }
+    }
+    ret TextureImage { width, height, pixels }
+}
+pub fn load_material_images(project: str, path: str) -> sending MaterialImages {
+    let material = match load_material_asset_file(project + "/" + path) {
+        Some(m) => m None => {
+            ret MaterialImages {
+                path, StandardMaterial::default(), Vec[TextureImage]::new(), "Unable to load material: " + path, HeightImage {
+                    1, 1, vec![32768_u16]
+                }
+                , 0_f32, Option::None, Vec[TextureImage]::new()
+            }
+        }
+    }
+    let mut images = load_material_images_for_material(project, path, material)
+    ret match resolve_native_material(project, path, "") {
+        Ok(resolved) => material_images_program(project, images, resolved) Err(error) => {
+            images.error = error images
+        }
+    }
+}
+pub fn load_material_images_for_material(project: str, path: str, material: StandardMaterial) -> sending MaterialImages {
+    let mut maps = Vec[TextureImage]::new()
+    for texture in vec![material.base_color_texture(), material.normal_texture(), material.roughness_texture(), material.metallic_texture(), material.ao_texture()] {
+        if texture == "" {
+            maps.push(empty())
+        } else {
+            let loaded = load_material_texture(project, texture, false)
+            if loaded.error != "" {
+                ret MaterialImages {
+                    path, material, Vec[TextureImage]::new(), loaded.error, HeightImage {
+                        1, 1, vec![32768_u16]
+                    }
+                    , 0_f32, Option::None, Vec[TextureImage]::new()
+                }
+            }
+            maps.push(loaded.image)
+        }
+    }
+    let base = maps.get_unchecked_borrowed(0)
+    let normal = if material.normal_texture() == "" {
+        TextureImage { 1_u32, 1_u32, vec![4294934656_u32] }
+    } else {
+        maps.get_unchecked_borrowed(1)
+    }
+    let rough = maps.get_unchecked_borrowed(2) let metal = maps.get_unchecked_borrowed(3)
+    let ao = maps.get_unchecked_borrowed(4)
+    let mut width = if rough.width > metal.width {
+        rough.width
+    } else {
+        metal.width
+    }
+    let mut height = if rough.height > metal.height {
+        rough.height
+    } else {
+        metal.height
+    }
+    if ao.width > width {
+        width = ao.width
+    }
+    if ao.height > height {
+        height = ao.height
+    }
+    let height_image = match load_height_texture(project, material.height_texture()) {
+        Ok(image) => image Err(error) => {
+            ret MaterialImages {
+                path, material, Vec[TextureImage]::new(), error, HeightImage {
+                    1, 1, vec![32768_u16]
+                }
+                , 0_f32, Option::None, Vec[TextureImage]::new()
+            }
+        }
+    }
+    let mut minimum = 65535_u16 let mut maximum = 0_u16
+    for sample in height_image.samples {
+        if sample < minimum {
+            minimum = sample
+        }
+        if sample > maximum {
+            maximum = sample
+        }
+    }
+    ret MaterialImages {
+        path, material, vec![base, normal, pack_orm_ao(maps.get_unchecked_borrowed(4), rough, metal, width, height, material.ao_strength())], "", height_image,((maximum as f32) -(minimum as f32)) / 65535_f32, Option::None, Vec[TextureImage]::new()
+    }
+}
+
+pub struct PbrMapImport {
+    path: str
+    error: str
+}
+/// Content-addressed imports never overwrite another texture; height stays R16.
+pub fn import_pbr_map(project: str, source: str, height: bool) -> sending PbrMapImport {
+    let native = source.byte_len() >= 9 && source.slice_bytes(source.byte_len() - 9, 9) == ".gtexture"
+    let mut digest = ""
+    let mut bytes = ""
+    if native {
+        digest = file_sha256(source)
+    } else {
+        match read_texture_file(source) {
+            Ok(data) => {
+                bytes = data digest = encore_text_sha256(data)
+            }
+            Err(e) => {
+                ret PbrMapImport {
+                    "", e
+                }
+            }
+        }
+    }
+    if digest.byte_len() != 64 {
+        ret PbrMapImport { "", "Unable to hash texture source" }
+    }
+    if mkdir_all(project + "/Content/Textures") != 0 {
+        ret PbrMapImport {
+            "", "Unable to create texture directory"
+        }
+    }
+    let path = "Content/Textures/" + digest +(if height {
+            "-height"
+        } else {
+            ""
+        }
+    ) + ".gtexture"
+    let saved = if height {
+        let image = if native {
+            load_native_height(source, "")
+        } else {
+            decode_height_png(bytes)
+        }
+        match image {
+            Ok(image) => save_native_height(project + "/" + path, source, digest, image) Err(e) => {
+                ret PbrMapImport {
+                    "", e
+                }
+            }
+        }
+    } else {
+        let image = if native {
+            load_native_texture(source, "")
+        } else {
+            decode_png(bytes)
+        }
+        match image {
+            Ok(image) => save_native_texture(project + "/" + path, source, digest, image) Err(e) => {
+                ret PbrMapImport {
+                    "", e
+                }
+            }
+        }
+    }
+    if !saved {
+        ret PbrMapImport { "", "Unable to save imported texture" }
+    }
+    ret PbrMapImport { path, "" }
+}
+
+/// Attaches authoring data to a prepared PBR packet without re-running graph compilation.
+pub fn material_images_program(project: str, prepared: MaterialImages, resolved: ResolvedMaterial) -> MaterialImages {
+    ret material_images_program_limit(project, prepared, resolved, 1024_u32)
+}
+pub fn material_images_program_limit(project: str, prepared: MaterialImages, resolved: ResolvedMaterial, limit: u32) -> MaterialImages {
+    let mut extra = Vec[TextureImage]::new()
+    for image in prepared.extra {
+        extra.push(image)
+    }
+    let mut result = MaterialImages {
+        prepared.path, prepared.material, prepared.images, prepared.error, prepared.height, prepared.height_range, prepared.program, extra
+    }
+    if result.error != "" {
+        ret result
+    }
+    if resolved.definition.variants.len() == 0 {
+        if resolved.definition.semantic != "builtin-standard-pbr-v1" || material_definition_semantic(resolved.definition) != material_definition_semantic(standard_pbr_definition()) {
+            result.error = "Material needs a successful graph compilation; last valid runtime retained"
+        }
+        ret result
+    }
+    if resolved.definition.semantic != material_definition_semantic(resolved.definition) {
+        result.error = "Material needs a successful graph compilation; last valid runtime retained" ret result
+    }
+    result.program = Option[ResolvedMaterial]::Some(resolved)
+    for parameter in resolved.definition.parameters {
+        if parameter.value.kind == "texture" && parameter.binding != "base_color_texture" && parameter.binding != "normal_texture" && parameter.binding != "roughness_texture" && parameter.binding != "metallic_texture" && parameter.binding != "ao_texture" && parameter.binding != "height_texture" {
+            let mut value = parameter.value
+            for item in resolved.values {
+                if item.parameter == parameter.id {
+                    value = item.value
+                }
+            }
+            if value.path == "" {
+                result.extra.push(empty())
+            } else {
+                let full = project + "/" + value.path
+                let image = if value.path.byte_len() > 9 && value.path.slice_bytes(value.path.byte_len() - 9, 9) == ".gtexture" {
+                    load_native_texture_preview(full, limit)
+                } elif file_exists(full + ".gtexture") {
+                    load_native_texture_preview(full + ".gtexture", limit)
+                } else {
+                    let loaded = load_material_texture(project, value.path, false) if loaded.error != "" {
+                        Result::Err(loaded.error)
+                    } else {
+                        Result::Ok(material_preview_reduced(loaded.image, limit))
+                    }
+                }
+                match image {
+                    Ok(image) => result.extra.push(image) Err(error) => {
+                        result.error = error ret result
+                    }
+                }
+            }
+        }
+    }
+    ret result
+}
+
+fn material_preview_reduced(image: TextureImage, limit: u32) -> TextureImage {
+    let width = if image.width > limit {
+        limit
+    } else {
+        image.width
+    }
+    let height = if image.height > limit {
+        limit
+    } else {
+        image.height
+    }
+    let mut pixels = Vec[u32]::with_capacity((width as usize) *(height as usize))
+    for y in 0_usize..height as usize {
+        for x in 0_usize..width as usize {
+            pixels.push(image.pixels.get_unchecked_borrowed((y *(image.height as usize) /(height as usize)) *(image.width as usize) + x *(image.width as usize) /(width as usize)))
+        }
+    }
+    ret TextureImage { width, height, pixels }
+}
+
+/// Obvious fallback for an asset with no last valid runtime generation.
+pub fn material_error_images(path: str) -> MaterialImages {
+    ret MaterialImages {
+        path, StandardMaterial::new(Vec3::new(1_f32, 0_f32, 1_f32), 0_f32, 0.7_f32), vec![TextureImage {
+                1_u32, 1_u32, vec![4294967295_u32]
+            }
+            , TextureImage {
+                1_u32, 1_u32, vec![4294934656_u32]
+            }
+            , TextureImage {
+                1_u32, 1_u32, vec![4294967295_u32]
+            }
+        ], "", HeightImage {
+            1_u32, 1_u32, vec![32768_u16]
+        }
+        , 0_f32, Option::None, Vec[TextureImage]::new()
+    }
+}
+
+fn preview_map(project: str, path: str, fallback: u32, limit: u32) -> Result[TextureImage, str] {
+    if path == "" {
+        ret Result::Ok(TextureImage { 1_u32, 1_u32, vec![fallback] })
+    }
+    let full = project + "/" + path
+    if path.byte_len() > 9 && path.slice_bytes(path.byte_len() - 9, 9) == ".gtexture" {
+        ret load_native_texture_preview(full, limit)
+    }
+    if file_exists(full + ".gtexture") {
+        ret load_native_texture_preview(full + ".gtexture", limit)
+    }
+    // Authored PNG fallback is reduced before the next source is decoded.
+    let loaded = load_material_texture(project, path, false)
+    if loaded.error != "" {
+        ret Result::Err(loaded.error)
+    }
+    ret Result::Ok(material_preview_reduced(loaded.image, limit))
+}
+fn preview_height(project: str, path: str, limit: u32) -> Result[HeightImage, str] {
+    if path == "" {
+        ret Result::Ok(HeightImage { 1_u32, 1_u32, vec![32768_u16] })
+    }
+    let full = project + "/" + path
+    if path.byte_len() > 9 && path.slice_bytes(path.byte_len() - 9, 9) == ".gtexture" {
+        ret load_native_height_preview(full, limit)
+    }
+    if file_exists(full + ".gtexture") {
+        ret load_native_height_preview(full + ".gtexture", limit)
+    }
+    let image = load_height_texture(project, path)?
+    let width = if image.width > limit {
+        limit
+    } else {
+        image.width
+    }
+    let height = if image.height > limit {
+        limit
+    } else {
+        image.height
+    }
+    let mut samples = Vec[u16]::with_capacity((width as usize) *(height as usize))
+    for y in 0_usize..height as usize {
+        for x in 0_usize..width as usize {
+            samples.push(image.samples.get_unchecked_borrowed(((y *(image.height as usize) /(height as usize)) as usize) *(image.width as usize) +(x *(image.width as usize) /(width as usize)) as usize))
+        }
+    }
+    ret Result::Ok(HeightImage { width, height, samples })
+}
+pub fn prepare_material_preview(project: str, path: str, resolved: ResolvedMaterial, limit: u32) -> Result[MaterialImages, str] {
+    if limit == 0_u32 || limit > 1024_u32 {
+        ret Result::Err("Invalid material preview sample limit")
+    }
+    let material = resolved.surface
+    let base = preview_map(project, material.base_color_texture(), 4294967295_u32, limit)?
+    let normal = preview_map(project, material.normal_texture(), 4294934656_u32, limit)?
+    let rough = preview_map(project, material.roughness_texture(), 4294967295_u32, limit)?
+    let metal = preview_map(project, material.metallic_texture(), 4294967295_u32, limit)?
+    let ao = preview_map(project, material.ao_texture(), 4294967295_u32, limit)?
+    let height = preview_height(project, material.height_texture(), limit)?
+    let mut low = 65535_u16 let mut high = 0_u16
+    for value in height.samples {
+        if value < low {
+            low = value
+        }
+        if value > high {
+            high = value
+        }
+    }
+    let mut width = 1_u32 let mut rows = 1_u32
+    for image in vec![rough, metal, ao] {
+        if image.width > width {
+            width = image.width
+        }
+        if image.height > rows {
+            rows = image.height
+        }
+    }
+    ret Result::Ok(material_images_program_limit(project, MaterialImages {
+                path, material, vec![base, normal, pack_orm_ao(ao, rough, metal, width, rows, material.ao_strength())], "", height,((high as f32) -(low as f32)) / 65535_f32, Option::None, Vec[TextureImage]::new()
+            }
+            , resolved, limit,))
+}
+
+/// Editor previews have a fixed CPU sample budget, independent of authored map sizes.
+pub fn load_material_preview(project: str, path: str, resolved: sending ResolvedMaterial) -> sending MaterialImages {
+    ret match prepare_material_preview(project, path, resolved, 1024_u32) {
+        Ok(images) => images
+        Err(error) => {
+            let mut images = material_error_images(path) images.error = error images
+        }
+    }
+}

@@ -4,18 +4,46 @@
 #include "shaders/cube_vertex_spirv.inc"
 #include "shaders/depth_fragment_spirv.inc"
 #include "shaders/depth_vertex_spirv.inc"
+#include "shaders/displacement_debug_spirv.inc"
+#include "shaders/displacement_mesh_spirv.inc"
+#include "shaders/displacement_ray_proxy_spirv.inc"
+#include "shaders/displacement_refine_spirv.inc"
+#include "shaders/displacement_selection_spirv.inc"
+#include "shaders/displacement_skin_source_spirv.inc"
+#include "shaders/displacement_topology_spirv.inc"
+#include "shaders/displacement_triangle_linear_spirv.inc"
+#include "shaders/displacement_triangle_spirv.inc"
+#include "shaders/displacement_triangle_temporal_spirv.inc"
+#include "shaders/displacement_vertex_spirv.inc"
 #include "shaders/double_words.inc"
+#include "shaders/genai_preview_fragment_spirv.inc"
+#include "shaders/genai_preview_vertex_spirv.inc"
 #include "shaders/gi_spatial_filter_spirv.inc"
 #include "shaders/material_fragment_spirv.inc"
 #include "shaders/material_vertex_spirv.inc"
 #include "shaders/mesh_triangle_spirv.inc"
+#include "shaders/ray_material_linear.inc"
+#include "shaders/ray_material_sdr.inc"
+#include "shaders/ray_material_temporal.inc"
 #include "shaders/ray_query_gi_spirv.inc"
+#include "shaders/ray_terrain_linear.inc"
+#include "shaders/ray_terrain_sdr.inc"
+#include "shaders/ray_terrain_temporal.inc"
+#include "shaders/ray_virtual_linear.inc"
+#include "shaders/ray_virtual_sdr.inc"
+#include "shaders/ray_virtual_temporal.inc"
 #include "shaders/screen_probe_place_spirv.inc"
 #include "shaders/selection_mask_frag_spirv.inc"
 #include "shaders/selection_mask_vert_spirv.inc"
 #include "shaders/selection_outline_frag_spirv.inc"
 #include "shaders/selection_outline_vert_spirv.inc"
 #include "shaders/software_gi_spirv.inc"
+#include "shaders/terrain_fragment_spirv.inc"
+#include "shaders/terrain_linear_spirv.inc"
+#include "shaders/terrain_ray_proxy_spirv.inc"
+#include "shaders/terrain_refine_spirv.inc"
+#include "shaders/terrain_temporal_spirv.inc"
+#include "shaders/terrain_vertex_spirv.inc"
 #include "shaders/virtual_geometry_mesh_spirv.inc"
 #include "shaders/virtual_scene_cull_spirv.inc"
 #include "shaders/virtual_scene_dispatch_spirv.inc"
@@ -25,53 +53,109 @@
 #include "shaders/virtual_scene_triangle_spirv.inc"
 uint32_t graphene_builtin_shader_length(uint32_t shader){switch(shader){
 case 2111262111u:return 534u;
-case 1097370823u:return 5006u;
+case 1097370823u:return 5046u;
 case 3118740152u:return 694u;
 case 894813113u:return 108u;
 case 4152115942u:return 188u;
+case 1220302136u:return 148u;
+case 134585297u:return 13066u;
+case 2818723001u:return 5792u;
+case 2659756390u:return 4585u;
+case 3262440083u:return 276u;
+case 1639979562u:return 548u;
+case 2991350411u:return 3472u;
+case 2283871198u:return 591u;
+case 3231301773u:return 430u;
+case 1774705883u:return 771u;
+case 3039295477u:return 12688u;
 case 3843395869u:return 161u;
+case 1586661300u:return 1381u;
+case 1585205965u:return 554u;
 case 777227442u:return 1087u;
-case 1713454215u:return 5610u;
+case 1713454215u:return 5739u;
 case 1289356445u:return 761u;
 case 1294176720u:return 400u;
+case 3596993926u:return 7030u;
+case 4277700180u:return 7011u;
+case 1499064184u:return 7190u;
 case 3920061503u:return 1970u;
+case 1808661919u:return 8865u;
+case 205226446u:return 8846u;
+case 3931851606u:return 9025u;
+case 789892733u:return 7827u;
+case 2366027990u:return 7298u;
+case 969146359u:return 7987u;
 case 3080039518u:return 1348u;
 case 2043047690u:return 221u;
 case 852193729u:return 375u;
 case 1200677338u:return 988u;
 case 211681041u:return 159u;
 case 2643119173u:return 1992u;
+case 1630687582u:return 7596u;
+case 507530282u:return 7828u;
+case 3981677338u:return 9980u;
+case 2143937283u:return 5217u;
+case 3961039444u:return 7988u;
+case 1416019344u:return 22624u;
 case 3912550431u:return 1056u;
 case 2059453688u:return 6667u;
 case 2744575276u:return 334u;
-case 3961835268u:return 5921u;
-case 2568860078u:return 3075u;
+case 3961835268u:return 6055u;
+case 2568860078u:return 3122u;
 case 2138051903u:return 6543u;
-case 3272378618u:return 6082u;
+case 3272378618u:return 6211u;
 default:return 0;}}
 uint32_t graphene_builtin_shader_word(uint32_t shader,uint32_t i){switch(shader){
 case 2111262111u:return i<534u?cluster_cull_spirv_words[i]:0;
-case 1097370823u:return i<5006u?cube_fragment_spirv_words[i]:0;
+case 1097370823u:return i<5046u?cube_fragment_spirv_words[i]:0;
 case 3118740152u:return i<694u?cube_vertex_spirv_words[i]:0;
 case 894813113u:return i<108u?depth_fragment_spirv_words[i]:0;
 case 4152115942u:return i<188u?depth_vertex_spirv_words[i]:0;
+case 1220302136u:return i<148u?displacement_debug_spirv_words[i]:0;
+case 134585297u:return i<13066u?displacement_mesh_spirv_words[i]:0;
+case 2818723001u:return i<5792u?displacement_ray_proxy_spirv_words[i]:0;
+case 2659756390u:return i<4585u?displacement_refine_spirv_words[i]:0;
+case 3262440083u:return i<276u?displacement_selection_spirv_words[i]:0;
+case 1639979562u:return i<548u?displacement_skin_source_spirv_words[i]:0;
+case 2991350411u:return i<3472u?displacement_topology_spirv_words[i]:0;
+case 2283871198u:return i<591u?displacement_triangle_linear_spirv_words[i]:0;
+case 3231301773u:return i<430u?displacement_triangle_spirv_words[i]:0;
+case 1774705883u:return i<771u?displacement_triangle_temporal_spirv_words[i]:0;
+case 3039295477u:return i<12688u?displacement_vertex_spirv_words[i]:0;
 case 3843395869u:return i<161u?double_words_words[i]:0;
+case 1586661300u:return i<1381u?genai_preview_fragment_spirv_words[i]:0;
+case 1585205965u:return i<554u?genai_preview_vertex_spirv_words[i]:0;
 case 777227442u:return i<1087u?gi_spatial_filter_spirv_words[i]:0;
-case 1713454215u:return i<5610u?material_fragment_spirv_words[i]:0;
+case 1713454215u:return i<5739u?material_fragment_spirv_words[i]:0;
 case 1289356445u:return i<761u?material_vertex_spirv_words[i]:0;
 case 1294176720u:return i<400u?mesh_triangle_spirv_words[i]:0;
+case 3596993926u:return i<7030u?ray_material_linear_words[i]:0;
+case 4277700180u:return i<7011u?ray_material_sdr_words[i]:0;
+case 1499064184u:return i<7190u?ray_material_temporal_words[i]:0;
 case 3920061503u:return i<1970u?ray_query_gi_spirv_words[i]:0;
+case 1808661919u:return i<8865u?ray_terrain_linear_words[i]:0;
+case 205226446u:return i<8846u?ray_terrain_sdr_words[i]:0;
+case 3931851606u:return i<9025u?ray_terrain_temporal_words[i]:0;
+case 789892733u:return i<7827u?ray_virtual_linear_words[i]:0;
+case 2366027990u:return i<7298u?ray_virtual_sdr_words[i]:0;
+case 969146359u:return i<7987u?ray_virtual_temporal_words[i]:0;
 case 3080039518u:return i<1348u?screen_probe_place_spirv_words[i]:0;
 case 2043047690u:return i<221u?selection_mask_frag_spirv_words[i]:0;
 case 852193729u:return i<375u?selection_mask_vert_spirv_words[i]:0;
 case 1200677338u:return i<988u?selection_outline_frag_spirv_words[i]:0;
 case 211681041u:return i<159u?selection_outline_vert_spirv_words[i]:0;
 case 2643119173u:return i<1992u?software_gi_spirv_words[i]:0;
+case 1630687582u:return i<7596u?terrain_fragment_spirv_words[i]:0;
+case 507530282u:return i<7828u?terrain_linear_spirv_words[i]:0;
+case 3981677338u:return i<9980u?terrain_ray_proxy_spirv_words[i]:0;
+case 2143937283u:return i<5217u?terrain_refine_spirv_words[i]:0;
+case 3961039444u:return i<7988u?terrain_temporal_spirv_words[i]:0;
+case 1416019344u:return i<22624u?terrain_vertex_spirv_words[i]:0;
 case 3912550431u:return i<1056u?virtual_geometry_mesh_spirv_words[i]:0;
 case 2059453688u:return i<6667u?virtual_scene_cull_spirv_words[i]:0;
 case 2744575276u:return i<334u?virtual_scene_dispatch_spirv_words[i]:0;
-case 3961835268u:return i<5921u?virtual_scene_fragment_spirv_words[i]:0;
-case 2568860078u:return i<3075u?virtual_scene_mesh_spirv_words[i]:0;
+case 3961835268u:return i<6055u?virtual_scene_fragment_spirv_words[i]:0;
+case 2568860078u:return i<3122u?virtual_scene_mesh_spirv_words[i]:0;
 case 2138051903u:return i<6543u?virtual_scene_post_cull_spirv_words[i]:0;
-case 3272378618u:return i<6082u?virtual_scene_triangle_spirv_words[i]:0;
+case 3272378618u:return i<6211u?virtual_scene_triangle_spirv_words[i]:0;
 default:return 0;}}

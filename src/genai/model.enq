@@ -1,0 +1,187 @@
+//! Provider-independent material capability and result validation.
+import core::vec::Vec
+
+import std::http::Url
+import std::os::{file_exists, home_dir, mkdir_all, read_file, write_file}
+
+import json::{Json, field, parse, stringify}
+
+import refrain::automation_transport::automation_secure_file
+
+pub struct Provider {
+    name: str
+    url: str
+    key: str
+}
+pub fn text(j: Json, name: str) -> str {
+    ret j.get(name).unwrap_or(Json::Null).as_str().unwrap_or("")
+}
+pub fn number(j: Json, name: str) -> str {
+    ret j.get(name).unwrap_or(Json::Null).as_number().unwrap_or("")
+}
+pub fn list(j: Json, name: str) -> Vec[Json] {
+    ret j.get(name).unwrap_or(Json::Null).as_array().unwrap_or(Vec[Json]::new())
+}
+pub fn value(source: str) -> Json {
+    ret parse(source).unwrap_or(Json::Null)
+}
+pub fn string(s: str) -> Json {
+    ret Json::String(s)
+}
+pub fn id_valid(s: str) -> bool {
+    if s.byte_len() == 0 || s.byte_len() > 128 {
+        ret false
+    }
+    for i in 0_usize..s.byte_len() {
+        let c = s.byte_at(i) if !(c >= 48 && c <= 57) && !(c >= 97 && c <= 122) && !(c >= 65 && c <= 90) && c != 45 && c != 95 {
+            ret false
+        }
+    }
+    ret true
+}
+pub fn roles() -> Vec[str] {
+    ret vec!["basecolor", "normal", "roughness", "metallic", "height", "ao"]
+}
+pub fn provider_valid(p: Provider) -> bool {
+    if p.name.byte_len() == 0 || p.url.byte_len() == 0 || p.key.byte_len() == 0 || p.key.contains("\n") || p.key.contains("\r") {
+        ret false
+    }
+    match Url::parse(p.url) {
+        Ok(url) => {
+            ret !url.target().contains("?")
+        }
+        Err(_) => {
+            ret false
+        }
+    }
+}
+fn resolution_valid(size: Json) -> bool {
+    let source = size.as_number().unwrap_or("")
+    if source.byte_len() == 0 || source.byte_len() > 4 {
+        ret false
+    }
+    let mut n = 0_u32
+    for i in 0_usize..source.byte_len() {
+        let c = source.byte_at(i) if c < 48 || c > 57 {
+            ret false
+        }
+        n = n * 10 +((c - 48) as u32)
+    }
+    ret n > 0 && n <= 4096
+}
+pub fn compatible(model: Json) -> bool {
+    if text(model, "capability") != "material.pbr-v1" || text(model, "id").byte_len() == 0 || text(model, "id").byte_len() > 256 || list(model, "resolutions").len() == 0 || list(model, "qualities").len() == 0 {
+        ret false
+    }
+    let mut input = false for item in list(model, "inputs") {
+        let kind = item.as_str().unwrap_or("") if kind == "text" || kind == "image" {
+            input = true
+        }
+    }
+    if !input {
+        ret false
+    }
+    for quality in list(model, "qualities") {
+        if quality.as_str().unwrap_or("").byte_len() == 0 {
+            ret false
+        }
+    }
+    for size in list(model, "resolutions") {
+        if !resolution_valid(size) {
+            ret false
+        }
+    }
+    for role in vec!["basecolor", "normal", "roughness", "metallic"] {
+        let mut found = false for map in list(model, "maps") {
+            if map.as_str().unwrap_or("") == role {
+                found = true
+            }
+        }
+        if !found {
+            ret false
+        }
+    }
+    ret true
+}
+pub fn manifest_valid(manifest: Json) -> bool {
+    if number(manifest, "version") != "1" {
+        ret false
+    }
+    let maps = list(manifest, "maps")
+    if maps.len() < 4 || maps.len() > 6 {
+        ret false
+    }
+    let mut seen = Vec[str]::new()
+    for map in maps {
+        let role = text(map, "role") let hash = text(map, "sha256")
+        if role != "basecolor" && role != "normal" && role != "roughness" && role != "metallic" && role != "height" && role != "ao" {
+            ret false
+        }
+        for old in seen {
+            if old == role {
+                ret false
+            }
+        }
+        seen.push(role)
+        let format = text(map, "format")
+        let supported = format == "png-rgb8" ||(role == "height" && format == "png-gray16")
+        if hash.byte_len() != 64 || !supported || text(map, "color_space") !=(if role == "basecolor" {
+                "srgb"
+            } else {
+                "linear"
+            }
+        ) {
+            ret false
+        }
+        for i in 0_usize..hash.byte_len() {
+            let c = hash.byte_at(i) if !(c >= 48 && c <= 57) && !(c >= 97 && c <= 102) {
+                ret false
+            }
+        }
+    }
+    for role in vec!["basecolor", "normal", "roughness", "metallic"] {
+        let mut found = false for old in seen {
+            if old == role {
+                found = true
+            }
+        }
+        if !found {
+            ret false
+        }
+    }
+    ret text(manifest, "normal_convention") == "opengl" || text(manifest, "normal_convention") == "directx"
+}
+pub fn settings_path() -> str {
+    ret home_dir() + "/.graphene/genai-settings.json"
+}
+pub fn providers_from_settings() -> Vec[Provider] {
+    let mut result = Vec[Provider]::new() let root = value(read_file(settings_path()))
+    for p in list(root, "providers") {
+        result.push(Provider {
+                text(p, "name"), text(p, "url"), text(p, "key")
+            }
+        )
+    }
+    if result.len() == 0 {
+        result.push(Provider { "Graphene", "http://127.0.0.1:8770", "" })
+    }
+    ret result
+}
+/// Restrict the existing file before writing any credential bytes.
+pub fn save_settings(providers: Vec[Provider], active: usize, job: str, idem: str, pending: Json) -> bool {
+    if mkdir_all(home_dir() + "/.graphene") != 0 {
+        ret false
+    }
+    let path = settings_path()
+    if !file_exists(path) && write_file(path, "") != 0 {
+        ret false
+    }
+    if !automation_secure_file(path) {
+        ret false
+    }
+    let mut entries = Vec[Json]::new()
+    for p in providers {
+        entries.push(Json::Object(vec![field("name", string(p.name)), field("url", string(p.url)), field("key", string(p.key))]))
+    }
+    ret write_file(path, stringify(Json::Object(vec![field("providers", Json::Array(entries)), field("active", Json::Number(active.fmt())), field("job", string(job)), field("idempotency", string(idem)), field("pending", pending)]))) == 0
+}

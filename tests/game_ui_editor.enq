@@ -1,3 +1,4 @@
+import luma::{RendererKind, Window}
 //! Designer commands and keyboard editing share one document history.
 import core::vec::Vec
 import graphene::game_ui::editor::UiEditor
@@ -8,6 +9,7 @@ fn click() -> Event {
     }
 }
 fn main() -> u32 {
+    let window = Window::create_with_renderer("Editor input test", 320, 200, RendererKind::Software)
     let mut editor = UiEditor::new()
     let sheet = StyleSheet::default()
     let layout = layout_widget(editor.widget(false), Rect::new(0, 0, 1200, 800))
@@ -15,28 +17,29 @@ fn main() -> u32 {
     editor.input(Event {
             event_pointer_down(), 10_f32, 10_f32, 0_f32, 0_f32, 4_u32, 3_u32, 0_u32, 0_f32, 0_f32, "", 0_u64
         }
-        , "uid-add-Button", layout, sheet, false,)
+        , "uid-add-Button", layout, sheet, false, window,)
     if editor.asset().widgets.len() != before {
         ret 7
     }
-    if !editor.input(click(), "uid-add-Button", layout, sheet, false) {
+    if !editor.input(click(), "uid-add-Button", layout, sheet, false, window) {
         ret 1
     }
     if editor.asset().widgets.len() != before + 1 {
         ret 2
     }
-    editor.input(click(), "uid-undo", layout, sheet, false)
+    editor.input(click(), "uid-undo", layout, sheet, false, window)
     if editor.asset().widgets.len() != before {
         ret 3
     }
-    editor.input(click(), "uid-redo", layout, sheet, false)
+    editor.input(click(), "uid-redo", layout, sheet, false, window)
     if editor.asset().widgets.len() != before + 1 {
         ret 4
     }
-    editor.input(click(), "uid-field-text", layout, sheet, false)
-    editor.input(Event::key_down(97, 64), "", layout, sheet, false)
-    editor.input(Event::text_input("Continue"), "", layout, sheet, false)
-    editor.input(Event::key_down(13, 0), "", layout, sheet, false)
+    editor.input(click(), "uid-field-text", layout, sheet, false, window)
+    editor.input(Event::key_down(97, 64), "", layout, sheet, false, window)
+    editor.input(Event::key_down(97, 192), "", layout, sheet, false, window)
+    editor.input(Event::text_input("Continue"), "", layout, sheet, false, window)
+    editor.input(Event::key_down(13, 0), "", layout, sheet, false, window)
     let mut changed = false for w in editor.asset().widgets {
         if w.text == "Continue" {
             changed = true
@@ -46,18 +49,18 @@ fn main() -> u32 {
         ret 5
     }
     let original = editor.asset().widgets.len()
-    editor.input(click(), "uid-add-Button", layout, sheet, true)
+    editor.input(click(), "uid-add-Button", layout, sheet, true, window)
     if editor.asset().widgets.len() != original {
         ret 6
     }
     // Reparented siblings need not be adjacent in the serialized flat array.
     let mut hierarchy = UiEditor::new()
-    hierarchy.input(click(), "uid-add-Vertical", layout, sheet, false)
-    hierarchy.input(click(), "uid-select-4", layout, sheet, false)
-    hierarchy.input(click(), "uid-parent-6", layout, sheet, false)
-    hierarchy.input(click(), "uid-select-6", layout, sheet, false)
-    hierarchy.input(click(), "uid-add-Button", layout, sheet, false)
-    hierarchy.input(click(), "uid-up", layout, sheet, false)
+    hierarchy.input(click(), "uid-add-Vertical", layout, sheet, false, window)
+    hierarchy.input(click(), "uid-select-4", layout, sheet, false, window)
+    hierarchy.input(click(), "uid-parent-6", layout, sheet, false, window)
+    hierarchy.input(click(), "uid-select-6", layout, sheet, false, window)
+    hierarchy.input(click(), "uid-add-Button", layout, sheet, false, window)
+    hierarchy.input(click(), "uid-up", layout, sheet, false, window)
     let mut first = 0_u64
     for w in hierarchy.asset().widgets {
         if w.parent == 6 && first == 0 {
@@ -67,7 +70,7 @@ fn main() -> u32 {
     if first != 7 {
         ret 8
     }
-    hierarchy.input(click(), "uid-down", layout, sheet, false)
+    hierarchy.input(click(), "uid-down", layout, sheet, false, window)
     first = 0_u64
     for w in hierarchy.asset().widgets {
         if w.parent == 6 && first == 0 {
@@ -82,21 +85,21 @@ fn main() -> u32 {
     let release = Event {
         luma::event_pointer_up(), 10_f32, 10_f32, 0_f32, 0_f32, 0_u32, 1_u32, 0_u32, 0_f32, 0_f32, "", 0_u64
     }
-    switched.input(click(), "uid-tab-graph", layout, sheet, false)
-    switched.input(release, "uid-tab-graph", layout, sheet, false)
-    switched.input(click(), "uid-tab-designer", layout, sheet, false)
-    switched.input(release, "uid-tab-designer", layout, sheet, false)
-    switched.input(click(), "uid-add-Canvas", layout, sheet, false)
-    switched.input(release, "uid-add-Canvas", layout, sheet, false)
+    switched.input(click(), "uid-tab-graph", layout, sheet, false, window)
+    switched.input(release, "uid-tab-graph", layout, sheet, false, window)
+    switched.input(click(), "uid-tab-designer", layout, sheet, false, window)
+    switched.input(release, "uid-tab-designer", layout, sheet, false, window)
+    switched.input(click(), "uid-add-Canvas", layout, sheet, false, window)
+    switched.input(release, "uid-add-Canvas", layout, sheet, false, window)
     if switched.widget(false).find("uid-undo").unwrap_or(Widget::panel("")).disabled() {
         ret 10
     }
-    switched.input(click(), "uid-undo", layout, sheet, false)
+    switched.input(click(), "uid-undo", layout, sheet, false, window)
     if switched.asset().widgets.len() != 5 {
         ret 11
     }
-    switched.input(click(), "uid-select-1", layout, sheet, false)
-    switched.input(click(), "uid-field-text", layout, sheet, false)
+    switched.input(click(), "uid-select-1", layout, sheet, false, window)
+    switched.input(click(), "uid-field-text", layout, sheet, false, window)
     let locked_field = switched.widget(true).find("uid-field-text").unwrap_or(Widget::panel(""))
     if !locked_field.disabled() || locked_field.focused() {
         ret 12

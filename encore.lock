@@ -11,9 +11,9 @@ registry = "http://127.0.0.1:8137/index"
 [[packages]]
 name = "json"
 ref = "index@json@>=0.0.3"
-version = "0.0.3"
-archive = "http://127.0.0.1:8137/archives/018cce6bcbca73c3aa1afa26d0ec09156b1cf0c915e2e0334e07207588f55258.tar.gz"
-checksum = "018cce6bcbca73c3aa1afa26d0ec09156b1cf0c915e2e0334e07207588f55258"
+version = "0.0.4"
+archive = "http://127.0.0.1:8137/archives/509f25e7f49650a1e487b42b0a96b4fd62004245739d126941c4e07f17b19b12.tar.gz"
+checksum = "509f25e7f49650a1e487b42b0a96b4fd62004245739d126941c4e07f17b19b12"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
@@ -34,10 +34,10 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "vulkan"
-ref = "index@vulkan@>=0.1.1"
-version = "0.1.1"
-archive = "http://127.0.0.1:8137/archives/db116f49be56e729ae425168790e5b9ff02d04ac446048b01448a7d6ac84f175.tar.gz"
-checksum = "db116f49be56e729ae425168790e5b9ff02d04ac446048b01448a7d6ac84f175"
+ref = "index@vulkan@>=0.1.2"
+version = "0.1.2"
+archive = "http://127.0.0.1:8137/archives/331b1cb93c21d9033ac8c3025453b16b8146499cf14c96bfead7872fef6ad37a.tar.gz"
+checksum = "331b1cb93c21d9033ac8c3025453b16b8146499cf14c96bfead7872fef6ad37a"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
@@ -56,10 +56,10 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "gpu"
-ref = "index@gpu@>=0.1.1"
-version = "0.1.1"
-archive = "http://127.0.0.1:8137/archives/667c967b6a42b359f808a16f0b4958798f6f48e7931facc770224231f9d02bce.tar.gz"
-checksum = "667c967b6a42b359f808a16f0b4958798f6f48e7931facc770224231f9d02bce"
+ref = "index@gpu@>=0.1.2, >=0.1.1"
+version = "0.1.2"
+archive = "http://127.0.0.1:8137/archives/728312e58be8ad9f38f4a12f2eb39bac0ee6aa07ae867d7a6595296221d53392.tar.gz"
+checksum = "728312e58be8ad9f38f4a12f2eb39bac0ee6aa07ae867d7a6595296221d53392"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
@@ -71,8 +71,8 @@ version = "0.1.0"
 name = "serialize"
 ref = "index@serialize@0.1.0"
 version = "0.1.0"
-archive = "http://127.0.0.1:8137/archives/99bd9f2e570d776c545866ebc4c93c864b125d043ec67b83988265a61108bd6a.tar.gz"
-checksum = "99bd9f2e570d776c545866ebc4c93c864b125d043ec67b83988265a61108bd6a"
+archive = "http://127.0.0.1:8137/archives/520ebd77d581c301155a6f4664fc071a9808b0e15ff91f0461180b42ddd4ed7d.tar.gz"
+checksum = "520ebd77d581c301155a6f4664fc071a9808b0e15ff91f0461180b42ddd4ed7d"
 registry = "http://127.0.0.1:8137/index"
 
 [[packages]]

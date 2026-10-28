@@ -7,6 +7,7 @@ import std::os::{file_exists, mkdir_all, read_file, write_file}
 import std::time::perf_counter_ms
 
 import graphene::{decode_png, load_material_texture, texture_path_valid}
+import graphene::texture_asset::decode_height_png
 
 extern fn encore_str_from_buffer(bytes: u8*, length: usize) -> str
 
@@ -66,10 +67,13 @@ fn stored(raw: Vec[u8]) -> Vec[u8] {
 }
 
 fn png(width: u32, height: u32, color: u8, interlace: u8, compressed: Vec[u8]) -> Vec[u8] {
+    ret png_depth(width, height, color, interlace, 8, compressed)
+}
+fn png_depth(width: u32, height: u32, color: u8, interlace: u8, depth: u8, compressed: Vec[u8]) -> Vec[u8] {
     let mut bytes = vec![137_u8, 80_u8, 78_u8, 71_u8, 13_u8, 10_u8, 26_u8, 10_u8]
     let mut header = Vec[u8]::new()
     be32(header, width) be32(header, height)
-    header.push(8) header.push(color) header.push(0) header.push(0) header.push(interlace)
+    header.push(depth) header.push(color) header.push(0) header.push(0) header.push(interlace)
     chunk(bytes, "IHDR", header)
     // Split IDAT to verify that chunk boundaries do not reset DEFLATE state.
     let mut first = Vec[u8]::new() let mut second = Vec[u8]::new()
@@ -260,6 +264,59 @@ fn main() -> u32 {
     let broken = spawn load_material_texture(scratch, source, true)
     if broken.join().error == "" || read_file(scratch + "/" + imported.path) != encoded {
         ret 26
+    }
+    match decode_png(bytes_string(png(2, 1, 0, 0, stored(vec![0_u8, 0_u8, 128_u8])))) {
+        Ok(image) => {
+            if image.pixels.get_unchecked_borrowed(0) != 4278190080_u32 || image.pixels.get_unchecked_borrowed(1) != 4286611584_u32 {
+                ret 30
+            }
+        }
+        Err(_) => {
+            ret 31
+        }
+    }
+    match decode_png(bytes_string(png(1, 1, 4, 0, stored(vec![0_u8, 128_u8, 64_u8])))) {
+        Ok(image) => {
+            if image.pixels.get_unchecked_borrowed(0) != 1082163328_u32 {
+                ret 32
+            }
+        }
+        Err(_) => {
+            ret 33
+        }
+    }
+    // Values differ only in low bits: an accidental 8-bit conversion fails.
+    let gray16 = png_depth(3, 2, 0, 0, 16, stored(vec![0_u8, 0_u8, 0_u8, 0_u8, 1_u8, 127_u8, 255_u8, 0_u8, 128_u8, 0_u8, 255_u8, 254_u8, 255_u8, 255_u8]))
+    match decode_png(bytes_string(gray16)) {
+        Ok(image) => {
+            if (image.pixels.get_unchecked_borrowed(2) & 255) != 127 ||(image.pixels.get_unchecked_borrowed(3) & 255) != 128 {
+                ret 34
+            }
+        }
+        Err(_) => {
+            ret 35
+        }
+    }
+    match decode_height_png(bytes_string(gray16)) {
+        Ok(image) => {
+            let expected = vec![0_u16, 1_u16, 32767_u16, 32768_u16, 65534_u16, 65535_u16] if image.width != 3 || image.height != 2 {
+                ret 27
+            }
+            for i in 0_usize..6_usize {
+                if image.samples.get_unchecked_borrowed(i) != expected.get_unchecked_borrowed(i) {
+                    ret 28
+                }
+            }
+        }
+        Err(error) => {
+            println(error) ret 29
+        }
+    }
+    if decode_height_png(bytes_string(png_depth(1, 1, 0, 1, 16, stored(vec![0_u8, 0_u8, 1_u8])))).is_ok() {
+        ret 30
+    }
+    if !texture_path_valid("Content/Materials/Generated/Stone/Textures/Height.gtexture") || texture_path_valid("Content//bad.png") || texture_path_valid("Content/./bad.png") {
+        ret 31
     }
     ret 0
 }

@@ -1,13 +1,18 @@
 //! Real project discovery, Unicode search, selection, navigation and file undo.
 import core::option::Option
+import core::result::Result
 import core::vec::Vec
-import graphene::content_browser::files::{scan_content, content_stat, content_move, content_name_valid, lower}
-import graphene::content_browser::operations::{content_create, content_rename, content_delete, content_duplicate, content_history, content_move_selection}
-import graphene::content_browser::{ContentBrowser, ContentAsset, content_query_terms, content_query_matches, content_sorted}
-import graphene::{discover_obj_assets, material_graph_parse}
-import luma::TextEditor
-import std::os::{mkdir_all, write_file, read_file, file_exists}
+
+import std::os::{file_exists, mkdir_all, read_file, write_file}
 import std::time::{perf_counter_ms, sleep_ms}
+
+import graphene::content_browser::{ContentAsset, ContentBrowser, content_query_matches, content_query_terms, content_sorted}
+import graphene::content_browser::files::{content_move, content_name_valid, content_stat, lower, scan_content}
+import graphene::content_browser::operations::{content_create, content_create_instance, content_delete, content_duplicate, content_history, content_move_selection, content_rename}
+import graphene::discover_obj_assets
+import graphene::material_schema::MaterialAsset
+import graphene::native_asset::read_native_material_asset
+import luma::TextEditor
 
 fn settle(browser: mut ContentBrowser) -> bool {
     let start = perf_counter_ms()
@@ -21,10 +26,21 @@ fn check_assets(browser: mut ContentBrowser, project: str) -> u32 {
     if browser.visible.len() < 6 {
         ret 1_u32
     }
+    browser.directory = "@engine" browser.rebuild()
+    let mut built_in_materials = false
+    for asset in browser.visible {
+        if asset.path == "@engine/Materials" {
+            built_in_materials = true
+        }
+    }
+    if !built_in_materials {
+        ret 34_u32
+    }
+    browser.directory = "@all" browser.rebuild()
     if lower("МАТЕРИАЛ ЁЖИК AbC") != "материал ёжик abc" {
         ret 2_u32
     }
-    let sample = ContentAsset::new("Content/Materials/Red Paint.graphene-material.json", "Red Paint", "material", 70)
+    let sample = ContentAsset::new("Content/Materials/Red Paint.gmaterial", "Red Paint", "material", 70)
     if !content_query_matches(sample, content_query_terms("t:material \"red paint\" -draft path:Materials")) {
         ret 3_u32
     }
@@ -117,9 +133,65 @@ fn check_assets(browser: mut ContentBrowser, project: str) -> u32 {
         ret 25_u32
     }
     browser.navigate("Content/Props", true) browser.popup = "material" browser.name = TextEditor::new("M_Test") content_create(browser)
-    if !settle(browser) || material_graph_parse(read_file(project + "/Content/Props/M_Test.graphene-material-graph.json")).is_none() {
+    let parent_path = "Content/Props/M_Test.gmaterial"
+    if !settle(browser) || file_exists(project + "/Content/Props/M_Test.graphene-material-graph.json") {
         ret 26_u32
     }
+    match read_native_material_asset(project + "/" + parent_path) {
+        Ok(asset) => {
+            match asset {
+                Definition(definition) => {
+                    if definition.graph.domain.key() != "surface" {
+                        ret 26_u32
+                    }
+                }
+                Instance(_) => {
+                    ret 26_u32
+                }
+            }
+        }
+        Err(_) => {
+            ret 26_u32
+        }
+    }
+    let parent_bytes = read_file(project + "/" + parent_path)
+    browser.primary = parent_path browser.selection = vec![parent_path] browser.mesh_refresh = false
+    content_create_instance(browser)
+    let instance_path = browser.primary
+    if !settle(browser) || instance_path == parent_path {
+        ret 29_u32
+    }
+    match read_native_material_asset(project + "/" + instance_path) {
+        Ok(asset) => {
+            match asset {
+                Instance(instance) => {
+                    if instance.parent != parent_path {
+                        ret 30_u32
+                    }
+                }
+                Definition(_) => {
+                    ret 30_u32
+                }
+            }
+        }
+        Err(_) => {
+            ret 30_u32
+        }
+    }
+    browser.mesh_refresh = false content_history(browser, false, Vec[str]::new())
+    if !settle(browser) || file_exists(project + "/" + instance_path) || read_file(project + "/" + parent_path) != parent_bytes {
+        ret 31_u32
+    }
+    browser.mesh_refresh = false content_history(browser, true, Vec[str]::new())
+    if !settle(browser) || !file_exists(project + "/" + instance_path) {
+        ret 32_u32
+    }
+    browser.primary = parent_path browser.selection = vec![parent_path] browser.popup = "delete" browser.mesh_refresh = false
+    content_delete(browser, Vec[str]::new())
+    if browser.error == "" || read_file(project + "/" + parent_path) != parent_bytes {
+        ret 33_u32
+    }
+    browser.error = "" browser.mesh_refresh = false
     browser.popup = "blueprint" browser.name = TextEditor::new("BP_Test") content_create(browser)
     if !settle(browser) || !file_exists(project + "/Content/Props/BP_Test.graphene-blueprint.json") {
         ret 27_u32

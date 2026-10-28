@@ -2,12 +2,13 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
-import mod::assets::StandardMaterial
-import mod::native_asset::{asset_source_stamp, load_native_material, save_native_material}
+
+import mod::native_asset::{load_native_material, save_native_material}
+import mod::standard_material::{DisplacementSettings, StandardMaterial}
 import mod::texture_asset::texture_path_valid
-import std::os::{read_file, write_file_atomic}
 
 fn parse_decimal(source: str) -> Option[f32] {
     if source.char_len() == 0_usize {
@@ -152,9 +153,17 @@ pub fn material_asset_stringify(material: StandardMaterial) -> str {
     color_values.push(number(color.x())) color_values.push(number(color.y())) color_values.push(number(color.z()))
     let mut fields = Vec[(str, Json)]::new()
     fields.push(field("format", Json::String("graphene-material")))
-    fields.push(field("version", Json::Number("4")))
+    fields.push(field("version", Json::Number("6")))
     fields.push(field("base_color_texture", Json::String(material.base_color_texture())))
     fields.push(field("normal_texture", Json::String(material.normal_texture())))
+    fields.push(field("roughness_texture", Json::String(material.roughness_texture())))
+    fields.push(field("metallic_texture", Json::String(material.metallic_texture())))
+    fields.push(field("height_texture", Json::String(material.height_texture())))
+    fields.push(field("ao_texture", Json::String(material.ao_texture())))
+    fields.push(field("ao_strength", number(material.ao_strength())))
+    let displacement = material.displacement()
+    fields.push(field("displacement", Json::Object(vec![field("enabled", Json::Bool(displacement.enabled)), field("magnitude", number(displacement.magnitude)), field("center", number(displacement.center)), field("quality", Json::Number(displacement.quality.fmt()))])))
+
     fields.push(field("normal_scale", number(material.normal_scale())))
     fields.push(field("normal_flip_y", Json::Bool(material.normal_flip_y())))
     fields.push(field("base_color", Json::Array(color_values)))
@@ -187,7 +196,7 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                 Option::Some(value) => {
                     match value.as_number() {
                         Option::Some(text) => {
-                            text == "1" || text == "2" || text == "3" || text == "4"
+                            text == "1" || text == "2" || text == "3" || text == "4" || text == "5" || text == "6"
                         }
                         Option::None => {
                             false
@@ -292,6 +301,92 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
             if !texture_path_valid(normal) {
                 ret Option[StandardMaterial]::None
             }
+            let roughness_texture_path = match root.get("roughness_texture") {
+                Some(v) => match v.as_str() {
+                    Some(p) => p None => {
+                        ret Option::None
+                    }
+                }
+                None => ""
+            }
+            if !texture_path_valid(roughness_texture_path) {
+                ret Option::None
+            }
+            let metallic_texture_path = match root.get("metallic_texture") {
+                Some(v) => match v.as_str() {
+                    Some(p) => p None => {
+                        ret Option::None
+                    }
+                }
+                None => ""
+            }
+            if !texture_path_valid(metallic_texture_path) {
+                ret Option::None
+            }
+            let height_texture_path = match root.get("height_texture") {
+                Some(v) => match v.as_str() {
+                    Some(p) => p None => {
+                        ret Option::None
+                    }
+                }
+                None => ""
+            }
+            if !texture_path_valid(height_texture_path) {
+                ret Option::None
+            }
+            let ao_texture = match root.get("ao_texture") {
+                Some(v) => match v.as_str() {
+                    Some(p) => p None => {
+                        ret Option::None
+                    }
+                }
+                None => ""
+            }
+            if !texture_path_valid(ao_texture) {
+                ret Option::None
+            }
+            let ao_strength = match root.get("ao_strength") {
+                Some(v) => match json_f32(v) {
+                    Some(n) => n None => {
+                        ret Option::None
+                    }
+                }
+                None => 1_f32
+            }
+            if !(ao_strength >= 0_f32 && ao_strength <= 1_f32) {
+                ret Option::None
+            }
+            let mut displacement = DisplacementSettings::default()
+            match root.get("displacement") {
+                Some(v) => {
+                    let enabled = match v.get("enabled").unwrap_or(Json::Null).as_bool() {
+                        Some(n) => n None => {
+                            ret Option::None
+                        }
+                    }
+                    let magnitude = match json_f32(v.get("magnitude").unwrap_or(Json::Null)) {
+                        Some(n) => n None => {
+                            ret Option::None
+                        }
+                    }
+                    let center = match json_f32(v.get("center").unwrap_or(Json::Null)) {
+                        Some(n) => n None => {
+                            ret Option::None
+                        }
+                    }
+                    let quality = match v.get("quality").unwrap_or(Json::Null).as_number().unwrap_or("") {
+                        "0" => 0_u32 "1" => 1_u32 "2" => 2_u32 _ => {
+                            ret Option::None
+                        }
+                    }
+                    displacement = DisplacementSettings { enabled, magnitude, center, quality }
+                    if !displacement.valid() {
+                        ret Option::None
+                    }
+                }
+                None => {
+                }
+            }
             let normal_scale = match root.get("normal_scale") {
                 Option::Some(value) => match json_f32(value) {
                     Option::Some(scale) => scale
@@ -321,7 +416,7 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
                                 ret Option[StandardMaterial]::Some(StandardMaterial::new(color, metal,
                                         rough,).with_unlit_value(unlit)
                                     .with_double_sided_value(double_sided).with_base_color_texture(texture)
-                                    .with_normal_texture(normal).with_normal_scale(normal_scale).with_normal_flip_y(flip_y))
+                                    .with_normal_texture(normal).with_normal_scale(normal_scale).with_normal_flip_y(flip_y).with_roughness_texture(roughness_texture_path).with_metallic_texture(metallic_texture_path).with_height_texture(height_texture_path).with_ao_texture(ao_texture).with_ao_strength(ao_strength).with_displacement(displacement))
                             }
                             Option::None => {
                             }
@@ -338,43 +433,20 @@ pub fn material_asset_parse(source: str) -> Option[StandardMaterial] {
     ret Option[StandardMaterial]::None
 }
 
-/// Loads an independent native material, or migrates the JSON authoring file.
+/// Loads only independent native material assets. JSON file authoring is unsupported.
 pub fn load_material_asset_file(path: str) -> Option[StandardMaterial] {
-    if path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" {
-        match load_native_material(path, "") {
-            Result::Ok(material) => {
-                ret Option[StandardMaterial]::Some(material)
-            }
-            Result::Err(_) => {
-                ret Option[StandardMaterial]::None
-            }
-        }
+    if path.byte_len() < 10 || path.slice_bytes(path.byte_len() - 10, 10) != ".gmaterial" {
+        ret Option[StandardMaterial]::None
     }
-    let revision = asset_source_stamp(path)
-    match load_native_material(path + ".gmaterial", revision) {
+    match load_native_material(path, "") {
         Result::Ok(material) => {
             ret Option[StandardMaterial]::Some(material)
         }
         Result::Err(_) => {
-        }
-    }
-    match material_asset_parse(read_file(path)) {
-        Option::Some(material) => {
-            let _saved = save_native_material(path + ".gmaterial", path, revision, material)
-            ret Option[StandardMaterial]::Some(material)
-        }
-        Option::None => {
             ret Option[StandardMaterial]::None
         }
     }
 }
 pub fn save_material_asset_file(path: str, material: StandardMaterial) -> bool {
-    if path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" {
-        ret save_native_material(path, "", "", material)
-    }
-    if write_file_atomic(path, material_asset_stringify(material) + "\n") != 0 {
-        ret false
-    }
-    ret save_native_material(path + ".gmaterial", path,
-        asset_source_stamp(path), material,)
+    ret path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" && save_native_material(path, "", "", material)
 }

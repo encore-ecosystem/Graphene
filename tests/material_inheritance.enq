@@ -1,0 +1,178 @@
+//! Native authoring, inheritance and compatibility regression without GPU allocation.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::io::println
+import std::os::{mkdir_all, read_file}
+import std::time::perf_counter_ns
+
+import binary::{decode, encode}
+import graphene::material_schema::*
+import graphene::native_asset::{apply_material_instance, load_native_material, read_native_material_asset, resolve_material_parent, resolve_native_material, save_builtin_pbr_material, save_native_material, save_native_material_asset}
+import graphene::standard_material::StandardMaterial
+
+fn run() -> Result[u32, str] {
+    let root = "target/material-inheritance-" + perf_counter_ns().fmt()
+    mkdir_all(root + "/Content/Materials")
+    let master = "Content/Materials/M_Test.gmaterial"
+    let child = "Content/Materials/MI_Child.gmaterial"
+    let leaf = "Content/Materials/MI_Leaf.gmaterial"
+    let mut definition = standard_pbr_definition()
+    definition.graph.name = "M_Test"
+    let mut rough = definition.parameters.get_unchecked_borrowed(2_usize)
+    rough.value = MaterialValue::scalar(0.8_f32)
+    definition.parameters.set(2_usize, rough)
+    // Keep reflective enum codecs reachable in standalone native builds.
+    let encoded = match encode(MaterialAsset::Definition(definition)) {
+        Ok(value) => value Err(_) => {
+            ret Result::Ok(1_u32)
+        }
+    }
+    if decode[MaterialAsset](encoded).is_err() {
+        ret Result::Ok(2_u32)
+    }
+    if !save_native_material_asset(root + "/" + master, "", "", MaterialAsset::Definition(definition)) {
+        ret Result::Ok(3_u32)
+    }
+    let mut instance = MaterialInstance::new(master).set(3_u64, MaterialValue::scalar(0.2_f32), true)
+    if !save_native_material_asset(root + "/" + child, "", "", MaterialAsset::Instance(instance)) {
+        ret Result::Ok(4_u32)
+    }
+    let mut resolved = match resolve_native_material(root, child, "") {
+        Ok(value) => value Err(_) => {
+            ret Result::Ok(5_u32)
+        }
+    }
+    if resolved.surface.roughness() != 0.2_f32 || resolved.definition_path != master {
+        ret Result::Ok(6_u32)
+    }
+    let first_key = resolved.fingerprint
+    if !save_native_material_asset(root + "/" + leaf, "", "", MaterialAsset::Instance(MaterialInstance::new(child))) {
+        ret Result::Ok(7_u32)
+    }
+    if resolve_native_material(root, leaf, "")?.surface.roughness() != 0.2_f32 {
+        ret Result::Ok(8_u32)
+    }
+    instance = instance.set(3_u64, MaterialValue::scalar(0.2_f32), false)
+    if !save_native_material_asset(root + "/" + child, "", "", MaterialAsset::Instance(instance)) {
+        ret Result::Ok(9_u32)
+    }
+    resolved = resolve_native_material(root, leaf, "")?
+    if resolved.surface.roughness() != 0.8_f32 || resolved.fingerprint == first_key {
+        ret Result::Ok(10_u32)
+    }
+    // Cached value edits match disk resolution without changing the inherited snapshot.
+    let cached_parent = resolve_material_parent(root, child, instance)?
+    let local = instance.set(3_u64, MaterialValue::scalar(0.37_f32), true)
+    if apply_material_instance(cached_parent, local)?.surface.roughness() != 0.37_f32 || cached_parent.surface.roughness() != 0.8_f32 {
+        ret Result::Ok(30_u32)
+    }
+    let disabled = local.set(3_u64, MaterialValue::scalar(0.37_f32), false)
+    match disabled.override_value(3_u64) {
+        Some(value) => {
+            if value.enabled || value.value.number != 0.37_f32 {
+                ret Result::Ok(31_u32)
+            }
+        }
+        None => {
+            ret Result::Ok(32_u32)
+        }
+    }
+    if apply_material_instance(cached_parent, disabled)?.surface.roughness() != 0.8_f32 || disabled.reset(3_u64).override_value(3_u64).is_some() || local.override_value(3_u64).is_none() {
+        ret Result::Ok(33_u32)
+    }
+    // Renaming does not break identity-based overrides.
+    instance = instance.set(3_u64, MaterialValue::scalar(0.3_f32), true)
+    rough.name = "Surface Finish"
+    definition.parameters.set(2_usize, rough)
+    if !save_native_material_asset(root + "/" + master, "", "", MaterialAsset::Definition(definition)) || !save_native_material_asset(root + "/" + child, "", "", MaterialAsset::Instance(instance)) {
+        ret Result::Ok(11_u32)
+    }
+    resolved = resolve_native_material(root, leaf, "")?
+    if resolved.surface.roughness() != 0.3_f32 || resolved.definition.parameter(3_u64).unwrap_or(standard_pbr_parameters(StandardMaterial::default()).get_unchecked_borrowed(0_usize)).name != "Surface Finish" {
+        ret Result::Ok(12_u32)
+    }
+    // Removed/incompatible overrides are diagnosed and retained, rather than discarded.
+    instance = instance.set(2_u64, MaterialValue::boolean(true), true).set(999_u64, MaterialValue::scalar(0.6_f32), true)
+    if !save_native_material_asset(root + "/" + child, "", "", MaterialAsset::Instance(instance)) {
+        ret Result::Ok(13_u32)
+    }
+    resolved = resolve_native_material(root, child, "")?
+    if resolved.diagnostics.len() != 2_usize || resolved.surface.metallic() != 0_f32 {
+        ret Result::Ok(14_u32)
+    }
+    match read_native_material_asset(root + "/" + child)? {
+        Instance(saved) => {
+            if saved.overrides.len() != 3_usize {
+                ret Result::Ok(15_u32)
+            }
+        }
+        Definition(_) => {
+            ret Result::Ok(16_u32)
+        }
+    }
+    // Editing the compatibility PBR facade must preserve parent and unknown overrides.
+    if !save_native_material(root + "/" + child, "", "", resolved.surface.with_roughness(0.4_f32)) {
+        ret Result::Ok(17_u32)
+    }
+    match read_native_material_asset(root + "/" + child)? {
+        Instance(saved) => {
+            if saved.parent != master || saved.overrides.len() != 3_usize {
+                ret Result::Ok(18_u32)
+            }
+        }
+        Definition(_) => {
+            ret Result::Ok(19_u32)
+        }
+    }
+    // Cycle and missing parents fail explicitly, without touching any asset bytes.
+    let before = read_file(root + "/" + master)
+    if !save_native_material_asset(root + "/" + child, "", "", MaterialAsset::Instance(MaterialInstance::new(leaf))) {
+        ret Result::Ok(20_u32)
+    }
+    if resolve_native_material(root, child, "").is_ok() || read_file(root + "/" + master) != before {
+        ret Result::Ok(21_u32)
+    }
+    if !save_native_material_asset(root + "/" + child, "", "", MaterialAsset::Instance(MaterialInstance::new("Content/Missing.gmaterial"))) || resolve_native_material(root, child, "").is_ok() {
+        ret Result::Ok(22_u32)
+    }
+    if save_native_material_asset(root + "/Bad.gmaterial", "", "", MaterialAsset::Instance(MaterialInstance::new("Content/../secret.gmaterial"))) {
+        ret Result::Ok(23_u32)
+    }
+    let legacy = "tests/fixtures/material_v3.gmaterial"
+    let legacy_before = read_file(legacy)
+    let old = load_native_material(legacy, "")?
+    if old.roughness() != 0.65_f32 || read_file(legacy) != legacy_before {
+        ret Result::Ok(24_u32)
+    }
+    if !save_native_material(root + "/Migrated.gmaterial", "", "", old) {
+        ret Result::Ok(25_u32)
+    }
+    match read_native_material_asset(root + "/Migrated.gmaterial")? {
+        Instance(saved) => {
+            if saved.parent != standard_pbr_parent() {
+                ret Result::Ok(26_u32)
+            }
+        }
+        Definition(_) => {
+            ret Result::Ok(27_u32)
+        }
+    }
+    if save_native_material_asset(standard_pbr_parent(), "", "", MaterialAsset::Definition(definition)) {
+        ret Result::Ok(28_u32)
+    }
+    if !save_builtin_pbr_material(root + "/Builtin.gmaterial") {
+        ret Result::Ok(29_u32)
+    }
+    println(root)
+    ret Result::Ok(0_u32)
+}
+
+fn main() -> u32 {
+    ret match run() {
+        Ok(code) => code Err(error) => {
+            println(error) 99_u32
+        }
+    }
+}

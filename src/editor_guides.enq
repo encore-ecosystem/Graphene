@@ -45,14 +45,7 @@ fn scalar(value: f32) -> str {
 }
 /// Stable short decimals for human-selected steps, not binary float expansion.
 pub fn gizmo_step_label(value: f32) -> str {
-    let mut text = scalar(value)
-    while text.byte_len() > 1 && text.byte_at(text.byte_len() - 1) == 48_u8 {
-        text = text.slice(0, text.byte_len() - 1)
-    }
-    if text.byte_at(text.byte_len() - 1) == 46_u8 {
-        text = text.slice(0, text.byte_len() - 1)
-    }
-    ret text
+    ret luma::format_decimal(value, 4_u32)
 }
 
 fn point(value: Vec3, bounds: Rect) -> DisplayPoint {

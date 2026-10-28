@@ -240,6 +240,7 @@ impl for SceneAnimation {
     pub fn runtime(self: Self&) -> AnimationWorld {
         ret self.world
     }
+    pub fn source_scene(self: Self&) -> Scene {ret self.source}
     pub fn actor_count(self: Self&) -> usize {
         let mut count = 0_usize for slot in self.actors {
             if slot.value.is_some() {

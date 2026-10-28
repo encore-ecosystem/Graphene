@@ -45,7 +45,7 @@ vec3 traceRadiance(vec3 origin, vec3 direction,
     float maximumDistance, vec3 sky) {
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene_tlas,
-        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        gl_RayFlagsOpaqueEXT,
         0xff, origin, 0.015, direction, maximumDistance);
     while (rayQueryProceedEXT(query)) {
     }

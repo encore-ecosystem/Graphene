@@ -1,0 +1,54 @@
+//! Ordinary material files have one native format; JSON is only a wire codec.
+import core::option::Option
+import std::os::{file_exists, mkdir_all, write_file}
+
+import graphene::{StandardMaterial, load_material_asset_file, material_asset_stringify, save_material_asset_file}
+import graphene::content_browser::path::{content_kind, content_name}
+import graphene::scene::world::material_reference_valid
+fn main() -> u32 {
+    let root = "target/native-material-only"
+    mkdir_all(root)
+    let legacy = root + "/Default.graphene-material.json"
+    if save_material_asset_file(legacy, StandardMaterial::editor_default()) || file_exists(legacy) || file_exists(legacy + ".gmaterial") || load_material_asset_file(legacy).is_some() {
+        ret 1
+    }
+    let unsupported = root + "/Unsupported.graphene-material.json"
+    if write_file(unsupported, material_asset_stringify(StandardMaterial::editor_default())) != 0 || !save_material_asset_file(unsupported + ".gmaterial", StandardMaterial::editor_default()) {
+        ret 10
+    }
+    if load_material_asset_file(unsupported).is_some() {
+        ret 11
+    }
+    if content_kind(legacy) == "material" || material_reference_valid("Content/Materials/Default.graphene-material.json") {
+        ret 2
+    }
+    if !material_reference_valid("Content/Materials/Default.gmaterial") || !material_reference_valid("Content/Meshes/Rock.gmaterial") || material_reference_valid("/tmp/escape.gmaterial") || material_reference_valid("Content/../escape.gmaterial") || content_name("Content/Materials/Default.gmaterial", "material") != "Default" {
+        ret 3
+    }
+    let path = root + "/Default.gmaterial"
+    let original = StandardMaterial::editor_default()
+    if !save_material_asset_file(path, original) {
+        ret 4
+    }
+    let loaded = match load_material_asset_file(path) {
+        Some(value) => value None => {
+            ret 5
+        }
+    }
+    if loaded.base_color().x() != original.base_color().x() || loaded.roughness() != original.roughness() {
+        ret 6
+    }
+    let sample = match load_material_asset_file("examples/spheres/Content/Materials/Default.gmaterial") {
+        Some(value) => value None => {
+            ret 7
+        }
+    }
+    if sample.base_color().x() != 0.7_f32 || sample.roughness() != 0.65_f32 || sample.metallic() != 0_f32 {
+        ret 8
+    }
+    // Native re-save produces an independent material without source metadata.
+    if !save_material_asset_file(root + "/Converted.gmaterial", sample) {
+        ret 9
+    }
+    ret 0
+}

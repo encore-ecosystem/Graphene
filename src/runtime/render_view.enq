@@ -33,7 +33,7 @@ impl for RuntimeRenderView {
         for binding in 2..5 {
             entries.push(BindGroupLayoutEntry::storage(binding as u32, shader_stage_fragment()))
         }
-        for binding in 5..8 {
+        for binding in 5..9 {
             entries.push(BindGroupLayoutEntry::texture_sampler(binding as u32, shader_stage_fragment()))
         }
         let layout = device.create_bind_group_layout(entries)

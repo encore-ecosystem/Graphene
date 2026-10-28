@@ -1,0 +1,41 @@
+import core::vec::Vec
+import graphene::displacement::patterns::{refinement_table, DisplacementBudget}
+
+fn main() -> u32 {
+    let table = refinement_table(4)
+    for pattern in table.patterns {
+        let denominator = 6_u32 * (1_u32 << pattern.level)
+        let mut area = 0_i64
+        let mut boundary = Vec[bool]::new()
+        let segments = (1_u32 << pattern.level) * if (pattern.edges & 4_u32) != 0 { 2_u32 } else { 1_u32 }
+        for _ in 0_usize..(segments as usize) + 1 { boundary.push(false) }
+        for i in 0_usize..pattern.triangles as usize {
+            let offset = (pattern.first as usize + i) * 4
+            let a = table.words.get_unchecked_borrowed(offset)
+            let b = table.words.get_unchecked_borrowed(offset + 1)
+            let c = table.words.get_unchecked_borrowed(offset + 2)
+            let ax = (a & 65535) as i64 let ay = (a >> 16) as i64
+            let bx = (b & 65535) as i64 let by = (b >> 16) as i64
+            let cx = (c & 65535) as i64 let cy = (c >> 16) as i64
+            let cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if cross <= 0 { ret 1 }
+            area += cross
+            for p in vec![a,b,c] {
+                let x = p & 65535 let y = p >> 16
+                if x + y > denominator { ret 2 }
+                if y == 0 {
+                    if (x * segments) % denominator != 0 { ret 3 }
+                    boundary.set(((x * segments) / denominator) as usize, true)
+                }
+            }
+        }
+        if area != (denominator as i64) * (denominator as i64) { ret 4 }
+        for present in boundary { if !present { ret 5 } }
+        if pattern.edges == 0 && pattern.triangles != (1_u32 << (pattern.level * 2)) { ret 6 }
+    }
+    let mut budget = DisplacementBudget::new()
+    if !budget.reserve(268435440) || budget.reserve(32) || budget.used() != 268435440 { ret 7 }
+    budget.release(268435440)
+    if budget.used() != 0 || !budget.reserve(268435456) { ret 8 }
+    ret 0
+}

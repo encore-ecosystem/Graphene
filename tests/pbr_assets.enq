@@ -1,0 +1,153 @@
+//! Precision and migration tests independent of GPU and external model codecs.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{mkdir_all, write_file}
+import std::time::perf_counter_ns
+
+import binary::encode
+import graphene::native_asset::{load_native_height, load_native_material, load_native_texture, save_native_height, save_native_material}
+import graphene::standard_material::{DisplacementSettings, StandardMaterial}
+import graphene::texture_image::HeightImage
+import linalg::Vec3
+
+extern fn encore_str_from_buffer(bytes: u8*, count: usize) -> str
+extern fn encore_text_sha256(value: str) -> str
+#attr(safe)
+fn text(bytes: Vec[u8]) -> str {
+    unsafe {
+        ret encore_str_from_buffer(bytes.as_ptr(), bytes.len())
+    }
+}
+struct Header {
+    version: u32
+    kind: str
+    identity: str
+    source: str
+    revision: str
+    payload_sha256: str
+}
+struct LegacyTexture {
+    width: u32
+    height: u32
+}
+struct LegacyMaterialV2 {
+    base_color: Vec3
+    metallic: f32
+    roughness: f32
+    unlit: bool
+    double_sided: bool
+    base_color_texture: str
+    normal_texture: str
+    normal_scale: f32
+    normal_flip_y: bool
+    roughness_texture: str
+    metallic_texture: str
+    height_texture: str
+}
+fn package(version: u32, kind: str, payload: str) -> str {
+    let header = encode(Header {
+            version, kind, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "legacy", "", encore_text_sha256(payload)
+        }
+    ).unwrap_or(Vec[u8]::new())
+    let mut prefix = vec![71_u8, 65_u8, 83_u8, 49_u8]
+    for i in 0_usize..4_usize {
+        prefix.push(((header.len() as u32) >>((i as u32) * 8)) as u8)
+    }
+    ret text(prefix) + text(header) + payload
+}
+fn main() -> u32 {
+    let root = "/tmp/graphene-pbr-assets-" + perf_counter_ns().fmt()
+    if mkdir_all(root) != 0 {
+        ret 1
+    }
+    let samples = vec![0_u16, 1_u16, 32767_u16, 32768_u16, 65534_u16, 65535_u16]
+    if !save_native_height(root + "/Height.gtexture", "height", "r16", HeightImage { 3, 2, samples }) {
+        ret 2
+    }
+    match load_native_height(root + "/Height.gtexture", "r16") {
+        Ok(image) => {
+            if image.width != 3 || image.height != 2 || image.samples.len() != 6 {
+                ret 3
+            }
+            for i in 0_usize..6_usize {
+                if image.samples.get_unchecked_borrowed(i) != samples.get_unchecked_borrowed(i) {
+                    ret 4
+                }
+            }
+        }
+        Err(_) => {
+            ret 5
+        }
+    }
+    if load_native_height(root + "/Height.gtexture", "wrong revision").is_ok() {
+        ret 6
+    }
+    // The exact old texture metadata and RGBA byte order remain readable.
+    let metadata = encode(LegacyTexture { 2, 1 }).unwrap_or(Vec[u8]::new())
+    let mut prefix = Vec[u8]::new()
+    for i in 0_usize..4_usize {
+        prefix.push(((metadata.len() as u32) >>((i as u32) * 8)) as u8)
+    }
+    let payload = text(prefix) + text(metadata) + text(vec![1_u8, 2_u8, 3_u8, 255_u8, 254_u8, 253_u8, 252_u8, 128_u8])
+    if write_file(root + "/Legacy.gtexture", package(1, "texture", payload)) != 0 {
+        ret 7
+    }
+    match load_native_texture(root + "/Legacy.gtexture", "") {
+        Ok(image) => {
+            if image.width != 2 || image.height != 1 || image.pixels.get_unchecked_borrowed(0) != 4278387201_u32 || image.pixels.get_unchecked_borrowed(1) != 2164063742_u32 {
+                ret 8
+            }
+        }
+        Err(_) => {
+            ret 9
+        }
+    }
+    match load_native_height(root + "/Legacy.gtexture", "") {
+        Ok(image) => {
+            if image.samples.get_unchecked_borrowed(0) != 257_u16 || image.samples.get_unchecked_borrowed(1) != 65278_u16 {
+                ret 10
+            }
+        }
+        Err(_) => {
+            ret 11
+        }
+    }
+    let pbr = StandardMaterial::new(Vec3::new(0.2, 0.3, 0.4), 0.7, 0.25)
+    .with_ao_texture("Content/Materials/Stone/Textures/AO.gtexture").with_ao_strength(0.6_f32)
+    .with_height_texture("Content/Materials/Stone/Textures/Height.gtexture").with_displacement(DisplacementSettings {
+            true, 0.12_f32, 0.3_f32, 2
+        }
+    )
+    if !save_native_material(root + "/Pbr.gmaterial", "pbr", "", pbr) {
+        ret 12
+    }
+    match load_native_material(root + "/Pbr.gmaterial", "") {
+        Ok(decoded) => {
+            if decoded.ao_texture() != pbr.ao_texture() || decoded.ao_strength() != pbr.ao_strength() || decoded.height_texture() != pbr.height_texture() || !decoded.displacement().enabled || decoded.displacement().magnitude != 0.12_f32 || decoded.displacement().center != 0.3_f32 || decoded.displacement().quality != 2 {
+                ret 13
+            }
+        }
+        Err(_) => {
+            ret 14
+        }
+    }
+    let old = LegacyMaterialV2 {
+        Vec3::new(0.2, 0.3, 0.4), 0.7, 0.25, true, true, "Content/Textures/Base.png", "Content/Textures/Normal.png", 2.5, true, "Content/Textures/Rough.png", "Content/Textures/Metal.png", "Content/Textures/Height.png"
+    }
+    if write_file(root + "/Legacy.gmaterial", package(2, "material", text(encode(old).unwrap_or(Vec[u8]::new())))) != 0 {
+        ret 15
+    }
+    match load_native_material(root + "/Legacy.gmaterial", "") {
+        Ok(decoded) => {
+            if decoded.metallic() != 0.7 || decoded.normal_scale() != 2.5 || !decoded.normal_flip_y() || decoded.height_texture() != old.height_texture || decoded.roughness_texture() != old.roughness_texture || decoded.ao_texture() != "" || decoded.ao_strength() != 1 || decoded.displacement().enabled {
+                ret 16
+            }
+        }
+        Err(_) => {
+            ret 17
+        }
+    }
+    ret 0
+}

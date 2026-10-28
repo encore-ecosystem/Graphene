@@ -1,3 +1,6 @@
+import luma::Window
+
+import refrain::scene::json_value::parse_number
 //! Dockable graph controls. Drawing is Luma Canvas; mutations use Command Bus.
 import core::fmt::Debug
 import core::option::Option
@@ -464,7 +467,14 @@ impl for BlueprintEditor {
         ret Widget::icon_button(id, title, self.icons.get(icon)).with_classes("bp-button").with_tag("button")
     }
     fn entry(self: Self, id: str, value: str) -> Widget {
-        let editor = Widget::input(id, value).with_focus(self.field == id)
+        let shown = if self.field != id &&(id.contains("bp-axis-") || id.contains("bp-value-axis-") ||(id == "bp-value" &&(self.active_type == "f32" || self.active_type == "f64"))) {
+            match parse_number(value) {
+                Some(number) => luma::format_decimal(number, 4_u32) None => value
+            }
+        } else {
+            value
+        }
+        let editor = Widget::input(id, shown).with_focus(self.field == id).with_cursor(self.field_editor().cursor()).with_selection(self.field_editor().selection_start(), self.field_editor().selection_end())
         ret editor.with_classes("bp-input" +(if self.field == id && self.message != "" {
                     " invalid"
                 } else {
@@ -1070,6 +1080,22 @@ impl for BlueprintEditor {
         self.field_dirty = self.field != "bp-search" && self.field != "bp-asset-name" && self.field != "bp-browser-search"
     }
     /// Consumed events never reach viewport navigation or editor-global shortcuts.
+    pub fn input_with_text(self: mut Self, state: mut EditorState, event: Event, target: str, bounds: Rect, sheet: StyleSheet, layout: WidgetLayout, window: Window) -> bool {
+        if self.field != "" &&(self.field_editor().pointer_handles(event, target, self.field) || luma::text_edit_key(event)) && luma::editable_text_field(layout, self.field) {
+            let editor = self.field_editor()
+            if editor.pointer_handles(event, target, self.field) {
+                self.update_field(editor.pointer_input(event, layout, self.field, window)) ret true
+            }
+            if luma::text_edit_key(event) {
+                self.update_field(editor.key_input(event, window)) ret true
+            }
+        }
+        let consumed = self.input(state, event, target, bounds, sheet)
+        if consumed && event.kind() == event_pointer_down() && event.key() == 1 && self.field == target {
+            self.update_field(self.field_editor().with_cursor(0).pointer_input(event, layout, target, window))
+        }
+        ret consumed
+    }
     pub fn input(self: mut Self, state: mut EditorState, event: Event, target: str, bounds: Rect, sheet: StyleSheet) -> bool {
         self.viewport = bounds
         if self.reference_menu &&(bounds.width() <= 0 || bounds.height() <= 0) {

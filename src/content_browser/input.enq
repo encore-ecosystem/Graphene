@@ -9,7 +9,7 @@ import luma::{Event, Point, ReactiveUi, Rect, TextEditor, Widget, WidgetLayout, 
 
 import mod::files::{content_leaf, content_parent}
 import mod::model::{ContentAsset, ContentBrowser, content_contains, content_toggled}
-import mod::operations::{content_create, content_delete, content_duplicate, content_history, content_move_selection, content_rename, content_stem}
+import mod::operations::{content_create, content_create_instance, content_delete, content_duplicate, content_history, content_move_selection, content_rename, content_stem}
 import mod::view::{ContentIcons, content_popup}
 
 fn actions(widget: Widget) -> Vec[str] {
@@ -109,7 +109,7 @@ fn open(browser: mut ContentBrowser) ->() {
             browser.popup = "" browser.query_focused = false
             if asset.kind == "folder" {
                 browser.navigate(asset.path, true)
-            } elif asset.kind == "ui" || asset.kind == "blueprint" || asset.kind == "material-graph" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "texture" {
+            } elif asset.kind == "ui" || asset.kind == "blueprint" || asset.kind == "material-graph" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "material-instance" || asset.kind == "texture" {
                 browser.emit("open", asset.path)
             } else {
                 if !asset.builtin() && asset.bytes <= 1048576 {
@@ -158,6 +158,8 @@ pub fn content_action(browser: mut ContentBrowser, target: str, window: Window, 
         }
     } elif target == "cb-sort" {
         popup(browser, "sort", browser.popup_x, browser.popup_y)
+    } elif target == "cb-create-instance" {
+        content_create_instance(browser)
     } elif target == "cb-new-folder" || target == "cb-new-material" || target == "cb-new-blueprint" || target == "cb-new-particle" || target == "cb-new-ui" {
         if editable {
             popup(browser, if target == "cb-new-folder" {
@@ -262,11 +264,21 @@ pub fn content_action(browser: mut ContentBrowser, target: str, window: Window, 
         browser.descending = !browser.descending browser.popup = "" browser.rebuild()
     } elif target.contains("cb-sort-") {
         browser.sort = target.slice_bytes(8, target.byte_len() - 8) browser.popup = "" browser.rebuild()
+    } elif target == "cb-more-types" {
+        popup(browser, "filters", browser.popup_x, browser.popup_y)
+        browser.focus_id = if browser.popup == "filters" {
+            mod::view::content_overflow_focus(browser)
+        } else {
+            "cb-more-types"
+        }
+    } elif target.contains("cb-crumb-") {
+        browser.navigate(target.slice_bytes(9, target.byte_len() - 9), true)
     } elif target.contains("cb-source-") {
         browser.navigate(target.slice_bytes(10, target.byte_len() - 10), true)
     } elif target.contains("cb-expand-") {
         browser.expanded = content_toggled(browser.expanded, target.slice_bytes(10, target.byte_len() - 10))
     } elif target.contains("cb-filter-") {
+        browser.focus_id = target
         browser.clear_selection() browser.types = content_toggled(browser.types, target.slice_bytes(10, target.byte_len() - 10)) browser.rebuild()
     } elif target.contains("cb-search-") {
         let mut index = 0_usize for search in browser.searches {
@@ -308,7 +320,7 @@ pub fn content_input(browser: mut ContentBrowser, event: Event, target: str, lay
             if dx * dx + dy * dy >= 36 {
                 browser.pending_open = false browser.last_click = ""
                 let asset = browser.find(browser.pressed_path).unwrap_or(ContentAsset::new("", "", "", 0))
-                if editable &&(asset.kind == "mesh" || asset.kind == "sound" || asset.kind == "particle-system") {
+                if editable &&(asset.kind == "mesh" || asset.kind == "material" || asset.kind == "material-instance" || asset.kind == "sound" || asset.kind == "particle-system") {
                     browser.drag_request = true browser.emit("drag", browser.pressed_path) browser.dirty = true
                 }
             }
@@ -353,6 +365,9 @@ pub fn content_input(browser: mut ContentBrowser, event: Event, target: str, lay
     if browser.popup != "" {
         if event.kind() == event_key_down() {
             if event.key() == key_escape() {
+                if browser.popup == "filters" {
+                    browser.focus_id = "cb-more-types"
+                }
                 browser.popup = "" browser.error = "" browser.dirty = true ret true
             }
             if browser.popup == "preview" {
@@ -417,7 +432,7 @@ pub fn content_input(browser: mut ContentBrowser, event: Event, target: str, lay
             }
             let owner = browser.popup
             browser.popup = "" browser.error = "" browser.dirty = true
-            if (owner == "add" && target == "cb-add") ||(owner == "sort" && target == "cb-sort") {
+            if (owner == "add" && target == "cb-add") ||(owner == "sort" && target == "cb-sort") ||(owner == "filters" && target == "cb-more-types") {
                 ret true
             }
             if !inside {

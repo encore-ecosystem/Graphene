@@ -1,0 +1,20 @@
+#version 450
+layout(local_size_x=128) in;
+// SkinGpuCache's immutable 128-byte source ABI. Conversion runs once when a
+// character first needs displacement, without rebuilding a mesh on the CPU.
+layout(set=0,binding=0,std430) readonly buffer SkinSource {float data[];} skin;
+layout(set=0,binding=1,std430) readonly buffer SourceIds {uint data[];} ids;
+layout(set=0,binding=2,std430) writeonly buffer PatchVertices {float data[];} vertices;
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=ids.data.length())return;
+    uint source=ids.data[i],outBase=i*11u,inBase=source*32u;
+    for(uint k=0u;k<3u;++k) {
+        vertices.data[outBase+k]=skin.data[inBase+k];
+        vertices.data[outBase+k+3u]=skin.data[inBase+k+4u];
+    }
+    vertices.data[outBase+6u]=float(source);
+    vertices.data[outBase+7u]=1.;vertices.data[outBase+8u]=1.;
+    vertices.data[outBase+9u]=skin.data[inBase+12u];
+    vertices.data[outBase+10u]=skin.data[inBase+13u];
+}

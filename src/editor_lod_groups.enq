@@ -1,10 +1,13 @@
+import luma::Window
 //! Draft-based project LOD group editor. Apply publishes one validated catalog.
 import core::option::Option
 import core::vec::Vec
-import luma::{Widget, TextEditor, Event, CurveEditor, CurveAxes, Point, Rect, WidgetLayout, PreparedFrame, StyleSheet, horizontal, vertical, event_pointer_down, event_pointer_up, event_focus_lost, event_key_down, event_text_input, key_enter, key_escape, key_tab, key_backspace, key_delete, key_left, key_right, key_home, key_end}
+
+import luma::{CurveAxes, CurveEditor, Event, Point, PreparedFrame, Rect, StyleSheet, TextEditor, Widget, WidgetLayout, event_focus_lost, event_key_down, event_pointer_down, event_pointer_up, event_text_input, horizontal, key_backspace, key_delete, key_end, key_enter, key_escape, key_home, key_left, key_right, key_tab, vertical}
+
 import mod::autolod_settings::AutoLodSettings
 import mod::automation_transport::automation_capability_token
-import mod::lod_groups::{LodGroups, LodGroup, LodCurvePoint, LodInterpolation, trim_name}
+import mod::lod_groups::{LodCurvePoint, LodGroup, LodGroups, LodInterpolation, trim_name}
 import mod::project_assets::ImportedMeshAsset
 import mod::scene::json_value::parse_number
 
@@ -37,31 +40,9 @@ fn button(id: str, text: str, disabled: bool) -> Widget {
 // Compact display only. Focused editing keeps the original numeric text, so
 // merely focusing/committing a field does not quantize the stored curve.
 fn compact_number(value: str) -> str {
-    let number = parse_number(value).unwrap_or( - 1.0_f32)
-    if !(number >= 0 && number <= 1000000) {
-        ret value
+    ret match parse_number(value) {
+        Some(number) => luma::format_decimal(number, 4_u32) None => value
     }
-    let scaled =(number * 1000.0_f32 + 0.5_f32) as usize
-    if scaled == 0 && number > 0 {
-        ret value
-    }
-    let whole =(scaled / 1000_usize).fmt()
-    let remainder = scaled % 1000_usize
-    if remainder == 0 {
-        ret whole
-    }
-    let mut fraction =(if remainder < 10 {
-            "00"
-        } elif remainder < 100 {
-            "0"
-        } else {
-            ""
-        }
-    ) + remainder.fmt()
-    while fraction.byte_at(fraction.byte_len() - 1_usize) == 48 {
-        fraction = fraction.slice_bytes(0, fraction.byte_len() - 1_usize)
-    }
-    ret whole + "." + fraction
 }
 
 impl for LodGroupEditor {
@@ -273,6 +254,7 @@ impl for LodGroupEditor {
     pub fn sync(self: mut Self, project: str, assets: Vec[ImportedMeshAsset]) ->() {
         if project != self.project {
             self.project = project self.catalog = LodGroups::load(project)
+            self.asset_paths = Vec[str]::new()
             self.message = if self.catalog.error != "" {
                 self.catalog.error
             } elif LodGroups::needs_migration(project) {
@@ -289,14 +271,24 @@ impl for LodGroupEditor {
             }
             self.draft = self.catalog.independent()
         }
-        let mut changed = self.asset_paths.len() != assets.len()
+        let builtin_count = if project == "" {
+            0_usize
+        } else {
+            3_usize
+        }
+        let mut changed = self.asset_paths.len() != assets.len() + builtin_count
         for index in 0_usize..assets.len() {
-            if self.asset_paths.get(index).unwrap_or("") != assets.get_unchecked_borrowed(index).project_path() {
+            if self.asset_paths.get(index + builtin_count).unwrap_or("") != assets.get_unchecked_borrowed(index).project_path() {
                 changed = true
             }
         }
         if changed {
             self.asset_paths = Vec[str]::new()
+            if project != "" {
+                for name in vec!["Cube", "Plane", "Sphere"] {
+                    self.asset_paths.push(AutoLodSettings::builtin_path(project, name))
+                }
+            }
             for asset in assets {
                 self.asset_paths.push(asset.project_path())
             }
@@ -568,7 +560,15 @@ impl for LodGroupEditor {
         }
         ret false
     }
-    pub fn input(self: mut Self, event: Event, target: str) -> bool {
+    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout, window: Window) -> bool {
+        if self.field != "" &&(self.editor.pointer_handles(event, target, self.field) || luma::text_edit_key(event)) && luma::editable_text_field(layout, self.field) {
+            if self.editor.pointer_handles(event, target, self.field) {
+                self.editor = self.editor.pointer_input(event, layout, self.field, window) ret true
+            }
+            if luma::text_edit_key(event) {
+                self.editor = self.editor.key_input(event, window) ret true
+            }
+        }
         if event.kind() == event_key_down() && event.control() && self.field == "" &&(event.key() == 122 || event.key() == 121) {
             self.undo(event.key() == 121 || event.shift()) ret true
         }
@@ -609,7 +609,7 @@ impl for LodGroupEditor {
                     if !self.commit_field() {
                         ret true
                     }
-                    self.focus_field(field) ret true
+                    self.focus_field(field) self.editor = self.editor.with_cursor(0).pointer_input(event, layout, field, window) ret true
                 }
             }
             if self.field != "" && !self.commit_field() {
@@ -690,7 +690,7 @@ impl for LodGroupEditor {
                 }
             }
             ,
-        ).with_classes("g-lod-input").with_focus(self.field == id).with_selection(self.editor.selection_start(), self.editor.selection_end()).with_disabled(disabled)
+        ).with_classes("g-lod-input").with_focus(self.field == id).with_cursor(self.editor.cursor()).with_selection(self.editor.selection_start(), self.editor.selection_end()).with_disabled(disabled)
     }
     pub fn widget(self: Self) -> Widget {
         ret self.widget_width(940)

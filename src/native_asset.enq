@@ -1,14 +1,20 @@
 //! Graphene's versioned asset container. Encore binary encodes the schema;
 //! large RGBA8 texture samples remain a contiguous little-endian payload.
 import binary::{encode, decode}
+import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import mod::scene::primitive::MeshData
-import mod::standard_material::StandardMaterial
-import mod::texture_image::{TextureImage, texture_path_valid}
-import mod::virtual_geometry::VirtualGeometry
+
 import std::os::write_file_atomic
 import std::time::perf_counter_ns
+
+import linalg::Vec3
+
+import mod::material_schema::*
+import mod::scene::primitive::MeshData
+import mod::standard_material::StandardMaterial
+import mod::texture_image::{HeightImage, TextureImage, texture_path_valid}
+import mod::virtual_geometry::VirtualGeometry
 
 extern fn encore_text_sha256(contents: str) -> str
 extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
@@ -33,34 +39,66 @@ struct AssetPackage {
 extern fn graphene_audio_file_size(path: str) -> u64
 extern fn graphene_audio_range_hash(path: str, offset: u64, bytes: u64) -> str
 extern fn graphene_audio_package(path: str, header: str, payload: str) -> bool
-pub struct NativeSound { offset: u64 bytes: u64 identity: str source: str revision: str }
+pub struct NativeSound {
+    offset: u64
+    bytes: u64
+    identity: str
+    source: str
+    revision: str
+}
 
 /// Audio keeps the GAS1 envelope, but validates and hashes through bounded IO.
 #attr(safe)
 pub fn native_sound_header(path: str, verify: bool) -> Result[NativeSound, str] {
     let file = encore_file_open(path, false)
-    if file == 0_u64 { ret Result::Err("Unable to open sound asset") }
+    if file == 0_u64 {
+        ret Result::Err("Unable to open sound asset")
+    }
     let prefix = encore_file_read(file, 8_usize)
-    if prefix.byte_len() != 8 || prefix.slice_bytes(0, 4) != "GAS1" { encore_file_close(file) ret Result::Err("Invalid sound signature") }
-    let n = (prefix.byte_at(4) as usize) | ((prefix.byte_at(5) as usize) << 8) | ((prefix.byte_at(6) as usize) << 16) | ((prefix.byte_at(7) as usize) << 24)
-    if n == 0 || n > 1048576 { encore_file_close(file) ret Result::Err("Invalid sound header size") }
+    if prefix.byte_len() != 8 || prefix.slice_bytes(0, 4) != "GAS1" {
+        encore_file_close(file) ret Result::Err("Invalid sound signature")
+    }
+    let n =(prefix.byte_at(4) as usize) |((prefix.byte_at(5) as usize) << 8) |((prefix.byte_at(6) as usize) << 16) |((prefix.byte_at(7) as usize) << 24)
+    if n == 0 || n > 1048576 {
+        encore_file_close(file) ret Result::Err("Invalid sound header size")
+    }
     let data = encore_file_read(file, n)
     let closed = encore_file_close(file)
-    if !closed || data.byte_len() != n { ret Result::Err("Truncated sound header") }
-    let h = match decode[AssetHeader](bytes(data)) { Ok(h) => h Err(_) => { ret Result::Err("Invalid sound header") } }
-    let offset = (n as u64) + 8_u64
+    if !closed || data.byte_len() != n {
+        ret Result::Err("Truncated sound header")
+    }
+    let h = match decode[AssetHeader](bytes(data)) {
+        Ok(h) => h Err(_) => {
+            ret Result::Err("Invalid sound header")
+        }
+    }
+    let offset =(n as u64) + 8_u64
     let size = graphene_audio_file_size(path)
-    if h.version != 1 || h.kind != "sound" || h.identity.byte_len() != 64 || h.payload_sha256.byte_len() != 64 || size <= offset || size - offset > 4294967295_u64 { ret Result::Err("Unsupported or invalid sound asset") }
-    if verify && graphene_audio_range_hash(path, offset, size - offset) != h.payload_sha256 { ret Result::Err("Sound checksum mismatch") }
+    if h.version != 1 || h.kind != "sound" || h.identity.byte_len() != 64 || h.payload_sha256.byte_len() != 64 || size <= offset || size - offset > 4294967295_u64 {
+        ret Result::Err("Unsupported or invalid sound asset")
+    }
+    if verify && graphene_audio_range_hash(path, offset, size - offset) != h.payload_sha256 {
+        ret Result::Err("Sound checksum mismatch")
+    }
     ret Result::Ok(NativeSound { offset, size - offset, h.identity, h.source, h.revision })
 }
 #attr(safe)
 pub fn save_native_sound(path: str, source: str, revision: str, prepared_wav: str) -> bool {
     let length = graphene_audio_file_size(prepared_wav)
-    if length < 44_u64 || length > 4294967295_u64 { ret false }
-    let identity = match native_sound_header(path, false) { Ok(h) => h.identity Err(_) => digest(source + ":" + perf_counter_ns().fmt()) }
-    let h = AssetHeader { 1_u32, "sound", identity, source, revision, graphene_audio_range_hash(prepared_wav, 0_u64, length) }
-    let encoded = match encode(h) { Ok(value) => byte_string(value) Err(_) => { ret false } }
+    if length < 44_u64 || length > 4294967295_u64 {
+        ret false
+    }
+    let identity = match native_sound_header(path, false) {
+        Ok(h) => h.identity Err(_) => digest(source + ":" + perf_counter_ns().fmt())
+    }
+    let h = AssetHeader {
+        1_u32, "sound", identity, source, revision, graphene_audio_range_hash(prepared_wav, 0_u64, length)
+    }
+    let encoded = match encode(h) {
+        Ok(value) => byte_string(value) Err(_) => {
+            ret false
+        }
+    }
     ret graphene_audio_package(path, encoded, prepared_wav)
 }
 pub struct NativeMesh {
@@ -137,7 +175,7 @@ fn read_package(path: str, kind: str) -> Result[AssetPackage, str] {
             ret Result::Err("Invalid asset header: " + error.message())
         }
     }
-    if header.version != 1 {
+    if header.version != 1 && !(header.kind == "material" &&(header.version == 2 || header.version == 3 || header.version == 4)) && !(header.kind == "texture" && header.version == 2) {
         ret Result::Err("Unsupported Graphene asset version")
     }
     if header.kind != kind {
@@ -153,6 +191,17 @@ fn read_package(path: str, kind: str) -> Result[AssetPackage, str] {
     ret Result::Ok(AssetPackage { header, payload })
 }
 fn write_package(path: str, kind: str, source: str, revision: str, payload: str) -> bool {
+    ret write_package_version(path, kind, source, revision, payload, if kind == "material" {
+            3_u32
+        } elif kind == "texture" {
+            2_u32
+        } else {
+            1_u32
+        }
+        ,
+    )
+}
+fn write_package_version(path: str, kind: str, source: str, revision: str, payload: str, version: u32) -> bool {
     if payload.byte_len() > 269000000 {
         ret false
     }
@@ -162,7 +211,10 @@ fn write_package(path: str, kind: str, source: str, revision: str, payload: str)
         Result::Ok(previous) => previous.header.identity
         Result::Err(_) => digest(source + ":" + perf_counter_ns().fmt())
     }
-    let header = AssetHeader { 1, kind, identity, source, revision, digest(payload) }
+    let header = AssetHeader {
+        version
+        , kind, identity, source, revision, digest(payload)
+    }
     let encoded = match encode(header) {
         Result::Ok(value) => value
         Result::Err(_) => {
@@ -291,24 +343,82 @@ fn material_valid(material: StandardMaterial) -> bool {
     finite(material.metallic()) && material.metallic() >= 0 && material.metallic() <= 1 &&
     finite(material.roughness()) && material.roughness() >= 0 && material.roughness() <= 1 &&
     finite(material.normal_scale()) && material.normal_scale() >= 0 && material.normal_scale() <= 4 &&
-    texture_path_valid(material.base_color_texture()) && texture_path_valid(material.normal_texture())
+    material.displacement().valid() && finite(material.ao_strength()) && material.ao_strength() >= 0 && material.ao_strength() <= 1 && texture_path_valid(material.ao_texture()) &&
+    texture_path_valid(material.base_color_texture()) && texture_path_valid(material.normal_texture()) && texture_path_valid(material.roughness_texture()) && texture_path_valid(material.metallic_texture()) && texture_path_valid(material.height_texture())
 }
+/// Saves PBR imports as instances. Editing a resolved PBR value never flattens its parent graph.
 pub fn save_native_material(path: str, source: str, revision: str, material: StandardMaterial) -> bool {
     if !material_valid(material) {
         ret false
     }
-    let payload = match encode(material) {
-        Result::Ok(value) => value
-        Result::Err(_) => {
-            ret false
+    let mut instance = standard_pbr_instance(material)
+    match read_native_material_asset(path) {
+        Ok(asset) => {
+            match asset {
+                Definition(_) => {
+                    ret false
+                }
+                Instance(previous) => {
+                    instance = previous
+                    match resolve_native_material(material_project_root(path), path, "") {
+                        Ok(resolved) => {
+                            for incoming in standard_pbr_parameters(material) {
+                                for parameter in resolved.definition.parameters {
+                                    if parameter.binding == incoming.binding && parameter.value.kind == incoming.value.kind {
+                                        let mut current = parameter.value
+                                        for value in resolved.values {
+                                            if value.parameter == parameter.id {
+                                                current = value.value
+                                            }
+                                        }
+                                        if !current.same(incoming.value) {
+                                            instance = instance.set(parameter.id, incoming.value, true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            ret false
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {
         }
     }
-    ret write_package(path, "material", source, revision, byte_string(payload))
+    ret save_native_material_asset(path, source, revision, MaterialAsset::Instance(instance))
 }
-pub fn load_native_material(path: str, revision: str) -> Result[StandardMaterial, str] {
+/// Reads legacy payloads without rewriting files or changing their identity.
+fn load_legacy_material(path: str, revision: str) -> Result[StandardMaterial, str] {
     let package = read_package(path, "material")?
     if !revision_matches(package.header, revision) {
         ret Result::Err("Material source changed; reimport required")
+    }
+    if package.header.version == 1 {
+        let old = match decode[LegacyMaterial](bytes(package.payload)) {
+            Ok(old) => old Err(_) => {
+                ret Result::Err("Invalid legacy material")
+            }
+        }
+        let material = StandardMaterial::new(old.base_color, old.metallic, old.roughness).with_unlit_value(old.unlit).with_double_sided_value(old.double_sided).with_base_color_texture(old.base_color_texture).with_normal_texture(old.normal_texture).with_normal_scale(old.normal_scale).with_normal_flip_y(old.normal_flip_y)
+        if !material_valid(material) {
+            ret Result::Err("Invalid legacy material values")
+        }
+        ret Result::Ok(material)
+    }
+    if package.header.version == 2 {
+        let old = match decode[LegacyMaterialV2](bytes(package.payload)) {
+            Ok(old) => old Err(_) => {
+                ret Result::Err("Invalid legacy material")
+            }
+        }
+        let material = StandardMaterial::new(old.base_color, old.metallic, old.roughness).with_unlit_value(old.unlit).with_double_sided_value(old.double_sided).with_base_color_texture(old.base_color_texture).with_normal_texture(old.normal_texture).with_normal_scale(old.normal_scale).with_normal_flip_y(old.normal_flip_y).with_roughness_texture(old.roughness_texture).with_metallic_texture(old.metallic_texture).with_height_texture(old.height_texture)
+        if !material_valid(material) {
+            ret Result::Err("Invalid legacy material values")
+        }
+        ret Result::Ok(material)
     }
     match decode[StandardMaterial](bytes(package.payload)) {
         Result::Ok(material) => {
@@ -322,19 +432,167 @@ pub fn load_native_material(path: str, revision: str) -> Result[StandardMaterial
         }
     }
 }
+/// Typed authoring data is shared by editors, runtime, imports and the thumbnail queue.
+pub fn save_native_material_asset(path: str, source: str, revision: str, asset: MaterialAsset) -> bool {
+    if path == standard_pbr_parent() {
+        ret false
+    }
+    if !material_asset_valid(asset) {
+        ret false
+    }
+    let payload = match encode(asset) {
+        Ok(value) => byte_string(value) Err(_) => {
+            ret false
+        }
+    }
+    ret write_package_version(path, "material", source, revision, payload, 4_u32)
+}
+/// Engine packaging uses the same native schema; editor saves reject the builtin path.
+pub fn save_builtin_pbr_material(path: str) -> bool {
+    let payload = match encode(MaterialAsset::Definition(standard_pbr_definition())) {
+        Ok(value) => byte_string(value) Err(_) => {
+            ret false
+        }
+    }
+    ret write_package_version(path, "material", "", "", payload, 4_u32)
+}
+pub fn material_asset_valid(asset: MaterialAsset) -> bool {
+    match asset {
+        Definition(definition) => {
+            ret definition.valid() && material_valid(definition.surface)
+        }
+        Instance(instance) => {
+            if !material_parent_valid(instance.parent) || instance.overrides.len() > 1024 {
+                ret false
+            }
+            let mut ids = Vec[u64]::new()
+            for value in instance.overrides {
+                if value.parameter == 0 || !value.value.valid() {
+                    ret false
+                }
+                for id in ids {
+                    if id == value.parameter {
+                        ret false
+                    }
+                }
+                ids.push(value.parameter)
+            }
+            ret true
+        }
+    }
+}
+pub fn read_native_material_asset(path: str) -> Result[MaterialAsset, str] {
+    if path == standard_pbr_parent() {
+        ret Result::Ok(MaterialAsset::Definition(standard_pbr_definition()))
+    }
+    let package = read_package(path, "material")?
+    if package.header.version < 4 {
+        ret Result::Ok(MaterialAsset::Instance(standard_pbr_instance(load_legacy_material(path, "")?)))
+    }
+    let asset = match decode[MaterialAsset](bytes(package.payload)) {
+        Ok(value) => value Err(error) => {
+            ret Result::Err("Invalid native material authoring data: " + error.message())
+        }
+    }
+    if !material_asset_valid(asset) {
+        ret Result::Err("Invalid material definition or instance")
+    }
+    ret Result::Ok(asset)
+}
+pub fn material_project_root(path: str) -> str {
+    if path.byte_len() >= 8 && path.slice_bytes(0, 8) == "Content/" {
+        ret "."
+    }
+    for i in 0_usize..path.byte_len() {
+        if i + 9 <= path.byte_len() && path.slice_bytes(i, 9) == "/Content/" {
+            ret path.slice_bytes(0, i)
+        }
+    }
+    ret "."
+}
+pub fn resolve_native_material(project: str, path: str, revision: str) -> Result[ResolvedMaterial, str] {
+    ret resolve_material_chain(project, path, revision, Vec[str]::new())
+}
+fn resolve_material_chain(project: str, path: str, revision: str, visited: Vec[str]) -> Result[ResolvedMaterial, str] {
+    if visited.len() >= 32 {
+        ret Result::Err("Material parent chain exceeds 32 levels")
+    }
+    let absolute = if path == standard_pbr_parent() {
+        path
+    } elif path.byte_len() >= 8 && path.slice_bytes(0, 8) == "Content/" {
+        project + "/" + path
+    } else {
+        path
+    }
+    for previous in visited {
+        if previous == absolute {
+            ret Result::Err("Material parent cycle: " + path)
+        }
+    }
+    let mut chain = Vec[str]::new()
+    for previous in visited {
+        chain.push(previous)
+    }
+    chain.push(absolute)
+    let key = if absolute == standard_pbr_parent() {
+        "builtin-standard-pbr-v1"
+    } else {
+        let package = read_package(absolute, "material")?
+        if !revision_matches(package.header, revision) {
+            ret Result::Err("Material source changed; reimport required")
+        }
+        package.header.identity + package.header.payload_sha256
+    }
+    match read_native_material_asset(absolute)? {
+        Definition(definition) => {
+            let mut values = Vec[MaterialOverride]::new()
+            let mut surface = definition.surface
+            for parameter in definition.parameters {
+                values.push(MaterialOverride { parameter.id, parameter.value, true })
+                surface = material_surface_value(surface, parameter.binding, parameter.value)
+            }
+            if !material_valid(surface) {
+                ret Result::Err("Invalid effective surface settings")
+            }
+            ret Result::Ok(ResolvedMaterial {
+                    path, definition, values, surface, vec![path], Vec[str]::new(), digest(key)
+                }
+            )
+        }
+        Instance(instance) => {
+            if !material_parent_valid(instance.parent) {
+                ret Result::Err("Invalid material parent path")
+            }
+            let mut resolved = resolve_material_chain(project, instance.parent, "", chain)?
+            resolved = apply_material_instance(resolved, instance)?
+            resolved.dependencies.push(path)
+            resolved.fingerprint = digest(key + resolved.fingerprint)
+            ret Result::Ok(resolved)
+        }
+    }
+}
+pub fn load_native_material(path: str, revision: str) -> Result[StandardMaterial, str] {
+    ret Result::Ok(resolve_native_material(material_project_root(path), path, revision)?.surface)
+}
 struct TextureMetadata {
     width: u32
     height: u32
 }
+struct TextureMetadataV2 {
+    width: u32
+    height: u32
+    format: str
+}
+struct NativeTextureSamples {
+    width: u32
+    height: u32
+    format: str
+    samples: str
+}
 extern fn graphene_asset_pixel_bytes(pointer: u32*, count: usize) -> str
-pub fn save_native_texture(path: str, source: str, revision: str, image: TextureImage) -> bool {
-    if image.width == 0 || image.height == 0 || image.width > 8192 || image.height > 8192 ||
-    image.pixels.len() !=(image.width as usize) *(image.height as usize) {
-        ret false
-    }
-    let metadata = match encode(TextureMetadata { image.width, image.height }) {
-        Result::Ok(value) => value
-        Result::Err(_) => {
+fn save_texture_samples(path: str, source: str, revision: str, width: u32, height: u32, format: str, samples: str) -> bool {
+    let metadata = match encode(TextureMetadataV2 { width, height, format }) {
+        Ok(v) => v Err(_) => {
             ret false
         }
     }
@@ -342,12 +600,28 @@ pub fn save_native_texture(path: str, source: str, revision: str, image: Texture
     for shift in 0_usize..4_usize {
         prefix.push(((metadata.len() as u32) >>((shift as u32) * 8)) as u8)
     }
+    ret write_package(path, "texture", source, revision, byte_string(prefix) + byte_string(metadata) + samples)
+}
+pub fn save_native_texture(path: str, source: str, revision: str, image: TextureImage) -> bool {
+    if image.width == 0 || image.height == 0 || image.width > 8192 || image.height > 8192 || image.pixels.len() !=(image.width as usize) *(image.height as usize) {
+        ret false
+    }
     let samples = unsafe {
         graphene_asset_pixel_bytes(image.pixels.as_ptr(), image.pixels.len())
     }
-    ret write_package(path, "texture", source, revision, byte_string(prefix) + byte_string(metadata) + samples)
+    ret save_texture_samples(path, source, revision, image.width, image.height, "rgba8", samples)
 }
-pub fn load_native_texture(path: str, revision: str) -> Result[TextureImage, str] {
+pub fn save_native_height(path: str, source: str, revision: str, image: HeightImage) -> bool {
+    if !image.valid() {
+        ret false
+    }
+    let mut raw = Vec[u8]::with_capacity(image.samples.len() * 2)
+    for sample in image.samples {
+        raw.push(sample as u8) raw.push((sample >> 8) as u8)
+    }
+    ret save_texture_samples(path, source, revision, image.width, image.height, "r16", byte_string(raw))
+}
+fn read_texture_samples(path: str, revision: str) -> Result[NativeTextureSamples, str] {
     let package = read_package(path, "texture")?
     if !revision_matches(package.header, revision) {
         ret Result::Err("Texture source changed; reimport required")
@@ -356,31 +630,76 @@ pub fn load_native_texture(path: str, revision: str) -> Result[TextureImage, str
     if data.byte_len() < 4 {
         ret Result::Err("Truncated texture")
     }
-    let length =(data.byte_at(0) as usize) |((data.byte_at(1) as usize) << 8) |
-    ((data.byte_at(2) as usize) << 16) |((data.byte_at(3) as usize) << 24)
+    let length =(data.byte_at(0) as usize) |((data.byte_at(1) as usize) << 8) |((data.byte_at(2) as usize) << 16) |((data.byte_at(3) as usize) << 24)
     if length > 1048576 || length > data.byte_len() - 4 {
         ret Result::Err("Invalid texture metadata length")
     }
-    let metadata = match decode[TextureMetadata](bytes(data.slice_bytes(4, length))) {
-        Result::Ok(value) => value
-        Result::Err(error) => {
-            ret Result::Err("Invalid texture metadata: " + error.message())
+    let mut width = 0_u32 let mut height = 0_u32 let mut format = "rgba8"
+    if package.header.version == 1 {
+        let m = match decode[TextureMetadata](bytes(data.slice_bytes(4, length))) {
+            Ok(v) => v Err(_) => {
+                ret Result::Err("Invalid legacy texture metadata")
+            }
         }
+        width = m.width height = m.height
+    } else {
+        let m = match decode[TextureMetadataV2](bytes(data.slice_bytes(4, length))) {
+            Ok(v) => v Err(_) => {
+                ret Result::Err("Invalid texture metadata")
+            }
+        }
+        width = m.width height = m.height format = m.format
     }
-    if metadata.width == 0 || metadata.height == 0 || metadata.width > 8192 || metadata.height > 8192 {
-        ret Result::Err("Invalid texture dimensions")
+    if width == 0 || height == 0 || width > 8192 || height > 8192 ||(format != "rgba8" && format != "r16") {
+        ret Result::Err("Invalid texture dimensions or format")
     }
-    let count =(metadata.width as usize) *(metadata.height as usize)
-    if data.byte_len() - 4 - length != count * 4 {
+    let count =(width as usize) *(height as usize)
+    let size = count * if format == "r16" {
+        2_usize
+    } else {
+        4_usize
+    }
+    if data.byte_len() - 4 - length != size {
         ret Result::Err("Invalid texture sample count")
     }
+    ret Result::Ok(NativeTextureSamples {
+            width, height, format, data.slice_bytes(4 + length, size)
+        }
+    )
+}
+pub fn load_native_height(path: str, revision: str) -> Result[HeightImage, str] {
+    let image = read_texture_samples(path, revision)?
+    let mut samples = Vec[u16]::with_capacity((image.width as usize) *(image.height as usize))
+    let step = if image.format == "r16" {
+        2_usize
+    } else {
+        4_usize
+    }
+    for i in 0_usize..(image.width as usize) *(image.height as usize) {
+        let low = image.samples.byte_at(i * step) as u16
+        samples.push(if step == 2 {
+                low |((image.samples.byte_at(i * step + 1) as u16) << 8)
+            } else {
+                low * 257_u16
+            }
+        )
+    }
+    ret Result::Ok(HeightImage { image.width, image.height, samples })
+}
+pub fn load_native_texture(path: str, revision: str) -> Result[TextureImage, str] {
+    let image = read_texture_samples(path, revision)?
+    let count =(image.width as usize) *(image.height as usize)
     let mut pixels = Vec[u32]::with_capacity(count)
     for index in 0_usize..count {
-        let offset = 4 + length + index * 4
-        pixels.push((data.byte_at(offset) as u32) |((data.byte_at(offset + 1) as u32) << 8) |
-            ((data.byte_at(offset + 2) as u32) << 16) |((data.byte_at(offset + 3) as u32) << 24))
+        if image.format == "r16" {
+            let value = image.samples.byte_at(index * 2 + 1) as u32
+            pixels.push(4278190080_u32 | value |(value << 8) |(value << 16))
+        } else {
+            let offset = index * 4
+            pixels.push((image.samples.byte_at(offset) as u32) |((image.samples.byte_at(offset + 1) as u32) << 8) |((image.samples.byte_at(offset + 2) as u32) << 16) |((image.samples.byte_at(offset + 3) as u32) << 24))
+        }
     }
-    ret Result::Ok(TextureImage { metadata.width, metadata.height, pixels })
+    ret Result::Ok(TextureImage { image.width, image.height, pixels })
 }
 
 /// Versioned immutable environment/material resources use the same checked asset envelope.
@@ -402,28 +721,249 @@ pub fn load_environment_payload(path: str, kind: str, revision: str) -> Result[s
 }
 
 /// VFX resources share the checked GAS1 envelope; source paths are provenance only.
-pub fn save_vfx_payload(path: str,kind: str,source: str,revision: str,payload: str) -> bool {
-    if kind!="particle-system" && kind!="particle-emitter" && kind!="particle-module" && kind!="particle-parameters" && kind!="particle-cache" {ret false}
-    ret write_package(path,kind,source,revision,payload)
+pub fn save_vfx_payload(path: str, kind: str, source: str, revision: str, payload: str) -> bool {
+    if kind != "particle-system" && kind != "particle-emitter" && kind != "particle-module" && kind != "particle-parameters" && kind != "particle-cache" {
+        ret false
+    }
+    ret write_package(path, kind, source, revision, payload)
 }
-pub fn load_vfx_payload(path: str,kind: str,revision: str) -> Result[str,str] {
-    if kind!="particle-system" && kind!="particle-emitter" && kind!="particle-module" && kind!="particle-parameters" && kind!="particle-cache" {ret Result::Err("Invalid VFX resource kind")}
-    let package=read_package(path,kind)?
-    if !revision_matches(package.header,revision) {ret Result::Err("VFX resource needs reimport")}
+pub fn load_vfx_payload(path: str, kind: str, revision: str) -> Result[str, str] {
+    if kind != "particle-system" && kind != "particle-emitter" && kind != "particle-module" && kind != "particle-parameters" && kind != "particle-cache" {
+        ret Result::Err("Invalid VFX resource kind")
+    }
+    let package = read_package(path, kind)?
+    if !revision_matches(package.header, revision) {
+        ret Result::Err("VFX resource needs reimport")
+    }
     ret Result::Ok(package.payload)
 }
 
 /// Animation resources use the same bounded, checksummed GAS1 container.
-pub fn save_animation_payload(path: str,kind: str,source: str,revision: str,payload: str) -> bool {
-    if !animation_asset_kind(kind) {ret false}
-    ret write_package(path,kind,source,revision,payload)
+pub fn save_animation_payload(path: str, kind: str, source: str, revision: str, payload: str) -> bool {
+    if !animation_asset_kind(kind) {
+        ret false
+    }
+    ret write_package(path, kind, source, revision, payload)
 }
-pub fn load_animation_payload(path: str,kind: str,revision: str) -> Result[str,str] {
-    if !animation_asset_kind(kind) {ret Result::Err("Invalid animation resource kind")}
-    let package=read_package(path,kind)?
-    if !revision_matches(package.header,revision){ret Result::Err("Animation source changed; reimport required")}
+pub fn load_animation_payload(path: str, kind: str, revision: str) -> Result[str, str] {
+    if !animation_asset_kind(kind) {
+        ret Result::Err("Invalid animation resource kind")
+    }
+    let package = read_package(path, kind)?
+    if !revision_matches(package.header, revision) {
+        ret Result::Err("Animation source changed; reimport required")
+    }
     ret Result::Ok(package.payload)
 }
 fn animation_asset_kind(kind: str) -> bool {
-    ret kind=="character" || kind=="skeleton" || kind=="skeletal-mesh" || kind=="animation-clip" || kind=="animation-graph" || kind=="blend-space" || kind=="animation-montage" || kind=="control-rig" || kind=="retarget-profile" || kind=="pose-search" || kind=="sequence"
+    ret kind == "character" || kind == "skeleton" || kind == "skeletal-mesh" || kind == "animation-clip" || kind == "animation-graph" || kind == "blend-space" || kind == "animation-montage" || kind == "control-rig" || kind == "retarget-profile" || kind == "pose-search" || kind == "sequence"
+}
+
+// Payload layout used by GAS1 material version 1; other asset kinds keep their schema.
+struct LegacyMaterial {
+    base_color: Vec3
+    metallic: f32
+    roughness: f32
+    unlit: bool
+    double_sided: bool
+    base_color_texture: str
+    normal_texture: str
+    normal_scale: f32
+    normal_flip_y: bool
+}
+
+// Binary positional layout written before AO/displacement were introduced.
+struct LegacyMaterialV2 {
+    base_color: Vec3
+    metallic: f32
+    roughness: f32
+    unlit: bool
+    double_sided: bool
+    base_color_texture: str
+    normal_texture: str
+    normal_scale: f32
+    normal_flip_y: bool
+    roughness_texture: str
+    metallic_texture: str
+    height_texture: str
+}
+
+/// Reads native sample rows with at most 32 KiB of source pixels resident.
+/// Thumbnail preparation never materializes an 8K map or the whole GAS1 payload.
+#attr(safe)
+fn sampled_texture_stream(file: u64, path: str, limit: u32) -> Result[NativeTextureSamples, str] {
+    let prefix = encore_file_read(file, 8_usize)
+    if prefix.byte_len() != 8 || prefix.slice_bytes(0, 4) != "GAS1" {
+        ret Result::Err("Invalid texture signature")
+    }
+    let length = little_word(prefix, 4_usize) as usize
+    if length == 0 || length > 1048576 {
+        ret Result::Err("Invalid texture header size")
+    }
+    let header_bytes = encore_file_read(file, length)
+    let header = match decode[AssetHeader](bytes(header_bytes)) {
+        Ok(v) => v Err(_) => {
+            ret Result::Err("Invalid texture header")
+        }
+    }
+    if header.kind != "texture" ||(header.version != 1 && header.version != 2) || header.identity.byte_len() != 64 {
+        ret Result::Err("Unsupported texture asset")
+    }
+    let size_prefix = encore_file_read(file, 4_usize)
+    if size_prefix.byte_len() != 4 {
+        ret Result::Err("Truncated texture metadata prefix")
+    }
+    let metadata_length = little_word(size_prefix, 0_usize) as usize
+    if metadata_length == 0 || metadata_length > 1048576 {
+        ret Result::Err("Invalid texture metadata size")
+    }
+    let metadata_bytes = encore_file_read(file, metadata_length)
+    let metadata = if header.version == 1 {
+        let m = match decode[TextureMetadata](bytes(metadata_bytes)) {
+            Ok(v) => v Err(_) => {
+                ret Result::Err("Invalid legacy texture metadata")
+            }
+        }
+        TextureMetadataV2 { m.width, m.height, "rgba8" }
+    } else {
+        match decode[TextureMetadataV2](bytes(metadata_bytes)) {
+            Ok(v) => v Err(_) => {
+                ret Result::Err("Invalid texture metadata")
+            }
+        }
+    }
+    if metadata.width == 0 || metadata.height == 0 || metadata.width > 8192 || metadata.height > 8192 ||(metadata.format != "rgba8" && metadata.format != "r16") {
+        ret Result::Err("Invalid texture sample layout")
+    }
+    let stride = if metadata.format == "r16" {
+        2_usize
+    } else {
+        4_usize
+    }
+    let count =(metadata.width as usize) *(metadata.height as usize)
+    let payload_size = 4_usize + metadata_length + count * stride
+    let offset = 8_usize + length
+    if graphene_audio_file_size(path) !=(offset + payload_size) as u64 || graphene_audio_range_hash(path, offset as u64, payload_size as u64) != header.payload_sha256 {
+        ret Result::Err("Texture checksum or size mismatch")
+    }
+    let width = if metadata.width > limit {
+        limit
+    } else {
+        metadata.width
+    }
+    let height = if metadata.height > limit {
+        limit
+    } else {
+        metadata.height
+    }
+    let mut output = Vec[u8]::with_capacity((width as usize) *(height as usize) * stride)
+    let mut next_y = 0_u32
+    for y in 0_usize..metadata.height as usize {
+        let row = encore_file_read(file,(metadata.width as usize) * stride)
+        if row.byte_len() !=(metadata.width as usize) * stride {
+            ret Result::Err("Truncated texture samples")
+        }
+        if next_y < height && y ==(next_y as usize) *(metadata.height as usize) /(height as usize) {
+            for x in 0_usize..width as usize {
+                let source =((x *(metadata.width as usize) /(width as usize)) as usize) * stride
+                for byte in 0_usize..stride {
+                    output.push(row.byte_at(source + byte))
+                }
+            }
+            next_y += 1_u32
+        }
+    }
+    if next_y != height {
+        ret Result::Err("Incomplete sampled texture")
+    }
+    ret Result::Ok(NativeTextureSamples { width, height, metadata.format, byte_string(output) })
+}
+fn little_word(data: str, offset: usize) -> u32 {
+    ret(data.byte_at(offset) as u32) |((data.byte_at(offset + 1) as u32) << 8_u32) |((data.byte_at(offset + 2) as u32) << 16_u32) |((data.byte_at(offset + 3) as u32) << 24_u32)
+}
+#attr(safe)
+fn sampled_texture(path: str, limit: u32) -> Result[NativeTextureSamples, str] {
+    if limit == 0 || limit > 1024 {
+        ret Result::Err("Invalid texture preview limit")
+    }
+    let file = encore_file_open(path, false)
+    if file == 0 {
+        ret Result::Err("Unable to open thumbnail texture")
+    }
+    let result = sampled_texture_stream(file, path, limit)
+    let closed = encore_file_close(file)
+    if !closed {
+        ret Result::Err("Unable to close thumbnail texture")
+    }
+    ret result
+}
+pub fn load_native_texture_preview(path: str, limit: u32) -> Result[TextureImage, str] {
+    let sample = sampled_texture(path, limit)?
+    let mut pixels = Vec[u32]::with_capacity((sample.width as usize) *(sample.height as usize))
+    for i in 0_usize..(sample.width as usize) *(sample.height as usize) {
+        if sample.format == "r16" {
+            let value = sample.samples.byte_at(i * 2 + 1) as u32
+            pixels.push(4278190080_u32 | value |(value << 8_u32) |(value << 16_u32))
+        } else {
+            pixels.push(little_word(sample.samples, i * 4))
+        }
+    }
+    ret Result::Ok(TextureImage { sample.width, sample.height, pixels })
+}
+pub fn load_native_height_preview(path: str, limit: u32) -> Result[HeightImage, str] {
+    let sample = sampled_texture(path, limit)?
+    let mut values = Vec[u16]::with_capacity((sample.width as usize) *(sample.height as usize))
+    for i in 0_usize..(sample.width as usize) *(sample.height as usize) {
+        values.push(if sample.format == "r16" {
+                (sample.samples.byte_at(i * 2) as u16) |((sample.samples.byte_at(i * 2 + 1) as u16) << 8_u16)
+            } else {
+                (sample.samples.byte_at(i * 4) as u16) * 257_u16
+            }
+        )
+    }
+    ret Result::Ok(HeightImage { sample.width, sample.height, values })
+}
+
+/// Resolves the immediate parent once for an editor session, retaining cycle checks.
+pub fn resolve_material_parent(project: str, path: str, instance: MaterialInstance) -> Result[ResolvedMaterial, str] {
+    if !material_parent_valid(instance.parent) {
+        ret Result::Err("Invalid material parent")
+    }
+    ret resolve_material_chain(project, instance.parent, "", vec![project + "/" + path])
+}
+/// Applies an unsaved editor instance through the exact runtime inheritance rules.
+pub fn resolve_material_instance(project: str, path: str, instance: MaterialInstance) -> Result[ResolvedMaterial, str] {
+    ret apply_material_instance(resolve_material_parent(project, path, instance)?, instance)
+}
+/// Value edits reuse a resolved parent without disk IO or shader recompilation.
+pub fn apply_material_instance(parent: ResolvedMaterial, instance: MaterialInstance) -> Result[ResolvedMaterial, str] {
+    let mut resolved = parent.snapshot()
+    for value in instance.overrides {
+        if value.enabled {
+            match resolved.definition.parameter(value.parameter) {
+                Some(parameter) => {
+                    if parameter.value.kind != value.value.kind {
+                        resolved.diagnostics.push("Inactive override: incompatible type for " + parameter.name)
+                    } else {
+                        if !material_binding_valid(parameter.binding, value.value) {
+                            ret Result::Err("Invalid value for " + parameter.name)
+                        }
+                        for i in 0_usize..resolved.values.len() {
+                            if resolved.values.get_unchecked_borrowed(i).parameter == value.parameter {
+                                resolved.values.set(i, value)
+                            }
+                        }
+                        resolved.surface = material_surface_value(resolved.surface, parameter.binding, value.value)
+                    }
+                }
+                None => {
+                    resolved.diagnostics.push("Inactive override: parameter " + value.parameter.fmt() + " no longer exists")
+                }
+            }
+        }
+    }
+    if !material_valid(resolved.surface) {
+        ret Result::Err("Invalid effective surface settings")
+    }
+    ret Result::Ok(resolved)
 }

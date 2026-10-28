@@ -1,0 +1,914 @@
+//! Retained GenAI controls and asynchronous API state; no scene mutation until Apply.
+import core::option::Option
+import core::vec::Vec
+
+import std::os::{file_exists, read_file}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
+import json::{Json, field, stringify}
+import luma::{Event, PreparedFrame, ReactiveUi, TextEditor, Widget, WidgetLayout, Window, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_text_input, horizontal, key_backspace, key_delete, key_end, key_enter, key_escape, key_home, key_left, key_right, key_tab, vertical}
+
+import mod::client::{Transfer, reference_preview, transfer, upload}
+import mod::importer::{GeneratedMap, PreparedMaterial, material_source, prepare_material, validate_maps}
+import mod::model::{Provider, compatible, id_valid, list, manifest_valid, number, provider_valid, providers_from_settings, roles, save_settings, settings_path, string, text, value}
+import mod::preview::GenAiPreview
+import refrain::automation_transport::automation_capability_token
+import refrain::displacement::patterns::DisplacementBudget
+
+pub struct GenAiEditor {
+    providers: Vec[Provider]
+    active: usize
+    models: Vec[Json]
+    model: usize
+    project: str
+    prompt: str
+    reference: str
+    reference_image: str
+    reference_dirty: bool
+    name: str
+    seed: str
+    quality: usize
+    resolution: usize
+    image_mode: bool
+    tileable: bool
+    worker: Option[JoinHandle[Transfer]]
+    importer: Option[JoinHandle[PreparedMaterial]]
+    manifest: Json
+    maps: Vec[GeneratedMap]
+    preview: Option[GenAiPreview<H>]
+    preview_pending: bool
+    preview_mode: u32
+    plane: bool
+    tiled: bool
+    job: str
+    idem: str
+    pending: Json
+    state: str
+    progress: str
+    last_poll: u64
+    connected: bool
+    cancel_requested: bool
+    imported: str
+    publication: Option[PreparedMaterial]
+    apply: bool
+    focused: str
+    editor: TextEditor
+    focus: str
+    hovered: str
+    pressed: str
+    owns_focus: bool
+    dirty: bool
+    message: str
+    target_available: bool
+    preview_limit: f32
+    budget: Option[DisplacementBudget<H>]
+    displaced: bool
+    reveal_pending: bool
+}
+fn matches_null(j: Json) -> bool {
+    ret match j {
+        Json::Null => true _ => false
+    }
+}
+fn uint32(s: str) -> bool {
+    if s.byte_len() == 0 || s.byte_len() > 10 {
+        ret false
+    }
+    let mut n = 0_u64
+    for i in 0_usize..s.byte_len() {
+        let c = s.byte_at(i) if c < 48 || c > 57 {
+            ret false
+        }
+        n = n * 10 +((c - 48) as u64)
+    }
+    ret n <= 4294967295_u64
+}
+
+impl for GenAiEditor {
+    pub fn new() -> Self {
+        let settings = value(read_file(settings_path()))
+        let mut result = Self {
+            providers_from_settings(), 0, Vec[Json]::new(), 0, "", "Rough gray stone with small mineral grains", "Content/Textures/Reference.png", "", true, "Generated material", "42", 0, 0, false, true, Option::None, Option::None, Json::Null, Vec[GeneratedMap]::new(), Option::None, false, 0, false, false, text(settings, "job"), text(settings, "idempotency"), settings.get("pending").unwrap_or(Json::Null), "idle", "", 0, false, false, "", Option::None, false, "", TextEditor::new(""), "", "", "", false, true, "Connect a provider to generate PBR materials", false, 640_f32, Option::None, false, false
+        }
+        let selected = number(settings, "active")
+        for i in 0_usize..result.providers.len() {
+            if i.fmt() == selected {
+                result.active = i
+            }
+        }
+        ret result
+    }
+    pub fn displacement_budget(self: mut Self, budget: DisplacementBudget<H>) ->() {
+        self.budget = Option[DisplacementBudget<H>]::Some(budget)
+    }
+    pub fn configure(self: mut Self, project: str) ->() {
+        if self.project != project {
+            self.project = project self.imported = "" self.reference_image = "" self.reference_dirty = true self.dirty = true
+        }
+        ret()
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.worker.is_some() || self.importer.is_some() || self.state == "queued" || self.state == "running" || self.state == "cancelling" || self.state == "downloading" || self.preview_pending
+    }
+    // GPU preparation needs frames, without locking already usable form controls.
+    pub fn needs_tick(self: Self) -> bool {
+        let preview_busy = match self.preview {
+            Some(preview) => preview.busy() None => false
+        }
+        ret self.busy() || preview_busy
+    }
+    pub fn focused(self: Self) -> str {
+        ret self.focus
+    }
+    fn has_map(self: Self, role: str) -> bool {
+        for map in self.maps {
+            if map.role == role {
+                ret true
+            }
+        }
+        ret false
+    }
+    fn provider(self: Self) -> Provider {
+        ret self.providers.get_unchecked_borrowed(self.active)
+    }
+    fn model_data(self: Self) -> Json {
+        ret self.models.get(self.model).unwrap_or(Json::Null)
+    }
+    fn supports(self: Self, kind: str) -> bool {
+        for item in list(self.model_data(), "inputs") {
+            if item.as_str().unwrap_or("") == kind {
+                ret true
+            }
+        }
+        ret false
+    }
+    fn seamless_supported(self: Self) -> bool {
+        ret self.model_data().get("tileable").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false)
+    }
+    fn adapt_model(self: mut Self) ->() {
+        if self.image_mode && !self.supports("image") {
+            self.image_mode = false
+        }
+        if !self.image_mode && !self.supports("text") {
+            self.image_mode = true self.reference_dirty = true
+        }
+        if !self.seamless_supported() {
+            self.tileable = false
+        }
+        ret()
+    }
+    fn reference_path(self: Self) -> str {
+        ret if self.reference.byte_len() > 0 && self.reference.slice_bytes(0, 1) == "/" {
+            self.reference
+        } else {
+            self.project + "/" + self.reference
+        }
+    }
+    fn quality_value(self: Self) -> str {
+        ret list(self.model_data(), "qualities").get(self.quality).unwrap_or(Json::Null).as_str().unwrap_or("standard")
+    }
+    fn resolution_value(self: Self) -> str {
+        ret list(self.model_data(), "resolutions").get(self.resolution).unwrap_or(Json::Null).as_number().unwrap_or("512")
+    }
+    fn persist(self: Self) -> bool {
+        ret save_settings(self.providers, self.active, self.job, self.idem, self.pending)
+    }
+    fn send(self: mut Self, operation: str, path: str, body: str, method: str) ->() {
+        if self.worker.is_none() {
+            self.worker = Option[JoinHandle[Transfer]]::Some(spawn transfer(self.provider(), operation, path, body, self.idem, method, "application/json", stringify(self.manifest)))
+        }
+        ret()
+    }
+    fn get_status(self: mut Self) ->() {
+        self.last_poll = perf_counter_ms() self.send("status", "/v1/jobs/" + self.job, "", "GET") ret()
+    }
+    fn submit(self: mut Self) ->() {
+        self.state = "submitting" self.persist() self.send("submit", "/v1/jobs", stringify(self.pending), "POST") ret()
+    }
+    fn request(self: Self, input: Json) -> Json {
+        ret Json::Object(vec![field("model", string(text(self.model_data(), "id"))), field("resolution", Json::Number(self.resolution_value())), field("quality", string(self.quality_value())), field("seed", Json::Number(self.seed)), field("tileable", Json::Bool(self.tileable && self.seamless_supported())), field("input", input)])
+    }
+    fn value(self: Self, key: str) -> str {
+        ret match key {
+            "provider" => self.provider().name "url" => self.provider().url "key" => self.provider().key "prompt" => self.prompt "reference" => self.reference "name" => self.name "seed" => self.seed _ => ""
+        }
+    }
+    fn commit(self: mut Self) ->() {
+        let s = self.editor.value() let p = self.provider()
+        match self.focused {
+            "provider" => {
+                self.providers.set(self.active, Provider { s, p.url, p.key })
+            }
+            "url" => {
+                let mut url = s if url.byte_len() > 0 && url.slice_bytes(url.byte_len() - 1, 1) == "/" {
+                    url = url.slice_bytes(0, url.byte_len() - 1)
+                }
+                self.providers.set(self.active, Provider {
+                        p.name, url, p.key
+                    }
+                    ,
+                ) self.connected = false self.job = "" self.pending = Json::Null
+            }
+            "key" => {
+                self.providers.set(self.active, Provider { p.name, p.url, s }) self.connected = false self.job = "" self.pending = Json::Null
+            }
+            "prompt" => {
+                self.prompt = s
+            }
+            "reference" => {
+                self.reference = s self.reference_dirty = true self.reference_image = ""
+            }
+            "name" => {
+                self.name = s
+            }
+            "seed" => {
+                self.seed = s
+            }
+            _ => {
+            }
+        }
+        self.focused = "" self.persist() self.dirty = true ret()
+    }
+    pub fn action(self: mut Self, id: str) -> bool {
+        match self.widget(false, true).find(id) {
+            Some(w) => {
+                if w.disabled() {
+                    ret true
+                }
+            }
+            None => {
+            }
+        }
+        if id.byte_len() < 6 || id.slice_bytes(0, 6) != "genai-" {
+            ret false
+        }
+        if self.focused != "" {
+            self.commit()
+        }
+        let busy = self.busy()
+        if id == "genai-connect" && self.worker.is_none() && !busy {
+            self.message = "Connecting…" self.send("models", "/v1/models", "", "GET")
+        } elif id == "genai-provider-next" && !busy {
+            self.active =(self.active + 1) % self.providers.len() self.connected = false self.models.clear() self.job = "" self.pending = Json::Null self.imported = "" self.persist()
+        } elif id == "genai-provider-add" && !busy {
+            self.providers.push(Provider {
+                    "Custom provider", "http://127.0.0.1:8770", ""
+                }
+            ) self.active = self.providers.len() - 1 self.connected = false self.models.clear() self.job = "" self.pending = Json::Null self.persist()
+        } elif id == "genai-provider-remove" && !busy && self.providers.len() > 1 {
+            let mut kept = Vec[Provider]::new() for i in 0_usize..self.providers.len() {
+                if i != self.active {
+                    kept.push(self.providers.get_unchecked_borrowed(i))
+                }
+            }
+            self.providers = kept self.active = 0 self.connected = false self.models.clear() self.job = "" self.pending = Json::Null self.persist()
+        } elif id == "genai-model" && !busy && self.models.len() > 0 {
+            self.model =(self.model + 1) % self.models.len() self.quality = 0 self.resolution = 0 self.adapt_model()
+        } elif id == "genai-quality" && !busy {
+            let choices = list(self.model_data(), "qualities") if choices.len() > 0 {
+                self.quality =(self.quality + 1) % choices.len()
+            }
+        } elif id == "genai-resolution" && !busy {
+            let choices = list(self.model_data(), "resolutions") if choices.len() > 0 {
+                self.resolution =(self.resolution + 1) % choices.len()
+            }
+        } elif id == "genai-text" && !busy {
+            self.image_mode = false
+        } elif id == "genai-image" && !busy {
+            self.image_mode = true self.reference_dirty = true
+        } elif id == "genai-tileable" && !busy {
+            self.tileable = !self.tileable
+        } elif id == "genai-random" && !busy {
+            self.seed =(perf_counter_ms() % 4294967296_u64).fmt()
+        } elif id == "genai-generate" && !busy && self.connected {
+            if !uint32(self.seed) {
+                self.message = "Seed must be an integer from 0 to 4294967295" self.dirty = true ret true
+            }
+            if !self.image_mode && self.prompt.byte_len() == 0 {
+                self.message = "Describe the material first" self.dirty = true ret true
+            }
+            self.idem = automation_capability_token() self.job = "" self.imported = "" self.cancel_requested = false self.manifest = Json::Null self.maps.clear()
+            if self.image_mode {
+                self.pending = self.request(Json::Object(vec![field("type", string("image")), field("upload_id", string(""))])) self.state = "uploading" self.worker = Option[JoinHandle[Transfer]]::Some(spawn upload(self.provider(), self.reference_path()))
+            } else {
+                self.pending = self.request(Json::Object(vec![field("type", string("text")), field("text", string(self.prompt))])) self.submit()
+            }
+            self.message = "Preparing generation…" self.persist()
+        } elif id == "genai-cancel" && busy {
+            self.cancel_requested = true self.message = "Cancellation requested"
+        } elif id == "genai-import" && self.maps.len() >= 4 && self.project != "" && self.importer.is_none() {
+            self.importer = Option[JoinHandle[PreparedMaterial]]::Some(spawn prepare_material(self.project, self.name, material_source(self.manifest, self.maps))) self.message = "Preparing native assets…"
+        } elif id == "genai-apply" && self.imported != "" {
+            self.apply = true
+        } elif id == "genai-shape-sphere" {
+            self.plane = false self.update_preview()
+        } elif id == "genai-shape-plane" {
+            self.plane = true self.update_preview()
+        } elif id == "genai-preview-displacement" {
+            if self.has_map("height") {
+                self.displaced = !self.displaced self.update_preview()
+            }
+        } elif id == "genai-preview-tile" {
+            self.tiled = !self.tiled self.update_preview()
+        } else {
+            for i in 0_usize..7_usize {
+                if id == "genai-view-" + i.fmt() {
+                    self.preview_mode = i as u32 self.update_preview()
+                }
+            }
+        }
+        self.dirty = true ret true
+    }
+    fn update_preview(self: mut Self) ->() {
+        match self.preview {
+            Some(preview) => {
+                preview.mode(self.preview_mode, self.plane, self.tiled) preview.displacement(self.displaced)
+            }
+            None => {
+            }
+        }
+        ret()
+    }
+    pub fn poll(self: mut Self, window: Window) ->() {
+        let density = window.pixel_density()
+        let limit = if density > 0_f32 {
+            1020_f32 / density
+        } else {
+            640_f32
+        }
+        if limit != self.preview_limit {
+            self.preview_limit = limit self.dirty = true
+        }
+        match self.preview {
+            Some(preview) => {
+                if preview.busy() {
+                    self.dirty = true
+                }
+                if preview.error() != "" && self.message != preview.error() {
+                    self.message = preview.error() self.dirty = true
+                }
+            }
+            None => {
+            }
+        }
+        match self.worker {
+            Some(worker) => {
+                if worker.is_finished() {
+                    let response = worker.join() self.worker = Option[JoinHandle[Transfer]]::None self.dirty = true
+                    if response.error != "" {
+                        self.message = response.error self.state = "disconnected"
+                        if response.operation == "upload" {
+                            self.pending = Json::Null self.persist()
+                        }
+                        if response.operation == "reference" {
+                            self.state = "idle" self.reference_image = ""
+                        }
+                        if response.status >= 400 && response.status < 500 && response.operation == "submit" {
+                            self.pending = Json::Null
+                        }
+                    } else {
+                        let j = value(response.body)
+                        if response.operation == "reference" {
+                            self.reference_image = response.body self.message = "Reference ready · generate a PBR material"
+                        } elif response.operation == "models" {
+                            self.models.clear() for model in list(j, "models") {
+                                if compatible(model) {
+                                    self.models.push(model)
+                                }
+                            }
+                            self.connected = self.models.len() > 0 self.model = 0 self.quality = 0 self.resolution = 0 self.adapt_model()
+                            self.message = if self.connected {
+                                "Provider connected"
+                            } else {
+                                "Provider has no compatible PBR models"
+                            }
+                            if self.connected {
+                                if self.job != "" {
+                                    self.get_status()
+                                } elif !matches_null(self.pending) {
+                                    self.submit()
+                                }
+                            }
+                        } elif response.operation == "upload" {
+                            let id = text(j, "upload_id")
+                            if self.cancel_requested {
+                                self.state = "cancelled" self.pending = Json::Null self.cancel_requested = false self.message = "Generation cancelled" self.persist()
+                            } elif id_valid(id) {
+                                self.pending = self.request(Json::Object(vec![field("type", string("image")), field("upload_id", string(id))])) self.submit()
+                            } else {
+                                self.state = "failed" self.message = "Provider returned an invalid upload ID" self.pending = Json::Null
+                            }
+                        } elif response.operation == "submit" || response.operation == "status" || response.operation == "cancel" {
+                            let id = text(j, "id") let state = text(j, "state")
+                            if !id_valid(id) ||(self.job != "" && self.job != id) ||(state != "queued" && state != "running" && state != "cancelling" && state != "succeeded" && state != "failed" && state != "cancelled") {
+                                self.state = "failed" self.message = "Provider returned an invalid job"
+                            } else {
+                                self.job = id self.state = state self.progress = number(j, "progress") self.last_poll = perf_counter_ms()
+                                self.message = state + if self.progress != "" {
+                                    " · " + self.progress + "%"
+                                } else {
+                                    ""
+                                }
+                                if state == "succeeded" {
+                                    self.manifest = j.get("result").unwrap_or(Json::Null) self.maps.clear()
+                                    if manifest_valid(self.manifest) {
+                                        self.state = "downloading" self.message = "Downloading PBR maps…"
+                                    } else {
+                                        self.state = "failed" self.message = "Provider returned an incompatible material manifest"
+                                    }
+                                    self.pending = Json::Null
+                                } elif state == "failed" || state == "cancelled" {
+                                    self.pending = Json::Null self.message = if state == "failed" {
+                                        if text(j, "error").contains(self.provider().key) {
+                                            "Generation failed"
+                                        } else {
+                                            text(j, "error")
+                                        }
+                                    } else {
+                                        "Generation cancelled"
+                                    }
+                                }
+                                self.persist()
+                            }
+                        } elif response.operation.byte_len() > 4 && response.operation.slice_bytes(0, 4) == "map-" {
+                            match response.map {
+                                Some(map) => self.maps.push(map) None => {
+                                    self.state = "failed" self.message = "Unable to decode generated map"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match self.importer {
+            Some(worker) => {
+                if worker.is_finished() {
+                    let prepared = worker.join() self.importer = Option[JoinHandle[PreparedMaterial]]::None if prepared.error != "" {
+                        self.message = prepared.error
+                    } elif prepared.project == self.project {
+                        self.publication = Option[PreparedMaterial]::Some(prepared)
+                    }
+                    self.dirty = true
+                }
+            }
+            None => {
+            }
+        }
+        if self.worker.is_none() {
+            if self.cancel_requested && self.job != "" &&(self.state == "queued" || self.state == "running" || self.state == "cancelling") {
+                self.cancel_requested = false self.send("cancel", "/v1/jobs/" + self.job + "/cancel", "{}", "POST")
+            } elif (self.state == "queued" || self.state == "running" || self.state == "cancelling") && perf_counter_ms() - self.last_poll >= 500 {
+                self.get_status()
+            } elif self.state == "downloading" {
+                let mut next = "" for role in roles() {
+                    let mut required = false for entry in list(self.manifest, "maps") {
+                        if text(entry, "role") == role {
+                            required = true
+                        }
+                    }
+                    let mut done = false for map in self.maps {
+                        if map.role == role {
+                            done = true
+                        }
+                    }
+                    if required && !done && next == "" {
+                        next = role
+                    }
+                }
+                if next != "" {
+                    self.send("map-" + next, "/v1/jobs/" + self.job + "/artifacts/" + next, "", "GET")
+                } else {
+                    let invalid = validate_maps(self.manifest, self.maps) self.state = if invalid == "" {
+                        "ready"
+                    } else {
+                        "failed"
+                    }
+                    self.message = if invalid == "" {
+                        "Material ready · preview or import"
+                    } else {
+                        invalid
+                    }
+                    self.preview_pending = invalid == "" self.dirty = true
+                }
+            }
+        }
+        if self.reference_dirty && self.image_mode && !self.busy() {
+            self.reference_dirty = false self.worker = Option[JoinHandle[Transfer]]::Some(spawn reference_preview(self.reference_path()))
+        }
+        if self.preview_pending {
+            let mut ready = true match self.preview {
+                Some(preview) => {
+                    ready = preview.ready()
+                }
+                None => {
+                }
+            }
+            if ready {
+                if !self.has_map("height") {
+                    self.displaced = false
+                }
+                if (self.preview_mode == 5 && !self.has_map("height")) ||(self.preview_mode == 6 && !self.has_map("ao")) {
+                    self.preview_mode = 0
+                }
+                match GenAiPreview::create(window, self.maps, text(self.manifest, "normal_convention") == "directx", self.budget.unwrap_or(DisplacementBudget::new())) {
+                    Ok(preview) => {
+                        window.clear_external_vulkan_images()
+                        match self.preview {
+                            Some(previous) => previous.destroy() None => {
+                            }
+                        }
+                        self.preview = Option[GenAiPreview<H>]::Some(preview) self.update_preview()
+                    }
+                    Err(error) => {
+                        self.message = error + " · last working preview retained"
+                    }
+                }
+                self.preview_pending = false self.dirty = true
+            }
+        }
+        ret()
+    }
+    pub fn take_publication(self: mut Self) -> Option[PreparedMaterial] {
+        let result = self.publication self.publication = Option[PreparedMaterial]::None ret result
+    }
+    pub fn published(self: mut Self, path: str) ->() {
+        self.imported = path self.message = if path == "" {
+            "Unable to publish generated assets"
+        } else {
+            "Imported " + path
+        }
+        self.dirty = true ret()
+    }
+    pub fn take_apply(self: mut Self) -> str {
+        let result = if self.apply {
+            self.imported
+        } else {
+            ""
+        }
+        self.apply = false ret result
+    }
+    pub fn update_target(self: mut Self, available: bool) ->() {
+        if available != self.target_available {
+            self.target_available = available self.dirty = true
+        }
+        ret()
+    }
+    pub fn take_dirty(self: mut Self) -> bool {
+        let result = self.dirty self.dirty = false ret result
+    }
+    fn button(self: Self, id: str, label: str, active: bool, disabled: bool) -> Widget {
+        ret Widget::button(id, label).with_classes("genai-button" + if active {
+                " is-active"
+            } else {
+                ""
+            }
+            + if self.hovered == id {
+                " is-hovered"
+            } else {
+                ""
+            }
+            + if self.pressed == id {
+                " is-pressed"
+            } else {
+                ""
+            }
+        ).with_checked(active).with_focus(self.owns_focus && self.focus == id).with_disabled(disabled).with_attribute("aria-pressed", if active {
+                "true"
+            } else {
+                "false"
+            }
+            ,
+        ).with_attribute("title", label)
+    }
+    fn field(self: Self, key: str, label: str, disabled: bool) -> Widget {
+        let id = "genai-field-" + key let raw = if self.focused == key {
+            self.editor.value()
+        } else {
+            self.value(key)
+        }
+        let mut display = raw
+        if key == "key" {
+            display = "" for _ in 0_usize..raw.char_len() {
+                display += "•"
+            }
+        }
+        let mut row = Widget::panel("").with_classes(if key == "prompt" {
+                "genai-property genai-prompt-property"
+            } else {
+                "genai-property"
+            }
+        ).with_direction(if key == "prompt" {
+                vertical()
+            } else {
+                horizontal()
+            }
+        )
+        row.push(Widget::label(label).with_classes("genai-label"))
+        row.push((if key == "prompt" {
+                    Widget::textarea(id, display)
+                } else {
+                    Widget::input(id, display)
+                }
+            ).with_classes(if key == "prompt" {
+                    "genai-prompt"
+                } else {
+                    "genai-input"
+                }
+            ).with_disabled(disabled).with_focus(self.owns_focus && self.focus == id).with_cursor(if self.focused == key {
+                    self.editor.cursor()
+                } else {
+                    raw.char_len()
+                }
+            ).with_selection(if self.focused == key {
+                    self.editor.selection_start()
+                } else {
+                    0_usize
+                }
+                , if self.focused == key {
+                    self.editor.selection_end()
+                } else {
+                    0_usize
+                }
+                ,
+            ).with_attribute("aria-label", label)) ret row
+    }
+    pub fn widget(self: Self, locked: bool, selected: bool) -> Widget {
+        let busy = self.busy() let editing = busy || locked
+        let mut root = Widget::panel("genai-panel").with_classes("genai-panel").with_direction(vertical()).with_css_variable("--genai-preview-limit", self.preview_limit.fmt() + "px")
+        let mut toolbar = Widget::panel("genai-toolbar").with_classes("genai-toolbar").with_direction(horizontal())
+        toolbar.push(Widget::label("MATERIAL GENERATION").with_classes("genai-heading"))
+        toolbar.push(self.button("genai-connect", if self.connected {
+                    "Reconnect"
+                } else {
+                    "Connect"
+                }
+                , false, busy || !provider_valid(self.provider()),))
+        toolbar.push(self.button("genai-generate", "Generate", false, editing || !self.connected || !matches_null(self.pending)))
+        toolbar.push(self.button("genai-cancel", "Cancel", false, !busy || self.state == "downloading" || self.importer.is_some()))
+        root.push(toolbar)
+        let mut body = Widget::panel("genai-body").with_classes("genai-body").with_direction(horizontal()).with_attribute("data-luma-scrollable", "true")
+        let mut settings = Widget::panel("genai-settings").with_classes("genai-settings").with_direction(vertical())
+        let mut providers = Widget::panel("").with_classes("genai-row").with_direction(horizontal())
+        providers.push(self.button("genai-provider-next", self.provider().name, false, editing)) providers.push(self.button("genai-provider-add", "+", false, editing)) providers.push(self.button("genai-provider-remove", "−", false, editing || self.providers.len() < 2)) settings.push(providers)
+        settings.push(self.field("provider", "Name", editing)) settings.push(self.field("url", "API URL", editing)) settings.push(self.field("key", "API key", editing))
+        settings.push(self.button("genai-model", if self.models.len() == 0 {
+                    "Model"
+                } else {
+                    text(self.model_data(), "name")
+                }
+                , false, editing || self.models.len() == 0,))
+        let mut modes = Widget::panel("").with_classes("genai-row").with_direction(horizontal()) modes.push(self.button("genai-text", "Text", !self.image_mode, editing || !self.supports("text"))) modes.push(self.button("genai-image", "Reference", self.image_mode, editing || !self.supports("image"))) settings.push(modes)
+        if self.image_mode {
+            settings.push(self.field("reference", "PNG file", editing))
+            if self.reference_image != "" {
+                settings.push(Widget::image("genai-reference-preview", self.reference_image).with_classes("genai-reference"))
+            }
+        } else {
+            settings.push(self.field("prompt", "Describe the material", editing))
+        }
+        let mut quality = Widget::panel("").with_classes("genai-row").with_direction(horizontal()) quality.push(self.button("genai-quality", self.quality_value(), false, editing || !self.connected)) quality.push(self.button("genai-resolution", self.resolution_value() + " × " + self.resolution_value(), false, editing || !self.connected)) quality.push(self.button("genai-tileable", "Seamless", self.tileable, editing || !self.seamless_supported())) settings.push(quality)
+        settings.push(self.field("seed", "Seed", editing)) settings.push(self.button("genai-random", "Random seed", false, editing))
+        body.push(settings)
+        let mut result = Widget::panel("genai-result").with_classes("genai-result").with_direction(vertical())
+        let mut views = Widget::panel("").with_classes("genai-row").with_direction(horizontal())
+        let labels = vec!["Material", "Base Color", "Normal", "Roughness", "Metallic", "Height", "AO"] for i in 0_usize..labels.len() {
+            views.push(self.button("genai-view-" + i.fmt(), labels.get_unchecked_borrowed(i), self.preview_mode == i as u32, self.preview.is_none() ||((i == 5 && !self.has_map("height")) ||(i == 6 && !self.has_map("ao")))))
+        }
+        result.push(views)
+        result.push((if self.preview.is_some() {
+                    Widget::render_surface("genai-preview-surface")
+                } else {
+                    Widget::panel("genai-preview-surface").with_children(vec![Widget::label("Your generated material will appear here").with_classes("genai-placeholder")])
+                }
+            ).with_classes("genai-preview"))
+        let mut shapes = Widget::panel("").with_classes("genai-row").with_direction(horizontal()) shapes.push(self.button("genai-shape-sphere", "Sphere", !self.plane, self.preview.is_none())) shapes.push(self.button("genai-shape-plane", "Plane", self.plane, self.preview.is_none())) shapes.push(self.button("genai-preview-tile", "3 × 3", self.tiled, self.preview.is_none())) shapes.push(self.button("genai-preview-displacement", "Displacement", self.displaced, self.preview.is_none() || !self.has_map("height"))) result.push(shapes)
+        result.push(self.field("name", "Asset name", locked || self.importer.is_some()))
+        let mut actions = Widget::panel("").with_classes("genai-row").with_direction(horizontal()) actions.push(self.button("genai-import", "Import Material", false, locked || self.project == "" || self.state != "ready" || self.importer.is_some())) actions.push(self.button("genai-apply", "Apply to Selected", false, locked || !selected || self.imported == "" || !file_exists(self.project + "/" + self.imported))) result.push(actions)
+        body.push(result) root.push(body)
+        root.push(Widget::label(self.message).with_id("genai-status").with_classes("genai-status").with_text_wrap(true)) ret root
+    }
+    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout, locked: bool, selected: bool, visible: bool, window: Window) -> bool {
+
+        if !visible || locked {
+            if self.focused != "" {
+                self.commit()
+            }
+            self.owns_focus = false self.focused = "" self.pressed = "" ret false
+        }
+        let text_field_id = if self.focused != "" {
+            "genai-field-" + self.focused
+        } else {
+            ""
+        }
+        if text_field_id != "" && self.owns_focus {
+            if self.editor.pointer_handles(event, target, text_field_id) {
+                self.editor = self.editor.pointer_input(event, layout, text_field_id, window) self.dirty = true ret true
+            }
+            if luma::text_edit_key(event) {
+                self.editor = self.editor.key_input(event, window) self.dirty = true ret true
+            }
+        }
+        let on_panel = target.byte_len() >= 6 && target.slice_bytes(0, 6) == "genai-" let kind = event.kind()
+        if kind == event_pointer_move() {
+            let next = if on_panel {
+                target
+            } else {
+                ""
+            }
+            if next != self.hovered {
+                self.hovered = next self.dirty = true
+            }
+        }
+        if kind == event_focus_lost() {
+            if self.focused != "" {
+                self.commit()
+            }
+            self.focused = "" self.owns_focus = false self.pressed = "" self.dirty = true ret false
+        }
+        if kind == event_pointer_up() && self.pressed != "" {
+            let id = self.pressed self.pressed = "" if target == id {
+                self.action(id)
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_pointer_down() && !on_panel {
+            if self.owns_focus {
+                self.dirty = true
+            }
+            if self.focused != "" {
+                self.commit()
+            }
+            self.owns_focus = false ret false
+        }
+        if self.owns_focus && kind == event_key_down() && event.key() == key_tab() {
+            if self.focused != "" {
+                self.commit()
+            }
+            let ids = vec!["genai-provider-next", "genai-provider-add", "genai-provider-remove", "genai-field-provider", "genai-field-url", "genai-field-key", "genai-connect", "genai-model", "genai-text", "genai-image", "genai-field-prompt", "genai-field-reference", "genai-quality", "genai-resolution", "genai-tileable", "genai-field-seed", "genai-random", "genai-generate", "genai-cancel", "genai-view-0", "genai-view-1", "genai-view-2", "genai-view-3", "genai-view-4", "genai-view-5", "genai-view-6", "genai-shape-sphere", "genai-shape-plane", "genai-preview-tile", "genai-preview-displacement", "genai-field-name", "genai-import", "genai-apply"]
+            let mut current = 0_usize for i in 0_usize..ids.len() {
+                if ids.get_unchecked_borrowed(i) == self.focus {
+                    current = i
+                }
+            }
+            let controls = self.widget(locked, selected)
+            for step in 1_usize..ids.len() + 1 {
+                let i = if event.shift() {
+                    (current + ids.len() - step % ids.len()) % ids.len()
+                } else {
+                    (current + step) % ids.len()
+                }
+                let id = ids.get_unchecked_borrowed(i) match controls.find(id) {
+                    Some(w) => {
+                        if !w.disabled() {
+                            self.focus = id self.reveal_pending = true self.dirty = true ret true
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            ret true
+        }
+        if self.focused != "" {
+            if kind == event_text_input() {
+                self.editor = self.editor.insert(event.text()) self.dirty = true ret true
+            }
+            if kind == event_key_down() {
+                if event.key() == key_escape() {
+                    self.focused = ""
+                } elif event.key() == key_enter() {
+                    if self.focused == "prompt" && !event.control() {
+                        self.editor = self.editor.insert("\n")
+                    } else {
+                        self.commit() if event.control() {
+                            self.action("genai-generate")
+                        }
+                    }
+                } elif event.control() && event.key() == 118 {
+                    self.editor = self.editor.paste(window.clipboard_text())
+                } elif event.control() &&(event.key() == 99 || event.key() == 120) {
+                    if self.editor.has_selection() && self.focused != "key" {
+                        window.set_clipboard(self.editor.selected_text())
+                    }
+                    if event.key() == 120 {
+                        self.editor = self.editor.cut()
+                    }
+                } elif event.control() && event.key() == 97 {
+                    self.editor = self.editor.select_all()
+                } elif event.key() == key_backspace() {
+                    self.editor = self.editor.backspace()
+                } elif event.key() == key_delete() {
+                    self.editor = self.editor.delete()
+                } elif event.key() == key_home() {
+                    self.editor = self.editor.move_home(event.shift())
+                } elif event.key() == key_end() {
+                    self.editor = self.editor.move_end(event.shift())
+                } elif event.key() == key_left() {
+                    self.editor = self.editor.move_left(event.shift())
+                } elif event.key() == key_right() {
+                    self.editor = self.editor.move_right(event.shift())
+                }
+                self.dirty = true ret true
+            }
+        }
+        if self.owns_focus && kind == event_key_down() &&(event.key() == key_enter() || event.key() == 32) {
+            if self.focus.byte_len() > 12 && self.focus.slice_bytes(0, 12) == "genai-field-" {
+                self.focused = self.focus.slice_bytes(12, self.focus.byte_len() - 12) self.editor = TextEditor::new(self.value(self.focused))
+            } else {
+                self.action(self.focus)
+            }
+            self.dirty = true ret true
+        }
+        if kind == event_pointer_down() && event.key() == 1 && on_panel {
+            match layout.find_widget(target) {
+                Some(w) => {
+                    if w.disabled() {
+                        ret true
+                    }
+                }
+                None => {
+                }
+            }
+            if self.focused != "" {
+                self.commit()
+            }
+            self.focus = target self.owns_focus = true self.reveal_pending = false
+            if target.byte_len() > 12 && target.slice_bytes(0, 12) == "genai-field-" {
+                self.focused = target.slice_bytes(12, target.byte_len() - 12) self.editor = TextEditor::new(self.value(self.focused)) self.editor = self.editor.with_cursor(0).pointer_input(event, layout, target, window)
+            } else {
+                self.focused = "" self.pressed = target
+            }
+            self.dirty = true ret true
+        }
+        ret false
+    }
+    pub fn reveal_focus(self: mut Self, ui: mut ReactiveUi) -> bool {
+        // Hover, network polling and fixed toolbar focus must not undo a
+        // user's scroll or move Import Material between pointer down/up.
+        if !self.reveal_pending {
+            ret false
+        }
+        self.reveal_pending = false
+        if self.focus == "" || !self.owns_focus || self.focus == "genai-connect" || self.focus == "genai-generate" || self.focus == "genai-cancel" {
+            ret false
+        }
+        let layout = ui.layout() match layout.find_bounds("genai-body") {
+            Some(body) => {
+                match layout.find_bounds(self.focus) {
+                    Some(focus) => {
+                        let delta = if focus.bottom() > body.bottom() {
+                            focus.bottom() - body.bottom() + 4_f32
+                        } elif focus.y() < body.y() {
+                            focus.y() - body.y() - 4_f32
+                        } else {
+                            0_f32
+                        }
+                        if delta != 0 {
+                            ret ui.scroll_at(body.x() + body.width() * 0.5_f32, body.y() + body.height() * 0.5_f32, delta)
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret false
+    }
+    pub fn compose(self: mut Self, frame: mut PreparedFrame) -> bool {
+        match self.preview {
+            Some(preview) => {
+                ret preview.compose(frame)
+            }
+            None => {
+                ret true
+            }
+        }
+    }
+    pub fn destroy(self: mut Self) ->() {
+        match self.worker {
+            Some(w) => {
+                let _joined = w.join()
+            }
+            None => {
+            }
+        }
+        match self.importer {
+            Some(w) => {
+                let _joined = w.join()
+            }
+            None => {
+            }
+        }
+        match self.preview {
+            Some(preview) => preview.destroy() None => {
+            }
+        }
+        self.preview = Option[GenAiPreview<H>]::None ret()
+    }
+}

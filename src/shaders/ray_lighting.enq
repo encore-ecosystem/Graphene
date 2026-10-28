@@ -1,0 +1,30 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn ray_material_sdr() -> Vec[u32] {
+    ret builtin_spirv(4277700180_u32)
+}
+pub fn ray_material_linear() -> Vec[u32] {
+    ret builtin_spirv(3596993926_u32)
+}
+pub fn ray_material_temporal() -> Vec[u32] {
+    ret builtin_spirv(1499064184_u32)
+}
+pub fn ray_virtual_sdr() -> Vec[u32] {
+    ret builtin_spirv(2366027990_u32)
+}
+pub fn ray_virtual_linear() -> Vec[u32] {
+    ret builtin_spirv(789892733_u32)
+}
+pub fn ray_virtual_temporal() -> Vec[u32] {
+    ret builtin_spirv(969146359_u32)
+}
+pub fn ray_terrain_sdr() -> Vec[u32] {
+    ret builtin_spirv(205226446_u32)
+}
+pub fn ray_terrain_linear() -> Vec[u32] {
+    ret builtin_spirv(1808661919_u32)
+}
+pub fn ray_terrain_temporal() -> Vec[u32] {
+    ret builtin_spirv(3931851606_u32)
+}

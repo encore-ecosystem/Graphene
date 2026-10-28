@@ -80,7 +80,7 @@ fn main() -> u32 {
         ranges.push(buffer.size()) offsets.push(0_u64)
     }
     let group = device.create_buffer_bind_group_many(layout, bindings, buffers, offsets, ranges)
-    let readback = device.create_buffer(224_u64, buffer_transfer_destination(), true)
+    let readback = device.create_buffer(272_u64, buffer_transfer_destination(), true)
     if !group.available() || !dispatch_pipeline.available() || !request_pipeline.available() {
         ret 6_u32
     }
@@ -106,17 +106,18 @@ fn main() -> u32 {
             let mut configuration = cache.geometry_configuration()
             configuration.push(1_u32) configuration.push(1_u32) configuration.push(1_u32) configuration.push(1_u32)
             configuration.push(cache.instance_history().get_unchecked_borrowed(0_usize)) configuration.push(0_u32) configuration.push(0_u32) configuration.push(0_u32)
-            if !frame.update_u32s(config, 0_u64, configuration) || !cache.record_selected(frame, group, dispatch_pipeline, request_pipeline) || !frame.copy_buffer(cache.cache_buffer(), readback, 0_u64, 0_u64, 192_u64) || !frame.copy_buffer(cache.dispatch_buffer(), readback, 0_u64, 192_u64, 32_u64) {
+            if !frame.update_u32s(config, 0_u64, configuration) || !cache.record_selected(frame, group, dispatch_pipeline, request_pipeline) || !frame.copy_buffer(cache.cache_buffer(), readback, 0_u64, 0_u64, 240_u64) || !frame.copy_buffer(cache.dispatch_buffer(), readback, 0_u64, 240_u64, 32_u64) {
                 ret 9_u32
             }
+            if !cache.record_all(frame) {ret 18_u32}
             if cache.destroy() {
                 ret 10_u32
             }
             if !frame.present() || !frame.destroy() || !target.wait_readback() {
                 ret 11_u32
             }
-            let values = readback.read_f32s(0_u64, 48_usize)
-            let requests = readback.read_u32(204_u64)
+            let values = readback.read_f32s(0_u64, 60_usize)
+            let requests = readback.read_u32(252_u64)
             if requests != if view == 0_usize {
                 3_u32
             } else {
@@ -130,7 +131,7 @@ fn main() -> u32 {
                     ret 13_u32
                 }
             } else {
-                if animation_abs(values.get_unchecked_borrowed(0_usize) - 2.5_f32) > 0.0001_f32 || animation_abs(values.get_unchecked_borrowed(1_usize) - 0.5_f32) > 0.0001_f32 || animation_abs(values.get_unchecked_borrowed(34_usize) - 2_f32) > 0.0001_f32 {
+                if animation_abs(values.get_unchecked_borrowed(0_usize) - 2.5_f32) > 0.0001_f32 || animation_abs(values.get_unchecked_borrowed(1_usize) - 0.5_f32) > 0.0001_f32 || animation_abs(values.get_unchecked_borrowed(42_usize) - 2_f32) > 0.0001_f32 {
                     ret 14_u32
                 }
                 if logical == 2_usize {

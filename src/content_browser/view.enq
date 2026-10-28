@@ -16,6 +16,7 @@ pub struct ContentIcons {
     file: SvgDocument
     mesh: SvgDocument
     material: SvgDocument
+    material_instance: SvgDocument
     texture: SvgDocument
     blueprint: SvgDocument
     script: SvgDocument
@@ -38,7 +39,7 @@ impl for ContentIcons {
     pub fn load(manager: IconManager) -> Self {
         ret Self {
             manager.document("arrow-left"), manager.document("arrow-right"), manager.document("arrow-up"), manager.document("refresh-cw"),
-            manager.document("folder"), manager.document("file"), manager.document("box"), manager.document("palette"), manager.document("image"),
+            manager.document("folder"), manager.document("file"), manager.document("box"), manager.document("palette"), manager.document("copy"), manager.document("image"),
             manager.document("workflow"), manager.document("file-code"), manager.document("map"), manager.document("plus"), manager.document("upload"),
             manager.document("grid-3x3"), manager.document("list"), manager.document("star"), manager.document("search"), manager.document("x"),
             manager.document("settings-2"), manager.document("chevron-right"), manager.document("chevron-down"), manager.document("panel-right"), manager.document("audio-waveform")
@@ -47,7 +48,7 @@ impl for ContentIcons {
     pub fn asset(self: Self, kind: str) -> SvgDocument {
         ret match kind {
             "terrain" => self.mesh "ui" => self.blueprint "particle-system" => self.blueprint "sound" => self.sound
-            "character" => self.mesh "skeletal-mesh" => self.mesh "skeleton" => self.blueprint "animation-clip" => self.blueprint "folder" => self.folder "mesh" => self.mesh "material" => self.material "material-graph" => self.material
+            "character" => self.mesh "skeletal-mesh" => self.mesh "skeleton" => self.blueprint "animation-clip" => self.blueprint "folder" => self.folder "mesh" => self.mesh "material-instance" => self.material_instance "material" => self.material "material-graph" => self.material
             "texture" => self.texture "blueprint" => self.blueprint "script" => self.script "scene" => self.scene _ => self.file
         }
     }
@@ -65,8 +66,40 @@ fn icon_button(id: str, title: str, icon: SvgDocument, active: bool, disabled: b
 fn text_button(id: str, text: str, active: bool) -> Widget {
     ret Widget::button(id, text).with_classes(classes("cb-button", active))
 }
+fn filter_kinds() -> Vec[str] {
+    ret vec!["mesh", "material", "texture", "sound", "particle-system", "ui", "blueprint", "script"]
+}
+fn filter_label(kind: str) -> str {
+    ret match kind {
+        "mesh" => "Meshes" "material" => "Materials" "texture" => "Textures" "sound" => "Sounds" "particle-system" => "Particles" "ui" => "UI" "blueprint" => "Blueprints" _ => "Scripts"
+    }
+}
+fn filter_width(kind: str) -> f32 {
+    ret(filter_label(kind).char_len() as f32) * 6_f32 + 18_f32
+}
+fn visible_filters(browser: ContentBrowser) -> usize {
+    let width = browser.bounds.width() + if browser.sources {
+        176_f32
+    } else {
+        0_f32
+    }
+    + if browser.inspector {
+        196_f32
+    } else {
+        0_f32
+    }
+    let mut used = 320_f32 let mut count = 0_usize
+    for kind in filter_kinds() {
+        used += filter_width(kind) + 3_f32
+        if used > width {
+            break
+        }
+        count += 1
+    }
+    ret count
+}
 fn source_button(browser: ContentBrowser, path: str, text: str, icon: SvgDocument) -> Widget {
-    ret Widget::icon_button("cb-source-" + path, text, icon).with_classes(classes("cb-source", browser.directory == path)).with_attribute("aria-label", text)
+    ret Widget::icon_button("cb-source-" + path, text, icon).with_classes(classes("cb-source", browser.directory == path)).with_attribute("aria-label", text).with_attribute("title", path).with_attribute("data-luma-text-overflow", "ellipsis")
 }
 fn tree_children(browser: ContentBrowser, root: str, depth: usize, icons: ContentIcons) -> Widget {
     let mut group = Widget::panel("").with_classes("cb-tree-children").with_direction(vertical())
@@ -98,6 +131,9 @@ fn tree_children(browser: ContentBrowser, root: str, depth: usize, icons: Conten
         }
     }
     ret group
+}
+pub fn content_overflow_focus(browser: ContentBrowser) -> str {
+    ret "cb-filter-" + filter_kinds().get(visible_filters(browser)).unwrap_or("mesh")
 }
 fn sources(browser: ContentBrowser, icons: ContentIcons) -> Widget {
     let mut panel = Widget::panel("cb-sources").with_classes("cb-sources").with_direction(vertical()).with_attribute("data-luma-scrollable", "true")
@@ -142,11 +178,26 @@ fn tile(browser: ContentBrowser, asset: ContentAsset, icons: ContentIcons) -> Wi
     )
     .with_computed_style(Style::default().with_width(browser.size as f32).with_height(browser.stride() - 6))
     let thumbnail = browser.thumbnail_payload(asset.path)
+    let preview_error = browser.thumbnail_error(asset.path)
+    cell = cell.with_attribute("title", if preview_error != "" {
+            asset.name + " · " + preview_error
+        } elif thumbnail == "" &&(asset.kind == "material" || asset.kind == "material-instance") {
+            asset.name + " · Preparing PBR preview…"
+        } else {
+            asset.path
+        }
+        ,
+    )
     let height =(browser.size as f32 - 8) * 0.75_f32
     if thumbnail != "" {
         cell.push(Widget::image("", thumbnail).with_classes("cb-thumbnail").with_computed_style(Style::default().with_height(height)))
     } else {
-        cell.push(Widget::icon("", icons.asset(asset.kind)).with_classes("cb-thumbnail cb-placeholder").with_computed_style(Style::default().with_height(height)))
+        cell.push(Widget::icon("", icons.asset(asset.kind)).with_classes("cb-thumbnail cb-placeholder" + if preview_error != "" {
+                    " cb-preview-error"
+                } else {
+                    ""
+                }
+            ).with_computed_style(Style::default().with_height(height)))
     }
     cell.push(Widget::label(asset.name).with_classes("cb-asset-name"))
     cell.push(Widget::label((if content_contains(browser.favorites, asset.path) {
@@ -189,7 +240,7 @@ pub fn content_widget(browser: ContentBrowser, icons: ContentIcons, editable: bo
     toolbar.push(icon_button("cb-up", "Parent folder (Backspace)", icons.up, false, browser.directory == "@all" || browser.directory == "@favorites"))
     let mut breadcrumbs = Widget::panel("cb-breadcrumbs").with_classes("cb-breadcrumbs").with_direction(horizontal())
     if browser.directory == "@all" || browser.directory == "@favorites" || browser.directory == "@engine" {
-        breadcrumbs.push(text_button("cb-source-" + browser.directory, if browser.directory == "@all" {
+        breadcrumbs.push(text_button("cb-crumb-" + browser.directory, if browser.directory == "@all" {
                     "All Assets"
                 } elif browser.directory == "@favorites" {
                     "Favorites"
@@ -207,12 +258,12 @@ pub fn content_widget(browser: ContentBrowser, icons: ContentIcons, editable: bo
                 } else {
                     path + "/" + part
                 }
-                breadcrumbs.push(text_button("cb-source-" + path, part, false)) breadcrumbs.push(Widget::icon("", icons.chevron).with_classes("cb-crumb-chevron")) part = ""
+                breadcrumbs.push(text_button("cb-crumb-" + path, part, false)) breadcrumbs.push(Widget::icon("", icons.chevron).with_classes("cb-crumb-chevron")) part = ""
             } else {
                 part = part + c
             }
         }
-        breadcrumbs.push(text_button("cb-source-" + browser.directory, part, true))
+        breadcrumbs.push(text_button("cb-crumb-" + browser.directory, part, true))
     }
     toolbar.push(breadcrumbs)
     toolbar.push(icon_button("cb-refresh", "Refresh (F5)", icons.refresh, browser.scan.is_some(), false))
@@ -240,23 +291,32 @@ pub fn content_widget(browser: ContentBrowser, icons: ContentIcons, editable: bo
         .with_attribute("aria-label", "Search project assets").with_focus(browser.query_focused).with_cursor(browser.query.cursor()).with_selection(browser.query.selection_start(), browser.query.selection_end()))
     search.push(icon_button("cb-clear", "Clear search and filters", icons.close, false, browser.query.value() == "" && browser.types.len() == 0))
     search.push(icon_button("cb-save-search", "Save current search", icons.star, false, browser.query.value() == ""))
-    for kind in vec!["mesh", "material", "texture", "sound", "particle-system", "ui", "blueprint", "script"] {
-        search.push(text_button("cb-filter-" + kind, if kind == "mesh" {
-                    "Meshes"
-                } elif kind == "material" {
-                    "Materials"
-                } elif kind == "texture" {
-                    "Textures"
-                } elif kind == "sound" {
-                    "Sounds"
-                } elif kind == "blueprint" {
-                    "Blueprints"
+    let shown = visible_filters(browser) let kinds = filter_kinds()
+    for index in 0_usize..shown {
+        let kind = kinds.get_unchecked_borrowed(index)
+        search.push(text_button("cb-filter-" + kind, filter_label(kind), content_contains(browser.types, kind)).with_added_classes("cb-filter cb-filter-control").with_geometry_basis(filter_width(kind)).with_attribute("aria-pressed", if content_contains(browser.types, kind) {
+                    "true"
                 } else {
-                    "Scripts"
+                    "false"
                 }
-                , content_contains(browser.types, kind),).with_added_classes("cb-filter"))
+                ,
+            ))
     }
-    search.push(text_button("cb-sort", "Sort", browser.popup == "sort")) panel.push(search)
+    if shown < kinds.len() {
+        let mut active = 0_usize
+        for index in shown..kinds.len() {
+            if content_contains(browser.types, kinds.get_unchecked_borrowed(index)) {
+                active += 1
+            }
+        }
+        search.push(text_button("cb-more-types", "More" + if active > 0 {
+                    " (" + active.fmt() + ")"
+                } else {
+                    ""
+                }
+                , browser.popup == "filters",).with_added_classes("cb-filter-control").with_attribute("aria-label", "More asset type filters").with_attribute("aria-haspopup", "menu").with_geometry_basis(76))
+    }
+    search.push(text_button("cb-sort", "Sort", browser.popup == "sort").with_added_classes("cb-filter-control").with_attribute("aria-label", "Sort assets").with_attribute("aria-haspopup", "menu")) panel.push(search)
     let mut body = Widget::panel("cb-body").with_classes("cb-body").with_direction(horizontal())
     if browser.sources {
         body.push(sources(browser, icons))
@@ -397,10 +457,23 @@ pub fn content_popup(browser: ContentBrowser, icons: ContentIcons, screen: Rect,
     if browser.popup == "add" {
         size = Size::new(224, 164)
         popup.push(popup_action("cb-new-folder", "New Folder", icons.folder, false, !editable))
-        popup.push(popup_action("cb-new-material", "Material Graph", icons.material, false, !editable))
+        popup.push(popup_action("cb-new-material", "Material", icons.material, false, !editable))
         popup.push(popup_action("cb-new-ui", "UI Screen", icons.blueprint, false, !editable))
         popup.push(popup_action("cb-new-blueprint", "Blueprint", icons.blueprint, false, !editable))
         popup.push(popup_action("cb-new-particle", "Particle System", icons.material, false, !editable))
+    } elif browser.popup == "filters" {
+        let kinds = filter_kinds() let shown = visible_filters(browser)
+        size = Size::new(224,((kinds.len() - shown) as f32) * 26_f32 + 14_f32)
+        for index in shown..kinds.len() {
+            let kind = kinds.get_unchecked_borrowed(index) let selected = content_contains(browser.types, kind)
+            popup.push(popup_action("cb-filter-" + kind, filter_label(kind), icons.asset(kind), selected, false).with_attribute("role", "menuitemcheckbox").with_attribute("aria-checked", if selected {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                    ,
+                ))
+        }
     } elif browser.popup == "sort" {
         size = Size::new(224, 132)
         for mode in vec!["name", "type", "size"] {
@@ -418,6 +491,9 @@ pub fn content_popup(browser: ContentBrowser, icons: ContentIcons, screen: Rect,
         size = Size::new(224, 322)
         let asset = browser.find(browser.primary).unwrap_or(ContentAsset::new("", "", "", 0))
         popup.push(popup_action("cb-open", "Open", icons.file, false, asset.path == ""))
+        if asset.kind == "material" || asset.kind == "material-instance" {
+            popup.push(popup_action("cb-create-instance", "Create Material Instance", icons.material, false, !editable))
+        }
         popup.push(popup_action("cb-find", "Show in Folder", icons.folder, false, asset.path == ""))
         popup.push(popup_action("cb-favorite", "Toggle Favorite", icons.star, content_contains(browser.favorites, browser.primary), false))
         popup.push(popup_action("cb-copy-path", "Copy Path", icons.file, false, asset.path == ""))

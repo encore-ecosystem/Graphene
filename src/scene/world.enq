@@ -21,6 +21,7 @@ pub struct Entity {
     blueprint_source: str
     component: SceneComponent
     physics: PhysicsComponent
+    material_path: str
 }
 pub struct Scene {
     entities: Vec[Entity]
@@ -49,6 +50,9 @@ impl for Entity {
     }
     pub fn renderable(self: Self) -> Option[Renderable] {
         ret self.renderable
+    }
+    pub fn material_path(self: Self) -> str {
+        ret self.material_path
     }
     pub fn physics(self: Self) -> PhysicsComponent {
         ret self.physics
@@ -102,7 +106,7 @@ impl for Scene {
             ret false
         }
         self.entities.push(Entity {
-                id, name, transform, Option[u64]::None, true, Option[Renderable]::None, "", SceneComponent::None, PhysicsComponent::defaults()
+                id, name, transform, Option[u64]::None, true, Option[Renderable]::None, "", SceneComponent::None, PhysicsComponent::defaults(), ""
             }
             ,
         )
@@ -183,7 +187,7 @@ impl for Scene {
                 }
                 remaining.push(Entity {
                         entity.id, entity.name, entity.transform, parent,
-                        entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
+                        entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                     }
                     ,)
             }
@@ -193,6 +197,27 @@ impl for Scene {
         }
         ret found
     }
+    pub fn set_material_path(self: mut Self, id: u64, path: str) -> bool {
+        if !material_reference_valid(path) {
+            ret false
+        }
+        let i = self.index_of(id)
+        match self.entities.get(i) {
+            Some(e) => {
+                if e.material_path == path {
+                    ret true
+                }
+                self.entities.set(i, Entity {
+                        e.id, e.name, e.transform, e.parent, e.visible, e.renderable, e.blueprint_source, e.component, e.physics, path
+                    }
+                    ,
+                ) self.revision += 1 ret true
+            }
+            None => {
+                ret false
+            }
+        }
+    }
     pub fn set_physics(self: mut Self, id: u64, value: PhysicsComponent) -> bool {
         if !value.valid() {
             ret false
@@ -201,7 +226,7 @@ impl for Scene {
         match self.entities.get(i) {
             Some(e) => {
                 self.entities.set(i, Entity {
-                        e.id, e.name, e.transform, e.parent, e.visible, e.renderable, e.blueprint_source, e.component, value
+                        e.id, e.name, e.transform, e.parent, e.visible, e.renderable, e.blueprint_source, e.component, value, e.material_path
                     }
                     ,
                 ) self.revision += 1_u64 ret true
@@ -219,7 +244,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
+                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                             }
                             ,)
                         ret true
@@ -243,7 +268,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
+                                entity.id, name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                             }
                             ,)
                         ret true
@@ -264,7 +289,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
+                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                             }
                             ,)
                         ret true
@@ -341,7 +366,7 @@ impl for Scene {
                 Option::Some(entity) => {
                     if entity.id == id {
                         self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics
+                                entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                             }
                             ,)
                         ret true
@@ -530,7 +555,7 @@ impl for Scene {
                     if entity.id == id {
                         self.entities.set(index, Entity {
                                 entity.id, entity.name, entity.transform, entity.parent, entity.visible,
-                                renderable, entity.blueprint_source, entity.component, entity.physics
+                                renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                             }
                             ,)
                         ret true
@@ -552,7 +577,7 @@ impl for Scene {
         for entity in self.entities {
             if entity.id == id {
                 self.entities.set(index, Entity {
-                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, source, entity.component, entity.physics
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, source, entity.component, entity.physics, entity.material_path
                     }
                     ,
                 )
@@ -571,7 +596,7 @@ impl for Scene {
         match self.entities.get(index) {
             Some(entity) => {
                 self.entities.set(index, Entity {
-                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, component, entity.physics
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, component, entity.physics, entity.material_path
                     }
                     ,
                 )
@@ -605,4 +630,8 @@ impl for Scene {
         }
         ret items
     }
+}
+
+pub fn material_reference_valid(path: str) -> bool {
+    ret path == "" ||(path.byte_len() > 18 && path.slice_bytes(0, 8) == "Content/" && !path.contains("..") && !path.contains(":") && !path.contains("\\") &&((path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial")))
 }

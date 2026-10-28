@@ -1,4 +1,8 @@
-#version 450
+#version 460
+#ifdef GRAPHENE_RAY_LIGHTING
+#extension GL_EXT_ray_query : require
+#endif
+
 
 layout(location = 0) in vec3 world_normal;
 layout(location = 1) in vec3 color;
@@ -9,8 +13,13 @@ layout(location = 4) in vec3 world_position;
 layout(location = 5) in vec2 texture_uv;
 layout(set = 0, binding = 5) uniform sampler2D base_color_texture;
 layout(set = 0, binding = 6) uniform sampler2D normal_texture;
+layout(set = 0, binding = 8) uniform sampler2D material_orm;
 layout(location = 6) flat in vec4 material_texture;
 #include "material_normal.glsl"
+#ifdef GRAPHENE_TERRAIN
+#define GRAPHENE_TERRAIN_FRAGMENT
+#include "terrain_material.glsl"
+#endif
 #endif
 layout(location = 0) out vec4 output_color;
 
@@ -34,6 +43,7 @@ layout(std430, set = 0, binding = 4) readonly buffer RadianceHistory {
 } gi_history;
 
 #define actor_lighting frame.actor_lighting
+#include "ray_lighting.glsl"
 #include "scene_lighting.glsl"
 #include "environment_surface.glsl"
 #ifdef GRAPHENE_MATERIAL_GRAPH
@@ -135,6 +145,16 @@ void main() {
     float diffuse = max(dot(surface_normal, normalize(-frame.light_direction.xyz)), 0.0);
     float metallic = material_surface.x;
     float roughness = material_surface.y;
+    float ambient_occlusion = 1.0;
+#ifdef GRAPHENE_BASE_COLOR_TEXTURE
+
+    vec3 orm = texture(material_orm, texture_uv).rgb;
+    ambient_occlusion = orm.r;
+    vec2 rm = orm.gb;
+    roughness *= mix(1.0, rm.x, material_texture.z);
+    metallic *= mix(1.0, rm.y, material_texture.w);
+#endif
+
     float unlit = material_surface.z;
     float diffuse_energy = (1.0 - metallic) * (1.0 - 0.25 * roughness);
 #ifdef GRAPHENE_BASE_COLOR_TEXTURE
@@ -152,22 +172,31 @@ void main() {
 #endif
     for(int i=0;i<8;++i)mg_environment[i]=actor_lighting[257+i];
     EnvironmentWeather mgLocal=environmentWeather(world_position);mg_environment[1]=mgLocal.sky;mg_environment[2]=mgLocal.wind;mg_environment[3].xy=mgLocal.surface.xy;
-    if(material_surface.z<.5)evaluateMaterial(base_color,metallic,roughness);
+    {vec3 mgNormal;float mgHeight;evaluateSurface(base_color,metallic,roughness,mgNormal,ambient_occlusion,mgHeight);surface_normal=materialSampleNormal(mgNormal,world_position,world_normal,mg_uv,mgNormalStrength(),mgNormalFlip());diffuse=max(dot(surface_normal,normalize(-frame.light_direction.xyz)),0.); }
+#endif
+#ifdef GRAPHENE_TERRAIN
+    base_color=terrainAlbedo(texture_uv,world_position.xz);
+    vec4 terrain_surface=terrainSurface(texture_uv,world_position.xz);
+    metallic=terrain_surface.x;roughness=terrain_surface.y;
+    ambient_occlusion=terrain_surface.z;unlit=terrain_surface.w;
+    surface_normal=terrainShadingNormal(texture_uv,world_position,world_normal);
+    diffuse=max(dot(surface_normal,normalize(-frame.light_direction.xyz)),0.);
 #endif
     environmentSurface(world_position, surface_normal, base_color, roughness);
     diffuse_energy=(1.-metallic)*(1.-.25*roughness);
     vec3 direct = frame.light_color_intensity.xyz *
-        (diffuse * frame.light_color_intensity.w * diffuse_energy) + actorDirectLight(world_position, surface_normal) * diffuse_energy;
+        (diffuse * frame.light_color_intensity.w * diffuse_energy * lightingVisibility(world_position,surface_normal,normalize(-frame.light_direction.xyz),10000.)) + actorDirectLight(world_position, surface_normal) * diffuse_energy;
     vec3 indirect = surfaceCacheIrradiance(world_position,
         surface_normal);
     vec3 view_direction = normalize(frame.camera_position.xyz - world_position);
     vec3 reflected = reflect(-view_direction, surface_normal);
     vec3 reflected_radiance = surfaceCacheReflection(
         world_position + reflected * 0.05, reflected, roughness);
+    reflected_radiance=lightingReflection(world_position,surface_normal,reflected,roughness,reflected_radiance);
     vec3 fresnel_zero = mix(vec3(0.04), base_color, metallic);
     float specular_strength = (1.0 - roughness) * (1.0 - roughness);
     vec3 indirect_specular = reflected_radiance * fresnel_zero * specular_strength;
-    vec3 lit_color = base_color * (indirect + direct * environmentCloudShadow(world_position)) + indirect_specular;
+    vec3 lit_color = base_color * (indirect * ambient_occlusion + direct * environmentCloudShadow(world_position)) + indirect_specular * ambient_occlusion;
     vec3 linear_color = mix(lit_color, base_color, unlit);
     linear_color = environmentFog(world_position, frame.camera_position.xyz, linear_color);
     vec3 encoded = mix(12.92 * linear_color,

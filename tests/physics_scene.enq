@@ -27,7 +27,7 @@ fn main() -> u32 {
     let mut asset = SceneAsset::new() asset.add(SceneActor::new("Crate", "cube", Transform::identity()).with_identity(id).with_physics(c))
     match SceneAsset::parse(asset.stringify()) {
         Some(loaded) => {
-            if loaded.version() != 7_u32 {
+            if loaded.version() != 8_u32 {
                 ret 4_u32
             }
             match loaded.actor(0) {

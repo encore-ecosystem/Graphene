@@ -1,0 +1,273 @@
+//! One PBR thumbnail producer and one bounded CPU preparation job, owned by the editor.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all, read_dir, remove_file, write_file_atomic}
+import std::thread::JoinHandle
+
+import luma::Window
+
+import mod::content_browser::{ContentBrowser, ContentThumb}
+import mod::displacement::patterns::DisplacementBudget
+import mod::material_images::{MaterialImages, prepare_material_preview}
+import mod::material_schema::{ResolvedMaterial, standard_pbr_parent}
+import mod::native_asset::{asset_source_stamp, load_native_height_preview, load_native_texture_preview, resolve_native_material}
+import mod::pbr_preview::PbrPreview
+import mod::standard_material::StandardMaterial
+import mod::texture_asset::{load_height_texture, load_material_texture}
+import mod::texture_image::{HeightImage, TextureImage}
+extern fn encore_text_sha256(value: str) -> str
+extern fn encore_file_open(path: str, writing: bool) -> u64
+extern fn encore_file_read(file: u64, size: usize) -> str
+extern fn encore_file_close(file: u64) -> bool
+
+struct ThumbnailPrepared {
+    project: str
+    path: str
+    generation: u64
+    key: str
+    cached: str
+    images: MaterialImages
+}
+pub struct MaterialThumbnails {
+    preview: Option[PbrPreview<H>]
+    worker: Option[JoinHandle[ThumbnailPrepared]]
+    active: Option[ThumbnailPrepared]
+    budget: DisplacementBudget<H>
+}
+fn empty_images(path: str, error: str) -> MaterialImages {
+    ret MaterialImages {
+        path, StandardMaterial::default(), Vec[TextureImage]::new(), error, HeightImage {
+            1_u32, 1_u32, vec![32768_u16]
+        }
+        , 0_f32, Option::None, Vec[TextureImage]::new()
+    }
+}
+fn textures(resolved: ResolvedMaterial) -> Vec[str] {
+    let m = resolved.surface
+    let mut paths = vec![m.base_color_texture(), m.normal_texture(), m.roughness_texture(), m.metallic_texture(), m.ao_texture(), m.height_texture()]
+    for parameter in resolved.definition.parameters {
+        if parameter.value.kind == "texture" {
+            let mut value = parameter.value
+            for item in resolved.values {
+                if item.parameter == parameter.id {
+                    value = item.value
+                }
+            }
+            paths.push(value.path)
+        }
+    }
+    ret paths
+}
+#attr(safe)
+pub fn material_thumbnail_key(project: str, path: str) -> str {
+    let resolved = match resolve_native_material(project, if path == "@engine/Materials/M_StandardPBR.gmaterial" {
+            standard_pbr_parent()
+        } else {
+            path
+        }
+        , "",) {
+        Ok(v) => v Err(_) => {
+            ret ""
+        }
+    }
+    let mut source = "pbr-studio-thumbnail-v2-checker8:128x96:256:" + resolved.fingerprint
+    for texture in textures(resolved) {
+        if texture != "" {
+            source += ":" + texture + ":" + asset_source_stamp(project + "/" + texture) + ":" + asset_source_stamp(project + "/" + texture + ".gtexture")
+        }
+    }
+    ret encore_text_sha256(source)
+}
+#attr(safe)
+fn read_cache(path: str) -> str {
+    let file = encore_file_open(path, false)
+    if file == 0 {
+        ret ""
+    }
+    let data = encore_file_read(file, 49161_usize)
+    let closed = encore_file_close(file)
+    ret if closed && data.byte_len() == 49160_usize && data.byte_at(0_usize) == 128_u8 && data.byte_at(1_usize) == 0_u8 && data.byte_at(2_usize) == 0_u8 && data.byte_at(3_usize) == 0_u8 && data.byte_at(4_usize) == 96_u8 && data.byte_at(5_usize) == 0_u8 && data.byte_at(6_usize) == 0_u8 && data.byte_at(7_usize) == 0_u8 {
+        data
+    } else {
+        ""
+    }
+}
+fn prepare_images(project: str, path: str) -> Result[MaterialImages, str] {
+    let resolved = resolve_native_material(project, if path == "@engine/Materials/M_StandardPBR.gmaterial" {
+            standard_pbr_parent()
+        } else {
+            path
+        }
+        , "",)?
+    ret prepare_material_preview(project, path, resolved, 256_u32)
+}
+fn prepare(project: str, path: str, generation: u64) -> sending ThumbnailPrepared {
+    let key = material_thumbnail_key(project, path)
+    let cached = if key != "" {
+        read_cache(project + "/.graphene/Thumbnails/" + key + ".thumb")
+    } else {
+        ""
+    }
+    let images = if cached != "" {
+        empty_images(path, "")
+    } else {
+        match prepare_images(project, path) {
+            Ok(images) => images Err(error) => empty_images(path, error)
+        }
+    }
+    ret ThumbnailPrepared { project, path, generation, key, cached, images }
+}
+fn cache_store(project: str, key: str, payload: str) ->() {
+    if key.byte_len() != 64 || payload.byte_len() != 49160 {
+        ret()
+    }
+    let directory = project + "/.graphene/Thumbnails"
+    if mkdir_all(directory) != 0 {
+        ret()
+    }
+    // Entries have a fixed 49,160 byte payload. 1,024 files stay below 49 MiB;
+    // reserve the rest of the 64 MiB disk budget for index/atomic-write overhead.
+    let mut count = 0_usize
+    for name in read_dir(directory) {
+        if name.byte_len() == 70 && name.slice_bytes(64, 6) == ".thumb" {
+            count += 1
+        }
+    }
+    if count >= 1024 {
+        for name in read_dir(directory) {
+            if count >= 1024 && name.byte_len() == 70 && name.slice_bytes(64, 6) == ".thumb" && name != key + ".thumb" {
+                if remove_file(directory + "/" + name) == 0 {
+                    count -= 1
+                }
+            }
+        }
+    }
+    let _stored = write_file_atomic(directory + "/" + key + ".thumb", payload)
+}
+
+impl for MaterialThumbnails {
+    pub fn new(budget: DisplacementBudget<H>) -> Self {
+        ret Self {
+            Option::None, Option::None, Option::None, budget
+        }
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.worker.is_some() || self.active.is_some()
+    }
+    pub fn poll(self: mut Self, window: Window, browser: mut ContentBrowser) -> bool {
+        let mut changed = false
+        match self.worker {
+            Some(worker) => {
+                if worker.is_finished() {
+                    let data = worker.join() self.worker = Option[JoinHandle[ThumbnailPrepared]]::None
+                    if data.project == browser.project && data.generation == browser.generation {
+                        if data.cached != "" || data.images.error != "" {
+                            browser.publish_thumbnail(ContentThumb {
+                                    data.generation, data.project, data.path, data.cached, data.images.error
+                                }
+                            ) changed = true
+                        } else {
+                            let ready = match self.preview {
+                                Some(preview) => preview.ready() None => true
+                            }
+                            if ready {
+                                match self.preview {
+                                    Some(preview) => {
+                                        if !preview.replace_images(data.images) {
+                                            browser.publish_thumbnail(ContentThumb {
+                                                    data.generation, data.project, data.path, "", "Unable to render material preview"
+                                                }
+                                            ) changed = true
+                                        } else {
+                                            self.active = Option[ThumbnailPrepared]::Some(data)
+                                        }
+                                    }
+                                    None => {
+                                        match PbrPreview::create_thumbnail(window, self.budget, data.images) {
+                                            Ok(preview) => {
+                                                self.preview = Option[PbrPreview<H>]::Some(preview) self.active = Option[ThumbnailPrepared]::Some(data)
+                                            }
+                                            Err(_) => {
+                                                browser.publish_thumbnail(ContentThumb {
+                                                        data.generation, data.project, data.path, "", "Unable to render material preview"
+                                                    }
+                                                ) changed = true
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                browser.publish_thumbnail(ContentThumb {
+                                        data.generation, data.project, data.path, "", "Unable to render material preview"
+                                    }
+                                ) changed = true
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match self.active {
+            Some(data) => {
+                match self.preview {
+                    Some(preview) => {
+                        let rendered = preview.render(128_u32, 96_u32)
+                        match preview.thumbnail_payload() {
+                            Some(payload) => {
+                                if data.project == browser.project && data.generation == browser.generation && data.key == material_thumbnail_key(data.project, data.path) {
+                                    cache_store(data.project, data.key, payload)
+                                    browser.publish_thumbnail(ContentThumb {
+                                            data.generation, data.project, data.path, payload, ""
+                                        }
+                                    ) changed = true
+                                }
+                                self.active = Option[ThumbnailPrepared]::None
+                            }
+                            None => {
+                                if !rendered && preview.error() != "" {
+                                    browser.publish_thumbnail(ContentThumb {
+                                            data.generation, data.project, data.path, "", "Unable to render material preview"
+                                        }
+                                    ) self.active = Option[ThumbnailPrepared]::None changed = true
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        self.active = Option[ThumbnailPrepared]::None
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if !self.busy() {
+            match browser.next_material_thumbnail() {
+                Some(asset) => {
+                    self.worker = Option[JoinHandle[ThumbnailPrepared]]::Some(spawn prepare(browser.project, asset.path, browser.generation))
+                }
+                None => {
+                }
+            }
+        }
+        ret changed
+    }
+    pub fn destroy(self: mut Self) ->() {
+        match self.worker {
+            Some(worker) => {
+                worker.join()
+            }
+            None => {
+            }
+        }
+        self.worker = Option[JoinHandle[ThumbnailPrepared]]::None match self.preview {
+            Some(preview) => preview.destroy() None => {
+            }
+        }
+        self.preview = Option[PbrPreview<H>]::None self.active = Option[ThumbnailPrepared]::None
+    }
+}

@@ -1,0 +1,101 @@
+//! One-time GPU conversion of immutable skin sources to shared patch topology.
+import core::result::Result
+import core::vec::Vec
+
+import linalg::Mat4
+
+import mod::patterns::DisplacementBudget
+import refrain::rhi::*
+import refrain::shaders::displacement::displacement_skin_source_spirv
+import refrain::virtual_geometry::VirtualGeometry
+
+pub struct DisplacementSkin {
+    source: GpuBuffer
+    output: GpuBuffer
+    morph_spans: GpuBuffer
+    morph_deltas: GpuBuffer
+    vertex_count: u32
+    instances: Vec[u32]
+    previous: Vec[Mat4]
+    history: Vec[bool]
+}
+
+pub struct GpuSkinPatchSource {
+    mesh: GpuMesh
+    ids: GpuBuffer
+    layout: BindGroupLayout
+    shader: ShaderModule
+    pipeline: ComputePipeline
+    group: BindGroup
+    completion: GpuCompletion
+    transient: u64
+    permanent: u64
+    retired: bool
+}
+
+impl for GpuSkinPatchSource {
+    pub fn create(device: GraphicsDevice, skin_source: GpuBuffer, geometry: VirtualGeometry, budget: mut DisplacementBudget&) -> Result[GpuSkinPatchSource<H>, str] {
+        let ids = geometry.vertex_indices() let indices = geometry.triangle_indices()
+        if !geometry.valid() || ids.len() == 0 || indices.len() == 0 || ids.len() > 4194304 || indices.len() > 12582912 {
+            ret Result::Err("Invalid skeletal displacement source")
+        }
+        for id in ids {
+            if (id as u64) * 128 + 128 > skin_source.size() {
+                ret Result::Err("Skeletal displacement source index is out of bounds")
+            }
+        }
+        let permanent =(ids.len() as u64) * 44 +(indices.len() as u64) * 4
+        let transient = if ids.len() < 4 {
+            16_u64
+        } else {
+            (ids.len() as u64) * 4
+        }
+        if !budget.reserve(permanent + transient) {
+            ret Result::Err("Skeletal displacement source budget exhausted")
+        }
+        let vertices = device.create_buffer((ids.len() as u64) * 44, buffer_vertex() | buffer_storage(), false)
+        let triangles = device.create_buffer((indices.len() as u64) * 4, buffer_index() | buffer_storage(), true)
+        let mapping = device.create_buffer(transient, buffer_storage(), true)
+        let layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::storage(0, shader_stage_compute()), BindGroupLayoutEntry::storage(1, shader_stage_compute()), BindGroupLayoutEntry::storage(2, shader_stage_compute())])
+        let shader = device.create_shader_module(displacement_skin_source_spirv(), shader_stage_compute())
+        let pipeline = device.create_compute_pipeline(shader, layout)
+        let group = device.create_buffer_bind_group_many(layout, vec![0_u32, 1_u32, 2_u32], vec![skin_source, mapping, vertices], vec![0_u64, 0_u64, 0_u64], vec![skin_source.size(),(ids.len() as u64) * 4, vertices.size()])
+        let mesh = GpuMesh { vertices, triangles, indices.len() as u32, true }
+        let mut result = GpuSkinPatchSource<H> {
+            mesh, mapping, layout, shader, pipeline, group, GpuCompletion::unavailable(), transient, permanent, false
+        }
+        if !vertices.available() || !triangles.available() || !mapping.available() || !layout.available() || !shader.available() || !pipeline.available() || !group.available() || !mapping.write_u32s(0, ids) || !triangles.write_u32s(0, indices) {
+            result.destroy(budget) ret Result::Err("Unable to allocate skeletal patch source")
+        }
+        ret Result::Ok(result)
+    }
+    pub fn record(self: mut Self&, frame: RenderFrame) -> bool {
+        if self.retired || self.completion.available() {
+            ret false
+        }
+        self.completion = frame.completion()
+        ret frame.dispatch_compute(self.pipeline, self.group,(((self.mesh.vertex_buffer().size() / 44) as u32) + 127) / 128, 1, 1) && frame.compute_barrier()
+    }
+    pub fn collect(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        if self.retired {
+            ret true
+        }
+        if self.completion.available() && !self.completion.ready() {
+            ret false
+        }
+        if self.completion.available() {
+            self.completion.destroy() self.completion = GpuCompletion::unavailable()
+        }
+        self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy() self.ids.destroy()
+        budget.release(self.transient) self.retired = true ret true
+    }
+    pub fn destroy(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        if self.permanent == 0 {
+            ret true
+        }
+        if !self.collect(budget) {
+            ret false
+        }
+        self.mesh.destroy() budget.release(self.permanent) self.permanent = 0 ret true
+    }
+}

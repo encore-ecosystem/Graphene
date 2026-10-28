@@ -1,0 +1,256 @@
+//! Shared ray scene descriptors and small graphics-pipeline variants. Every
+//! descriptor generation and replaced pipeline survives its own frame fences.
+import core::vec::Vec
+import linalg::Vec3
+
+import mod::rhi::*
+import mod::shaders::ray_lighting::*
+
+pub struct RayLightingView {
+    layout: BindGroupLayout
+    group: BindGroup
+}
+
+impl for RayLightingView {
+    pub fn unavailable() -> Self {
+        ret Self {
+            BindGroupLayout { 0 }, BindGroup::unavailable()
+        }
+    }
+    pub fn available(self: Self) -> bool {
+        ret self.group.available() && self.layout.available()
+    }
+    pub fn bind(self: Self, pass: RenderPassEncoder) -> bool {
+        ret !self.available() || pass.bind_group_at(1, self.group)
+    }
+}
+struct RayLightingGeneration {
+    acceleration: usize
+    sky: Vec3
+    group: BindGroup
+    config: GpuBuffer
+    uses: Vec[GpuCompletion]
+}
+pub struct RayLighting {
+    layout: BindGroupLayout
+    generations: Vec[RayLightingGeneration<H>]
+    active: usize
+    error: str
+}
+
+impl for RayLighting {
+    pub fn new() -> RayLighting<H> {
+        ret RayLighting<H> {
+            BindGroupLayout { 0 }, Vec[RayLightingGeneration<H>]::new(), 0, ""
+        }
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn prepare(self: mut Self&, device: GraphicsDevice, frame: RenderFrame,
+        acceleration: AccelerationStructure, sky: Vec3,) -> RayLightingView {
+        self.active = 0 self.error = ""
+        if !acceleration.available() {
+            self.collect() ret RayLightingView::unavailable()
+        }
+        if !self.layout.available() {
+            self.layout = device.create_bind_group_layout(vec![BindGroupLayoutEntry::acceleration_structure(0, shader_stage_fragment()), BindGroupLayoutEntry::storage(1, shader_stage_fragment())])
+        }
+        let mut chosen = self.generations.len()
+        for i in 0_usize..self.generations.len() {
+            let entry = self.generations.get_unchecked_borrowed(i)
+            if entry.acceleration == acceleration.handle && entry.sky.x() == sky.x() && entry.sky.y() == sky.y() && entry.sky.z() == sky.z() {
+                chosen = i break
+            }
+        }
+        if chosen == self.generations.len() {
+            let config = device.create_buffer(32, buffer_storage(), true)
+            let valid = config.available() && config.write_f32s(0, vec![1_f32, 80_f32, 0.003_f32, 1_f32, sky.x(), sky.y(), sky.z(), 1_f32])
+            let group = device.create_ray_query_bind_group(self.layout, 0, acceleration, vec![1_u32], vec![config], vec![0_u64], vec![32_u64])
+            if !valid || !group.available() {
+                self.error = "Unable to bind ray lighting: " + group.error() group.destroy() config.destroy()
+                self.collect() ret RayLightingView::unavailable()
+            }
+            self.generations.push(RayLightingGeneration<H> {
+                    acceleration.handle, sky, group, config, Vec[GpuCompletion]::new()
+                }
+            )
+        }
+        let mut entry = self.generations.get_unchecked_borrowed(chosen)
+        let token = frame.completion()
+        if !token.available() {
+            ret RayLightingView::unavailable()
+        }
+        entry.uses.push(token) self.active = entry.group.handle
+        let result = RayLightingView { self.layout, entry.group }
+        self.collect() ret result
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut count = 0_usize
+        for i in 0_usize..self.generations.len() {
+            let mut entry = self.generations.get_unchecked_borrowed(i)
+            let mut pending = Vec[GpuCompletion]::new()
+            for token in entry.uses {
+                if token.ready() {
+                    token.destroy()
+                } else {
+                    pending.push(token)
+                }
+            }
+            entry.uses = pending
+            if entry.group.handle != self.active && entry.uses.len() == 0 {
+                entry.group.destroy() entry.config.destroy()
+            } else {
+                self.generations.set(count, entry) count += 1
+            }
+        }
+        while self.generations.len() > count {
+            self.generations.pop()
+        }
+        ret()
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        self.active = 0 self.collect()
+        if self.generations.len() != 0 {
+            ret false
+        }
+        self.layout.destroy() self.layout = BindGroupLayout { 0 } ret true
+    }
+}
+struct RayPipelineGeneration {
+    key: str
+    shader: ShaderModule
+    solid: RenderPipeline
+    double_sided: RenderPipeline
+    uses: Vec[GpuCompletion]
+}
+pub struct RayPipelineSet {
+    generations: Vec[RayPipelineGeneration<H>]
+    solid: RenderPipeline
+    double_sided: RenderPipeline
+    view: RayLightingView
+    active: usize
+    error: str
+}
+
+impl for RayPipelineSet {
+    pub fn new() -> RayPipelineSet<H> {
+        ret RayPipelineSet<H> {
+            Vec[RayPipelineGeneration<H>]::new(), RenderPipeline::unavailable(), RenderPipeline::unavailable(), RayLightingView::unavailable(), 0, ""
+        }
+    }
+    pub fn prepare(self: mut Self&, device: GraphicsDevice, target: Swapchain, frame: RenderFrame,
+        vertex: ShaderModule, material_layout: BindGroupLayout, vertex_layout: VertexBufferLayout,
+        baseline: RenderPipeline, family: u32, variant: u32, cull: bool, view: RayLightingView,) -> bool {
+        self.view = RayLightingView::unavailable() self.active = 0 self.error = ""
+        if !view.available() {
+            self.collect() ret true
+        }
+        let key = target.handle().fmt() + ":" + baseline.identity().fmt() + ":" + vertex.handle.fmt() + ":" + material_layout.handle.fmt() + ":" + view.layout.handle.fmt() + ":" + family.fmt() + ":" + variant.fmt() + ":" + if cull {
+            "cull"
+        } else {
+            "both"
+        }
+        let mut chosen = self.generations.len()
+        for i in 0_usize..self.generations.len() {
+            if self.generations.get_unchecked_borrowed(i).key == key {
+                chosen = i break
+            }
+        }
+        if chosen == self.generations.len() {
+            let words = if family == 1 {
+                if variant == 2 {
+                    ray_virtual_temporal()
+                } elif variant == 1 {
+                    ray_virtual_linear()
+                } else {
+                    ray_virtual_sdr()
+                }
+            } elif family == 2 {
+                if variant == 2 {
+                    ray_terrain_temporal()
+                } elif variant == 1 {
+                    ray_terrain_linear()
+                } else {
+                    ray_terrain_sdr()
+                }
+            } else {
+                if variant == 2 {
+                    ray_material_temporal()
+                } elif variant == 1 {
+                    ray_material_linear()
+                } else {
+                    ray_material_sdr()
+                }
+            }
+            let shader = device.create_shader_module(words, shader_stage_fragment())
+            let solid = device.create_render_pipeline_two_sets(target, vertex, shader, vertex_layout, material_layout, view.layout, if cull {
+                    RenderPipelineOptions::depth().with_backface_culling()
+                } else {
+                    RenderPipelineOptions::depth()
+                }
+                ,
+            )
+            let double_sided = device.create_render_pipeline_two_sets(target, vertex, shader, vertex_layout, material_layout, view.layout, RenderPipelineOptions::depth())
+            if !shader.available() || !solid.available() || !double_sided.available() {
+                self.error = "Unable to create ray lighting pipeline: " + solid.error() + " " + shader.error()
+                solid.destroy() double_sided.destroy() shader.destroy() self.collect() ret false
+            }
+            self.generations.push(RayPipelineGeneration<H> {
+                    key, shader, solid, double_sided, Vec[GpuCompletion]::new()
+                }
+            )
+        }
+        let mut entry = self.generations.get_unchecked_borrowed(chosen)
+        let token = frame.completion()
+        if !token.available() {
+            ret false
+        }
+        entry.uses.push(token) self.solid = entry.solid self.double_sided = entry.double_sided self.view = view self.active = entry.solid.handle
+        self.collect() ret true
+    }
+    pub fn pipeline(self: Self&, original: RenderPipeline, double_sided: bool) -> RenderPipeline {
+        ret if self.view.available() {
+            if double_sided {
+                self.double_sided
+            } else {
+                self.solid
+            }
+        } else {
+            original
+        }
+    }
+    pub fn bind(self: Self&, pass: RenderPassEncoder) -> bool {
+        ret self.view.bind(pass)
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut count = 0_usize
+        for i in 0_usize..self.generations.len() {
+            let mut entry = self.generations.get_unchecked_borrowed(i)
+            let mut pending = Vec[GpuCompletion]::new()
+            for token in entry.uses {
+                if token.ready() {
+                    token.destroy()
+                } else {
+                    pending.push(token)
+                }
+            }
+            entry.uses = pending
+            if entry.solid.handle != self.active && entry.uses.len() == 0 {
+                entry.solid.destroy() entry.double_sided.destroy() entry.shader.destroy()
+            } else {
+                self.generations.set(count, entry) count += 1
+            }
+        }
+        while self.generations.len() > count {
+            self.generations.pop()
+        }
+        ret()
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        self.active = 0 self.view = RayLightingView::unavailable() self.collect() ret self.generations.len() == 0
+    }
+}

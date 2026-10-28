@@ -1,12 +1,12 @@
 import std::io::println
 //! Native import, source-independent playback ranges, scene history and migration.
 import core::option::Option
-import graphene::AudioPanel
+import std::os::{copy_file, mkdir_all, read_file, remove_file, write_file}
+
+import graphene::{ActorComponentCommand, AudioPanel, AudioSettings, AudioSource, EditorState, GrapheneCommand, Scene, SceneActor, SceneAsset, SceneComponent, Transform}
 import graphene::audio::asset::{import_sound, load_sound, waveform}
-import graphene::native_asset::{native_sound_header, NativeSound}
-import graphene::{Scene, SceneActor, SceneAsset, Transform, SceneComponent, AudioSource, AudioSettings, EditorState, GrapheneCommand, ActorComponentCommand}
+import graphene::native_asset::{NativeSound, native_sound_header}
 import linalg::Vec3
-import std::os::{mkdir_all, copy_file, remove_file, read_file, write_file}
 
 fn main() -> u32 {
     let project = "target/audio-fixture"
@@ -87,7 +87,7 @@ fn main() -> u32 {
             ret 9
         }
     }
-    if decoded.version() != 7 || decoded.source_version() != 7 {
+    if decoded.version() != 8 || decoded.source_version() != 8 {
         ret 10
     }
     match decoded.actor_by_id(id) {

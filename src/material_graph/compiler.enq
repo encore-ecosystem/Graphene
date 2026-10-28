@@ -3,11 +3,14 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
-import mod::model::*
+
 import std::os::{env, file_exists, file_sha256, mkdir_all, read_file, write_file_atomic}
 import std::path::Path
 import std::process::run_args_capture
 import std::string::String
+
+import mod::model::*
+import refrain::material_schema::{MaterialDefinition}
 
 extern fn encore_text_sha256(contents: str) -> str
 extern fn graphene_bp_stage(parent: str) -> str
@@ -99,8 +102,16 @@ fn input_source(graph: MaterialGraph, node: MaterialNode, key: str, kind: str, f
     for link in graph.links {
         if link.target.node == node.id && link.target.pin == key {
             let source = graph.node(link.source.node).unwrap_or(node)
-            let value = f "m_{source.id}"
-            ret if kind == "vec3" && source.kind == "scalar" {
+            let value = f"m_{source.id}" + if source.operation == "texture-parameter" && link.source.pin != "rgb" {
+                "." + link.source.pin
+            } else {
+                ""
+            }
+            let source_pin = material_pin(source, link.source.pin, true).unwrap_or(MaterialPin {
+                    "value", source.kind, true
+                }
+            )
+            ret if kind == "vec3" && source_pin.kind == "scalar" {
                 "vec3(" + value + ")"
             } else {
                 value
@@ -115,6 +126,12 @@ fn expression(graph: MaterialGraph, node: MaterialNode) -> str {
     let b = input_source(graph, node, "b", node.kind, literal(node))
     if op == "scalar" || op == "color" {
         ret literal(node)
+    }
+    if op == "scalar-parameter" || op == "color-parameter" || op == "bool-parameter" {
+        ret "mg_parameter_" + node.id.fmt()
+    }
+    if op == "texture-parameter" {
+        ret "mg_sample_" + node.id.fmt() + "((" + input_source(graph, node, "uv", "vec3", "vec3(mg_uv,0.0)") + ").xy)"
     }
     if op == "add" {
         ret "(" + a + "+" + b + ")"
@@ -264,7 +281,7 @@ pub fn generate_material(graph: MaterialGraph) -> MaterialGenerated {
                     } else {
                         "vec3"
                     }
-                    body += f "    {glsl_type} m_{node.id} = {lowered};\n"
+                    body += f"    {glsl_type} m_{node.id} = {lowered};\n"
                     done.push(node.id) progress = true
                 }
             }
@@ -296,6 +313,9 @@ pub fn generate_material(graph: MaterialGraph) -> MaterialGenerated {
         ,
     )
     let rough = input_source(graph, root, "roughness", "scalar", "0.5")
+    let normal = input_source(graph, root, "normal", "vec3", "vec3(0.5,0.5,1.0)")
+    let ao = input_source(graph, root, "ao", "scalar", "1.0")
+    let height = input_source(graph, root, "height", "scalar", "0.5")
     let emission = input_source(graph, root, "emission", "vec3", "vec3(0.0)")
     let volume = if domain == "volume" {
         "void evaluateVolume(out vec3 scattering,out float density,out vec3 emission){\n" + body + "scattering=max(" + base + ",vec3(0));density=max(" + metal + ",0.0);emission=max(" + emission + ",vec3(0));}\n"
@@ -312,22 +332,22 @@ pub fn generate_material(graph: MaterialGraph) -> MaterialGenerated {
         } else {
             "PARTICLE"
         }
-        + " 1\n" + material_context_source() + volume + "void evaluateMaterial(out vec3 baseColor, out float metallic, out float roughness) {\n" + body +
+        + " 1\n" + material_context_source() + "#ifndef GRAPHENE_NATIVE_PARAMETERS\nfloat mgNormalStrength(){return 1.;}\nfloat mgNormalFlip(){return 1.;}\n#endif\n" + volume + "void evaluateSurface(out vec3 baseColor, out float metallic, out float roughness, out vec3 tangentNormal, out float occlusion, out float height) {\n" + body +
         "    baseColor = " + if domain == "surface" {
             "clamp(" + base + ",0.0,1.0)"
         } else {
             "max(" + base + "+" + emission + ",vec3(0))"
         }
-        + ";\n    metallic = clamp(" + metal + ",0.0,1.0);\n    roughness = clamp(" + rough + ",0.0,1.0);\n}\n", diagnostics, done.len()
+        + ";\n    metallic = clamp(" + metal + ",0.0,1.0);\n    roughness = clamp(" + rough + ",0.0,1.0);\n    tangentNormal=" + normal + ";occlusion=clamp(" + ao + ",0.,1.);height=" + height + ";\n}\nvoid evaluateMaterial(out vec3 baseColor,out float metallic,out float roughness){vec3 normal;float ao,height;evaluateSurface(baseColor,metallic,roughness,normal,ao,height); }\n", diagnostics, done.len()
     }
 }
 
 pub fn material_vertex_source() -> str {
-    ret "#version 450\nlayout(location=0) in vec3 position;\nlayout(location=1) in vec3 normal;\nlayout(location=0) out vec3 worldNormal;\nlayout(location=1) out vec3 worldPosition;\nlayout(set=0,binding=0) uniform Preview { mat4 viewProjection; vec4 camera; vec4 environment[8]; } frame;\nvoid main(){worldNormal=normal;worldPosition=position;gl_Position=frame.camera.w>0.5?vec4(position.xy,0.0,1.0):frame.viewProjection*vec4(position,1.0);}\n"
+    ret "#version 450\nlayout(location=0) in vec3 position;\nlayout(location=1) in vec3 normal;\nlayout(location=3) in vec2 uv;\nlayout(location=2) out vec2 materialUV;\nlayout(location=0) out vec3 worldNormal;\nlayout(location=1) out vec3 worldPosition;\nlayout(set=0,binding=0) uniform Preview { mat4 viewProjection; vec4 camera; vec4 environment[8]; } frame;\nvoid main(){materialUV=uv;worldNormal=normal;worldPosition=position;gl_Position=frame.camera.w>0.5?vec4(position.xy,0.0,1.0):frame.viewProjection*vec4(position,1.0);}\n"
 }
 pub fn material_fragment_source(generated: str) -> str {
-    ret "#version 450\nlayout(location=0) in vec3 worldNormal;\nlayout(location=1) in vec3 worldPosition;\nlayout(location=0) out vec4 outputColor;\nlayout(set=0,binding=0) uniform Preview { mat4 viewProjection; vec4 camera; vec4 environment[8]; } frame;\n" + generated +
-    "void main(){mg_position=worldPosition;mg_direction=normalize(worldPosition-frame.camera.xyz);mg_uv=worldPosition.xy*.5+.5;for(int i=0;i<8;++i)mg_environment[i]=frame.environment[i];\n#ifndef GRAPHENE_DOMAIN_SURFACE\nvec3 forward=normalize(-frame.camera.xyz),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);mg_direction=normalize(forward+right*worldPosition.x+up*worldPosition.y);mg_position=frame.camera.xyz+mg_direction*1000.;\n#endif\nvec3 base;float metal;float rough;evaluateMaterial(base,metal,rough);vec3 n=normalize(worldNormal);vec3 l=normalize(vec3(0.5,0.8,0.6));vec3 v=normalize(frame.camera.xyz-worldPosition);float diffuse=max(dot(n,l),0.0);vec3 h=normalize(l+v);float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,rough));vec3 linear=base*(0.18+diffuse*0.8)*(1.0-metal)+mix(vec3(0.04),base,metal)*spec*(1.0-rough);\n#ifdef GRAPHENE_DOMAIN_SKY\nlinear=base;\n#elif defined(GRAPHENE_DOMAIN_VOLUME)\nvec3 sum=vec3(0);float through=1.;for(int i=0;i<32;++i){mg_position=vec3(worldPosition.xy*2.,float(i)/16.-1.);vec3 scattering,emission;float density;evaluateVolume(scattering,density,emission);float opacity=1.-exp(-max(density,0.)*.2);sum+=through*opacity*(scattering+emission);through*=1.-opacity;}linear=sum+through*vec3(.025,.04,.065);\n#elif defined(GRAPHENE_DOMAIN_PARTICLE)\nfloat soft=1.-smoothstep(.35,1.,length(worldPosition.xy));linear=mix(vec3(.025,.04,.065),base,metal*soft);\n#endif\nvec3 encoded=mix(linear*12.92,1.055*pow(max(linear,vec3(0.0)),vec3(1.0/2.4))-0.055,greaterThan(linear,vec3(0.0031308)));outputColor=vec4(encoded,1.0); }\n"
+    ret "#version 450\nlayout(location=0) in vec3 worldNormal;\nlayout(location=1) in vec3 worldPosition;\nlayout(location=2) in vec2 materialUV;\nlayout(location=0) out vec4 outputColor;\nlayout(set=0,binding=0) uniform Preview { mat4 viewProjection; vec4 camera; vec4 environment[8]; } frame;\n" + generated +
+    "void main(){mg_position=worldPosition;mg_direction=normalize(worldPosition-frame.camera.xyz);mg_uv=materialUV;for(int i=0;i<8;++i)mg_environment[i]=frame.environment[i];\n#ifndef GRAPHENE_DOMAIN_SURFACE\nvec3 forward=normalize(-frame.camera.xyz),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);mg_direction=normalize(forward+right*worldPosition.x+up*worldPosition.y);mg_position=frame.camera.xyz+mg_direction*1000.;\n#endif\nvec3 base;float metal;float rough;evaluateMaterial(base,metal,rough);vec3 n=normalize(worldNormal);vec3 l=normalize(vec3(0.5,0.8,0.6));vec3 v=normalize(frame.camera.xyz-worldPosition);float diffuse=max(dot(n,l),0.0);vec3 h=normalize(l+v);float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,rough));vec3 linear=base*(0.18+diffuse*0.8)*(1.0-metal)+mix(vec3(0.04),base,metal)*spec*(1.0-rough);\n#ifdef GRAPHENE_DOMAIN_SKY\nlinear=base;\n#elif defined(GRAPHENE_DOMAIN_VOLUME)\nvec3 sum=vec3(0);float through=1.;for(int i=0;i<32;++i){mg_position=vec3(worldPosition.xy*2.,float(i)/16.-1.);vec3 scattering,emission;float density;evaluateVolume(scattering,density,emission);float opacity=1.-exp(-max(density,0.)*.2);sum+=through*opacity*(scattering+emission);through*=1.-opacity;}linear=sum+through*vec3(.025,.04,.065);\n#elif defined(GRAPHENE_DOMAIN_PARTICLE)\nfloat soft=1.-smoothstep(.35,1.,length(worldPosition.xy));linear=mix(vec3(.025,.04,.065),base,metal*soft);\n#endif\nvec3 encoded=mix(linear*12.92,1.055*pow(max(linear,vec3(0.0)),vec3(1.0/2.4))-0.055,greaterThan(linear,vec3(0.0031308)));outputColor=vec4(encoded,1.0); }\n"
 }
 #attr(safe)
 fn digest(source: str) -> str {
@@ -358,7 +378,7 @@ fn resolve_tool(name: str) -> Result[str, str] {
 }
 pub fn material_runtime_variants(domain: str) -> Vec[str] {
     if domain == "surface" {
-        ret vec!["scene-linear", "scene-temporal", "mesh-linear", "mesh-temporal", "triangle-linear", "triangle-temporal"]
+        ret vec!["scene-linear", "scene-temporal", "mesh-linear", "mesh-temporal", "triangle-linear", "triangle-temporal", "scene-sdr", "mesh-sdr", "triangle-sdr", "scene-ray-linear", "scene-ray-temporal", "mesh-ray-linear", "mesh-ray-temporal", "triangle-ray-linear", "triangle-ray-temporal", "scene-ray-sdr", "mesh-ray-sdr", "triangle-ray-sdr"]
     }
     if domain == "particle" {
         ret vec!["particle"]
@@ -372,10 +392,10 @@ fn shader_root() -> str {
     ret Path::new(env("GRAPHENE_SHADER_ROOT").unwrap_or("shaders")).resolve().as_str()
 }
 fn shader_files() -> Vec[str] {
-    ret vec!["cube.frag", "virtual_scene.frag", "virtual_scene_triangle.frag", "environment_sky.frag", "environment_atmosphere.glsl", "environment_precipitation.frag", "scene_lighting.glsl", "environment_surface.glsl", "environment_weather.glsl", "material_normal.glsl", "aa_motion.glsl", "aa_decode.glsl"]
+    ret vec!["cube.frag", "virtual_scene.frag", "virtual_scene_triangle.frag", "environment_sky.frag", "environment_atmosphere.glsl", "environment_precipitation.frag", "scene_lighting.glsl", "ray_lighting.glsl", "environment_surface.glsl", "environment_weather.glsl", "material_normal.glsl", "aa_motion.glsl", "aa_decode.glsl"]
 }
 fn runtime_shader_fingerprint() -> str {
-    let mut content = "runtime-material-abi-2"
+    let mut content = "runtime-material-abi-3"
     for file in shader_files() {
         content += read_file(shader_root() + "/" + file)
     }
@@ -431,9 +451,11 @@ fn compile_runtime_material(directory: str, compiler: str, validator: str) -> i3
         } else {
             "cube.frag"
         }
-        let mut args = vec!["-O", "--target-env=vulkan1.2", "-I" + directory, "-DGRAPHENE_LINEAR_COLOR"]
+        let mut args = vec!["-O", "--target-env=vulkan1.2", "-I" + directory]
+        if !variant.contains("sdr") { args.push("-DGRAPHENE_LINEAR_COLOR") }
+        if variant.contains("ray") { args.push("-DGRAPHENE_RAY_LIGHTING") }
         if domain == "surface" {
-            args.push("-DGRAPHENE_MATERIAL_GRAPH") args.push("-DGRAPHENE_ENVIRONMENT_SHELTER") args.push("-DGRAPHENE_BASE_COLOR_TEXTURE")
+            args.push("-DGRAPHENE_MATERIAL_GRAPH") args.push("-DGRAPHENE_MATERIAL_PARAMETERS") args.push("-DGRAPHENE_ENVIRONMENT_SHELTER") args.push("-DGRAPHENE_BASE_COLOR_TEXTURE")
             if variant.contains("temporal") {
                 args.push("-DGRAPHENE_TEMPORAL")
             }
@@ -459,7 +481,7 @@ pub fn prepare_material_build(project: str, semantic: str, generated: str) -> Re
     let compiler = resolve_tool(env("GRAPHENE_GLSLC").unwrap_or("glslc"))?
     let validator = resolve_tool(env("GRAPHENE_SPIRV_VAL").unwrap_or("spirv-val"))?
     let vertex = material_vertex_source() let fragment = material_fragment_source(generated)
-    let key = digest(vertex + fragment + file_sha256(compiler) + file_sha256(validator) + runtime_shader_fingerprint() + "-O --target-env=vulkan1.2 material-runtime-abi-2")
+    let key = digest(vertex + fragment + file_sha256(compiler) + file_sha256(validator) + runtime_shader_fingerprint() + "-O --target-env=vulkan1.2 material-runtime-abi-3")
     let root = Path::new(project).resolve().join("target/materials").as_str()
     if key.byte_len() != 64 || mkdir_all(root) != 0 {
         ret Result::Err("Unable to create material compiler cache")
@@ -542,4 +564,72 @@ pub fn material_spirv(bytes: str) -> Result[Vec[u32], str] {
         ret Result::Err("Invalid SPIR-V magic")
     }
     ret Result::Ok(words)
+}
+
+/// Parameter values live in a descriptor buffer. The generated program depends
+/// on parameter identities/types, never on an instance's override values.
+pub fn generate_material_definition(definition: MaterialDefinition) -> MaterialGenerated {
+    let mut generated = generate_material(definition.graph)
+    let mut prefix = "#define GRAPHENE_NATIVE_PARAMETERS 1\n#ifdef GRAPHENE_MATERIAL_PARAMETERS\nlayout(set=0,binding=63) uniform GraphParameters { vec4 values[256]; } mg_parameters;\n#endif\n"
+    let mut texture_index = 0_usize
+    for index in 0_usize..definition.parameters.len() {
+        let parameter = definition.parameters.get_unchecked_borrowed(index)
+        let id = parameter.id.fmt()
+        let value = parameter.value
+        if value.kind == "texture" {
+            if texture_index >= 8 {
+                generated.diagnostics.push(MaterialDiagnostic {
+                        parameter.id, "", "A surface material supports at most eight texture parameters"
+                    }
+                )
+            }
+            let slot = texture_index.fmt()
+            let binding =(64_usize + texture_index).fmt()
+            prefix += "#ifdef GRAPHENE_MATERIAL_PARAMETERS\nlayout(set=0,binding=" + binding + ") uniform sampler2D mg_map_" + slot + ";\nvec3 mg_sample_" + id + "(vec2 uv){return texture(mg_map_" + slot + ",uv)." + if parameter.binding == "roughness_texture" { "ggg" } elif parameter.binding == "metallic_texture" { "bbb" } elif parameter.binding == "ao_texture" { "rrr" } else { "rgb" } + ";}\n#else\nvec3 mg_sample_" + id + "(vec2 uv){return " + if parameter.binding == "normal_texture" {
+                "vec3(.5,.5,1.)"
+            } elif parameter.binding == "height_texture" {
+                "vec3(.5)"
+            } else {
+                "vec3(1.)"
+            }
+            + ";}\n#endif\n"
+            texture_index += 1
+        } else {
+            let fallback = if value.kind == "color" {
+                "vec3(" + number(value.vector.x()) + "," + number(value.vector.y()) + "," + number(value.vector.z()) + ")"
+            } elif value.kind == "bool" {
+                if value.flag {
+                    "1.0"
+                } else {
+                    "0.0"
+                }
+            } else {
+                number(value.number)
+            }
+            let swizzle = if value.kind == "color" {
+                ".xyz"
+            } else {
+                ".x"
+            }
+            prefix += "#ifdef GRAPHENE_MATERIAL_PARAMETERS\n#define mg_parameter_" + id + " mg_parameters.values[" + index.fmt() + "]" + swizzle + "\n#else\n#define mg_parameter_" + id + " " + fallback + "\n#endif\n"
+        }
+    }
+    for node in definition.graph.nodes {
+        if node.operation == "scalar-parameter" || node.operation == "color-parameter" || node.operation == "bool-parameter" || node.operation == "texture-parameter" {
+            if definition.parameter(node.id).is_none() {
+                generated.diagnostics.push(MaterialDiagnostic {
+                        node.id, "", "Parameter definition is missing"
+                    }
+                )
+            }
+        }
+    }
+    let mut strength = "1.0" let mut flip = "1.0"
+    for parameter in definition.parameters {
+        if parameter.binding == "normal_scale" { strength = "mg_parameter_" + parameter.id.fmt() }
+        if parameter.binding == "normal_flip_y" { flip = "(1.0-2.0*mg_parameter_" + parameter.id.fmt() + ")" }
+    }
+    prefix += "float mgNormalStrength(){return " + strength + ";}\nfloat mgNormalFlip(){return " + flip + ";}\n"
+    generated.source = prefix + generated.source
+    ret generated
 }

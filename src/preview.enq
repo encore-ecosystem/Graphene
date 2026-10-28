@@ -13,9 +13,13 @@ import mod::animation::component::CharacterMorphChoice
 import mod::animation::picking::{AnimationPick, pick_animation}
 import mod::animation::scene::SceneAnimation
 import mod::animation::scene_gpu::{CharacterRenderView, SceneCharacters}
-import mod::anti_aliasing::AntiAliasingView
+import mod::anti_aliasing::{AntiAliasingView, aa_vertex_layout}
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
 import mod::autolod_settings::AutoLodSettings
+import mod::displacement::patterns::DisplacementBudget
+import mod::displacement::ray_scene::DisplacementRayScene
+import mod::displacement::renderer::{DisplacementRenderer, DisplacementStatistics}
+import mod::displacement::scene::{DisplacementActorIdentity, DisplacementInput, DisplacementMaterial, prepare_displacement_inputs}
 import mod::dynamic_gi::{GpuDynamicGi, SdfBox, SdfSphere, SurfaceCacheSample}
 import mod::editor_gesture::gizmo_angle
 import mod::editor_gizmo_handle::{gizmo_extra_hit, gizmo_handle_contains, gizmo_plane_handle_mesh}
@@ -26,10 +30,14 @@ import mod::environment::precipitation::PrecipitationView
 import mod::environment::sky_view::EnvironmentView
 import mod::environment::system::{EnvironmentFrame, EnvironmentSystem}
 import mod::lod_groups::{LodGroup, LodGroups}
+import mod::material_images::MaterialImageRequest
+import mod::material_program::{MaterialProgram, material_program_key, material_program_layout}
+import mod::material_schema::ResolvedMaterial
 import mod::mesh_prepare::prepare_mesh_geometry
 import mod::particles::scene::SceneParticles
 import mod::performance::performance_counter_ns
 import mod::project_assets::ImportedMeshAsset
+import mod::ray_lighting::{RayLighting, RayLightingView}
 import mod::render_policy::RenderFeaturePolicy
 import mod::render_settings::{AntiAliasingMethod, RenderSettings}
 import mod::renderer::SceneRenderer
@@ -43,10 +51,12 @@ import mod::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
 import mod::scene::transform::Transform
 import mod::scene::world::Scene
 import mod::shaders::{material_fragment_spirv, material_vertex_spirv}
+import mod::terrain::gpu_materials::TerrainGpuMaterials
+import mod::terrain::model::TerrainAsset
 import mod::texture_asset::TextureImage
 import mod::texture_gpu::TextureUpload
 import mod::virtual_geometry::VirtualGeometry
-import mod::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, gpu_virtual_geometry_available, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_cluster_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_error, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_maximum_lod, gpu_virtual_geometry_minimum_ratio, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_replace_texture_groups, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_selected_lod, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_target_ratio, gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_traversal_instances}
+import mod::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, gpu_virtual_geometry_available, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_cluster_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_error, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_maximum_lod, gpu_virtual_geometry_minimum_ratio, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pbr_groups, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_program_groups, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_replace_texture_groups, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_selected_lod, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_target_ratio, gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_traversal_instances}
 
 /// Stable source entity identity to a renderer-owned mesh resource.
 pub struct SceneGpuBinding {
@@ -87,6 +97,8 @@ pub struct ViewportRenderer {
     virtual_meshes: Vec[VirtualMeshEntry<H>]
     virtual_mesh_frame_ready: Vec[bool]
     virtual_frame_ready: bool
+    ray_lighting: RayLighting<H>
+    ray_scene: DisplacementRayScene<H>
     ray_tlas: AccelerationStructure
     ray_scene_transforms: Vec[f32]
     ray_path_reported: bool
@@ -94,6 +106,10 @@ pub struct ViewportRenderer {
     scene: Scene
     frame_items: Vec[RenderItem]
     foliage_items: Vec[RenderItem]
+    pbr_materials: Vec[PbrMaterialEntry]
+    terrain_materials: TerrainGpuMaterials<H>
+    displacement: DisplacementRenderer<H>
+    pbr_project: str
     frame_scene_revision: u64
     gizmo_scene: Scene
     cube_mesh: MeshId
@@ -149,6 +165,7 @@ pub struct ViewportRenderer {
     authored_light: DirectionalLight
     graph_key: str
     graph_shaders: Vec[Vec[u32]]
+    retired_material_programs: Vec[MaterialProgram<H>]
     grid_origin: Vec3
     primary_position: Vec3
     probe_camera_position: Vec3
@@ -186,8 +203,18 @@ fn viewport_renderer_is_editor_actor(
     ret false
 }
 
+struct PbrMaterialEntry {
+    path: str
+    id: MaterialId
+    material: StandardMaterial
+    textures: Vec[GpuTexture]
+    height_range: f32
+    program: Option[MaterialProgram<H>]
+}
+
 struct VirtualMeshEntry {
     geometry: GpuVirtualGeometry<H>
+    material: u64
     mesh: u64
     frame_ready: bool
     enabled: bool
@@ -372,6 +399,10 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     entries.push(BindGroupLayoutEntry::texture_sampler(5, shader_stage_fragment()))
     entries.push(BindGroupLayoutEntry::texture_sampler(6, shader_stage_fragment()))
     entries.push(BindGroupLayoutEntry::texture_sampler(7, shader_stage_fragment()))
+    entries.push(BindGroupLayoutEntry::texture_sampler(8, shader_stage_fragment()))
+    for entry in material_program_layout() {
+        entries.push(entry)
+    }
     let layout = device.create_bind_group_layout(entries)
     let pipeline = device.create_render_pipeline_with_options(swapchain, vertex_shader, fragment_shader,
         VertexBufferLayout::new(44_u32, attributes), layout,
@@ -408,7 +439,7 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     }
     let mut virtual_meshes = Vec[VirtualMeshEntry<H>]::new()
     virtual_meshes.push(VirtualMeshEntry<H> {
-            virtual_cubes, mesh_id.value(), false, true
+            virtual_cubes, 0_u64, mesh_id.value(), false, true
         }
         ,
     )
@@ -498,17 +529,17 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
     }
     let flat_normal_texture = normal_upload.finish()
     let material_sampler = device.create_repeat_sampler()
-    let mut renderer = SceneRenderer::create_with_gi(
+    let mut renderer = SceneRenderer::create_with_material_programs(
         device, layout, swapchain.frames_in_flight(), pipeline, double_sided_pipeline,
         dynamic_gi.scene_storage(), dynamic_gi.surface_storage(),
         dynamic_gi.history_storage(), white_texture, flat_normal_texture, material_sampler,)
-    let gizmo_renderer = SceneRenderer::create_with_gi(
+    let gizmo_renderer = SceneRenderer::create_with_material_programs(
         device, layout, swapchain.frames_in_flight(),
         overlay_pipeline, overlay_double_sided_pipeline,
         dynamic_gi.scene_storage(), dynamic_gi.surface_storage(),
         dynamic_gi.history_storage(), white_texture, flat_normal_texture, material_sampler,)
     let preview_target = device.create_shared_offscreen_target(512_u32, 320_u32)
-    let mut preview_renderer = SceneRenderer::create_with_gi(device, layout, preview_target.frames_in_flight(), pipeline, double_sided_pipeline,
+    let mut preview_renderer = SceneRenderer::create_with_material_programs(device, layout, preview_target.frames_in_flight(), pipeline, double_sided_pipeline,
         dynamic_gi.scene_storage(), dynamic_gi.surface_storage(), dynamic_gi.history_storage(), white_texture, flat_normal_texture, material_sampler,)
     let indirect_ambient = Vec3::new(0.28_f32, 0.28_f32, 0.28_f32)
     if !device.available() || !swapchain.available() || !pipeline.available() || !overlay_pipeline.available()
@@ -606,9 +637,9 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
             white_texture, GpuTexture::unavailable(), flat_normal_texture, GpuTexture::unavailable(), material_sampler,
             Vec[GpuTexture]::new(), Vec[BindGroup]::new(), dynamic_gi,
             virtual_meshes, virtual_mesh_frame_ready, false,
-            ray_tlas, Vec[f32]::new(), false,
+            RayLighting::new(), DisplacementRayScene::new(), ray_tlas, Vec[f32]::new(), false,
             indirect_ambient,
-            scene, Vec[RenderItem]::new(), Vec[RenderItem]::new(), 0_u64, gizmo_scene, mesh_id, mesh_bounds_min,
+            scene, Vec[RenderItem]::new(), Vec[RenderItem]::new(), Vec[PbrMaterialEntry]::new(), TerrainGpuMaterials::new(), DisplacementRenderer::new(), "", 0_u64, gizmo_scene, mesh_id, mesh_bounds_min,
             mesh_bounds_max, material_id, terrain_material_id, selected_material_id,
             unlit_material_id, selected_unlit_material_id,
             selection_outline, Vec[u64]::new(), grid,
@@ -617,7 +648,7 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
             gizmo_x_active_material, gizmo_y_active_material, gizmo_z_active_material,
             gizmo_x, gizmo_y, gizmo_z, gizmo_x_tip, gizmo_y_tip, gizmo_z_tip,
             gizmo_plane_meshes, gizmo_planes, gizmo_center, gizmo_center_material,
-            cubes, Vec[u64]::new(), Vec[u64]::new(), skybox_material_id, skybox, Vec[u64]::new(), Vec[f32]::new(), EnvironmentSystem::new(), EnvironmentView::create(device), EnvironmentView::create(device), SceneParticles::create(device), SceneAnimation::new(), SceneCharacters::create(device), precipitation, preview_precipitation, DirectionalLight::new(Vec3::new(0, - 1, 0), Vec3::new(1, 1, 1), 1.15_f32), "", Vec[Vec[u32]]::new(),
+            cubes, Vec[u64]::new(), Vec[u64]::new(), skybox_material_id, skybox, Vec[u64]::new(), Vec[f32]::new(), EnvironmentSystem::new(), EnvironmentView::create(device), EnvironmentView::create(device), SceneParticles::create(device), SceneAnimation::new(), SceneCharacters::create(device), precipitation, preview_precipitation, DirectionalLight::new(Vec3::new(0, - 1, 0), Vec3::new(1, 1, 1), 1.15_f32), "", Vec[Vec[u32]]::new(), Vec[MaterialProgram<H>]::new(),
             Vec3::zero(), Vec3::zero(),
             Vec3::new(3.2_f32, 2.35_f32, 4.2_f32),
             Vec3::new( - 0.55_f32, - 0.4_f32, - 0.72_f32),
@@ -706,6 +737,485 @@ impl for ViewportRenderer {
         ret()
     }
 
+    pub fn set_material_project(self: mut Self&, project: str) ->() {
+        if self.pbr_project != project {
+            self.displacement.invalidate()
+            for texture in self.terrain_materials.drain() {
+                self.retired_material_textures.push(texture)
+            }
+        }
+        self.pbr_project = project ret()
+    }
+    pub fn set_terrain_material(self: mut Self&, mesh: MeshId, asset: TerrainAsset, revision: u64) -> bool {
+        ret self.terrain_materials.set(self.device, mesh, asset, revision)
+    }
+    pub fn terrain_material_requests(self: Self&) -> Vec[MaterialImageRequest] {
+        ret self.terrain_materials.requests()
+    }
+    pub fn poll_terrain_materials(self: mut Self&) -> bool {
+        let textures = self.terrain_materials.poll()
+        if textures.len() == 0 {
+            ret false
+        }
+        self.displacement.invalidate()
+        for texture in textures {
+            if texture.available() {
+                self.retired_material_textures.push(texture)
+            }
+        }
+        self.frame_scene_revision = 0 self.invalidate_anti_aliasing() ret true
+    }
+    pub fn has_pbr_material(self: Self&, path: str) -> bool {
+        for entry in self.pbr_materials {
+            if entry.path == path {
+                ret true
+            }
+        }
+        ret false
+    }
+    fn pbr_material_for_entity(self: Self&, entity: u64) -> u64 {
+        match self.scene.get(entity) {
+            Some(actor) => {
+                for entry in self.pbr_materials {
+                    if entry.path == self.pbr_project + "/" + actor.material_path() {
+                        ret entry.id.value()
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        ret 0_u64
+    }
+    fn pbr_virtual_groups(self: Self&, entry: VirtualMeshEntry<H>, base: GpuTexture, normal: GpuTexture) -> Vec[BindGroup] {
+        for material in self.pbr_materials {
+            if entry.material == material.id.value() {
+                ret gpu_virtual_geometry_program_groups(entry.geometry, self.device, material.textures.get_unchecked_borrowed(0), material.textures.get_unchecked_borrowed(1), material.textures.get_unchecked_borrowed(2), self.material_sampler, material.program)
+            }
+        }
+        ret gpu_virtual_geometry_texture_groups(entry.geometry, self.device, base, normal, self.material_sampler)
+    }
+    pub fn register_pbr_material(self: mut Self&, path: str, material: StandardMaterial, textures: Vec[GpuTexture], height_range: f32) -> bool {
+        ret self.register_pbr_material_native(path, material, textures, height_range, Option::None, Vec[GpuTexture]::new())
+    }
+    pub fn register_pbr_material_native(self: mut Self&, path: str, material: StandardMaterial, textures: Vec[GpuTexture], height_range: f32, resolved: Option[ResolvedMaterial], extra: Vec[GpuTexture]) -> bool {
+        let mut program = Option[MaterialProgram<H>]::None
+        match resolved {
+            Some(resolved) => {
+                let mut shared = Vec[Vec[u32]]::new() let key = material_program_key(resolved)
+                for known in self.pbr_materials {
+                    match known.program {
+                        Some(known) => {
+                            if known.key() == key {
+                                shared = known.shaders() break
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                match MaterialProgram::create_shared(self.device, resolved, textures, extra, shared) {
+                    Ok(value) => {
+                        program = Option[MaterialProgram<H>]::Some(value)
+                    }
+                    Err(_) => {
+                        for texture in textures {
+                            texture.destroy()
+                        }
+                        for texture in extra {
+                            texture.destroy()
+                        }
+                        ret false
+                    }
+                }
+            }
+            None => {
+                for texture in extra {
+                    texture.destroy()
+                }
+            }
+        }
+        let published = self.publish_pbr_material(path, material, textures, height_range, program)
+        if !published {
+            match program {
+                Some(program) => {
+                    program.destroy()
+                }
+                None => {
+                }
+            }
+        }
+        ret published
+    }
+    fn publish_pbr_material(self: mut Self&, path: str, material: StandardMaterial, textures: Vec[GpuTexture], height_range: f32, program: Option[MaterialProgram<H>]) -> bool {
+        if textures.len() != 4 {
+            for texture in textures {
+                texture.destroy()
+            }
+            ret false
+        }
+        let mut existing = self.pbr_materials.len()
+        for i in 0_usize..self.pbr_materials.len() {
+            if self.pbr_materials.get_unchecked_borrowed(i).path == path {
+                existing = i
+            }
+        }
+        let id = if existing < self.pbr_materials.len() {
+            self.pbr_materials.get_unchecked_borrowed(existing).id
+        } else {
+            self.materials.add(material)
+        }
+        let groups = self.renderer.program_groups(textures.get_unchecked_borrowed(0), textures.get_unchecked_borrowed(1), textures.get_unchecked_borrowed(2), self.material_sampler, program)
+        let preview_groups = self.preview_renderer.program_groups(textures.get_unchecked_borrowed(0), textures.get_unchecked_borrowed(1), textures.get_unchecked_borrowed(2), self.material_sampler, program)
+        if groups.len() == 0 || preview_groups.len() == 0 {
+            for group in groups {
+                group.destroy()
+            }
+            for group in preview_groups {
+                group.destroy()
+            }
+            for texture in textures {
+                texture.destroy()
+            }
+            ret false
+        }
+        let mut virtual_groups = Vec[Vec[BindGroup]]::new()
+        for entry in self.virtual_meshes {
+            let next = if entry.material == id.value() {
+                gpu_virtual_geometry_program_groups(entry.geometry, self.device, textures.get_unchecked_borrowed(0), textures.get_unchecked_borrowed(1), textures.get_unchecked_borrowed(2), self.material_sampler, program)
+            } else {
+                Vec[BindGroup]::new()
+            }
+            if entry.material == id.value() && next.len() == 0 {
+                for group in groups {
+                    group.destroy()
+                }
+                for group in preview_groups {
+                    group.destroy()
+                }
+                for set in virtual_groups {
+                    for group in set {
+                        group.destroy()
+                    }
+                }
+                for texture in textures {
+                    texture.destroy()
+                }
+                ret false
+            }
+            virtual_groups.push(next)
+        }
+        let old_main = self.renderer.replace_material_groups(id.value(), groups)
+        let old_preview = self.preview_renderer.replace_material_groups(id.value(), preview_groups)
+        for group in old_main {
+            self.retired_material_groups.push(group)
+        }
+        for group in old_preview {
+            self.retired_material_groups.push(group)
+        }
+        self.displacement.invalidate()
+        self.materials.set(id, material)
+        if existing < self.pbr_materials.len() {
+            self.displacement.set_material_program(self.pbr_materials.get_unchecked_borrowed(existing).textures.get_unchecked_borrowed(0_usize).native_handle(), Option::None)
+            match self.pbr_materials.get_unchecked_borrowed(existing).program {
+                Some(program) => self.retired_material_programs.push(program) None => {
+                }
+            }
+
+            for texture in self.pbr_materials.get_unchecked_borrowed(existing).textures {
+                self.retired_material_textures.push(texture)
+            }
+            self.pbr_materials.set(existing, PbrMaterialEntry {
+                    path, id, material, textures, height_range, program
+                }
+                ,
+            )
+        } else {
+            self.pbr_materials.push(PbrMaterialEntry {
+                    path, id, material, textures, height_range, program
+                }
+            )
+        }
+        for i in 0_usize..self.virtual_meshes.len() {
+            let entry = self.virtual_meshes.get_unchecked_borrowed(i)
+            let next = virtual_groups.get_unchecked_borrowed(i)
+            if next.len() > 0 {
+                for group in gpu_virtual_geometry_replace_texture_groups(entry.geometry, next) {
+                    self.retired_material_groups.push(group)
+                }
+            }
+        }
+        self.renderer.set_material_program(id.value(), program) self.preview_renderer.set_material_program(id.value(), program)
+        for entry in self.virtual_meshes {
+            if entry.material == id.value() {
+                entry.geometry.set_material_program(program)
+            }
+        }
+        self.displacement.set_material_program(textures.get_unchecked_borrowed(0_usize).native_handle(), program)
+        self.frame_scene_revision = 0 self.invalidate_anti_aliasing() ret true
+    }
+    pub fn graphics_device(self: Self&) -> GraphicsDevice {
+        ret self.device
+    }
+
+    fn displacement_inputs(self: Self&, items: Vec[RenderItem], camera: PerspectiveCamera) -> Vec[DisplacementInput] {
+        let mut result = self.terrain_materials.inputs(self.pbr_project, self.meshes, items, self.displacement_materials(), self.white_texture, self.flat_normal_texture)
+        for material in self.pbr_materials {
+            if !material.material.displacement().enabled || material.material.height_texture() == "" {
+                continue
+            }
+            let mut seen = Vec[u64]::new()
+            for first_item in items {
+                let mut terrain_owned = false
+                for input in result {
+                    if input.terrain.is_some() && input.mesh == first_item.mesh().value() {
+                        terrain_owned = true break
+                    }
+                }
+                if terrain_owned || first_item.material().value() != material.id.value() {
+                    continue
+                }
+                let mesh = first_item.mesh() let mut found = false
+                for value in seen {
+                    if value == mesh.value() {
+                        found = true break
+                    }
+                }
+                if found {
+                    continue
+                }
+                seen.push(mesh.value())
+                let geometry = self.meshes.geometry(mesh)
+                let gpu = if geometry.is_some() {
+                    self.meshes.gpu_virtual_mesh(mesh)
+                } else {
+                    self.meshes.gpu_mesh(mesh)
+                }
+                if !gpu.available() {
+                    continue
+                }
+                let mut matching = Vec[RenderItem]::new()
+                for item in items {
+                    if item.mesh().value() == mesh.value() && item.material().value() == material.id.value() {
+                        matching.push(item)
+                    }
+                }
+                let capacity = DisplacementRenderer::instance_capacity(gpu.index_count() / 3) as usize
+                let mut first = 0_usize
+                while first < matching.len() {
+                    let end = if first + capacity < matching.len() {
+                        first + capacity
+                    } else {
+                        matching.len()
+                    }
+                    let mut batch = Vec[RenderItem]::new() let mut lods = Vec[u32]::new()
+                    for i in first..end {
+                        let item = matching.get_unchecked_borrowed(i) let mut ratio = 1_f32
+                        let distance = item.world().transform_point(Vec3::zero()).sub(camera.position()).length()
+                        for entry in self.virtual_meshes {
+                            if entry.mesh == mesh.value() && entry.enabled {
+                                ratio = entry.geometry.triangle_ratio_at(distance) break
+                            }
+                        }
+                        batch.push(item) lods.push(match geometry {
+                                Some(g) => DisplacementRenderer::select_lod(g, ratio) None => 0_u32
+                            }
+                        )
+                    }
+                    let key = mesh.value().fmt() + ":" + material.id.value().fmt() + ":" +(first / capacity).fmt()
+                    result.push(DisplacementInput {
+                            key, mesh.value(), gpu, geometry, material.material, material.textures, material.height_range, batch, lods, Option::None, Option::None
+                        }
+                    )
+                    first = end
+                }
+            }
+        }
+        ret result
+    }
+    fn displacement_materials(self: Self&) -> Vec[DisplacementMaterial] {
+        let mut result = Vec[DisplacementMaterial]::new()
+        for entry in self.pbr_materials {
+            result.push(DisplacementMaterial {
+                    entry.path, entry.id, entry.material, entry.textures, entry.height_range
+                }
+            )
+        }
+        ret result
+    }
+    fn displacement_identities(self: Self&) -> Vec[DisplacementActorIdentity] {
+        let mut result = Vec[DisplacementActorIdentity]::new()
+        for i in 0_usize..self.source_actor_ids.len() {
+            if i < self.cubes.len() {
+                result.push(DisplacementActorIdentity {
+                        self.source_actor_ids.get_unchecked_borrowed(i), self.cubes.get_unchecked_borrowed(i)
+                    }
+                )
+            }
+        }
+        ret result
+    }
+    fn prepare_displacement(self: mut Self&, frame: RenderFrame, camera: PerspectiveCamera, preview: bool, items: Vec[RenderItem]) -> bool {
+        self.displacement.show_triangles(self.shading_mode == 3)
+        let aa = if preview {
+            self.preview_aa
+        } else {
+            self.aa
+        }
+        let target = aa.target()
+        let mut scene_buffers = Vec[Vec[GpuBuffer]]::new()
+        for slot in 0_usize..target.frames_in_flight() as usize {
+            scene_buffers.push(if preview {
+                    self.preview_renderer.frame_bindings(slot)
+                } else {
+                    self.renderer.frame_bindings(slot)
+                }
+            )
+        }
+        let aspect = if preview {
+            aa.render_width() as f32 / aa.render_height() as f32
+        } else {
+            self.probe_camera_aspect
+        }
+        let shelter = if preview {
+            self.preview_precipitation.shelter_texture()
+        } else {
+            self.precipitation.shelter_texture()
+        }
+        let identities = self.displacement_identities()
+        let mut inputs = self.displacement_inputs(items, camera)
+        match self.characters.displacement_inputs(self.animation, frame, camera, self.displacement_materials(), identities) {
+            Ok(animated) => {
+                for input in animated {
+                    inputs.push(input)
+                }
+            }
+            Err(_) => {
+                ret false
+            }
+        }
+        let prepared = prepare_displacement_inputs(self.displacement, self.device, frame, target, if preview {
+                1_u32
+            } else {
+                0_u32
+            }
+            , inputs, self.material_sampler, shelter, scene_buffers, camera, aa.temporal(), aa.render_width(), aa.render_height(), aspect, aa.method().temporal(), aa.method().key() != "off", Vec[u64]::new(),)
+        ret prepared && self.characters.suppress_displaced(frame, if preview {
+                1_u32
+            } else {
+                0_u32
+            }
+            , self.displacement, identities,)
+    }
+
+    pub fn displacement_statistics(self: mut Self&) -> DisplacementStatistics {
+        self.displacement.collect()
+        ret self.displacement.statistics(0)
+    }
+    pub fn displacement_memory_bytes(self: Self&) -> u64 {
+        ret self.displacement.memory_bytes()
+    }
+    pub fn displacement_error(self: Self&) -> str {
+        ret self.displacement.error()
+    }
+
+    fn fork_pbr_view(self: mut Self&, source: usize, material: PbrMaterialEntry) -> Option[VirtualMeshEntry<H>] {
+        let mut original = self.virtual_meshes.get_unchecked_borrowed(source)
+        let mut view = original.geometry.fork_view(self.device, self.aa.target(), self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(), vec![4294967295_u32], 1, 1)
+        if !gpu_virtual_geometry_available(view) {
+            ret Option::None
+        }
+        view.set_material_program(material.program)
+        let entry = VirtualMeshEntry<H> {
+            view, material.id.value(), original.mesh, false, original.enabled
+        }
+        let groups = self.pbr_virtual_groups(entry, GpuTexture::unavailable(), GpuTexture::unavailable())
+        if groups.len() == 0 {
+            gpu_virtual_geometry_destroy(view) ret Option::None
+        }
+        for old in gpu_virtual_geometry_replace_texture_groups(view, groups) {
+            self.retired_material_groups.push(old)
+        }
+        ret Option::Some(entry)
+    }
+    pub fn apply_actor_materials(self: mut Self&) ->() {
+        if self.pbr_materials.len() == 0 {
+            ret()
+        }
+        for material in self.pbr_materials {
+            self.materials.set(material.id, if self.shading_mode == 10 {
+                    material.material.with_unlit()
+                } else {
+                    material.material
+                }
+                ,
+            )
+        }
+        for i in 0_usize..self.cubes.len() {
+            let entity = self.cubes.get_unchecked_borrowed(i)
+            match self.scene.get(entity) {
+                Some(actor) => {
+                    let mut custom = false
+                    for material in self.pbr_materials {
+                        if self.pbr_project + "/" + actor.material_path() == material.path {
+                            custom = true
+                        }
+                    }
+                    if !custom {
+                        match actor.renderable() {
+                            Some(r) => {
+                                let mut previous_custom = false for old in self.pbr_materials {
+                                    if old.id.value() == r.material().value() {
+                                        previous_custom = true
+                                    }
+                                }
+                                if previous_custom {
+                                    self.scene.set_renderable(entity, Option::Some(Renderable::new(r.mesh(), viewport_cube_material(self.shading_mode, self.cube_material, self.selected_material, self.cube_unlit_material, self.selected_unlit_material, self.selected_cube == i as u32 + 1))))
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    for material in self.pbr_materials {
+                        if self.pbr_project + "/" + actor.material_path() == material.path {
+                            match actor.renderable() {
+                                Some(r) => {
+                                    if r.material().value() != material.id.value() {
+                                        self.scene.set_renderable(entity, Option::Some(Renderable::new(r.mesh(), material.id)))
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                            let mesh = self.object_mesh(i).value() let mut source = self.virtual_meshes.len() let mut found = false
+                            for n in 0_usize..self.virtual_meshes.len() {
+                                let e = self.virtual_meshes.get_unchecked_borrowed(n) if e.mesh == mesh {
+                                    if e.material == material.id.value() {
+                                        found = true
+                                    } elif e.material == 0 {
+                                        source = n
+                                    }
+                                }
+                            }
+                            if !found && source < self.virtual_meshes.len() {
+                                match self.fork_pbr_view(source, material) {
+                                    Some(view) => {
+                                        self.virtual_meshes.push(view) self.virtual_mesh_frame_ready.push(false)
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret()
+    }
     pub fn upload_material_texture(self: Self&, image: TextureImage) -> Option[TextureUpload] {
         ret TextureUpload::begin(self.device, image)
     }
@@ -761,8 +1271,7 @@ impl for ViewportRenderer {
         }
         let mut virtual_groups = Vec[Vec[BindGroup]]::new()
         for entry in self.virtual_meshes {
-            let prepared = gpu_virtual_geometry_texture_groups(entry.geometry,
-                self.device, base, detail, self.material_sampler,)
+            let prepared = self.pbr_virtual_groups(entry, base, detail)
             if prepared.len() == 0 {
                 for group in groups {
                     group.destroy()
@@ -814,15 +1323,29 @@ impl for ViewportRenderer {
     }
 
     pub fn material_resources_pending(self: Self&) -> bool {
-        ret self.retired_material_groups.len() > 0 || self.retired_material_textures.len() > 0
+        ret self.terrain_materials.pending() || self.retired_material_groups.len() > 0 || self.retired_material_textures.len() > 0 || self.retired_material_programs.len() > 0
     }
 
     pub fn collect_material_resources(self: mut Self&) ->() {
+        self.displacement.collect()
+        if self.displacement.retirement_pending() {
+            ret()
+        }
         if !self.material_resources_pending() {
             ret()
         }
         if !self.swapchain.last_frame_complete() || !self.preview_target.last_frame_complete() ||
         (self.consumer_swapchain != 0 && !Swapchain::borrow(self.consumer_swapchain).last_frame_complete()) {
+            ret()
+        }
+        let mut pending = Vec[MaterialProgram<H>]::new()
+        for program in self.retired_material_programs {
+            if !program.destroy() {
+                pending.push(program)
+            }
+        }
+        self.retired_material_programs = pending
+        if pending.len() > 0 {
             ret()
         }
         for group in self.retired_material_groups {
@@ -836,6 +1359,7 @@ impl for ViewportRenderer {
     }
 
     fn prepare_scene_snapshot(self: mut Self&) ->() {
+        self.apply_actor_materials()
         if self.frame_scene_revision != self.scene.revision() {
             let mut items = Vec[RenderItem]::new()
             for item in self.scene.visible_render_items() {
@@ -848,63 +1372,93 @@ impl for ViewportRenderer {
         }
     }
 
-    fn ensure_ray_scene(self: mut Self&) -> bool {
+    fn ensure_ray_scene(self: mut Self&, frame: RenderFrame) -> bool {
         if !self.dynamic_gi.hardware_available() {
             ret false
         }
+        let proxies = self.displacement.ray_instances(self.device, frame)
         let mut structures = Vec[AccelerationStructure]::new()
         let mut transforms = Vec[Mat4]::new()
-        let mut transform_values = Vec[f32]::new()
+        let mut parts = vec![self.scene.revision().fmt()]
+        for proxy in proxies {
+            structures.push(proxy.acceleration) transforms.push(proxy.world)
+            parts.push(proxy.generation)
+        }
         for item in self.frame_items {
-            if viewport_renderer_is_editor_actor(self, item.entity()) {
-                let mesh = self.object_mesh_for_entity(item.entity())
-                let acceleration = self.meshes.acceleration(mesh)
-                if acceleration.available() {
-                    structures.push(acceleration)
-                    transforms.push(item.world())
-                    // Mesh identity participates in the cache key as actors
-                    // can swap assets without changing their transform.
-                    transform_values.push(mesh.value() as f32)
-                    for value in item.world().values() {
-                        transform_values.push(value)
-                    }
+            if !viewport_renderer_is_editor_actor(self, item.entity()) {
+                continue
+            }
+            let mesh = self.object_mesh_for_entity(item.entity())
+            let mut displaced = false
+            for proxy in proxies {
+                if proxy.entity == item.entity() && proxy.mesh == mesh.value() {
+                    displaced = true break
+                }
+            }
+            if displaced {
+                continue
+            }
+            let acceleration = self.meshes.acceleration(mesh)
+            if acceleration.available() {
+                structures.push(acceleration) transforms.push(item.world())
+
+            }
+        }
+        let budget = self.displacement.budget()
+        let next = self.ray_scene.prepare_parts(self.device, frame, structures, transforms, parts, budget)
+        if !next.available() {
+            ret false
+        }
+        if next.handle != self.ray_tlas.handle {
+            if !self.dynamic_gi.bind_ray_scene(next) {
+                ret false
+            }
+            self.ray_tlas = next
+        }
+        ret true
+    }
+
+    fn prepare_ray_lighting(self: mut Self&, frame: RenderFrame, preview: bool) -> bool {
+        let lighting = self.ray_lighting.prepare(self.device, frame, self.ray_tlas, self.indirect_ambient)
+        if lighting.available() &&(!self.ray_scene.retain(frame, self.ray_tlas) || !self.displacement.retain_ray_frame(frame)) {
+            ret false
+        }
+        let aa = if preview {
+            self.preview_aa
+        } else {
+            self.aa
+        }
+        let variant = if aa.method().temporal() {
+            2_u32
+        } else {
+            1_u32
+        }
+        let view = if self.shading_mode == 0 && aa.graph_linear.len() == 0 {
+            lighting
+        } else {
+            RayLightingView::unavailable()
+        }
+        let okay = if preview {
+            self.preview_renderer.prepare_ray_lighting(aa.target(), frame, aa.scene_vertex, aa_vertex_layout(), variant, view)
+        } else {
+            self.renderer.prepare_ray_lighting(aa.target(), frame, aa.scene_vertex, aa_vertex_layout(), variant, view)
+        }
+        if !okay || !self.displacement.prepare_ray_lighting(self.device, aa.target(), frame, if preview {
+                1_u32
+            } else {
+                0_u32
+            }
+            , view,) || !self.characters.prepare_ray_lighting(frame, aa.target(), preview, view) {
+            ret false
+        }
+        if !preview {
+            for i in 0_usize..self.virtual_meshes.len() {
+                let mut entry = self.virtual_meshes.get_unchecked_borrowed(i)
+                if entry.frame_ready && !entry.geometry.prepare_ray_lighting(self.device, aa.target(), frame, view) {
+                    ret false
                 }
             }
         }
-        if structures.len() == 0_usize {
-            ret false
-        }
-        let mut unchanged = transform_values.len() == self.ray_scene_transforms.len()
-        let mut index = 0_usize
-        while unchanged && index < transform_values.len() {
-            let current = match transform_values.get(index) {
-                Option::Some(value) => value
-                Option::None => 0.0_f32
-            }
-            let previous = match self.ray_scene_transforms.get(index) {
-                Option::Some(value) => value
-                Option::None => 1.0_f32
-            }
-            if current != previous {
-                unchanged = false
-            }
-            index += 1_usize
-        }
-        if unchanged && self.ray_tlas.available() {
-            ret true
-        }
-        let next = self.device.create_tlas(structures, transforms)
-        if !next.available() || !self.dynamic_gi.bind_ray_scene(next) {
-            if next.available() {
-                next.destroy()
-            }
-            ret false
-        }
-        if self.ray_tlas.available() {
-            self.ray_tlas.destroy()
-        }
-        self.ray_tlas = next
-        self.ray_scene_transforms = transform_values
         ret true
     }
 
@@ -940,7 +1494,10 @@ impl for ViewportRenderer {
         if frame_handle == 0_usize {
             ret false
         }
-        let hardware_ray_query = self.ensure_ray_scene()
+        let hardware_ray_query = self.ensure_ray_scene(RenderFrame::borrow(frame_handle))
+        if !hardware_ray_query {
+            self.ray_tlas = AccelerationStructure::unavailable()
+        }
         let mut spheres = Vec[SdfSphere]::new()
         let mut boxes = Vec[SdfBox]::new()
         spheres.push(SdfSphere::new(
@@ -1107,14 +1664,14 @@ impl for ViewportRenderer {
             Vec3::new(0.6_f32, 0.6_f32, 0.6_f32),)
     }
 
-    fn virtual_mesh_ready(self: Self&, mesh: MeshId) -> bool {
+    fn virtual_mesh_ready(self: Self&, mesh: MeshId, material: u64) -> bool {
         let mut index = 0_usize
         for entry in self.virtual_meshes {
             let ready = match self.virtual_mesh_frame_ready.get(index) {
                 Option::Some(value) => value
                 Option::None => false
             }
-            if entry.mesh == mesh.value() && entry.enabled && ready {
+            if entry.mesh == mesh.value() && entry.material == material && entry.enabled && ready {
                 ret true
             }
             index += 1_usize
@@ -1124,19 +1681,24 @@ impl for ViewportRenderer {
 
     fn is_virtual_actor(self: Self&, entity: u64) -> bool {
         ret viewport_renderer_is_editor_actor(self, entity) &&
-        self.virtual_mesh_ready(self.object_mesh_for_entity(entity))
+        self.virtual_mesh_ready(self.object_mesh_for_entity(entity), self.pbr_material_for_entity(entity))
     }
 
     fn traditional_scene_items(self: Self&) -> Vec[RenderItem] {
         let mut result = Vec[RenderItem]::new()
         for item in self.frame_items {
+            if self.displacement.handles(item.entity(), 0) {
+                continue
+            }
             if !self.virtual_frame_ready ||
             !self.is_virtual_actor(item.entity()) {
                 result.push(item)
             }
         }
         for item in self.foliage_items {
-            result.push(item)
+            if !self.displacement.handles(item.entity(), 0) {
+                result.push(item)
+            }
         }
         ret result
     }
@@ -1215,7 +1777,7 @@ impl for ViewportRenderer {
                 }
             }
         }
-        ret self.selection_outline.prepare(items, self.selection_entities, camera, self.light, self.meshes, width, height, consumers_complete, self.characters, self.animation, source_selected, self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage())
+        ret self.selection_outline.prepare(items, self.selection_entities, camera, self.light, self.meshes, width, height, consumers_complete, self.characters, self.animation, source_selected, self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(), self.displacement_inputs(items, camera), self.displacement, self.material_sampler, self.precipitation.shelter_texture(), self.displacement_materials(), self.displacement_identities())
     }
 
     /// Builds one instance stream per unique editor mesh and records GPU
@@ -1246,9 +1808,9 @@ impl for ViewportRenderer {
             let mut entry = self.virtual_meshes.get_unchecked_borrowed(virtual_index)
             entry.frame_ready = false
             entry.geometry.set_lights(self.scene_lights)
-            entry.geometry.set_graph_shaders(self.graph_key, self.graph_shaders)
+            entry.geometry.set_graph_shaders("", Vec[Vec[u32]]::new())
             if entry.geometry.set_shelter_texture(self.precipitation.shelter_texture()) {
-                let groups = gpu_virtual_geometry_texture_groups(entry.geometry, self.device, GpuTexture::unavailable(), GpuTexture::unavailable(), self.material_sampler)
+                let groups = self.pbr_virtual_groups(entry, GpuTexture::unavailable(), GpuTexture::unavailable())
                 if groups.len() == 0 {
                     ret false
                 }
@@ -1264,8 +1826,11 @@ impl for ViewportRenderer {
                 }
                 let mut instances = Vec[VirtualGeometryInstance]::new()
                 for item in visible {
+                    if self.displacement.handles(item.entity(), 0) {
+                        continue
+                    }
                     if viewport_renderer_is_editor_actor(self, item.entity()) &&
-                    self.object_mesh_for_entity(item.entity()).value() == entry.mesh {
+                    self.object_mesh_for_entity(item.entity()).value() == entry.mesh && self.pbr_material_for_entity(item.entity()) == entry.material {
                         match self.materials.get(item.material()) {
                             Option::Some(material) => {
                                 let previous = self.aa.temporal().previous(item)
@@ -1278,7 +1843,7 @@ impl for ViewportRenderer {
                                         } else {
                                             material.normal_scale()
                                         }
-                                        , material.normal_flip_y(),).with_previous(previous.0, previous.1))
+                                        , material.normal_flip_y(),).with_pbr_maps(material.roughness_texture() != "", material.metallic_texture() != "").with_previous(previous.0, previous.1))
                             }
                             Option::None => {
                             }
@@ -1381,7 +1946,7 @@ impl for ViewportRenderer {
                 }
             }
         }
-        let result = "Meshes " + Debug::fmt(meshes) +
+        let mut result = "Meshes " + Debug::fmt(meshes) +
         "  Clusters " + Debug::fmt(clusters) +
         "  Tris " + Debug::fmt(triangles) +
         "  Pages " + Debug::fmt(resident) + "/" + Debug::fmt(capacity) +
@@ -1390,6 +1955,15 @@ impl for ViewportRenderer {
         "  Candidates " + Debug::fmt(candidates) +
         "  Main " + Debug::fmt(main_visible) +
         "  Post " + Debug::fmt(post_visible) + "/" + Debug::fmt(post_candidates)
+        let displaced = self.displacement.statistics(0)
+        if displaced.source_triangles > 0 {
+            result += "  Displaced " + if displaced.pending {
+                "pending"
+            } else {
+                displaced.triangles.fmt() + " tris"
+            }
+            result += " (base " + displaced.source_triangles.fmt() + ")"
+        }
         ret result
     }
 
@@ -1404,11 +1978,15 @@ impl for ViewportRenderer {
         ret self.cube_mesh
     }
 
+    pub fn displacement_budget(self: Self&) -> DisplacementBudget<H> {
+        ret self.displacement.budget()
+    }
+
     /// Interactive terrain uploads use the classic path and retain a stable mesh ID.
     /// Both offscreen producers and Luma presentation consumers must finish first.
     pub fn update_terrain_mesh(self: mut Self&, mesh: MeshId, data: MeshData) -> MeshId {
-        if mesh.valid() &&(!self.swapchain.wait_readback() ||
-            (self.consumer_swapchain != 0 && !Swapchain::borrow(self.consumer_swapchain).wait_readback())) {
+        if mesh.valid() &&(!self.selection_outline.wait() || !self.swapchain.wait_readback() ||
+            (self.consumer_swapchain != 0 && !Swapchain::borrow(self.consumer_swapchain).wait_readback()) || !self.aa.target().wait_readback() || !self.preview_aa.target().wait_readback()) {
             ret MeshId::new(0_u64)
         }
         let values = data.vertices() let stride =(data.stride() / 4_u32) as usize
@@ -1454,6 +2032,7 @@ impl for ViewportRenderer {
                 ,
             ) i += stride
         }
+        self.displacement.invalidate_mesh(mesh.value())
         let uploaded = self.meshes.update_editable(self.device, mesh, data)
         if uploaded.valid() {
             if mesh.valid() {
@@ -1646,7 +2225,7 @@ impl for ViewportRenderer {
                 }
                 virtual_mesh.set_autolod_enabled(autolod_enabled)
                 self.virtual_meshes.push(VirtualMeshEntry<H> {
-                        virtual_mesh, mesh.value(), false, true
+                        virtual_mesh, 0_u64, mesh.value(), false, true
                     }
                     ,
                 )
@@ -1664,26 +2243,45 @@ impl for ViewportRenderer {
     /// Disabled AutoLOD draws source-detail leaves with the same material;
     /// enabling resumes adaptive refinement on the next frame.
     pub fn set_mesh_autolod(self: mut Self&, mesh: MeshId, enabled: bool) -> bool {
+        let mut applied = false
         for index in 0_usize..self.virtual_meshes.len() {
             let mut entry = self.virtual_meshes.get_unchecked_borrowed(index)
             if entry.mesh == mesh.value() {
                 entry.geometry.set_autolod_enabled(enabled)
                 entry.frame_ready = false
-                self.virtual_frame_ready = false
-                ret true
+                self.virtual_meshes.set(index, entry)
+                if index < self.virtual_mesh_frame_ready.len() {
+                    self.virtual_mesh_frame_ready.set(index, false)
+                }
+                applied = true
             }
         }
-        ret false
+        if applied {
+            self.virtual_frame_ready = false
+        }
+        ret applied
     }
 
     pub fn set_mesh_lod_group(self: mut Self&, mesh: MeshId, group: LodGroup) -> bool {
+        if !group.valid() {
+            ret false
+        }
+        let mut applied = false
         for index in 0_usize..self.virtual_meshes.len() {
             let mut entry = self.virtual_meshes.get_unchecked_borrowed(index)
             if entry.mesh == mesh.value() {
-                ret entry.geometry.set_lod_group(group)
+                let _changed = entry.geometry.set_lod_group(group)
+                entry.frame_ready = false self.virtual_meshes.set(index, entry)
+                if index < self.virtual_mesh_frame_ready.len() {
+                    self.virtual_mesh_frame_ready.set(index, false)
+                }
+                applied = true
             }
         }
-        ret false
+        if applied {
+            self.virtual_frame_ready = false
+        }
+        ret applied
     }
     pub fn set_mesh_autolod_error(self: mut Self&, mesh: MeshId, error: f32) -> bool {
         for index in 0_usize..self.virtual_meshes.len() {
@@ -1698,6 +2296,15 @@ impl for ViewportRenderer {
 
     /// Counts the selected mesh's actual GPU cut across its visible instances.
     pub fn mesh_autolod_stats(self: Self&, mesh: MeshId, source_triangles: usize) -> str {
+        let displaced = self.displacement.mesh_statistics(mesh.value(), 0)
+        if displaced.source_triangles > 0 {
+            ret "Displaced surface " +(if displaced.pending {
+                    "pending"
+                } else {
+                    displaced.triangles.fmt() + " tris"
+                }
+            ) + "\nBase LOD " + displaced.source_triangles.fmt() + " tris"
+        }
         for entry in self.virtual_meshes {
             if entry.mesh == mesh.value() {
                 let drawn = gpu_virtual_geometry_selected_triangle_count(entry.geometry)
@@ -1998,6 +2605,14 @@ impl for ViewportRenderer {
                 self.preview_aa.target(), view, self.preview_aa.render_width(), self.preview_aa.render_height(), self.preview_aa.method().samples(), self.preview_aa.method().temporal(), self.preview_aa.temporal().view_projection(), self.light, self.indirect_ambient, self.scene_lights, self.shading_mode, self.preview_precipitation.shelter_texture()
             }
             , true, self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(),)
+        let displaced_ready = self.prepare_displacement(raw, view, true, items)
+        let lighting_ready = self.prepare_ray_lighting(raw, true)
+        let mut traditional_items = Vec[RenderItem]::new()
+        for item in items {
+            if !self.displacement.handles(item.entity(), 1) {
+                traditional_items.push(item)
+            }
+        }
         let vfx_ready = self.vfx.prepare(raw, view,(width as f32) /(height as f32), self.preview_aa.target())
         raw.timing_mark(10_u32, true)
         let sky_recorded = self.preview_environment_view.record(raw, self.preview_aa.target(), camera, self.environment.frame(camera.position()))
@@ -2006,7 +2621,7 @@ impl for ViewportRenderer {
         } else {
             raw.begin_render_pass(self.preview_aa.solid_pipeline(), 0.0022_f32, 0.0026_f32, 0.0033_f32, 1)
         }
-        let preview_recorded = characters_ready && vfx_ready && sky_recorded && self.preview_renderer.render_items(items, view, self.light, self.meshes, self.materials, pass, raw.slot(), width as f32 / height as f32) && self.characters.draw(pass, raw.slot(), true, self.shading_mode) && self.preview_precipitation.record(raw, self.preview_aa.target(), view, self.environment.frame(camera.position())) && self.vfx.record(raw, self.preview_aa.target()) && pass.end()
+        let preview_recorded = lighting_ready && displaced_ready && characters_ready && vfx_ready && sky_recorded && self.preview_renderer.render_items(traditional_items, view, self.light, self.meshes, self.materials, pass, raw.slot(), width as f32 / height as f32) && self.displacement.draw(pass, raw.slot(), 1) && self.characters.draw(pass, raw.slot(), true, self.shading_mode) && self.preview_precipitation.record(raw, self.preview_aa.target(), view, self.environment.frame(camera.position())) && self.vfx.record(raw, self.preview_aa.target()) && pass.end()
         raw.timing_mark(10_u32, false)
         let recorded = preview_recorded && raw.present()
         raw.destroy()
@@ -2079,9 +2694,6 @@ impl for ViewportRenderer {
             raw.destroy() ret false
         }
         raw.timing_mark(0_u32, true)
-        raw.timing_mark(1_u32, true)
-        let gi_recorded = self.record_dynamic_gi(raw.handle())
-        raw.timing_mark(1_u32, false)
         raw.timing_mark(17_u32, true)
         let vfx_prepared = self.vfx.prepare(raw, view, aspect, self.aa.target())
         raw.timing_mark(17_u32, false)
@@ -2089,7 +2701,15 @@ impl for ViewportRenderer {
                 self.aa.target(), view, self.aa.render_width(), self.aa.render_height(), self.aa.method().samples(), self.aa.method().temporal(), self.aa.temporal().view_projection(), self.light, self.indirect_ambient, self.scene_lights, self.shading_mode, self.precipitation.shelter_texture()
             }
             , false, self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(),)
-        let prepared = characters_ready && vfx_prepared && gi_recorded && self.record_virtual_geometry(raw.handle(), self.aa.render_width(), self.aa.render_height(), position, yaw, pitch, fov)
+        raw.timing_mark(23_u32, true)
+        let displaced_ready = self.prepare_displacement(raw, view, false, self.frame_items)
+        raw.timing_mark(23_u32, false)
+        raw.timing_mark(1_u32, true)
+        let gi_recorded = self.record_dynamic_gi(raw.handle())
+        raw.timing_mark(1_u32, false)
+        let virtual_prepared = self.record_virtual_geometry(raw.handle(), self.aa.render_width(), self.aa.render_height(), position, yaw, pitch, fov)
+        let lighting_ready = self.prepare_ray_lighting(raw, false)
+        let prepared = displaced_ready && characters_ready && vfx_prepared && gi_recorded && virtual_prepared && lighting_ready
         let scene_pipeline = if self.shading_mode == 10 {
             self.composition_pipeline()
         } else {
@@ -2115,7 +2735,10 @@ impl for ViewportRenderer {
         if self.virtual_frame_ready {
             raw.timing_mark(5_u32, true)
         }
-        let virtual_recorded = traditional && self.draw_virtual_geometry(pass, raw.slot()) && self.characters.draw(pass, raw.slot(), false, self.shading_mode)
+        raw.timing_mark(24_u32, true)
+        let displaced_recorded = traditional && self.displacement.draw(pass, raw.slot(), 0)
+        raw.timing_mark(24_u32, false)
+        let virtual_recorded = displaced_recorded && self.draw_virtual_geometry(pass, raw.slot()) && self.characters.draw(pass, raw.slot(), false, self.shading_mode)
         if self.virtual_frame_ready {
             raw.timing_mark(5_u32, false)
         }
@@ -2612,7 +3235,7 @@ impl for ViewportRenderer {
                 Some(entity) => {
                     self.scene.set_parent(entity, Option[u64]::None)
                     self.scene.set_transform(entity, actor.transform())
-                    self.scene.set_component(entity, actor.component()) self.scene.set_physics(entity, actor.physics())
+                    self.scene.set_component(entity, actor.component()) self.scene.set_physics(entity, actor.physics()) self.scene.set_material_path(entity, actor.material_path())
                     self.scene.set_visible(entity, actor.visible())
                     let mut mesh = Option[MeshId]::None
                     for binding in bindings {
@@ -2792,7 +3415,7 @@ impl for ViewportRenderer {
                 Some(actor) => {
                     match self.cubes.get(index) {
                         Some(id) => {
-                            self.scene.set_component(id, actor.component()) self.scene.set_physics(id, actor.physics())
+                            self.scene.set_component(id, actor.component()) self.scene.set_physics(id, actor.physics()) self.scene.set_material_path(id, actor.material_path())
                         }
                         None => {
                         }
@@ -3651,6 +4274,9 @@ impl for ViewportRenderer {
             Swapchain::borrow(self.consumer_swapchain).wait_readback()
         }
         self.aa.target().wait_readback() self.preview_aa.target().wait_readback()
+        self.ray_scene.destroy(self.displacement.budget())
+        self.displacement.destroy()
+        self.terrain_materials.destroy()
         self.characters.destroy()
         self.aa.destroy() self.preview_aa.destroy()
         self.environment_view.destroy() self.preview_environment_view.destroy()
@@ -3690,13 +4316,24 @@ impl for ViewportRenderer {
         if self.normal_texture.available() {
             self.normal_texture.destroy()
         }
+        for entry in self.pbr_materials {
+            match entry.program {
+                Some(program) => {
+                    program.destroy()
+                }
+                None => {
+                }
+            }
+            for texture in entry.textures {
+                texture.destroy()
+            }
+        }
+        self.pbr_materials.clear()
         self.white_texture.destroy()
         self.flat_normal_texture.destroy()
         self.material_sampler.destroy()
         self.dynamic_gi.destroy()
-        if self.ray_tlas.available() {
-            self.ray_tlas.destroy()
-        }
+        self.ray_lighting.destroy()
         // Release retained virtual-mesh entries while their owning device is
         // still alive. Encore's generated aggregate drop otherwise runs after
         // device teardown and can release an invalid nested heap handle.

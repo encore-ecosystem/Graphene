@@ -9,6 +9,42 @@ pub struct TextureImage {
 }
 
 pub fn texture_path_valid(path: str) -> bool {
-    ret path == "" ||(path.byte_len() > 17 && path.slice_bytes(0, 17) == "Content/Textures/" &&
-        !path.contains("..") && !path.contains("\\") && !path.contains(":") && path.slice_bytes(17, path.byte_len() - 17) != "")
+    if path == "" {
+        ret true
+    }
+    if path.byte_len() <= 8 || path.slice_bytes(0, 8) != "Content/" || path.contains("\\") || path.contains(":") || path.contains("\0") {
+        ret false
+    }
+    // Components are checked individually; bundled textures may live beside materials.
+    let mut start = 8_usize
+    for i in 8_usize..path.byte_len() + 1 {
+        if i == path.byte_len() || path.byte_at(i) == 47 {
+            let part = path.slice_bytes(start, i - start)
+            if part == "" || part == "." || part == ".." {
+                ret false
+            }
+            start = i + 1
+        }
+    }
+    ret true
+}
+
+/// Linear normalized height samples; retains all 16 bits of authored heightmaps.
+pub struct HeightImage {
+    width: u32
+    height: u32
+    samples: Vec[u16]
+}
+
+impl for HeightImage {
+    pub fn valid(self: Self) -> bool {
+        ret self.width > 0 && self.height > 0 && self.width <= 8192 && self.height <= 8192 && self.samples.len() ==(self.width as usize) *(self.height as usize)
+    }
+    pub fn from_rgba(image: TextureImage) -> Self {
+        let mut samples = Vec[u16]::with_capacity(image.pixels.len())
+        for p in image.pixels {
+            samples.push(((p & 255_u32) * 257_u32) as u16)
+        }
+        ret Self { image.width, image.height, samples }
+    }
 }

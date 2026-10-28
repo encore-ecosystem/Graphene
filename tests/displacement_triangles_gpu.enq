@@ -1,0 +1,176 @@
+//! The diagnostic shows generated microtriangles, not the original mesh.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::println
+import std::os::write_file
+
+import graphene::displacement::renderer::DisplacementRenderer
+import graphene::rhi::*
+import graphene::scene::camera::PerspectiveCamera
+import graphene::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
+import graphene::standard_material::{DisplacementSettings, StandardMaterial}
+import graphene::temporal_view::TemporalView
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::{HeightImage, TextureImage}
+import linalg::{Mat4, Vec3}
+extern fn encore_str_from_buffer(data: u8*, count: usize) -> str
+fn main() -> u32 {
+    let instance = GraphicsInstance::create() let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 1
+        }
+    }
+    let device = instance.create_device(adapter) let target = device.create_offscreen_target(128, 128)
+    let white_upload = match TextureUpload::begin_linear(device, TextureImage {
+            1, 1, vec![4294967295_u32]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 2
+        }
+    }
+    if !white_upload.wait() {
+        ret 3
+    }
+    let white = white_upload.finish()
+    let mut heights = Vec[u16]::new()
+    for _ in 0_usize..4096_usize {
+        heights.push(65535_u16)
+    }
+    let height_upload = match TextureUpload::begin_height(device, HeightImage {
+            64, 64, heights
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 4
+        }
+    }
+    if !height_upload.wait() {
+        ret 5
+    }
+    let height = height_upload.finish()
+    let low_upload = match TextureUpload::begin_height(device, HeightImage {
+            2, 2, vec![65535_u16, 65535_u16, 65535_u16, 65535_u16]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 12
+        }
+    }
+    if !low_upload.wait() {
+        ret 13
+    }
+    let low_height = low_upload.finish() let sampler = device.create_repeat_sampler()
+    let mut vertices = Vec[f32]::new()
+    for p in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
+        for v in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1) * 0.5_f32,(p.y() + 1) * 0.5_f32] {
+            vertices.push(v)
+        }
+    }
+    let mesh = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
+    let mut uniforms = Vec[GpuBuffer]::new() let mut scene = Vec[Vec[GpuBuffer]]::new() let mut zeros = Vec[f32]::new()
+    for _ in 0_usize..3172_usize {
+        zeros.push(0_f32)
+    }
+    let dummy = device.create_buffer(16, buffer_storage(), true) dummy.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32])
+    for _ in 0_usize..target.frames_in_flight() as usize {
+        let u = device.create_buffer(12688, buffer_uniform(), true) u.write_f32s(0, zeros) uniforms.push(u) scene.push(vec![u, dummy, dummy, dummy, dummy])
+    }
+    let material = StandardMaterial::new(Vec3::new(0.2, 1, 0.2), 0, 1).with_unlit().with_double_sided().with_displacement(DisplacementSettings {
+            true, 0.6_f32, 0.5_f32, 1
+        }
+    )
+    let item = RenderItem::new(1, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::identity())
+    let history = TemporalView::new() let mut renderer = DisplacementRenderer::new()
+    let mut counts = Vec[u64]::new()
+    for index in 0_usize..7_usize {
+        let distance = if index == 1 {
+            24_f32
+        } elif index == 4 {
+            90_f32
+        } else {
+            3_f32
+        }
+        let camera = PerspectiveCamera::new(Vec3::new(0, 0, distance), Vec3::zero(), 1, 0.1_f32, 100)
+        let detail_material = material.with_displacement(DisplacementSettings {
+                true, if index == 6 {
+                    0.001_f32
+                } else {
+                    0.6_f32
+                }
+                , 0.5_f32, if index == 5 {
+                    2_u32
+                } else {
+                    1_u32
+                }
+            }
+        )
+        let sampled_height = if index >= 3 && index <= 5 {
+            low_height
+        } else {
+            height
+        }
+        renderer.show_triangles(index != 2) renderer.begin(0)
+        let frame = target.acquire_frame()
+        if !renderer.prepare_batch(device, frame, target, "triangles-proof-" + index.fmt(), 0, 1, mesh, Option::None, detail_material, vec![white, white, white, sampled_height], sampler, white, scene, vec![item], vec![0_u32], camera.position(), camera.view_projection(1), history, 128, 128, false, false, 1, Vec[u64]::new(), Option::None) {
+            println(renderer.error()) ret 6
+        }
+        let pass = frame.begin_render_pass(renderer.pipeline(0), 0, 0, 0, 1)
+        if !renderer.draw(pass, frame.slot(), 0) || !pass.end() || !frame.present() || !target.wait_readback() {
+            println(frame.error()) ret 7
+        }
+        frame.destroy() renderer.collect()
+        let image = unsafe {
+            encore_str_from_buffer(target.pixels() as u8*, 65536)
+        }
+        write_file("target/displacement-triangles-" + index.fmt() + ".bgra", image)
+        let mut chromatic = 0_usize let mut green = 0_usize let mut varied = 0_usize
+        let center = image.slice_bytes((64 * 128 + 64) * 4, 3)
+        for i in 0_usize..16384_usize {
+            let b = image.byte_at(i * 4) let g = image.byte_at(i * 4 + 1) let r = image.byte_at(i * 4 + 2)
+            if r > 80 &&(r > g + 20 || g > r + 20 || b > r + 20) {
+                chromatic += 1
+            }
+            if g > 200 && r < 160 && b < 160 {
+                green += 1
+            }
+        }
+        for i in 0_usize..16384_usize {
+            let pixel = image.slice_bytes(i * 4, 3)
+            if (image.byte_at(i * 4) > 0 || image.byte_at(i * 4 + 1) > 0 || image.byte_at(i * 4 + 2) > 0) && pixel != center {
+                varied += 1
+            }
+        }
+        let stats = renderer.mesh_statistics(1, 0)
+        println("Triangle diagnostic " + index.fmt() + ": surface=" + stats.triangles.fmt() + " base=" + stats.source_triangles.fmt() + " chromatic=" + chromatic.fmt() + " green=" + green.fmt())
+        if stats.pending || stats.source_triangles != 2 || stats.triangles == 0 {
+            ret 8
+        }
+        if (index != 2 && index != 4 &&(chromatic == 0 || varied == 0)) ||(index == 2 &&(green < 1000 || varied > 0)) {
+            ret 9
+        }
+        counts.push(stats.triangles)
+    }
+    if counts.get_unchecked_borrowed(0) <= counts.get_unchecked_borrowed(1) || counts.get_unchecked_borrowed(0) != counts.get_unchecked_borrowed(2) {
+        ret 10
+    }
+    // A 2x2 map needs at most one split on Medium. Distance and the existing
+    // quality setting must still reduce/increase detail within the texel cap.
+    if counts.get_unchecked_borrowed(3) > 8 || counts.get_unchecked_borrowed(3) <= counts.get_unchecked_borrowed(4) || counts.get_unchecked_borrowed(5) <= counts.get_unchecked_borrowed(3) || counts.get_unchecked_borrowed(5) > 32 {
+        ret 14
+    }
+    if counts.get_unchecked_borrowed(6) != 2 {
+        ret 15
+    }
+    if !renderer.destroy() || renderer.memory_bytes() != 0 {
+        ret 11
+    }
+    for buffer in uniforms {
+        buffer.destroy()
+    }
+    dummy.destroy() mesh.destroy() sampler.destroy() low_height.destroy() height.destroy() white.destroy() target.destroy() device.destroy() instance.destroy() ret 0
+}

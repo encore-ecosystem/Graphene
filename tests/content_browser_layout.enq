@@ -15,6 +15,11 @@ fn count(widget: Widget) -> usize {
     }
     ret total
 }
+fn pixel(image: str, x: usize, y: usize) -> u32 {
+    let offset = 8 +(y * 128 + x) * 4
+    ret(image.byte_at(offset) as u32) |((image.byte_at(offset + 1) as u32) << 8) |
+    ((image.byte_at(offset + 2) as u32) << 16) |((image.byte_at(offset + 3) as u32) << 24)
+}
 fn main() -> u32 {
     let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
                 Ok(value) => value Err(_) => {
@@ -80,6 +85,34 @@ fn main() -> u32 {
     }
     if cube.payload.byte_at(0) != 128 || cube.payload.byte_at(4) != 96 {
         ret 8_u32
+    }
+    let plane = content_thumbnail("", ContentAsset::new("@engine/Primitives/Plane", "Plane", "mesh", 0), 7)
+    if plane.payload.byte_len() != 49160 {
+        ret 9_u32
+    }
+    // A flat double-sided plane must have one lit color throughout its interior,
+    // including the shared diagonal. Opposite faces must not create depth speckles.
+    let paint = pixel(plane.payload, 64, 40)
+    if (paint & 255_u32) < 100_u32 {
+        ret 10_u32
+    }
+    for y in 20_usize..76_usize {
+        for x in 14_usize..114_usize {
+            let dx = if x < 64 {
+                64 - x
+            } else {
+                x - 64
+            }
+            let dy = if y < 48 {
+                48 - y
+            } else {
+                y - 48
+            }
+            if (dx as f32 + 0.5_f32) / 54.0_f32 +(dy as f32 + 0.5_f32) / 31.17_f32 < 0.94_f32 && pixel(plane.payload, x, y) != paint {
+                println("Plane thumbnail has a hole or inconsistent lighting at " + x.fmt() + "," + y.fmt())
+                ret 11_u32
+            }
+        }
     }
     browser.destroy() ret 0_u32
 }

@@ -101,7 +101,7 @@ fn main() -> u32 {
             let source_archive_bytes =
             (vertices.len() / 9_usize) * 11_usize * 4_usize +
             geometry.triangle_indices().len() * 4_usize
-            let virtual_scene = OwnedVirtualScene<H> {
+            let mut virtual_scene = OwnedVirtualScene<H> {
                 GpuVirtualGeometry::create(
                     device, target, geometry, vertices, 1_usize,
                     gi_scene, gi_surfaces, gi_history,)

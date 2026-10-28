@@ -1,11 +1,16 @@
 import core::option::Option
+import core::vec::Vec
 
-import std::os::read_file
+import std::os::{mkdir_all, read_file, write_file_atomic}
 import std::time::perf_counter_ms
 
+import binary::{decode, encode}
+import graphene::content_browser::{ContentBrowser, ContentEdit, ContentMove}
 import graphene::material_graph::*
+import graphene::material_graph::cooked::CookedMaterialGraph
 import graphene::material_graph::editor::MaterialEditor
-import luma::{Event, Rect, StyleSheet, Widget, WidgetLayout, event_pointer_down, event_pointer_up, layout_widget, vertical}
+import graphene::material_schema::MaterialShaderVariant
+import luma::{Event, Rect, RendererKind, StyleSheet, Widget, WidgetLayout, Window, event_pointer_down, event_pointer_up, layout_widget, vertical}
 fn click() -> Event {
     ret Event { event_pointer_down(), 0, 0, 0, 0, 1, 0, 0, 0, 0, "", 0 }
 }
@@ -21,6 +26,35 @@ fn click_on(id: str, layout: WidgetLayout) -> Event {
     }
 }
 fn main() -> u32 {
+    // Encore #171: the standalone backend omits unused browser container layouts.
+    // Retain the browser/history types imported by material unique-path helpers.
+    let browser = ContentBrowser::new()
+    let history = ContentEdit { Vec[ContentMove]::new(), "fixture" }
+    if browser.undo.len() != 0_usize || browser.redo.len() != 0_usize || history.moves.len() != 0_usize {
+        ret 94_u32
+    }
+    let window = Window::create_with_renderer("Editor input test", 320, 200, RendererKind::Software)
+    // Cover cooked persistence and retain its reflective codec in standalone tests.
+    let sample = CookedMaterialGraph {
+        3_u32, "surface", "codec fixture", vec![MaterialShaderVariant {
+                "name", vec![119734787_u32, 65536_u32, 0_u32, 1_u32, 0_u32]
+            }
+        ]
+    }
+    let bytes = match encode(sample) {
+        Ok(value) => value Err(_) => {
+            ret 91
+        }
+    }
+    let decoded = match decode[CookedMaterialGraph](bytes) {
+        Ok(value) => value Err(_) => {
+            ret 92
+        }
+    }
+    if decoded.variants.get(0_usize).unwrap_or(MaterialShaderVariant { "", Vec[u32]::new() }).code.get(0_usize).unwrap_or(0_u32) != 119734787_u32 {
+        ret 93
+    }
+
     let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
                 Ok(value) => value Err(_) => {
                     ret 90
@@ -29,13 +63,13 @@ fn main() -> u32 {
         ))
     let mut editor = MaterialEditor::new() editor.open(f"target/color-picker-test-{perf_counter_ms()}", sheet)
     let bounds = Rect::new(0, 0, 850, 700) let preview = Rect::new(0, 0, 0, 0)
-    let _select = editor.input(Event { event_pointer_down(), 100, 90, 0, 0, 1, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet)
-    let _release = editor.input(Event { event_pointer_up(), 100, 90, 0, 0, 0, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet)
+    let _select = editor.input(Event { event_pointer_down(), 100, 90, 0, 0, 1, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _release = editor.input(Event { event_pointer_up(), 100, 90, 0, 0, 0, 0, 0, 0, 0, "", 0 }, "material-canvas", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.widget().find("mg-color-open").is_none() {
         ret 1
     }
     let original = editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value
-    let _open = editor.input(click(), "mg-color-open", bounds, preview, sheet)
+    let _open = editor.input(click(), "mg-color-open", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if !editor.popup_open() {
         ret 2
     }
@@ -44,37 +78,39 @@ fn main() -> u32 {
     if picker.width() != 320 || picker.height() != 384 || editor.widget().find("mg-value-0").is_some() {
         ret 8
     }
-    let _hex = editor.color_input(click_on("mg-picker-value-6", layout), "mg-picker-value-6", layout, sheet)
-    let _text = editor.color_input(Event::text_input("#00FF00"), "", layout, sheet)
-    let _enter = editor.color_input(Event::key_down(13, 0), "", layout, sheet)
+    let _hex = editor.color_input(click_on("mg-picker-value-6", layout), "mg-picker-value-6", layout, sheet, window)
+    let _select_all = editor.color_input(Event::key_down(97, 192), "", layout, sheet, window)
+    let _text = editor.color_input(Event::text_input("#00FF00"), "", layout, sheet, window)
+    let _enter = editor.color_input(Event::key_down(13, 0), "", layout, sheet, window)
     if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.y() != 1 {
         ret 3
     }
     // Cancelling discards all live updates from this dialog.
-    let _cancel = editor.color_input(Event::key_down(27, 0), "", layout, sheet)
+    let _cancel = editor.color_input(Event::key_down(27, 0), "", layout, sheet, window)
     let reverted = editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value
     if editor.popup_open() || reverted.x() != original.x() || reverted.y() != original.y() {
         ret 4
     }
-    let _open_again = editor.input(click(), "mg-color-open", bounds, preview, sheet)
-    let _field = editor.color_input(click_on("mg-picker-value-6", layout), "mg-picker-value-6", layout, sheet)
-    let _new = editor.color_input(Event::text_input("#FF0000"), "", layout, sheet)
-    let _accept = editor.color_input(click_on("mg-picker-ok", layout), "mg-picker-ok", layout, sheet)
+    let _open_again = editor.input(click(), "mg-color-open", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _field = editor.color_input(click_on("mg-picker-value-6", layout), "mg-picker-value-6", layout, sheet, window)
+    let _select_all = editor.color_input(Event::key_down(97, 192), "", layout, sheet, window)
+    let _new = editor.color_input(Event::text_input("#FF0000"), "", layout, sheet, window)
+    let _accept = editor.color_input(click_on("mg-picker-ok", layout), "mg-picker-ok", layout, sheet, window)
     if editor.popup_open() || editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.x() != 1 {
         ret 5
     }
-    let _undo = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet)
+    let _undo = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     let undone = editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value
     if undone.x() != original.x() || undone.y() != original.y() {
         ret 6
     }
-    let _redo = editor.input(Event::key_down(122, 195), "", bounds, preview, sheet)
+    let _redo = editor.input(Event::key_down(122, 195), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.x() != 1 {
         ret 7
     }
-    let _outside_open = editor.input(click(), "mg-color-open", bounds, preview, sheet)
+    let _outside_open = editor.input(click(), "mg-color-open", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     let outside_layout = popup_layout(editor, sheet)
-    let _outside = editor.color_input(click(), "material-canvas", outside_layout, sheet)
+    let _outside = editor.color_input(click(), "material-canvas", outside_layout, sheet, window)
     if editor.popup_open() {
         ret 9
     }

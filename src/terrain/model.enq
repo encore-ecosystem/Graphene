@@ -2,11 +2,14 @@
 import core::vec::Vec
 import linalg::Vec3
 
+import refrain::texture_image::texture_path_valid
+
 pub struct TerrainLayer {
     name: str
     color: Vec3
     texture: str
     tiling: f32
+    material: str
 }
 pub struct FoliageInstance {
     id: u64
@@ -56,15 +59,15 @@ impl for TerrainAsset {
             heights.push(0_f32) weights.push(Vec3::new(1_f32, 0_f32, 0_f32))
         }
         ret Self {
-            2_u32, n, clamp(spacing, 0.1_f32, 100_f32), heights, weights,
-            vec![TerrainLayer { "Grass", Vec3::new(0.20_f32, 0.34_f32, 0.09_f32), "", 4_f32 },
-                TerrainLayer { "Rock", Vec3::new(0.40_f32, 0.42_f32, 0.43_f32), "", 4_f32 },
-                TerrainLayer { "Earth", Vec3::new(0.29_f32, 0.17_f32, 0.08_f32), "", 4_f32 }], 48_f32, Vec[FoliageInstance]::new()
+            3_u32, n, clamp(spacing, 0.1_f32, 100_f32), heights, weights,
+            vec![TerrainLayer { "Grass", Vec3::new(0.20_f32, 0.34_f32, 0.09_f32), "", 4_f32, "" },
+                TerrainLayer { "Rock", Vec3::new(0.40_f32, 0.42_f32, 0.43_f32), "", 4_f32, "" },
+                TerrainLayer { "Earth", Vec3::new(0.29_f32, 0.17_f32, 0.08_f32), "", 4_f32, "" }], 48_f32, Vec[FoliageInstance]::new()
         }
     }
     pub fn valid(self: Self) -> bool {
         let n = self.resolution
-        if self.version != 2 || !(n == 33 || n == 65 || n == 129 || n == 257 || n == 513) || !finite(self.spacing) || self.spacing < 0.1_f32 || self.spacing > 100_f32 || self.heights.len() !=(n * n) as usize || self.weights.len() != self.heights.len() || self.layers.len() != 3 || !finite(self.lod_distance) || self.lod_distance < 1 || self.lod_distance > 100000 {
+        if self.version != 3 || !(n == 33 || n == 65 || n == 129 || n == 257 || n == 513) || !finite(self.spacing) || self.spacing < 0.1_f32 || self.spacing > 100_f32 || self.heights.len() !=(n * n) as usize || self.weights.len() != self.heights.len() || self.layers.len() != 3 || !finite(self.lod_distance) || self.lod_distance < 1 || self.lod_distance > 100000 {
             ret false
         }
         for h in self.heights {
@@ -88,7 +91,7 @@ impl for TerrainAsset {
         }
         for layer in self.layers {
             let c = layer.color
-            if !finite(c.x()) || !finite(c.y()) || !finite(c.z()) || c.x() < 0 || c.x() > 1 || c.y() < 0 || c.y() > 1 || c.z() < 0 || c.z() > 1 || !finite(layer.tiling) || layer.tiling < 0.1_f32 || layer.tiling > 10000 ||(layer.texture != "" && !terrain_path(layer.texture)) {
+            if !finite(c.x()) || !finite(c.y()) || !finite(c.z()) || c.x() < 0 || c.x() > 1 || c.y() < 0 || c.y() > 1 || c.z() < 0 || c.z() > 1 || !finite(layer.tiling) || layer.tiling < 0.1_f32 || layer.tiling > 10000 ||(layer.texture != "" && !texture_path_valid(layer.texture)) ||(layer.material != "" &&(!texture_path_valid(layer.material) ||(layer.material.byte_len() < 10 || layer.material.slice_bytes(layer.material.byte_len() - 10, 10) != ".gmaterial"))) {
                 ret false
             }
         }

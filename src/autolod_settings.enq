@@ -3,8 +3,10 @@ import mod::scene::json_value::parse_number
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
+
 import json::{Json, field, parse, stringify}
-import std::os::{file_exists, read_file, write_file_atomic}
 
 pub struct AutoLodSettings {
     enabled: bool
@@ -14,6 +16,26 @@ pub struct AutoLodSettings {
 impl for AutoLodSettings {
     pub fn defaults() -> Self {
         ret Self { true, "default" }
+    }
+    /// Engine primitives have no writable source asset. Their project-owned
+    /// sidecars use the same format and never modify the engine installation.
+    pub fn builtin_path(project: str, name: str) -> str {
+        if project == "" ||(name != "Cube" && name != "Plane" && name != "Sphere") {
+            ret ""
+        }
+        ret project + "/Config/BuiltinMeshes/" + name
+    }
+    pub fn load_builtin(project: str, name: str) -> Self {
+        let path = Self::builtin_path(project, name)
+        ret if path == "" {
+            Self::defaults()
+        } else {
+            Self::load(path)
+        }
+    }
+    pub fn save_builtin(self: Self, project: str, name: str) -> bool {
+        let path = Self::builtin_path(project, name)
+        ret path != "" && mkdir_all(project + "/Config/BuiltinMeshes") == 0 && self.save(path)
     }
     pub fn bounded_error(value: f32) -> f32 {
         ret if value >= 0.25_f32 && value <= 16.0_f32 {

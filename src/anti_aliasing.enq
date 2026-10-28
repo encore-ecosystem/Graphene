@@ -1,9 +1,12 @@
 //! Per-view anti-aliasing. Scene/history stay on the GPU; UI never enters a filter.
 import core::option::Option
 import core::vec::Vec
+
 import linalg::{Mat4, Vec3}
+import vulkan::{PresentationSchedule, native_reconstruction_available, native_reconstruction_capabilities, native_reconstruction_create, native_reconstruction_destroy, native_reconstruction_error, native_reconstruction_record_images, native_reconstruction_resolution}
+
 import mod::performance::performance_counter_ns
-import mod::render_settings::{AntiAliasingMethod, RenderSettings, effective_reconstruction, effective_frame_generation}
+import mod::render_settings::{AntiAliasingMethod, RenderSettings, effective_frame_generation, effective_reconstruction}
 import mod::rhi::*
 import mod::scene::camera::PerspectiveCamera
 import mod::scene::renderable::RenderItem
@@ -23,7 +26,6 @@ import mod::shaders::aa_temporal_vertex::aa_temporal_vertex
 import mod::temporal_view::{TemporalView, temporal_jitter_phases}
 import mod::texture_gpu::TextureUpload
 import mod::texture_image::TextureImage
-import vulkan::{native_reconstruction_capabilities, native_reconstruction_resolution, native_reconstruction_create, native_reconstruction_available, native_reconstruction_error, native_reconstruction_destroy, native_reconstruction_record_images, PresentationSchedule}
 extern fn graphene_smaa_texel(table: u32, index: u32) -> u32
 
 struct AaBinding {
@@ -42,7 +44,7 @@ struct AaStage {
     uniforms: Vec[GpuBuffer]
     bindings: Vec[AaBinding]
 }
-fn aa_vertex_layout() -> VertexBufferLayout {
+pub fn aa_vertex_layout() -> VertexBufferLayout {
     ret VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0), VertexAttribute::new(1, vertex_format_float32x3(), 12), VertexAttribute::new(2, vertex_format_float32x3(), 24), VertexAttribute::new(3, vertex_format_float32x2(), 36)])
 }
 fn stage_create(device: GraphicsDevice, target: Swapchain, owned: bool, layout: BindGroupLayout, vertex: ShaderModule, shader: Vec[u32]) -> AaStage<H> {

@@ -1,0 +1,157 @@
+//! Immutable bindings for three PBR layers. The texture owner retains sampled
+//! images until all controller views using this record have retired.
+import core::result::Result
+import core::vec::Vec
+
+import mod::patterns::DisplacementBudget
+import refrain::rhi::*
+import refrain::standard_material::StandardMaterial
+
+pub struct TerrainPatchMaterial {
+    layers: Vec[StandardMaterial]
+    textures: Vec[GpuTexture]
+    weights: GpuTexture
+    extent: f32
+    tilings: Vec[f32]
+}
+pub struct GpuTerrainPatchBindings {
+    uniform: GpuBuffer
+    material: TerrainPatchMaterial
+}
+
+impl for TerrainPatchMaterial {
+    pub fn valid(self: Self) -> bool {
+        if self.layers.len() != 3 || self.textures.len() != 12 || self.tilings.len() != 3 || !self.weights.available() || !(self.extent > 0 && self.extent <= 1000000) {
+            ret false
+        }
+        for texture in self.textures {
+            if !texture.available() {
+                ret false
+            }
+        }
+        for size in self.tilings {
+            if !(size >= 0.1_f32 && size <= 10000) {
+                ret false
+            }
+        }
+        for material in self.layers {
+            if !material.displacement().valid() {
+                ret false
+            }
+        }
+        ret true
+    }
+    pub fn key(self: Self) -> str {
+        let mut result = self.weights.native_handle().fmt() + ":" + self.extent.fmt()
+        for texture in self.textures {
+            result += ":" + texture.native_handle().fmt()
+        }
+        for size in self.tilings {
+            result += ":" + size.fmt()
+        }
+        for material in self.layers {
+            for value in material.uniform_values() {
+                result += ":" + value.fmt()
+            }
+            for value in material.texture_uniform_values() {
+                result += ":" + value.fmt()
+            }
+            let d = material.displacement() result += ":" + d.magnitude.fmt() + ":" + d.center.fmt() + ":" +(if d.enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            )
+        }
+        ret result
+    }
+}
+
+impl for GpuTerrainPatchBindings {
+    pub fn create(device: GraphicsDevice, material: TerrainPatchMaterial, budget: mut DisplacementBudget&) -> Result[Self, str] {
+        if !material.valid() {
+            ret Result::Err("Invalid terrain PBR layers")
+        }
+        if !budget.reserve(208) {
+            ret Result::Err("Terrain PBR uniform budget exhausted")
+        }
+        let uniform = device.create_buffer(208, buffer_uniform(), true)
+        let mut values = vec![material.extent, 0_f32, 0_f32, 0_f32]
+        for layer in material.layers {
+            let tint = layer.base_color() values.push(tint.x()) values.push(tint.y()) values.push(tint.z())
+            values.push(layer.normal_scale() *(if layer.normal_flip_y() {
+                        - 1_f32
+                    } else {
+                        1_f32
+                    }
+                ))
+        }
+        for layer in material.layers {
+            values.push(layer.metallic()) values.push(layer.roughness()) values.push(if layer.unlit() {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            ) values.push(0)
+        }
+        for i in 0_usize..3_usize {
+            let layer = material.layers.get_unchecked_borrowed(i) let d = layer.displacement()
+            values.push(material.tilings.get_unchecked_borrowed(i)) values.push(d.magnitude) values.push(d.center) values.push(if d.enabled && layer.height_texture() != "" {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            )
+        }
+        for layer in material.layers {
+            values.push(if layer.base_color_texture() != "" {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            ) values.push(if layer.normal_texture() != "" {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            ) values.push(if layer.roughness_texture() != "" {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            ) values.push(if layer.metallic_texture() != "" {
+                    1_f32
+                } else {
+                    0_f32
+                }
+            )
+        }
+        if !uniform.available() || !uniform.write_f32s(0, values) {
+            uniform.destroy() budget.release(208) ret Result::Err("Unable to allocate terrain PBR parameters")
+        }
+        ret Result::Ok(Self { uniform, material })
+    }
+    pub fn append(self: Self, bindings: mut Vec[u32], buffers: mut Vec[GpuBuffer], offsets: mut Vec[u64], ranges: mut Vec[u64]) ->() {
+        bindings.push(44) buffers.push(self.uniform) offsets.push(0) ranges.push(208)
+    }
+    pub fn texture_bindings(self: Self) -> Vec[u32] {
+        ret vec![35_u32, 36_u32, 37_u32, 38_u32, 39_u32, 40_u32, 41_u32, 42_u32, 43_u32]
+    }
+    pub fn textures(self: Self) -> Vec[GpuTexture] {
+        let mut textures = Vec[GpuTexture]::new() for i in 4_usize..12_usize {
+            textures.push(self.material.textures.get_unchecked_borrowed(i))
+        }
+        textures.push(self.material.weights) ret textures
+    }
+    pub fn destroy(self: Self, budget: mut DisplacementBudget&) ->() {
+        self.uniform.destroy() budget.release(208)
+    }
+}
+pub fn terrain_layout_entries() -> Vec[BindGroupLayoutEntry] {
+    let stages = shader_stage_compute() | shader_stage_vertex() | shader_stage_fragment()
+    let mut entries = Vec[BindGroupLayoutEntry]::new()
+    for binding in 35_usize..44_usize {
+        entries.push(BindGroupLayoutEntry::texture_sampler(binding as u32, stages))
+    }
+    entries.push(BindGroupLayoutEntry::uniform(44, stages)) ret entries
+}

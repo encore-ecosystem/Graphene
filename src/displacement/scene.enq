@@ -1,0 +1,77 @@
+//! A render-view-independent description also consumed by depth/selection views.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::Mat4
+
+import mod::renderer::DisplacementRenderer
+import mod::skin_source::DisplacementSkin
+import mod::terrain_source::TerrainPatchMaterial
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::renderable::{MaterialId, RenderItem}
+import refrain::standard_material::StandardMaterial
+import refrain::temporal_view::TemporalView
+import refrain::virtual_geometry::VirtualGeometry
+
+pub struct DisplacementInput {
+    key: str
+    mesh: u64
+    gpu: GpuMesh
+    geometry: Option[VirtualGeometry]
+    material: StandardMaterial
+    textures: Vec[GpuTexture]
+    height_range: f32
+    items: Vec[RenderItem]
+    lods: Vec[u32]
+    skin: Option[DisplacementSkin]
+    terrain: Option[TerrainPatchMaterial]
+}
+pub struct DisplacementMaterial {
+    path: str
+    id: MaterialId
+    material: StandardMaterial
+    textures: Vec[GpuTexture]
+    height_range: f32
+}
+pub struct DisplacementActorIdentity {
+    source: u64
+    render: u64
+}
+
+/// Consumer identities: main=0, camera=1, visible selection=2, silhouette=3.
+/// Each owns its frame data; the budget and immutable topology remain shared.
+pub fn prepare_displacement_inputs(renderer: mut DisplacementRenderer&, device: GraphicsDevice, frame: RenderFrame,
+    target: Swapchain, consumer: u32, inputs: Vec[DisplacementInput], sampler: GpuSampler, shelter: GpuTexture,
+    scene_buffers: Vec[Vec[GpuBuffer]], camera: PerspectiveCamera, history: TemporalView&, width: u32, height: u32,
+    aspect: f32, temporal: bool, linear: bool, selected: Vec[u64],) -> bool {
+    renderer.begin(consumer)
+    for input in inputs {
+        let mut key = target.handle().fmt() + ":" + consumer.fmt() + ":" + input.key + ":" + shelter.native_handle().fmt() + ":" + if temporal {
+            "temporal"
+        } elif linear {
+            "linear"
+        } else {
+            "sdr"
+        }
+        match input.terrain {
+            Some(terrain) => {
+                key += ":" + terrain.key()
+            }
+            None => {
+            }
+        }
+        for texture in input.textures {
+            key += ":" + texture.native_handle().fmt()
+        }
+        let prepared = match input.terrain {
+            Some(terrain) => renderer.prepare_terrain_batch(device, frame, target, key, consumer, input.mesh, input.gpu, input.geometry, input.material, input.textures, sampler, shelter, scene_buffers, input.items, input.lods, camera.position(), camera.view_projection(aspect), history, width, height, temporal, linear, input.height_range, selected, input.skin, terrain) None => renderer.prepare_batch(device, frame, target, key, consumer, input.mesh, input.gpu, input.geometry, input.material, input.textures, sampler, shelter, scene_buffers, input.items, input.lods, camera.position(), camera.view_projection(aspect), history, width, height, temporal, linear, input.height_range, selected, input.skin)
+        }
+        if !prepared {
+            // Failed batches retain their normal renderer draw. Successfully
+            // reserved batches are excluded by handles() after this function.
+            continue
+        }
+    }
+    renderer.collect() ret true
+}

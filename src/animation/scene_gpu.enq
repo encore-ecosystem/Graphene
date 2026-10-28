@@ -1,25 +1,33 @@
 //! Per-character shared VG geometry/deformation, with separate viewport streams.
 //! Retired generations keep their real producer/consumer completion records.
+import refrain::displacement::scene::{DisplacementInput, DisplacementMaterial, DisplacementActorIdentity}
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import linalg::{Mat4, Vec3}
+
 import mod::character::CharacterAsset
 import mod::cook::{CookedSkeletalMesh, SkinGeometrySection, skeletal_gpu_bind_mesh}
-import mod::gpu::{SkinGpuCache, SkinFrameInstance}
+import mod::gpu::{SkinFrameInstance, SkinGpuCache}
 import mod::gpu_section::SkinGpuSection
-import mod::material::{AnimationSourceMaterial, AnimationSourceImage}
+import mod::material::{AnimationSourceImage, AnimationSourceMaterial}
 import mod::model::{SkeletalMesh, Skeleton}
-import mod::runtime::{AnimationWorld, PoseSnapshot, AnimationInstanceId}
-import mod::scene::{SceneAnimation, SceneCharacterLibrary, SceneAnimatedActor, SceneAnimatedActorSlot, animated_actor_matrix}
-import refrain::lod_groups::{LodGroups, LodGroup}
+import mod::runtime::{AnimationInstanceId, AnimationWorld, PoseSnapshot}
+import mod::scene::{SceneAnimatedActor, SceneAnimatedActorSlot, SceneAnimation, SceneCharacterLibrary, animated_actor_matrix}
+import refrain::displacement::renderer::DisplacementRenderer
+import refrain::displacement::skin_source::DisplacementSkin
+import refrain::lod_groups::{LodGroup, LodGroups}
+import refrain::ray_lighting::RayLightingView
 import refrain::rhi::*
 import refrain::scene::camera::PerspectiveCamera
 import refrain::scene::light::DirectionalLight
+import refrain::scene::renderable::{MeshId, RenderItem, Renderable}
+import refrain::scene::world::Scene
 import refrain::texture_gpu::TextureUpload
 import refrain::texture_image::TextureImage
 import refrain::virtual_geometry::VirtualGeometry
-import refrain::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryResources, VirtualGeometryInstance, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_destroy, destroy_virtual_geometry_resources, gpu_virtual_geometry_error, gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_replace_texture_groups}
+import refrain::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, VirtualGeometryResources, destroy_virtual_geometry_resources, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_error, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_replace_texture_groups, gpu_virtual_geometry_texture_groups}
 
 pub struct CharacterRenderView {
     target: Swapchain
@@ -50,6 +58,8 @@ struct CharacterPart {
     mask_ready: bool
     silhouette_ready: bool
     retirement: u32
+    patch_key: u64
+    source_geometry: VirtualGeometry
 }
 struct PartSlot {
     value: CharacterPart<H>
@@ -79,12 +89,13 @@ pub struct SceneCharacters {
     project: str
     groups: LodGroups
     message: str
+    next_patch_key: u64
 }
 
 impl for SceneCharacters {
     pub fn create(device: GraphicsDevice) -> SceneCharacters<H> {
         ret SceneCharacters<H> {
-            device, Vec[SetSlot]::new(), Vec[SetSlot]::new(), "", LodGroups::defaults(), ""
+            device, Vec[SetSlot]::new(), Vec[SetSlot]::new(), "", LodGroups::defaults(), "", 1000000000_u64
         }
     }
     pub fn configure(self: mut Self&, project: str) ->() {
@@ -99,6 +110,139 @@ impl for SceneCharacters {
     }
     pub fn message(self: Self&) -> str {
         ret self.message
+    }
+    pub fn displacement_inputs(self: mut Self&, animation: SceneAnimation<H>, frame: RenderFrame,
+        camera: PerspectiveCamera, materials: Vec[DisplacementMaterial], identities: Vec[DisplacementActorIdentity],) -> Result[Vec[DisplacementInput], str] {
+        let scene = animation.source_scene() let mut result = Vec[DisplacementInput]::new()
+        for slot in self.sets {
+            let mut set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            let mut needed = false
+            for actor in set.actors {
+                match scene.get(actor.entity) {
+                    Some(source) => {
+                        for material in materials {
+                            if self.project + "/" + source.material_path() == material.path {
+                                needed = true break
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            if !needed {
+                continue
+            }
+            if !set.cache.record_all(frame) {
+                ret Result::Err("Unable to record displaced character skinning")
+            }
+            let history = set.cache.instance_history()
+            let vertex_count = set.cache.geometry_configuration().get_unchecked_borrowed(0)
+            for part_slot in set.parts {
+                let part = part_slot.value let geometry = part.source_geometry
+                let capacity = DisplacementRenderer::instance_capacity((geometry.triangle_indices().len() / 3) as u32) as usize
+                for material in materials {
+                    if material.textures.len() != 4 {
+                        continue
+                    }
+                    let mut actors = Vec[usize]::new()
+                    for i in 0_usize..set.actors.len() {
+                        match scene.get(set.actors.get_unchecked_borrowed(i).entity) {
+                            Some(source) => {
+                                if self.project + "/" + source.material_path() == material.path {
+                                    actors.push(i)
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    let mut first = 0_usize
+                    while first < actors.len() {
+                        let end = if first + capacity < actors.len() {
+                            first + capacity
+                        } else {
+                            actors.len()
+                        }
+                        let mut items = Vec[RenderItem]::new() let mut lods = Vec[u32]::new()
+                        let mut indices = Vec[u32]::new() let mut previous = Vec[Mat4]::new() let mut valid = Vec[bool]::new()
+                        for n in first..end {
+                            let i = actors.get_unchecked_borrowed(n) let actor = set.actors.get_unchecked_borrowed(i)
+                            let mut entity = 0_u64
+                            for identity in identities {
+                                if identity.source == actor.entity {
+                                    entity = identity.render break
+                                }
+                            }
+                            if entity == 0 {
+                                continue
+                            }
+                            let distance = actor.model.transform_point(Vec3::zero()).sub(camera.position()).length()
+                            let ratio = self.groups.resolve("default").evaluate(distance)
+                            items.push(RenderItem::new(entity, Renderable::new(MeshId::new(part.patch_key), material.id), actor.model))
+                            lods.push(DisplacementRenderer::select_lod(geometry, ratio)) indices.push(i as u32) previous.push(actor.previous) valid.push(actor.history && history.get(i).unwrap_or(0) != 0)
+                        }
+                        let mut settings = material.material.displacement()
+                        let displaced = settings.enabled && material.material.height_texture() != ""
+                        if !displaced {
+                            settings.enabled = true settings.magnitude = 0
+                        }
+                        let key = part.patch_key.fmt() + ":" + material.id.value().fmt() + ":" +(first / capacity).fmt()
+                        result.push(DisplacementInput {
+                                key, part.patch_key, GpuMesh::unavailable(), Option::Some(geometry), material.material.with_displacement(settings), material.textures, if displaced {
+                                    material.height_range
+                                } else {
+                                    0_f32
+                                }
+                                , items, lods, Option::Some(DisplacementSkin {
+                                        set.cache.source_buffer(), set.cache.cache_buffer(), set.cache.morph_span_buffer(), set.cache.morph_delta_buffer(), vertex_count, indices, previous, valid
+                                    }
+                                ), Option::None
+                            }
+                        )
+                        first = end
+                    }
+                }
+            }
+        }
+        ret Result::Ok(result)
+    }
+    pub fn suppress_displaced(self: Self&, frame: RenderFrame, consumer: u32, renderer: DisplacementRenderer&, identities: Vec[DisplacementActorIdentity]) -> bool {
+        for slot in self.sets {
+            let set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            for part_slot in set.parts {
+                let part = part_slot.value
+                let geometry = if consumer == 0 {
+                    part.main
+                } elif consumer == 1 {
+                    part.preview
+                } elif consumer == 2 {
+                    part.mask
+                } else {
+                    part.silhouette
+                }
+                for i in 0_usize..set.actors.len() {
+                    let actor = set.actors.get_unchecked_borrowed(i) let mut entity = 0_u64
+                    for identity in identities {
+                        if identity.source == actor.entity {
+                            entity = identity.render break
+                        }
+                    }
+                    if renderer.handles_mesh(entity, part.patch_key, consumer) && !geometry.set_instance_visible(frame, i, false) {
+                        ret false
+                    }
+                }
+            }
+        }
+        ret frame.transfer_storage_barrier()
     }
     fn collect(self: mut Self&) ->() {
         for i in 0_usize..self.retired.len() {
@@ -170,11 +314,12 @@ impl for SceneCharacters {
                 let mut capacity = 16_usize while capacity < count {
                     capacity *= 2_usize
                 }
-                match create_set(self.device, view.target, library, capacity, gi_scene, gi_surfaces, gi_history) {
+                match create_set(self.device, view.target, library, capacity, gi_scene, gi_surfaces, gi_history, self.next_patch_key) {
                     Ok(set) => {
                         if slot.value.is_some() {
                             self.retired.push(SetSlot { slot.value })
                         }
+                        self.next_patch_key += library.asset.geometry.sections.len() as u64
                         slot.value = Option[CharacterGpuSet<H>]::Some(set) self.sets.set(index, slot)
                     }
                     Err(error) => {
@@ -336,6 +481,29 @@ impl for SceneCharacters {
         }
         ret true
     }
+    pub fn prepare_ray_lighting(self: mut Self&, frame: RenderFrame, target: Swapchain, preview: bool, lighting: RayLightingView) -> bool {
+        for i in 0_usize..self.sets.len() {
+            let mut slot = self.sets.get_unchecked_borrowed(i)
+            let mut set = match slot.value {
+                Some(s) => s None => {
+                    continue
+                }
+            }
+            for j in 0_usize..set.parts.len() {
+                let mut part = set.parts.get_unchecked_borrowed(j)
+                if preview {
+                    if part.value.preview_ready && !part.value.preview.prepare_ray_lighting(self.device, target, frame, lighting) {
+                        ret false
+                    }
+                } else {
+                    if part.value.main_ready && !part.value.main.prepare_ray_lighting(self.device, target, frame, lighting) {
+                        ret false
+                    }
+                }
+            }
+        }
+        ret true
+    }
     pub fn draw(self: Self&, pass: RenderPassEncoder, frame_slot: u32, preview: bool, mode: u32) -> bool {
         for slot in self.sets {
             let set = match slot.value {
@@ -423,7 +591,7 @@ impl for SceneCharacters {
         self.sets.clear() self.collect() ret self.retired.len() == 0_usize
     }
 }
-fn create_set(device: GraphicsDevice, target: Swapchain, library: SceneCharacterLibrary<H>, capacity: usize, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> Result[CharacterGpuSet<H>, str] {
+fn create_set(device: GraphicsDevice, target: Swapchain, library: SceneCharacterLibrary<H>, capacity: usize, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer, patch_key: u64) -> Result[CharacterGpuSet<H>, str] {
     let asset = library.asset
     let mut cache = SkinGpuCache::create(device, asset.skeleton, asset.geometry.mesh, capacity)?
     let mut set = CharacterGpuSet<H> {
@@ -437,7 +605,7 @@ fn create_set(device: GraphicsDevice, target: Swapchain, library: SceneCharacter
                 selected = i
             }
         }
-        match create_part(device, target, cache, asset.geometry.mesh, section, asset.materials.get_unchecked_borrowed(selected), capacity, gi_scene, gi_surfaces, gi_history) {
+        match create_part(device, target, cache, asset.geometry.mesh, section, asset.materials.get_unchecked_borrowed(selected), capacity, gi_scene, gi_surfaces, gi_history, patch_key + index as u64) {
             Ok(part) => {
                 set.parts.push(PartSlot { part })
             }
@@ -448,7 +616,7 @@ fn create_set(device: GraphicsDevice, target: Swapchain, library: SceneCharacter
     }
     ret Result::Ok(set)
 }
-fn create_part(device: GraphicsDevice, target: Swapchain, cache: SkinGpuCache<H>, mesh: SkeletalMesh, section: SkinGeometrySection, material: AnimationSourceMaterial, capacity: usize, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer) -> Result[CharacterPart<H>, str] {
+fn create_part(device: GraphicsDevice, target: Swapchain, cache: SkinGpuCache<H>, mesh: SkeletalMesh, section: SkinGeometrySection, material: AnimationSourceMaterial, capacity: usize, gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer, patch_key: u64) -> Result[CharacterPart<H>, str] {
     let mut skin = SkinGpuSection::create(device, cache, section)?
     let values = skeletal_gpu_bind_mesh(mesh).vertices() let mut packed = Vec[f32]::with_capacity(section.geometry.vertex_indices().len() * 11_usize)
     for index in section.geometry.vertex_indices() {
@@ -465,7 +633,7 @@ fn create_part(device: GraphicsDevice, target: Swapchain, cache: SkinGpuCache<H>
     let mut mask = main.fork_view(device, target, gi_scene, gi_surfaces, gi_history, image.pixels, image.width, image.height)
     let mut silhouette = main.fork_view(device, target, gi_scene, gi_surfaces, gi_history, image.pixels, image.width, image.height)
     let mut part = CharacterPart<H> {
-        main, preview, mask, silhouette, main.shared_resources(), skin, material, GpuTexture::unavailable(), device.create_sampler(), false, false, false, false, 0_u32
+        main, preview, mask, silhouette, main.shared_resources(), skin, material, GpuTexture::unavailable(), device.create_sampler(), false, false, false, false, 0_u32, patch_key, section.geometry
     }
     if !preview.is_ready() || !mask.is_ready() || !silhouette.is_ready() {
         let error = "Unable to create character render views" retire_part(part) ret Result::Err(error)

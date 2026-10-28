@@ -1,0 +1,206 @@
+//! Per-asset asynchronous loading and fence-owned GPU uploads.
+import core::option::Option
+import core::vec::Vec
+
+import std::thread::JoinHandle
+
+pub import mod::material_images::{MaterialImages, load_material_images, pack_orm, pack_orm_ao}
+import mod::material_images::{load_material_images_for_material, material_error_images}
+import mod::material_schema::material_extra_linear
+import mod::native_asset::resolve_native_material
+import mod::preview::ViewportRenderer
+import mod::rhi::GpuTexture
+import mod::scene::world::Scene
+import mod::texture_gpu::TextureUpload
+
+pub struct MaterialTextureLoader {
+    project: str
+    attempted: Vec[str]
+    reload: Vec[str]
+    worker: Option[JoinHandle[MaterialImages]]
+    pending: Option[MaterialImages]
+    uploads: Vec[TextureUpload]
+    failed: bool
+    error: str
+}
+
+impl for MaterialTextureLoader {
+    pub fn new() -> Self {
+        ret Self {
+            "", Vec[str]::new(), Vec[str]::new(), Option::None, Option::None, Vec[TextureUpload]::new(), false, ""
+        }
+    }
+    pub fn invalidate(self: mut Self, path: str) ->() {
+        for old in self.reload {
+            if old == path {
+                ret()
+            }
+        }
+        self.reload.push(path) ret()
+    }
+    pub fn invalidate_material(self: mut Self, project: str, path: str, scene: Scene) ->() {
+        for actor in scene.entities() {
+            if actor.material_path() != "" {
+                match resolve_native_material(project, actor.material_path(), "") {
+                    Ok(resolved) => {
+                        for dependency in resolved.dependencies {
+                            if dependency == path {
+                                self.invalidate(actor.material_path()) break
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        self.invalidate(actor.material_path())
+                    }
+                }
+            }
+        }
+    }
+    pub fn busy(self: Self) -> bool {
+        ret self.worker.is_some() || self.pending.is_some()
+    }
+    pub fn error(self: Self) -> str {
+        ret self.error
+    }
+    pub fn sync(self: mut Self, project: str, scene: Scene, renderer: mut ViewportRenderer&) -> bool {
+        let mut changed = false renderer.set_material_project(project)
+        if self.project != project && !self.busy() {
+            self.project = project self.attempted.clear() self.reload.clear()
+        }
+        match self.worker {
+            Some(worker) => {
+                if worker.is_finished() {
+                    let result = worker.join() self.worker = Option[JoinHandle[MaterialImages]]::None
+                    if project == self.project && result.error == "" {
+                        self.pending = Option[MaterialImages]::Some(result) self.failed = false
+                    } elif result.error != "" {
+                        self.error = result.error
+                        if project == self.project && !renderer.has_pbr_material(project + "/" + result.path) {
+                            self.pending = Option[MaterialImages]::Some(material_error_images(result.path)) self.failed = false
+                        }
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        match self.pending {
+            Some(data) => {
+                while self.uploads.len() < 4 + data.extra.len() && !self.failed {
+                    let i = self.uploads.len() let image = if i >= 4 {
+                        data.extra.get_unchecked_borrowed(i - 4)
+                    } else {
+                        data.images.get_unchecked_borrowed(if i >= 3 {
+                                0_usize
+                            } else {
+                                i
+                            }
+                        )
+                    }
+                    match if i == 3 {
+                        TextureUpload::begin_height(renderer.graphics_device(), data.height)
+                    } elif i >= 4 {
+                        if match data.program {
+                            Some(resolved) => material_extra_linear(resolved, i - 4_usize) None => false
+                        }
+                        {
+                            renderer.upload_normal_texture(image)
+                        } else {
+                            renderer.upload_material_texture(image)
+                        }
+                    } elif i == 0 {
+                        renderer.upload_material_texture(image)
+                    } else {
+                        renderer.upload_normal_texture(image)
+                    }
+                    {
+                        Some(upload) => self.uploads.push(upload) None => {
+                            self.failed = true self.error = "Unable to upload PBR maps"
+                        }
+                    }
+                }
+                let mut complete = true for upload in self.uploads {
+                    complete = complete && upload.complete()
+                }
+                if complete {
+                    let mut textures = Vec[GpuTexture]::new() let mut extra = Vec[GpuTexture]::new()
+                    for i in 0_usize..self.uploads.len() {
+                        let texture = self.uploads.get_unchecked_borrowed(i).finish() if i < 4 {
+                            textures.push(texture)
+                        } else {
+                            extra.push(texture)
+                        }
+                    }
+                    self.uploads.clear()
+                    if !self.failed && project == self.project {
+                        changed = renderer.register_pbr_material_native(project + "/" + data.path, data.material, textures, data.height_range, data.program, extra)
+                    } else {
+                        for texture in textures {
+                            texture.destroy()
+                        }
+                        for texture in extra {
+                            texture.destroy()
+                        }
+                    }
+                    self.pending = Option[MaterialImages]::None
+                }
+            }
+            None => {
+            }
+        }
+        if !self.busy() && project == self.project && self.reload.len() > 0 {
+            let path = self.reload.get_unchecked_borrowed(self.reload.len() - 1) self.reload.pop()
+            self.worker = Option[JoinHandle[MaterialImages]]::Some(spawn load_material_images(project, path))
+        }
+        if !self.busy() && project == self.project {
+            for actor in scene.entities() {
+                let path = actor.material_path() let mut seen = path == "" || renderer.has_pbr_material(project + "/" + path)
+                for old in self.attempted {
+                    if old == path {
+                        seen = true
+                    }
+                }
+                if !seen {
+                    self.attempted.push(path)
+                    self.worker = Option[JoinHandle[MaterialImages]]::Some(spawn load_material_images(project, path)) break
+                }
+            }
+        }
+        if !self.busy() && project == self.project {
+            for request in renderer.terrain_material_requests() {
+                let mut seen = renderer.has_pbr_material(project + "/" + request.path)
+                for old in self.attempted {
+                    if old == request.path {
+                        seen = true
+                    }
+                }
+                if !seen {
+                    self.attempted.push(request.path)
+                    self.worker = Option[JoinHandle[MaterialImages]]::Some(match request.material {
+                            Some(material) => spawn load_material_images_for_material(project, request.path, material) None => spawn load_material_images(project, request.path)
+                        }
+                    )
+                    break
+                }
+            }
+        }
+        if changed || !self.busy() {
+            renderer.apply_actor_materials()
+        }
+        ret changed
+    }
+    pub fn close(self: mut Self) ->() {
+        match self.worker {
+            Some(w) => {
+                let _joined = w.join()
+            }
+            None => {
+            }
+        }
+        self.worker = Option[JoinHandle[MaterialImages]]::None
+        for upload in self.uploads {
+            upload.wait() upload.finish().destroy()
+        }
+        self.uploads.clear() self.pending = Option[MaterialImages]::None ret()
+    }
+}

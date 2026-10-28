@@ -1,0 +1,39 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn displacement_refine_spirv() -> Vec[u32] {
+    ret builtin_spirv(2659756390_u32)
+}
+pub fn displacement_ray_proxy_spirv() -> Vec[u32] {
+    ret builtin_spirv(2818723001_u32)
+}
+pub fn terrain_ray_proxy_spirv() -> Vec[u32] {
+    ret builtin_spirv(3981677338_u32)
+}
+pub fn displacement_topology_spirv() -> Vec[u32] {
+    ret builtin_spirv(2991350411_u32)
+}
+pub fn displacement_vertex_spirv() -> Vec[u32] {
+    ret builtin_spirv(3039295477_u32)
+}
+pub fn displacement_mesh_spirv() -> Vec[u32] {
+    ret builtin_spirv(134585297_u32)
+}
+pub fn displacement_debug_spirv() -> Vec[u32] {
+    ret builtin_spirv(1220302136_u32)
+}
+pub fn displacement_triangle_spirv() -> Vec[u32] {
+    ret builtin_spirv(3231301773_u32)
+}
+pub fn displacement_triangle_linear_spirv() -> Vec[u32] {
+    ret builtin_spirv(2283871198_u32)
+}
+pub fn displacement_triangle_temporal_spirv() -> Vec[u32] {
+    ret builtin_spirv(1774705883_u32)
+}
+pub fn displacement_selection_spirv() -> Vec[u32] {
+    ret builtin_spirv(3262440083_u32)
+}
+pub fn displacement_skin_source_spirv() -> Vec[u32] {
+    ret builtin_spirv(1639979562_u32)
+}

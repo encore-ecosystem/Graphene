@@ -1,4 +1,5 @@
 import core::option::Option
+
 import linalg::Vec3
 
 /// Gives interactive retained controls layered over the viewport priority over
@@ -16,7 +17,9 @@ pub fn resolve_editor_pointer_target(
 }
 
 pub struct EditorTransform {
-    position: Vec3 rotation: Vec3 scale: Vec3
+    position: Vec3
+    rotation: Vec3
+    scale: Vec3
 }
 
 impl for EditorTransform {
@@ -31,40 +34,14 @@ impl for EditorTransform {
     }
 }
 
+/// Match the material/scene parser: round once to f32 and accept exponents.
 pub fn parse_editor_scalar(source: str) -> Option[f32] {
-    if source.byte_len() == 0_usize {
-        ret Option[f32]::None
+    let text = if source.byte_len() > 0 && source.byte_at(0) == 43 {
+        source.slice_bytes(1, source.byte_len() - 1)
+    } else {
+        source
     }
-    let mut index = 0_usize
-    let mut sign = 1.0_f32
-    if source.byte_at(index) == 45_u8 {
-        sign = - 1.0_f32 index = index + 1_usize
-    } elif source.byte_at(index) == 43_u8 {
-        index = index + 1_usize
-    }
-    let mut value = 0.0_f32
-    let mut digits = 0_usize
-    while index < source.byte_len() && source.byte_at(index) >= 48_u8 && source.byte_at(index) <= 57_u8
-    {
-        value = value * 10.0_f32 +((source.byte_at(index) - 48_u8) as f32)
-        digits = digits + 1_usize
-        index = index + 1_usize
-    }
-    if index < source.byte_len() && source.byte_at(index) == 46_u8 {
-        index = index + 1_usize
-        let mut place = 0.1_f32
-        while index < source.byte_len() && source.byte_at(index) >= 48_u8 && source.byte_at(index) <=
-        57_u8 {
-            value = value +((source.byte_at(index) - 48_u8) as f32) * place
-            place = place * 0.1_f32
-            digits = digits + 1_usize
-            index = index + 1_usize
-        }
-    }
-    if digits == 0_usize || index != source.byte_len() {
-        ret Option[f32]::None
-    }
-    ret Option[f32]::Some(value * sign)
+    ret refrain::scene::json_value::parse_number(text)
 }
 
 fn replace_axis(value: Vec3, axis: str, scalar: f32) -> Option[Vec3] {

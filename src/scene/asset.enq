@@ -8,6 +8,7 @@ import linalg::Vec3
 
 import mod::component::SceneComponent
 import mod::transform::Transform
+import mod::world::material_reference_valid
 import refrain::blueprint::codec::{blueprint_instance_json, blueprint_instance_parse}
 import refrain::blueprint::model::BlueprintInstance
 import refrain::physics::component::PhysicsComponent
@@ -22,6 +23,7 @@ pub struct SceneActor {
     blueprint: Option[BlueprintInstance]
     component: SceneComponent
     physics: PhysicsComponent
+    material_path: str
 }
 pub struct SceneAsset {
     version: u32
@@ -56,27 +58,27 @@ pub import mod::json_value::{json_vec3, parse_number, vec3_json}
 impl for SceneActor {
     pub fn new(name: str, kind: str, transform: Transform) -> SceneActor {
         ret SceneActor {
-            0_u64, Option[u64]::None, name, kind, transform, true, Option[BlueprintInstance]::None, SceneComponent::for_kind(kind), PhysicsComponent::defaults()
+            0_u64, Option[u64]::None, name, kind, transform, true, Option[BlueprintInstance]::None, SceneComponent::for_kind(kind), PhysicsComponent::defaults(), ""
         }
     }
     pub fn with_identity(self: Self, id: u64) -> SceneActor {
         ret SceneActor {
-            id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics
+            id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics, self.material_path
         }
     }
     pub fn with_parent(self: Self, parent: Option[u64]) -> SceneActor {
         ret SceneActor {
-            self.id, parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics
+            self.id, parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics, self.material_path
         }
     }
     pub fn with_visible(self: Self, visible: bool) -> SceneActor {
         ret SceneActor {
-            self.id, self.parent, self.name, self.kind, self.transform, visible, self.blueprint, self.component, self.physics
+            self.id, self.parent, self.name, self.kind, self.transform, visible, self.blueprint, self.component, self.physics, self.material_path
         }
     }
     pub fn with_blueprint(self: Self, blueprint: BlueprintInstance) -> SceneActor {
         ret SceneActor {
-            self.id, self.parent, self.name, "blueprint", self.transform, self.visible, Option[BlueprintInstance]::Some(blueprint), self.component, self.physics
+            self.id, self.parent, self.name, "blueprint", self.transform, self.visible, Option[BlueprintInstance]::Some(blueprint), self.component, self.physics, self.material_path
         }
     }
     pub fn component(self: Self) -> SceneComponent {
@@ -89,7 +91,15 @@ impl for SceneActor {
             } else {
                 component.kind()
             }
-            , self.transform, self.visible, self.blueprint, component, self.physics
+            , self.transform, self.visible, self.blueprint, component, self.physics, self.material_path
+        }
+    }
+    pub fn material_path(self: Self) -> str {
+        ret self.material_path
+    }
+    pub fn with_material_path(self: Self, path: str) -> Self {
+        ret Self {
+            self.id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, self.physics, path
         }
     }
     pub fn physics(self: Self) -> PhysicsComponent {
@@ -97,7 +107,7 @@ impl for SceneActor {
     }
     pub fn with_physics(self: Self, physics: PhysicsComponent) -> Self {
         ret Self {
-            self.id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, physics
+            self.id, self.parent, self.name, self.kind, self.transform, self.visible, self.blueprint, self.component, physics, self.material_path
         }
     }
     pub fn blueprint(self: Self) -> Option[BlueprintInstance] {
@@ -141,6 +151,7 @@ impl for SceneActor {
             fields.push(field("component", self.component.to_json()))
         }
         fields.push(field("physics", self.physics.to_json()))
+        fields.push(field("material", Json::String(self.material_path)))
         match self.blueprint {
             Some(instance) => {
                 fields.push(field("blueprint", blueprint_instance_json(instance)))
@@ -347,6 +358,21 @@ impl for SceneActor {
                 None => {
                 }
             }
+            match value.get("material") {
+                Some(v) => {
+                    let path = match v.as_str() {
+                        Some(p) => p None => {
+                            ret Option::None
+                        }
+                    }
+                    if !material_reference_valid(path) {
+                        ret Option::None
+                    }
+                    actor = actor.with_material_path(path)
+                }
+                None => {
+                }
+            }
             ret Option[SceneActor]::Some(actor)
         }
         ret Option[SceneActor]::None
@@ -356,7 +382,7 @@ impl for SceneActor {
 impl for SceneAsset {
     pub fn new() -> SceneAsset {
         ret SceneAsset {
-            7_u32, Vec[SceneActor]::new(), 7_u32
+            8_u32, Vec[SceneActor]::new(), 8_u32
         }
     }
     pub fn source_version(self: Self) -> u32 {
@@ -489,6 +515,8 @@ impl for SceneAsset {
                                     version = 6_u32
                                 } elif value == "7" {
                                     version = 7_u32
+                                } elif value == "8" {
+                                    version = 8_u32
                                 }
                             }
                             Option::None => {
@@ -524,7 +552,7 @@ impl for SceneAsset {
                                     ret Option[SceneAsset]::None
                                 }
                                 // Legacy identities survive upgrades; generated components are not actors.
-                                asset.version = 7_u32
+                                asset.version = 8_u32
                                 ret Option[SceneAsset]::Some(asset)
                             }
                             Option::None => {

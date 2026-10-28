@@ -77,6 +77,18 @@ impl for TerrainDocument {
         }
         ret true
     }
+    /// Assigning a layer material is one ordinary terrain document edit.
+    pub fn set_layer_material(self: mut Self, index: u32, path: str) -> bool {
+        if index >= 3 {
+            ret false
+        }
+        let mut asset = self.asset.copy() let mut layer = asset.layers.get_unchecked_borrowed(index as usize)
+        if layer.material == path {
+            ret false
+        }
+        layer.material = path asset.layers.set(index as usize, layer)
+        ret self.replace(asset)
+    }
     pub fn touch(self: mut Self) ->() {
         self.serial += 1_u64
     }

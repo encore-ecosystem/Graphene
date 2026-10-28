@@ -21,12 +21,16 @@ import graphene::audio::panel::AudioPanel
 import graphene::autolod_settings::AutoLodSettings
 import graphene::blueprint::*
 import graphene::blueprint::editor::BlueprintEditor
-import graphene::command_bus::{ActorComponentCommand, BlueprintActorCommand}
+import graphene::command_bus::{ActorComponentCommand, ActorMaterialCommand, BlueprintActorCommand}
 import graphene::content_browser::{ContentBrowser, ContentIcons}
 import graphene::content_browser::files::{content_kind, content_leaf}
 import graphene::content_browser::input::{content_action, content_input}
+import graphene::content_browser::operations::content_publish_generated
 import graphene::content_browser::path::{ends, lower}
 import graphene::content_browser::view::{content_asset_info, content_popup, content_widget}
+// Encore #169: owners of transitively accessed EditorUiState fields.
+import graphene::displacement::renderer::DisplacementStatistics
+import graphene::editor_actor_details::ActorDetails
 import graphene::editor_camera_actor::{first_scene_camera, load_scene_camera, piloted_transform, scene_camera}
 import graphene::editor_camera_overlay::CameraOverlayStyle
 import graphene::editor_docking::{create_editor_docks, editor_dock_shell, stage_editor_dock_contents}
@@ -35,23 +39,35 @@ import graphene::editor_gizmo_readout::gizmo_world_value
 import graphene::editor_gizmo_snap::{snap_step_grid, snap_step_label, snap_tool_name, snap_value_action}
 import graphene::editor_guides::{GizmoGuideStyle, gizmo_guides}
 import graphene::editor_layout::{load_editor_layout, save_editor_layout}
+import graphene::editor_lod_groups::LodGroupEditor
+import graphene::editor_mesh_details::MeshDetails
 import graphene::editor_performance::profile_snapshot
 import graphene::environment::model::{WeatherSample, environment_kinds}
 import graphene::environment::panel::{environment_controller, environment_panel}
 import graphene::game_ui::asset::UiConfiguration
 import graphene::game_ui::editor::UiEditor
 import graphene::game_ui::runtime::GameUi
+import graphene::game_ui::settings::PlaySettings
+import graphene::genai::editor::GenAiEditor
+import graphene::genai::importer::PreparedMaterial
+import graphene::lod_groups::LodGroups
 import graphene::material_graph::editor::MaterialEditor
+import graphene::material_properties::PbrMaterialEditor
+import graphene::material_schema::{MaterialAsset, standard_pbr_parent}
+import graphene::material_textures::MaterialTextureLoader
 import graphene::mcp::editor::*
 import graphene::mcp::http::McpHttpServer
 import graphene::mcp::jobs::McpJobs
 import graphene::mcp::protocol::*
+import graphene::mcp::settings::McpSettings
 import graphene::mcp_gateway::GrapheneMcpGateway
+import graphene::native_asset::read_native_material_asset
 import graphene::particles::editor::ParticleEditor
 import graphene::particles::model::ParticleComponent
 import graphene::physics::scene::{PhysicsMesh, append_builtin_physics_mesh, scene_physics}
 import graphene::preview::SceneGpuBinding
 import graphene::runtime::InputSnapshot
+import graphene::scene::primitive::cube_mesh
 import graphene::terrain::editor::{TerrainEditor, terrain_key_path}
 import graphene::terrain::model::terrain_path
 import json::{Json, field, stringify}
@@ -224,7 +240,7 @@ fn parent_directory(path: str) -> str {
 fn project_paths(root: str) -> ProjectPaths {
     let base = trim_trailing_separator(root)
     ret ProjectPaths {
-        base, base + "/graphene.project", base + "/scene.graphene.json", base + "/Content/Materials/Default.graphene-material.json",
+        base, base + "/graphene.project", base + "/scene.graphene.json", base + "/Content/Materials/Default.gmaterial",
         base + "/game/src/main.enq", base + "/game/encore.toml", base + "/game/.graphene-build.log",
         base + "/game/.graphene-build-complete"
     }
@@ -261,8 +277,7 @@ fn create_project_with_template(root: str, template: str) -> bool {
     {
         ret false
     }
-    if write_file(paths.material, material_asset_stringify(StandardMaterial::editor_default()) + "\n")
-    != 0_i32 {
+    if !save_material_asset_file(paths.material, StandardMaterial::editor_default()) {
         ret false
     }
     if write_file(paths.manifest, "[project]\nname = \"graphene_game\"\nversion = \"0.1.0\"\ndependencies = []\n")
@@ -318,7 +333,7 @@ fn load_project(paths: ProjectPaths) -> Option[ProjectContents] {
                 }
                 index = index + 1_usize
             }
-            let material = if file_exists(paths.material) || file_exists(paths.material + ".gmaterial") {
+            let material = if file_exists(paths.material) {
                 match load_material_asset_file(paths.material) {
                     Option::Some(value) => value Option::None => StandardMaterial::editor_default()
                 }
@@ -563,6 +578,7 @@ fn menu_popup(menu: str, hovered: str, project_loaded: bool, project_dirty: bool
         popup.push(popup_action("menu-performance-action", "Performance", icons.panels, hovered, false, false))
         popup.push(popup_action("menu-environment-action", "Environment", icons.light, hovered, false, false))
         popup.push(popup_action("menu-audio-action", "Audio", icons.settings, hovered, false, false))
+        popup.push(popup_action("menu-genai-action", "GenAI", icons.material, hovered, false, false))
         popup.push(popup_action("menu-terrain-action", "Terrain", icons.mesh, hovered, false, false))
         popup.push(popup_action("menu-widget-action", "UI Designer", icons.settings, hovered, false, false))
         popup.push(popup_action("menu-particles-action", "VFX / Particles", icons.settings, hovered, false, false))
@@ -783,13 +799,13 @@ fn asset_import_dialog(picker: FilePicker, error: str, view_width: f32, view_hei
     dialog.push(Widget::label(if mode == "normal" {
                 "Normal Map / Linear"
             } elif texture {
-                "Base Color Texture"
+                "Texture"
             } else {
                 "Import Asset"
             }
         ).with_added_classes("g-asset-import-dialog-3"))
     dialog.push(Widget::label(if texture {
-                "Choose an 8-bit RGB/RGBA PNG. A project-owned copy will be stored in Content/Textures."
+                "Choose a PNG texture. Height supports 16-bit grayscale; imported maps are stored in Content/Textures."
             } else {
                 "Import a model, PNG texture, or WAV / FLAC / MP3 / Ogg sound as a native Graphene asset."
             }
@@ -1350,7 +1366,7 @@ fn property_value(id: str, text: str, axis: str, active: bool, editor: TextEdito
                 text
             }
             ,
-        ).with_focus(active)
+        ).with_focus(active).with_cursor(editor.cursor()).with_selection(editor.selection_start(), editor.selection_end())
         .with_disabled(disabled).with_added_classes("g-transform-value-input" + if invalid && active {
                 " state-invalid-active"
             } else {
@@ -1361,30 +1377,7 @@ fn property_value(id: str, text: str, axis: str, active: bool, editor: TextEdito
 }
 
 fn transform_scalar(value: f32) -> str {
-    let negative = value < 0.0_f32
-    let magnitude = if negative {
-        - value
-    } else {
-        value
-    }
-    let scaled =(magnitude * 1000.0_f32 + 0.5_f32) as u32
-    let whole = scaled / 1000_u32
-    let fraction = scaled % 1000_u32
-    let padding = if fraction < 10_u32 {
-        "00"
-    } else {
-        if fraction < 100_u32 {
-            "0"
-        } else {
-            ""
-        }
-    }
-    let sign = if negative {
-        "-"
-    } else {
-        ""
-    }
-    ret sign + Debug::fmt(whole) + "." + padding + Debug::fmt(fraction)
+    ret luma::format_decimal(value, 4_u32)
 }
 
 fn transform_property(name: str, prefix: str, value: Vec3, active_field: str, editor: TextEditor, invalid:
@@ -1458,12 +1451,12 @@ fn transform_input_text(field: str, position: Vec3, rotation: Vec3, scale: Vec3)
         }
     }
     if field.slice(field.byte_len() - 1_usize, 1_usize) == "x" {
-        ret transform_scalar(value.x())
+        ret value.x().fmt()
     }
     if field.slice(field.byte_len() - 1_usize, 1_usize) == "y" {
-        ret transform_scalar(value.y())
+        ret value.y().fmt()
     }
-    ret transform_scalar(value.z())
+    ret value.z().fmt()
 }
 
 fn control_classes(active: bool, hovered: bool) -> str {
@@ -2600,6 +2593,10 @@ fn scale_at(scales: Vec[Vec3], cube_index: u32) -> Vec3 {
     }
 }
 
+fn genai_mesh_target(name: str) -> bool {
+    ret terrain_key_path(name) != "" || name == "@skeletal-mesh" || name == "" || name == "@plane" || name == "@sphere" || name.slice_bytes(0, 1) != "@"
+}
+
 fn mesh_name_at(mesh_names: Vec[str], cube_index: u32) -> str {
     if cube_index == 0_u32 {
         ret ""
@@ -2743,6 +2740,16 @@ fn resolve_actor_gpu_mesh(mesh_name: str, plane: MeshId, sphere: MeshId,
         index = index + 1_usize
     }
     ret MeshId::new(0_u64)
+}
+
+fn apply_builtin_lod_settings(renderer: mut ViewportRenderer&, project: str, meshes: Vec[MeshId], catalog: LodGroups) ->() {
+    let names = vec!["Cube", "Plane", "Sphere"]
+    for index in 0_usize..names.len() {
+        let settings = AutoLodSettings::load_builtin(project, names.get_unchecked_borrowed(index))
+        let mesh = meshes.get(index).unwrap_or(MeshId::new(0))
+        renderer.set_mesh_autolod(mesh, settings.enabled)
+        renderer.set_mesh_lod_group(mesh, catalog.resolve(settings.group_id))
+    }
 }
 
 fn blueprint_render_error(classes: Vec[BlueprintClass], plane: MeshId, sphere: MeshId,
@@ -2995,7 +3002,7 @@ fn save_editor_project(scene_path: str, script_path: str, positions: Vec[Vec3], 
                 let mut stored = actor.with_identity(actor.id())
                 match scene.get(actor.id()) {
                     Some(entity) => {
-                        stored = stored.with_component(entity.component()).with_physics(entity.physics()) match entity.blueprint() {
+                        stored = stored.with_component(entity.component()).with_physics(entity.physics()).with_material_path(entity.material_path()) match entity.blueprint() {
                             Some(instance) => {
                                 stored = stored.with_blueprint(instance)
                             }
@@ -3246,9 +3253,19 @@ fn autolod_asset_inspector(enabled: bool, statistics: str,
     let mut identity = Widget::panel("autolod-identity").with_added_classes("g-autolod-asset-inspector-2")
     identity.push(Widget::icon("", icons.mesh)
         .with_added_classes("g-autolod-asset-inspector-3"))
-    identity.push(Widget::label("Static Mesh")
+    identity.push(Widget::label(if ui.mesh.available() {
+                ui.mesh.name
+            } else {
+                "Static Mesh"
+            }
+        )
         .with_added_classes("g-autolod-asset-inspector-4"))
-    identity.push(Widget::label("ASSET")
+    identity.push(Widget::label(if ui.mesh.builtin_project != "" {
+                "BUILTIN"
+            } else {
+                "ASSET"
+            }
+        )
         .with_added_classes("g-autolod-asset-inspector-5"))
     panel.push(identity)
     panel.push(property_section("ui-section-autolod", "AutoLOD", ui.expanded("ui-section-autolod"), ui.mesh.widget(ui.lod_groups.catalog)))
@@ -3357,12 +3374,7 @@ fn inspector(selected: str, name_editor: TextEditor, name_focused: bool, positio
                     "None"
                 }
                 , "tone-info",))
-        mesh.push(detail_row("Material", if cube_selected {
-                    "Graphene Default"
-                } else {
-                    "None"
-                }
-                , "tone-warning",))
+        mesh.push(ui.actors.material_widget(icons.material, ui.browser.editable))
         panel.push(property_section("ui-section-mesh", "Static Mesh", ui.expanded("ui-section-mesh"), mesh))
         if ui.mesh.available() {
             panel.push(property_section("ui-section-autolod", "AutoLOD", ui.expanded("ui-section-autolod"), ui.mesh.widget(ui.lod_groups.catalog)))
@@ -3392,8 +3404,13 @@ fn content_live_references(scene: Scene, names: Vec[str], project: str, material
         Err(_) => {
         }
     }
-    references.push("Content/Materials/Default.graphene-material.json")
-    references.push(material.base_color_texture()) references.push(material.normal_texture())
+    references.push("Content/Materials/Default.gmaterial")
+    references.push(material.base_color_texture()) references.push(material.normal_texture()) references.push(material.roughness_texture()) references.push(material.metallic_texture()) references.push(material.height_texture())
+    for entity in scene.entities() {
+        if entity.material_path() != "" {
+            references.push(entity.material_path())
+        }
+    }
     for path in vec![material_path, blueprint_path] {
         if path.byte_len() > project.byte_len() + 1 && path.slice_bytes(0, project.byte_len() + 1) == project + "/" {
             references.push(path.slice_bytes(project.byte_len() + 1, path.byte_len() - project.byte_len() - 1))
@@ -4139,11 +4156,11 @@ fn editor_menu_bar(open_menu: str, hovered: str, project_loaded: bool,
             ,))
     menu.push(Widget::spacer(1.0_f32))
     menu.push(Widget::label(if project_loaded {
-                project_root + " / scene.graphene.json"
+                project_name(project_root)
             } else {
                 "No Project"
             }
-        ).with_added_classes("g-editor-menu-bar-3"))
+        ).with_id("project-title").with_attribute("title", project_root).with_attribute("data-luma-text-overflow", "ellipsis").with_added_classes("g-editor-menu-bar-3"))
     ret menu
 }
 
@@ -4335,7 +4352,7 @@ fn upper_workspace(simulation_mode: str, selected: str, selected_position: Vec3,
         let mut details_dock = Widget::panel("details-dock").with_classes("details-dock")
         if selected_asset == "asset-material" {
             details_dock.push(material_inspector(default_material, hovered, icons, ui,))
-        } elif selected_asset.contains("asset-imported-mesh-") {
+        } elif selected_asset.contains("asset-imported-mesh-") || selected_asset == "asset-cube" || selected_asset == "asset-plane" || selected_asset == "asset-sphere" {
             details_dock.push(autolod_asset_inspector(
                     selected_autolod_enabled, autolod_stats, hovered, icons, ui,))
         } elif selected_asset == "cb-selected" {
@@ -4453,7 +4470,6 @@ fn profile_view_part(name: str, started: u64) ->() {
 
 struct ProjectSources {
     scene: str
-    material: str
     script: str
 }
 
@@ -4464,12 +4480,6 @@ fn read_project_sources(root: str) -> ProjectSources {
     ret ProjectSources {
         if file_exists(paths.scene) {
             read_file(paths.scene)
-        } else {
-            ""
-        }
-        ,
-        if file_exists(paths.material) {
-            read_file(paths.material)
         } else {
             ""
         }
@@ -4524,7 +4534,7 @@ fn retained_bounds(ui: mut ReactiveUi, id: str) -> Option[Rect] {
 
 fn retained_render_frame(window: Window, ui: mut ReactiveUi, layout: WidgetLayout, cached: bool) -> PreparedFrame {
     let mut slots = Vec[SurfaceSlot]::new()
-    for id in vec!["viewport-surface", "camera-preview-surface", "material-preview-surface", "vfx-preview-surface"] {
+    for id in vec!["viewport-surface", "camera-preview-surface", "material-preview-surface", "vfx-preview-surface", "genai-preview-surface", "pbr-preview-surface"] {
         match window.surface_slot(ui, id) {
             Some(slot) => {
                 slots.push(slot)
@@ -4738,6 +4748,8 @@ fn main() -> u32 {
     let mut selected_cube = 1_u32
     let mut selected_cubes = Vec[u32]::new()
     let mut dragging = false
+    let mut drag_material_path = ""
+    let mut drag_material_valid = false
     let mut selected_asset = match env("GRAPHENE_SELECTED_ASSET") {
         Option::Some(name) => {
             if name == "material" {
@@ -4749,7 +4761,7 @@ fn main() -> u32 {
             }
         }
         Option::None => {
-            "asset-cube"
+            ""
         }
     }
     let mut project_root = project_at_startup
@@ -4784,7 +4796,7 @@ fn main() -> u32 {
     let mut selected_autolod_enabled = true
     let mut scene_path = paths.scene
     let mut material_path = paths.material
-    let mut default_material = if file_exists(material_path) || file_exists(material_path + ".gmaterial") {
+    let mut default_material = if file_exists(material_path) {
         match load_material_asset_file(material_path) {
             Option::Some(material) => material Option::None => StandardMaterial::editor_default()
         }
@@ -4835,7 +4847,7 @@ fn main() -> u32 {
                                     let entity = actor.id()
                                     editor_scene.create_entity_with_id(entity, actor_name, transform)
                                     editor_scene.set_blueprint(entity, actor.blueprint())
-                                    editor_scene.set_component(entity, actor.component()) editor_scene.set_physics(entity, actor.physics())
+                                    editor_scene.set_component(entity, actor.component()) editor_scene.set_physics(entity, actor.physics()) editor_scene.set_material_path(entity, actor.material_path())
                                     editor_scene.set_renderable(entity,
                                         Option[Renderable]::Some(Renderable::new(MeshId::new(1_u64),
                                                 MaterialId::new(1_u64),)),)
@@ -5205,6 +5217,9 @@ fn main() -> u32 {
     let main_dock_window = WindowId::new(1)
     let mut ui_editor = UiEditor::new() ui_editor.configure(project_root)
     let mut game_ui = GameUi::new()
+    let mut genai_editor = GenAiEditor::new() genai_editor.configure(project_root)
+    let mut material_texture_loader = MaterialTextureLoader::new()
+    let mut pbr_editor = PbrMaterialEditor::new().with_icons(icon_manager.document("check"), icon_manager.document("rotate-ccw"))
     let mut terrain_editor = TerrainEditor::new() terrain_editor.configure(project_root)
     let mut blueprint_editor = BlueprintEditor::new()
     let mut audio_panel = AudioPanel::new() audio_panel.configure(project_root)
@@ -5298,9 +5313,19 @@ fn main() -> u32 {
     }
     let mut viewport_renderer = create_viewport_renderer(window,
         render_width, render_height,)
+    genai_editor.displacement_budget(viewport_renderer.displacement_budget())
+    pbr_editor.displacement_budget(viewport_renderer.displacement_budget())
+    material_editor.displacement_budget(viewport_renderer.displacement_budget())
+    let mut material_thumbnails = graphene::material_thumbnail::MaterialThumbnails::new(viewport_renderer.displacement_budget())
     viewport_renderer.set_default_material(default_material)
-    let plane_gpu_mesh = viewport_renderer.upload_mesh(plane_mesh(2.0_f32))
-    let sphere_gpu_mesh = viewport_renderer.upload_mesh(sphere_mesh(0.6_f32, 20_u32, 32_u32))
+    let plane_source = plane_mesh(2.0_f32)
+    let sphere_source = sphere_mesh(0.6_f32, 20_u32, 32_u32)
+    let plane_gpu_mesh = viewport_renderer.upload_mesh(plane_source)
+    let sphere_gpu_mesh = viewport_renderer.upload_mesh(sphere_source)
+    let builtin_gpu_meshes = vec![viewport_renderer.default_cube_mesh(), plane_gpu_mesh, sphere_gpu_mesh]
+    let builtin_source_triangles = vec![cube_mesh(1).index_count() / 3_usize, plane_source.index_count() / 3_usize, sphere_source.index_count() / 3_usize]
+    apply_builtin_lod_settings(viewport_renderer, project_root, builtin_gpu_meshes, LodGroups::load(project_root))
+    let mut builtin_lod_project = project_root
     let mut imported_gpu_meshes = Vec[MeshId]::new()
     for asset in imported_meshes {
         imported_gpu_meshes.push(viewport_renderer.upload_imported_mesh(asset))
@@ -5508,6 +5533,7 @@ fn main() -> u32 {
         println("Graphene Editor: unable to draw first frame using " + backend_name() + ": " + backend_error())
         window.clear_external_vulkan_images()
         particle_editor.destroy()
+        material_thumbnails.destroy() pbr_editor.destroy() genai_editor.destroy() material_texture_loader.close()
         material_editor.destroy()
         match texture_upload {
             Some(upload) => {
@@ -5630,6 +5656,8 @@ fn main() -> u32 {
         if reconstruction_changed {
             ui.reconstruction_capabilities = viewport_renderer.reconstruction_capabilities() ui.reconstruction_status = viewport_renderer.reconstruction_status() redraw_pending = true
         }
+        let displacement_stats = viewport_renderer.displacement_statistics()
+        performance_panel.displacement(viewport_renderer.displacement_memory_bytes(), viewport_renderer.displacement_error(), displacement_stats.source_triangles, displacement_stats.triangles, displacement_stats.pending)
         performance_panel.reconstruction(viewport_renderer.reconstruction_frame_counts(), viewport_renderer.internal_render_width(), viewport_renderer.internal_render_height(), render_width, render_height, viewport_renderer.anti_aliasing_attachment_bytes())
         // Intermediate images reuse the exact prepared UI transaction. This path
         // never ticks gameplay, animation, audio, VFX, bindings, or layout.
@@ -5698,7 +5726,7 @@ fn main() -> u32 {
                     // A deferred GPU frame is not a new input sample. Yield
                     // while its fence completes, without delaying queued input.
                     1_u32
-                } elif terrain_editor.busy() || game_ui.busy() || ui_editor.busy() ||(audio_panel.needs_tick() || particle_editor.needs_tick()) || building || simulating || blueprint_build_worker.is_some() || material_editor.busy() || ui.browser.busy() || content_mesh_worker.is_some() || ui.browser.request != "" || texture_loader.busy() || texture_upload.is_some() || texture_restore_path != "" || normal_restore_path != "" || texture_retirement_pending {
+                } elif genai_editor.needs_tick() || pbr_editor.needs_tick() || material_texture_loader.busy() || terrain_editor.busy() || game_ui.busy() || ui_editor.busy() ||(audio_panel.needs_tick() || particle_editor.needs_tick()) || building || simulating || blueprint_build_worker.is_some() || material_editor.busy() || material_thumbnails.busy() || ui.browser.busy() || content_mesh_worker.is_some() || ui.browser.request != "" || texture_loader.busy() || texture_upload.is_some() || texture_restore_path != "" || normal_restore_path != "" || texture_retirement_pending {
                     16_u32
                 } else {
                     if automation_listener.available() || navigation.orbiting {
@@ -5744,7 +5772,9 @@ fn main() -> u32 {
             ui.browser.open_project(project_root)
         }
         ui.lod_groups.sync(project_root, imported_meshes)
-        let content_polled = ui.browser.poll()
+        let browser_polled = ui.browser.poll()
+        let material_thumbnails_updated = material_thumbnails.poll(window, ui.browser)
+        let content_polled = browser_polled || material_thumbnails_updated
         match ui.browser.take_import_result() {
             Some(result) => {
                 let success = result.error == ""
@@ -5767,7 +5797,7 @@ fn main() -> u32 {
         }
         let mesh_stats_due = show_details && ui.mesh.available() && ui.expanded("ui-section-autolod") && perf_counter_ms() - mesh_stats_sampled >= 250
         if event.kind() == event_none() && automation_request == "" && mcp_request == "" && mcp_capture_ticket == 0 && mcp_input_ticket == 0 && !mesh_stats_due &&
-        !redraw_pending && !simulating && !environment_active && !building && blueprint_build_worker.is_none() && !material_editor.busy() &&
+        !redraw_pending && !genai_editor.needs_tick() && !pbr_editor.needs_tick() && !material_texture_loader.busy() && !simulating && !environment_active && !building && blueprint_build_worker.is_none() && !material_editor.busy() &&
         !content_mesh_worker.is_some() && !content_polled && ui.browser.request == "" && !ui.browser.dirty && !texture_loader.busy() && texture_upload.is_none() && texture_restore_path == "" && normal_restore_path == "" &&
         !navigation.orbiting && !navigation.panning && !navigation.pointer_locked &&
         !ui_update_pending && !aa_pending && !profiler_active && !(audio_panel.needs_tick() || particle_editor.needs_tick()) {
@@ -5776,7 +5806,7 @@ fn main() -> u32 {
         let released_ui = ui.pressed()
         if event.kind() == event_pointer_down() {
             let hit = reactive_ui.hit(event.x(), event.y()) ui.press(hit)
-            if !material_editor.popup_open() && !blueprint_editor.popup_open() {
+            if !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() {
                 ui.focus(hit)
             }
         }
@@ -5987,6 +6017,7 @@ fn main() -> u32 {
                             let setting = AutoLodSettings::load(asset.project_path())
                             let _applied = viewport_renderer.set_mesh_lod_group(imported_gpu_meshes.get(index).unwrap_or(MeshId::new(0)), catalog.resolve(setting.group_id))
                         }
+                        apply_builtin_lod_settings(viewport_renderer, project_root, builtin_gpu_meshes, catalog)
                         viewport_redraw_pending = true ui_chrome_dirty = true dirty = true result = mcp_ok("AutoLOD groups saved and applied")
                     }
                 } elif operation == "editor.assets" {
@@ -6001,7 +6032,8 @@ fn main() -> u32 {
                     result = mcp_set_material(ui.browser, arguments)
                     if result.get("ok").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false) {
                         let changed_path = mcp_string(arguments, "path")
-                        if changed_path == "Content/Materials/Default.graphene-material.json" || changed_path == "Content/Materials/Default.gmaterial" {
+                        material_texture_loader.invalidate(changed_path)
+                        if changed_path == "Content/Materials/Default.gmaterial" {
                             match load_material_asset_file(project_root + "/" + changed_path) {
                                 Some(material) => {
                                     default_material = material viewport_renderer.set_default_material(material)
@@ -6141,7 +6173,7 @@ fn main() -> u32 {
             // event while the handle was still alive; treating that event as
             // an unconditional exit made the editor disappear while idle.
             if !window.is_open() {
-                let guarded = guard_editor_action("exit", project_dirty || material_editor.dirty() || ui_editor.changed() || terrain_editor.changed())
+                let guarded = guard_editor_action("exit", project_dirty || pbr_editor.unsaved() || material_editor.dirty() || ui_editor.changed() || terrain_editor.changed())
                 if action_needs_confirmation(guarded) {
                     unsaved_action = guarded_action(guarded)
                     navigation.focused = false code_focused = false actor_name_focused = false outliner_search_focused
@@ -6213,6 +6245,80 @@ fn main() -> u32 {
                 }
             }
         }
+        genai_editor.configure(project_root) pbr_editor.configure(project_root)
+        if project_dialog_mode == "" && pbr_editor.picking() {
+            pbr_editor.cancel_pick()
+        }
+        genai_editor.poll(window) pbr_editor.poll(window)
+        let genai_selected = selected_cube > 0 && genai_mesh_target(mesh_name_at(cube_mesh_names, selected_cube)) && !simulating
+        let genai_consumed = genai_editor.input(event, reactive_ui.hit(event.x(), event.y()), reactive_ui.layout(), simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "", genai_selected, dock_workspace.location(PanelId::new("genai")).is_some(), window)
+        if genai_consumed {
+            ui.focus(genai_editor.focused()) dirty = true reactive_only = true shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
+        }
+        if pbr_editor.input(event, reactive_ui.hit(event.x(), event.y()), reactive_ui.layout().find_bounds("material-instance-editor").is_some(), simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "", window, reactive_ui.layout()) {
+            ui.focus(pbr_editor.focused()) dirty = true reactive_only = true shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
+        }
+        if pbr_editor.take_pick() != "" {
+            project_dialog_mode = "texture" asset_picker = FilePicker::new(project_root) project_path_focused = false code_focused = false project_error = "" dirty = true reactive_only = false
+        }
+        if pbr_editor.take_imported() != "" {
+            ui.browser.refresh() content_chrome_dirty = true dirty = true
+        }
+        let changed_pbr = pbr_editor.take_changed()
+        if changed_pbr != "" {
+            if changed_pbr == "Content/Materials/Default.gmaterial" {
+                match load_material_asset_file(project_root + "/" + changed_pbr) {
+                    Some(material) => {
+                        default_material = material material_texture_changed = true
+                    }
+                    None => {
+                    }
+                }
+            }
+            material_texture_loader.invalidate_material(project_root, changed_pbr, editor_scene) ui.browser.refresh() content_chrome_dirty = true viewport_redraw_pending = true dirty = true
+        }
+        match genai_editor.take_publication() {
+            Some(prepared) => {
+                let published = prepared.project == project_root && content_publish_generated(ui.browser, prepared.textures_from, prepared.textures_to, prepared.material_from, prepared.material_to)
+                genai_editor.published(if published {
+                        prepared.material_to
+                    } else {
+                        ""
+                    }
+                )
+                if published {
+                    ui.browser.refresh() content_chrome_dirty = true dirty = true
+                }
+            }
+            None => {
+            }
+        }
+        let generated_material = genai_editor.take_apply()
+        if generated_material != "" && genai_selected {
+            let actor = cube_entities.get((selected_cube - 1) as usize).unwrap_or(0_u64)
+            let key = mesh_name_at(cube_mesh_names, selected_cube)
+            if terrain_key_path(key) != "" {
+                terrain_editor.select(editor_scene, actor, key)
+                if terrain_editor.assign_material(generated_material) {
+                    project_dirty = true viewport_redraw_pending = true dirty = true status_message = "Applied generated material to the active terrain layer"
+                }
+            } else {
+                let applied = command_state.execute(GrapheneCommand::SetMaterial(ActorMaterialCommand {
+                            actor, generated_material
+                        }
+                    ))
+                status_message = applied.message()
+                if applied.success() {
+                    editor_scene = command_state.scene() project_dirty = true viewport_redraw_pending = true dirty = true
+                }
+            }
+        }
+        if viewport_renderer.poll_terrain_materials() {
+            viewport_redraw_pending = true dirty = true
+        }
+        if material_texture_loader.sync(project_root, editor_scene, viewport_renderer) {
+            viewport_redraw_pending = true dirty = true
+        }
         let terrain_selected_id = cube_entities.get(if selected_cube > 0 {
                 (selected_cube - 1) as usize
             } else {
@@ -6223,8 +6329,8 @@ fn main() -> u32 {
         let terrain_bounds = viewport_bounds(reactive_ui.layout())
         let terrain_ray = viewport_renderer.camera_ray_pose((event.x() - terrain_bounds.x()) *(viewport_renderer.width() as f32) / terrain_bounds.width(),(event.y() - terrain_bounds.y()) *(viewport_renderer.height() as f32) / terrain_bounds.height(), camera.position, camera.yaw, camera.pitch, camera.fov)
         let terrain_consumed = terrain_editor.input(event, reactive_ui.hit(event.x(), event.y()), reactive_ui.layout(), terrain_ray,
-            simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "" || material_editor.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open(),
-            reactive_ui.layout().find_bounds("terrain-panel").is_some(),)
+            simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "" || pbr_editor.popup_open() || material_editor.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open(),
+            reactive_ui.layout().find_bounds("terrain-panel").is_some(), window,)
         if terrain_consumed {
             ui.focus(terrain_editor.focused()) dirty = true reactive_only = true viewport_redraw_pending = true
             shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
@@ -6238,7 +6344,7 @@ fn main() -> u32 {
         let ui_editor_target = reactive_ui.hit(event.x(), event.y())
         let ui_editor_popup_was_open = ui_editor.popup_open()
         let ui_editor_consumed = dock_workspace.location(PanelId::new("ui")).is_some() && project_dialog_mode == "" && unsaved_action == "" &&
-        ui_editor.input(event, ui_editor_target, reactive_ui.layout(), window.stylesheet(), simulating)
+        ui_editor.input(event, ui_editor_target, reactive_ui.layout(), window.stylesheet(), simulating, window)
         if ui_editor_consumed {
             project_dirty = project_dirty || ui_editor.changed()
             ui.focus(ui_editor.focused_control()) ui.press(ui_editor.pressed_control())
@@ -6247,7 +6353,7 @@ fn main() -> u32 {
         }
         if event.kind() == event_pointer_down() && event.key() == 1 &&
         project_dialog_mode == "" && unsaved_action == "" && !moving_cube &&
-        !navigation.pointer_locked && !material_editor.popup_open() && !blueprint_editor.popup_open() && !ui_editor.popup_open() && ui.popup() == "" {
+        !navigation.pointer_locked && !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() && !ui_editor.popup_open() && ui.popup() == "" {
             if dock_interaction.press(dock_host, main_dock_window, reactive_ui, event.x(), event.y()) {
                 hovered = ""
                 window.set_cursor(if dock_interaction.resizing() {
@@ -6624,7 +6730,7 @@ fn main() -> u32 {
                 let hit = reactive_ui.hit(event.x(), event.y())
                 if !ui.lod_groups.dragging() && event.kind() == event_pointer_down() &&(hit == "lod-cancel" || !retained_bounds(reactive_ui, "ui-local-popup").unwrap_or(Rect::new(0, 0, 0, 0)).contains(Point::new(event.x(), event.y()))) {
                     ui.lod_groups.cancel() ui.close() consume = true ui_chrome_dirty = true
-                } elif ui.lod_groups.input(event, hit) {
+                } elif ui.lod_groups.input(event, hit, layout, window) {
                     consume = true ui_chrome_dirty = true
                 } elif event.kind() == event_pointer_down() {
                     let _handled = ui.lod_groups.action(hit) consume = true ui_chrome_dirty = true
@@ -6663,7 +6769,7 @@ fn main() -> u32 {
                 } elif event.kind() == event_scroll() {
                     reactive_ui.scroll_at(event.x(), event.y(), - event.wheel_y() * 26) layout = reactive_ui.layout() consume = true ui_chrome_dirty = true
                 }
-            } elif retained_bounds(reactive_ui, ui.popup_anchor()).is_none() || material_editor.popup_open() || unsaved_action != "" || project_dialog_mode != "" {
+            } elif retained_bounds(reactive_ui, ui.popup_anchor()).is_none() || pbr_editor.popup_open() || material_editor.popup_open() || unsaved_action != "" || project_dialog_mode != "" {
                 ui.close() ui_chrome_dirty = true
             } elif event.kind() == event_key_down() {
                 consume = true
@@ -6782,7 +6888,7 @@ fn main() -> u32 {
                 reactive_ui.hit(event.x(), event.y())
             }
             ui.actors.physics_expanded = ui.expanded("ui-section-physics")
-            if ui.actors.input(event, actor_target, layout, command_state) {
+            if ui.actors.input(event, actor_target, layout, command_state, window) {
                 editor_scene = command_state.scene() project_dirty = command_state.dirty()
                 ui_chrome_dirty = true dirty = true event = Event::none()
             }
@@ -6790,8 +6896,12 @@ fn main() -> u32 {
         if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && audio_panel.input(event, reactive_ui.hit(event.x(), event.y()), layout) {
             dirty = true reactive_only = true ui_chrome_dirty = true event = Event::none() shortcuts.clear() flight.clear() navigation.focused = false
         }
-        if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && particle_editor.input(event, reactive_ui.hit(event.x(), event.y()), layout) {
+        if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && particle_editor.input(event, reactive_ui.hit(event.x(), event.y()), layout, window) {
             dirty = true reactive_only = true ui_chrome_dirty = true event = Event::none() shortcuts.clear() flight.clear() navigation.focused = false
+        }
+        if transform_field != "" && transform_editor.pointer_handles(event, reactive_ui.hit(event.x(), event.y()), transform_field) && !simulating && ui.popup() == "" {
+            transform_editor = transform_editor.pointer_input(event, layout, transform_field, window)
+            dirty = true ui_chrome_dirty = true event = Event::none()
         }
         let content_target = reactive_ui.hit(event.x(), event.y())
         let content_file_input =(event.kind() == event_key_down() &&(event.control() || event.key() == key_delete() || event.key() == 1073741883 ||(event.key() == key_enter() && ui.browser.popup != ""))) ||
@@ -6801,7 +6911,7 @@ fn main() -> u32 {
         } else {
             Vec[str]::new()
         }
-        if project_dialog_mode == "" && unsaved_action == "" && !material_editor.popup_open() && !blueprint_editor.popup_open() && !ui_editor.popup_open() && ui.popup() == "" &&
+        if project_dialog_mode == "" && unsaved_action == "" && !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() && !ui_editor.popup_open() && ui.popup() == "" &&
         (event.kind() != event_pointer_down() ||(transform_field == "" && !actor_name_focused && !ui.actors.editing())) {
             content_input_routed = true
             if content_input(ui.browser, event, reactive_ui.hit(event.x(), event.y()), layout, reactive_ui, window, icons.content, ui.browser.editable, content_references) {
@@ -6812,11 +6922,44 @@ fn main() -> u32 {
                 shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
             }
         }
-        let content_request = ui.browser.take_request()
+        if local_action == "pbr-open-asset" {
+            ui.browser.emit("open", ui.browser.primary) local_action = ""
+        }
+        let parent_request = pbr_editor.take_parent_request()
+        if parent_request != "" {
+            let parent_file = if parent_request == standard_pbr_parent() {
+                parent_request
+            } else {
+                project_root + "/" + parent_request
+            }
+            match read_native_material_asset(parent_file) {
+                Ok(asset) => {
+                    match asset {
+                        Definition(_) => {
+                            browser_material_path = parent_file local_action = "content-materials"
+                        }
+                        Instance(_) => {
+                            if pbr_editor.open(project_root, parent_request) {
+                                local_action = "content-material-instance"
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    status_message = error
+                }
+            }
+        }
+        let browser_request = ui.browser.take_request()
+        let content_request = if browser_request == "open-actor-material" {
+            "open"
+        } else {
+            browser_request
+        }
         if content_request == "import" {
             local_action = "content-add"
         } elif content_request == "cancel-drag" {
-            dragging = false dirty = true
+            dragging = false drag_material_path = "" dirty = true
         } elif content_request == "select" || content_request == "open" || content_request == "drag" {
             let path = ui.browser.requested_path
             selected_asset = if path == "" {
@@ -6827,12 +6970,18 @@ fn main() -> u32 {
                 "asset-plane"
             } elif path == "@engine/Primitives/Sphere" {
                 "asset-sphere"
-            } elif path == "Content/Materials/Default.graphene-material.json" {
-                "asset-material"
             } else {
                 "cb-selected"
             }
-            dragging = ui.browser.drag_request && content_request == "drag" && selected_asset == "asset-cube"
+            if content_kind(path) == "material" {
+                selected_asset = "asset-pbr"
+            }
+            drag_material_path = if content_request == "drag" && content_kind(path) == "material" {
+                path
+            } else {
+                ""
+            }
+            dragging = ui.browser.drag_request && content_request == "drag" &&(selected_asset == "asset-cube" || drag_material_path != "")
             let mut asset_index = 0_usize
             for asset in imported_meshes {
                 if asset.project_path() == project_root + "/" + path || asset.native_path() == project_root + "/" + path {
@@ -6866,9 +7015,35 @@ fn main() -> u32 {
                     }
                 }
             }
+            if browser_request == "open-actor-material" {
+                selected_asset = ""
+            }
             actor_name_focused = false outliner_search_focused = false asset_search_focused = false code_focused = false
             if content_request == "open" {
-                if content_kind(path) == "material-graph" {
+                if content_kind(path) == "material" {
+                    let file = if path == "@engine/Materials/M_StandardPBR.gmaterial" {
+                        standard_pbr_parent()
+                    } else {
+                        project_root + "/" + path
+                    }
+                    match read_native_material_asset(file) {
+                        Ok(asset) => {
+                            match asset {
+                                Definition(_) => {
+                                    browser_material_path = file local_action = "content-materials"
+                                }
+                                Instance(_) => {
+                                    if pbr_editor.open(project_root, path) {
+                                        local_action = "content-material-instance"
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            status_message = error
+                        }
+                    }
+                } elif content_kind(path) == "material-graph" {
                     browser_material_path = project_root + "/" + path local_action = "content-materials"
                 } elif content_kind(path) == "weather-preset" {
                     match graphene::environment::preset::load_weather_preset(project_root + "/" + path) {
@@ -6941,7 +7116,7 @@ fn main() -> u32 {
             ui.browser.mesh_refresh = false
             content_mesh_project = project_root content_mesh_worker = Option[JoinHandle[Vec[ImportedMeshAsset]]]::Some(spawn discover_obj_assets(project_root))
         }
-        if ui.popup() == "" && !ui.browser.typing() && !ui.browser.focused && ui.browser.popup == "" && !ui.actors.editing() && !material_editor.popup_open() && !blueprint_editor.popup_open() && project_dialog_mode == "" && unsaved_action == "" &&
+        if ui.popup() == "" && !ui.browser.typing() && !ui.browser.focused && ui.browser.popup == "" && !ui.actors.editing() && !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() && project_dialog_mode == "" && unsaved_action == "" &&
         !actor_name_focused && transform_field == "" && !outliner_search_focused && !asset_search_focused && !code_focused && !console_focused && retained_bounds(reactive_ui, "material-canvas").is_none() && retained_bounds(reactive_ui, "blueprint-canvas").is_none() {
             if event.kind() == event_key_down() && event.key() == 9 {
                 let choices = local_popup_actions(layout.retained_widget())
@@ -6970,13 +7145,13 @@ fn main() -> u32 {
             }
         }
         if event.kind() == event_scroll() && project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" &&
-        !material_editor.popup_open() && !blueprint_editor.popup_open() && !navigation.pointer_locked && !navigation.orbiting && !navigation.panning && !moving_cube {
+        !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() && !navigation.pointer_locked && !navigation.orbiting && !navigation.panning && !moving_cube {
             if reactive_ui.scroll_at(event.x(), event.y(), - event.wheel_y() * 26) {
                 layout = reactive_ui.layout() dirty = true reactive_only = true event = Event::none()
             }
         }
         if unsaved_action == "" && project_dialog_mode == "" {
-            if material_editor.color_input(event, reactive_ui.hit(event.x(), event.y()), layout, window.stylesheet()) {
+            if material_editor.color_input(event, reactive_ui.hit(event.x(), event.y()), layout, window.stylesheet(), window) {
                 if event.kind() == event_pointer_move() || event.kind() == event_pointer_down() || event.kind() == event_pointer_up() {
                     let cursor = if material_editor.popup_open() {
                         match reactive_ui.find_widget(reactive_ui.hit(event.x(), event.y())) {
@@ -6992,13 +7167,13 @@ fn main() -> u32 {
             }
             let material_bounds = retained_bounds(reactive_ui, "material-canvas").unwrap_or(Rect::new(0, 0, 0, 0))
             let preview_bounds = retained_bounds(reactive_ui, "material-preview-surface").unwrap_or(Rect::new(0, 0, 0, 0))
-            if material_bounds.width() > 0 && material_editor.input(event, reactive_ui.hit(event.x(), event.y()), material_bounds, preview_bounds, window.stylesheet()) {
+            if material_bounds.width() > 0 && material_editor.input(event, reactive_ui.hit(event.x(), event.y()), material_bounds, preview_bounds, window.stylesheet(), layout, window) {
                 dirty = true reactive_only = true shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
             }
             let canvas_bounds = retained_bounds(reactive_ui, "blueprint-canvas").unwrap_or(Rect::new(0, 0, 0, 0))
             let target = reactive_ui.hit(event.x(), event.y())
             let old_revision = command_state.revision()
-            if blueprint_editor.input(command_state, event, target, canvas_bounds, window.stylesheet()) {
+            if blueprint_editor.input_with_text(command_state, event, target, canvas_bounds, window.stylesheet(), layout, window) {
                 blueprint_paint_dirty = true dirty = true reactive_only = true
                 blueprint_chrome_dirty = blueprint_chrome_dirty || blueprint_editor.resizing() ||(event.kind() != event_pointer_move() && event.kind() != event_scroll())
                 shortcuts.clear()
@@ -7021,6 +7196,15 @@ fn main() -> u32 {
             }
             if local_action != "" {
                 target = local_action
+            }
+            if target == "actor-material-open" {
+                let path = ui.actors.material_path()
+                if ui.browser.editable && path != "" {
+                    // Use the same asset dispatch as Content Browser, including
+                    // native definitions, instances and loading diagnostics.
+                    ui.browser.emit("open-actor-material", path)
+                }
+                ui.focus(target) ui_chrome_dirty = true dirty = true target = ""
             }
             if target == "mcp-toggle" {
                 let previous = ui.mcp.enabled ui.mcp.enabled = !previous
@@ -7144,8 +7328,10 @@ fn main() -> u32 {
                 }
             }
             event_target = target
-            if target == "menu-terrain-action" || target == "menu-performance-action" || target == "menu-environment-action" || target == "menu-audio-action" || target == "menu-particles-action" || target == "menu-widget-action" {
-                let panel = PanelId::new(if target == "menu-terrain-action" {
+            if target == "menu-genai-action" || target == "menu-terrain-action" || target == "menu-performance-action" || target == "menu-environment-action" || target == "menu-audio-action" || target == "menu-particles-action" || target == "menu-widget-action" {
+                let panel = PanelId::new(if target == "menu-genai-action" {
+                        "genai"
+                    } elif target == "menu-terrain-action" {
                         "terrain"
                     } elif target == "menu-widget-action" {
                         "ui"
@@ -7159,7 +7345,9 @@ fn main() -> u32 {
                         "performance"
                     }
                 )
-                let _staged = dock_host.stage_panel(panel, if target == "menu-terrain-action" {
+                let _staged = dock_host.stage_panel(panel, if target == "menu-genai-action" {
+                        genai_editor.widget(simulating, selected_cube > 0 && genai_mesh_target(mesh_name_at(cube_mesh_names, selected_cube)))
+                    } elif target == "menu-terrain-action" {
                         terrain_editor.widget(simulating)
                     } elif target == "menu-widget-action" {
                         ui_editor.widget(simulating)
@@ -7271,6 +7459,15 @@ fn main() -> u32 {
                 if target == "env-select-" + Debug::fmt(cube_entities.get(index).unwrap_or(0)) {
                     target = "entity-cube-" + Debug::fmt(index + 1)
                 }
+            }
+            if target == "content-material-instance" {
+                let _staged = dock_host.stage_panel(PanelId::new("material-instance"), pbr_editor.widget())
+                let _shown = dock_workspace.show(PanelId::new("material-instance"), main_dock_window)
+                let destination = dock_workspace.location(PanelId::new("viewport")).unwrap_or(DockNodeId::empty())
+                let _docked = dock_workspace.dock(PanelId::new("material-instance"), destination, DockPlacement::Center, 0)
+                let _active = dock_workspace.activate(PanelId::new("material-instance"))
+                let _committed = dock_host.commit()
+                layout = reactive_ui.layout() dirty = true reactive_only = true layout_dirty = true
             }
             if target == "content-materials" {
                 if browser_material_path != "" {
@@ -7470,7 +7667,7 @@ fn main() -> u32 {
                 transform_field = clicked_transform
                 transform_editor = TextEditor::new(transform_input_text(clicked_transform,
                         position_at(cube_positions, selected_cube), rotation_at(cube_rotations, selected_cube),
-                        scale_at(cube_scales, selected_cube),)).select_all()
+                        scale_at(cube_scales, selected_cube),)).with_cursor(0).pointer_input(event, layout, clicked_transform, window)
                 transform_invalid = false
                 actor_name_focused = false
                 outliner_search_focused = false
@@ -7503,7 +7700,13 @@ fn main() -> u32 {
             } elif target == "unsaved-save" && unsaved_action != "" {
                 action_after_save = unsaved_action unsaved_action = "" request_save = true dirty = true
             } elif target == "material-texture-confirm" &&(project_dialog_mode == "texture" || project_dialog_mode == "normal") {
-                if !texture_loader.busy() && texture_upload.is_none() {
+                if pbr_editor.picking() {
+                    if pbr_editor.import_map(asset_picker.selected()) {
+                        project_dialog_mode = "" project_error = "" status_message = "Importing PBR texture"
+                    } else {
+                        project_error = "A PBR texture is still importing"
+                    }
+                } elif !texture_loader.busy() && texture_upload.is_none() {
                     texture_loading_normal = project_dialog_mode == "normal"
                     texture_loader.start(project_root, asset_picker.selected(), true)
                     project_error = ""
@@ -7704,7 +7907,7 @@ fn main() -> u32 {
                                         let mut index = 0_usize while index < asset.len() {
                                             match asset.actor(index) {
                                                 Some(actor) => {
-                                                    editor_scene.set_component(actor.id(), actor.component()) editor_scene.set_physics(actor.id(), actor.physics()) editor_scene.set_blueprint(actor.id(), actor.blueprint()) editor_scene.set_component(actor.id(), actor.component()) editor_scene.set_physics(actor.id(), actor.physics())
+                                                    editor_scene.set_component(actor.id(), actor.component()) editor_scene.set_physics(actor.id(), actor.physics()) editor_scene.set_material_path(actor.id(), actor.material_path()) editor_scene.set_blueprint(actor.id(), actor.blueprint()) editor_scene.set_component(actor.id(), actor.component()) editor_scene.set_physics(actor.id(), actor.physics()) editor_scene.set_material_path(actor.id(), actor.material_path())
                                                 }
                                                 None => {
                                                 }
@@ -7858,7 +8061,7 @@ fn main() -> u32 {
                 } else {
                     "open"
                 }
-                let guarded = guard_editor_action(action, project_dirty || material_editor.dirty() || ui_editor.changed() || terrain_editor.changed())
+                let guarded = guard_editor_action(action, project_dirty || pbr_editor.unsaved() || material_editor.dirty() || ui_editor.changed() || terrain_editor.changed())
                 if action_needs_confirmation(guarded) {
                     unsaved_action = guarded_action(guarded)
                 } else {
@@ -7881,7 +8084,7 @@ fn main() -> u32 {
                 run_after_build = false
                 request_build = true dirty = true
             } elif target == "menu-exit-action" {
-                let guarded = guard_editor_action("exit", project_dirty || material_editor.dirty() || ui_editor.changed() || terrain_editor.changed())
+                let guarded = guard_editor_action("exit", project_dirty || pbr_editor.unsaved() || material_editor.dirty() || ui_editor.changed() || terrain_editor.changed())
                 if action_needs_confirmation(guarded) {
                     unsaved_action = guarded_action(guarded)
                     code_focused = false navigation.focused = false actor_name_focused = false outliner_search_focused
@@ -8436,14 +8639,14 @@ fn main() -> u32 {
                         settings.group_id = group.id
                     }
                 }
-                if ui.lod_groups.catalog.save(project_root) && settings.save(ui.mesh.path) {
+                if ui.lod_groups.catalog.save(project_root) && ui.mesh.save_settings(settings) {
                     let switched = viewport_renderer.set_mesh_autolod(ui.mesh.mesh, settings.enabled)
                     let quality = viewport_renderer.set_mesh_lod_group(ui.mesh.mesh, ui.lod_groups.catalog.resolve(settings.group_id))
                     if switched && quality {
                         ui.mesh.settings = settings selected_autolod_enabled = settings.enabled ui.lod_groups.refresh_usage()
                         viewport_redraw_pending = true status_message = "AutoLOD group: " + ui.lod_groups.catalog.resolve(settings.group_id).name
                     } else {
-                        old_settings.save(ui.mesh.path)
+                        ui.mesh.save_settings(old_settings)
                         viewport_renderer.set_mesh_autolod(ui.mesh.mesh, old_settings.enabled)
                         viewport_renderer.set_mesh_lod_group(ui.mesh.mesh, ui.lod_groups.catalog.resolve(old_settings.group_id))
                         status_message = "AutoLOD runtime unavailable"
@@ -9142,7 +9345,7 @@ fn main() -> u32 {
         selected_cube > 0_u32 && !simulating && !moving_cube && !navigation.orbiting &&
         !code_focused && !console_focused && !outliner_search_focused && !asset_search_focused &&
         !actor_name_focused && transform_field == "" && !ui.actors.editing() && !ui.browser.focused &&
-        ui.browser.popup == "" && ui.popup() == "" && !material_editor.popup_open() && !blueprint_editor.popup_open() &&
+        ui.browser.popup == "" && ui.popup() == "" && !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() &&
         project_dialog_mode == "" && unsaved_action == "" {
             request_delete = true
         }
@@ -9188,6 +9391,70 @@ fn main() -> u32 {
                 dirty = true
                 viewport_only = true
             }
+        }
+        if dragging && drag_material_path != "" && event.kind() == event_pointer_move() {
+            drag_material_valid = false
+            match viewport_point_extent(viewport_pixel_x, viewport_pixel_y, render_width, render_height, viewport_density, event.x(), event.y()) {
+                Some(point) => {
+                    let index = viewport_renderer.pick_cube_pose_at(point.0 * window.pixel_density(), point.1 * window.pixel_density(), camera.position, camera.yaw, camera.pitch, camera.fov)
+                    if index > 0 {
+                        let mesh = mesh_name_at(cube_mesh_names, index)
+                        drag_material_valid = mesh == "" || mesh == "@plane" || mesh == "@sphere" || mesh == "@skeletal-mesh" ||(!mesh.contains("@") && mesh != "")
+                    }
+                }
+                None => {
+                }
+            }
+            dirty = true
+        }
+        if dragging && drag_material_path != "" &&(event.kind() == event_focus_lost() ||(event.kind() == event_key_down() && event.key() == key_escape())) {
+            dragging = false drag_material_path = "" dirty = true
+        }
+        if !simulating && event.kind() == event_pointer_up() && dragging && drag_material_path != "" {
+            let mut applied = false
+            match viewport_point_extent(viewport_pixel_x, viewport_pixel_y, render_width, render_height, viewport_density, event.x(), event.y()) {
+                Some(point) => {
+                    let index = viewport_renderer.pick_cube_pose_at(point.0 * window.pixel_density(), point.1 * window.pixel_density(), camera.position, camera.yaw, camera.pitch, camera.fov)
+                    if index > 0 {
+                        let id = cube_entities.get((index - 1) as usize).unwrap_or(0_u64)
+                        let mesh = mesh_name_at(cube_mesh_names, index)
+                        if id != 0 &&(mesh == "" || mesh == "@plane" || mesh == "@sphere" || mesh == "@skeletal-mesh" ||(!mesh.contains("@") && mesh != "")) && load_material_asset_file(project_root + "/" + drag_material_path).is_some() {
+                            match editor_scene.get(id) {
+                                Some(actor) => {
+                                    if actor.material_path() == drag_material_path {
+                                        applied = true
+                                    } else {
+                                        let result = command_state.execute(GrapheneCommand::SetMaterial(ActorMaterialCommand {
+                                                    id, drag_material_path
+                                                }
+                                            ))
+                                        if result.success() {
+                                            editor_scene = command_state.scene() project_dirty = command_state.dirty()
+                                            viewport_redraw_pending = true applied = true
+                                        } else {
+                                            status_message = result.message()
+                                        }
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+            if applied {
+                ui.browser.focused = false ui.browser.query_focused = false
+                ui.focus("viewport-surface") navigation.focused = true
+            }
+            status_message = if applied {
+                "Material applied: " + content_leaf(drag_material_path)
+            } else {
+                "Drop a .gmaterial on a mesh in the viewport"
+            }
+            dragging = false drag_material_path = "" dirty = true
         }
         if !simulating && event.kind() == event_pointer_up() && dragging {
             match viewport_point_extent(viewport_pixel_x, viewport_pixel_y,
@@ -9304,7 +9571,7 @@ fn main() -> u32 {
                 request_error = requested.message()
             }
             if request_accepted {
-                let saved = terrain_editor.save_all() &&(!ui_editor.changed() || ui_editor.save()) && material_editor.save(window.stylesheet()) && save_blueprint_document(command_state, blueprint_path) && save_editor_project(scene_path, script_path, cube_positions, cube_rotations,
+                let saved = terrain_editor.save_all() &&(!ui_editor.changed() || ui_editor.save()) && pbr_editor.save() && material_editor.save(window.stylesheet()) && save_blueprint_document(command_state, blueprint_path) && save_editor_project(scene_path, script_path, cube_positions, cube_rotations,
                     cube_scales, actor_names, cube_mesh_names, actor_visibilities,
                     cube_entities, scene_actor_parents(editor_scene, cube_entities), material_path,
                     default_material, code_editor.value(), editor_scene,)
@@ -10209,7 +10476,8 @@ fn main() -> u32 {
             ui_chrome_dirty = true ui.browser.editable = project_loaded && !simulating && !building content_chrome_dirty = true dirty = true
         }
         ui.lod_groups.sync(project_root, imported_meshes)
-        if ui.lod_groups.take_applied() {
+        let lod_groups_applied = ui.lod_groups.take_applied()
+        if lod_groups_applied {
             for index in 0_usize..imported_meshes.len() {
                 let asset = imported_meshes.get_unchecked_borrowed(index)
                 let setting = AutoLodSettings::load(asset.project_path())
@@ -10217,7 +10485,15 @@ fn main() -> u32 {
             }
             viewport_redraw_pending = true dirty = true ui_chrome_dirty = true
         }
-        ui.mesh.sync(imported_meshes, imported_gpu_meshes, selected_asset, mesh_name_at(cube_mesh_names, selected_cube), simulating || building)
+        if lod_groups_applied || builtin_lod_project != project_root {
+            apply_builtin_lod_settings(viewport_renderer, project_root, builtin_gpu_meshes, ui.lod_groups.catalog)
+            builtin_lod_project = project_root viewport_redraw_pending = true dirty = true ui_chrome_dirty = true
+        }
+        let previous_mesh_details_path = ui.mesh.path let previous_mesh_details_id = ui.mesh.mesh.value()
+        ui.mesh.sync(project_root, imported_meshes, imported_gpu_meshes, builtin_gpu_meshes, builtin_source_triangles, selected_asset, mesh_name_at(cube_mesh_names, selected_cube), selected_cube > 0, simulating || building)
+        if previous_mesh_details_path != ui.mesh.path || previous_mesh_details_id != ui.mesh.mesh.value() {
+            dirty = true ui_chrome_dirty = true
+        }
         ui.actors.sync(editor_scene, if selected_cube > 0 {
                 cube_entities.get((selected_cube - 1) as usize).unwrap_or(0_u64)
             } else {
@@ -10353,6 +10629,12 @@ fn main() -> u32 {
                 }
             }
         }
+        if pbr_editor.take_dirty() {
+            let _staged = dock_host.stage_panel(PanelId::new("material-instance"), pbr_editor.widget())
+            if dock_host.commit() {
+                let _revealed = pbr_editor.reveal_focus(reactive_ui) layout = reactive_ui.layout() reactive_only = true dirty = true
+            }
+        }
         if dirty && show_details && selected_asset == "asset-material" &&
         (material_edit_action(event_target) || material_texture_changed) {
             if window.stage_component(reactive_ui, "details-panel",
@@ -10417,7 +10699,9 @@ fn main() -> u32 {
             if show_details {
                 let details = if selected_asset == "asset-material" {
                     material_inspector(default_material, hovered, icons, ui,)
-                } elif selected_asset.contains("asset-imported-mesh-") {
+                } elif selected_asset == "asset-pbr" {
+                    pbr_editor.summary(project_root, ui.browser.primary)
+                } elif selected_asset.contains("asset-imported-mesh-") || selected_asset == "asset-cube" || selected_asset == "asset-plane" || selected_asset == "asset-sphere" {
                     autolod_asset_inspector(
                         selected_autolod_enabled, autolod_stats, hovered, icons, ui,)
                 } else {
@@ -10517,7 +10801,7 @@ fn main() -> u32 {
                     while index < asset.len() {
                         match asset.actor(index) {
                             Some(actor) => {
-                                editor_scene.set_blueprint(actor.id(), actor.blueprint()) editor_scene.set_component(actor.id(), actor.component()) editor_scene.set_physics(actor.id(), actor.physics())
+                                editor_scene.set_blueprint(actor.id(), actor.blueprint()) editor_scene.set_component(actor.id(), actor.component()) editor_scene.set_physics(actor.id(), actor.physics()) editor_scene.set_material_path(actor.id(), actor.material_path())
                             }
                             None => {
                             }
@@ -10634,10 +10918,10 @@ fn main() -> u32 {
         if material_editor.popup_open() && retained_bounds(reactive_ui, "mg-color-open").is_none() {
             material_editor.cancel_color(window.stylesheet()) dirty = true
         }
-        let color_popup_dirty = material_editor.take_popup_dirty()
+        let color_popup_dirty = material_editor.take_popup_dirty() || pbr_editor.take_popup_dirty()
         let popup_visible = open_menu != "" || open_viewport_menu == "shading" || add_actor_open || outliner_settings_open ||
         project_dialog_mode != "" || unsaved_action != "" || ui.popup() != "" || ui.browser.popup != "" || ui.actors.popup_open() ||
-        material_editor.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open() || pending_approval_id(approval_broker) != ""
+        pbr_editor.popup_open() || material_editor.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open() || pending_approval_id(approval_broker) != ""
         let ui_editor_popup_dirty = ui_editor_popup_was_open != ui_editor.popup_open() ||(ui_editor_consumed && ui_editor.popup_open())
         let overlay_refresh = content_chrome_dirty ||(hover_only && popup_visible) || docks_changed || resize_changed || ui_chrome_dirty || overlay_reactive_target(event_target) || overlay_editing || blueprint_chrome_dirty || color_popup_dirty || ui_editor_popup_dirty
         if dirty && overlay_refresh {
@@ -10664,6 +10948,9 @@ fn main() -> u32 {
             }
             if ui.popup() != "" {
                 next_overlay.push(interactive_overlay(local_popup(ui, layout, window.width() as f32, window.height() as f32, default_material, build_profile, snap_settings, skybox_mode, camera_speed, grid_visible, hovered, icons)))
+            }
+            if pbr_editor.popup_open() && unsaved_action == "" {
+                next_overlay.push(interactive_overlay(pbr_editor.popup(window.width() as f32, window.height() as f32, layout)))
             }
             if material_editor.popup_open() && unsaved_action == "" {
                 next_overlay.push(interactive_overlay(material_editor.popup(window.width() as f32, window.height() as f32, layout)))
@@ -10920,6 +11207,15 @@ fn main() -> u32 {
             viewport_renderer.reload_particles(vfx_published) ui.browser.refresh() dirty = true content_chrome_dirty = true
         }
         let material_updated = material_editor.tick(window, window.stylesheet())
+        let material_changed_path = material_editor.take_changed()
+        if material_changed_path != "" {
+            pbr_editor.reload_parent(material_changed_path)
+            ui.browser.refresh() content_chrome_dirty = true dirty = true
+            let prefix = project_root + "/"
+            if material_changed_path.byte_len() > prefix.byte_len() && material_changed_path.slice_bytes(0_usize, prefix.byte_len()) == prefix {
+                material_texture_loader.invalidate_material(project_root, material_changed_path.slice_bytes(prefix.byte_len(), material_changed_path.byte_len() - prefix.byte_len()), editor_scene)
+            }
+        }
         match material_editor.take_runtime() {
             Some(asset) => {
                 match asset.shaders() {
@@ -10957,7 +11253,10 @@ fn main() -> u32 {
                             }
                         }
                         if asset.domain == "surface" {
-                            viewport_renderer.set_material_graph(asset.semantic, shaders)
+                            let prefix = project_root + "/" let full = material_editor.asset_path()
+                            if full.byte_len() > prefix.byte_len() && full.slice_bytes(0_usize, prefix.byte_len()) == prefix {
+                                material_texture_loader.invalidate_material(project_root, full.slice_bytes(prefix.byte_len(), full.byte_len() - prefix.byte_len()), editor_scene) ui.browser.refresh() content_chrome_dirty = true
+                            }
                         } elif asset.domain == "particle" {
                             viewport_renderer.set_particle_graph(asset.semantic, shaders.get(0).unwrap_or(Vec[u32]::new()))
                         } elif asset.domain == "sky" || asset.domain == "volume" {
@@ -10977,6 +11276,13 @@ fn main() -> u32 {
             let _staged = dock_host.stage_panel(PanelId::new("material"), material_editor.widget())
             if dock_host.commit() {
                 layout = reactive_ui.layout() reactive_only = true layout_dirty = true dirty = true
+            }
+        }
+        genai_editor.update_target(selected_cube > 0 && genai_mesh_target(mesh_name_at(cube_mesh_names, selected_cube)) && !simulating)
+        if genai_editor.take_dirty() && dock_workspace.location(PanelId::new("genai")).is_some() {
+            let _staged_genai = dock_host.stage_panel(PanelId::new("genai"), genai_editor.widget(simulating, selected_cube > 0 && genai_mesh_target(mesh_name_at(cube_mesh_names, selected_cube))))
+            if dock_host.commit() {
+                let _revealed = genai_editor.reveal_focus(reactive_ui) layout = reactive_ui.layout() layout_dirty = true dirty = true reactive_only = true
             }
         }
         if terrain_editor.take_dirty() && dock_workspace.location(PanelId::new("terrain")).is_some() {
@@ -11081,6 +11387,9 @@ fn main() -> u32 {
                 }
                 if blueprint_editor.popup_open() {
                     resize_overlay.push(interactive_overlay(blueprint_editor.popup(window.width() as f32, window.height() as f32, command_state, layout)))
+                }
+                if pbr_editor.popup_open() {
+                    resize_overlay.push(interactive_overlay(pbr_editor.popup(window.width() as f32, window.height() as f32, layout)))
                 }
                 if material_editor.popup_open() {
                     resize_overlay.push(interactive_overlay(material_editor.popup(window.width() as f32, window.height() as f32, layout)))
@@ -11384,7 +11693,7 @@ fn main() -> u32 {
                 if overlay_visible(open_menu, add_actor_open, outliner_settings_open,
                     project_dialog_mode, unsaved_action, hovered,
                     pending_approval_id(approval_broker),) ||
-                open_viewport_menu == "shading" || ui.popup() != "" || ui.browser.popup != "" || ui.actors.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open() || material_editor.popup_open() {
+                open_viewport_menu == "shading" || ui.popup() != "" || ui.browser.popup != "" || ui.actors.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open() || pbr_editor.popup_open() || material_editor.popup_open() {
                     external_overlays.push("overlay-layer")
                     match reactive_ui.find_layout("overlay-layer") {
                         Option::Some(overlay) => {
@@ -11403,9 +11712,21 @@ fn main() -> u32 {
             let hint_display = tooltip_display(if popup_visible {
                     ""
                 } elif dragging {
-                    "Place " + content_leaf(ui.browser.primary) + " · Release in viewport"
+                    if drag_material_path != "" {
+                        if drag_material_valid {
+                            "Apply " + content_leaf(drag_material_path) + " · Release to apply"
+                        } else {
+                            "Move " + content_leaf(drag_material_path) + " over a mesh"
+                        }
+                    } else {
+                        "Place " + content_leaf(ui.browser.primary) + " · Release in viewport"
+                    }
                 } else {
-                    tooltip_text(hovered)
+                    if hovered == "project-title" || hovered.contains("cb-source-") {
+                        reactive_ui.find_widget(hovered).unwrap_or(Widget::label("")).attribute("title").unwrap_or("")
+                    } else {
+                        tooltip_text(hovered)
+                    }
                 }
                 , pointer_x, pointer_y, window.width() as f32, window.height() as f32, tooltip_style,)
             let hint_clip = Rect::new(0, 0, window.width() as f32, window.height() as f32)
@@ -11523,7 +11844,9 @@ fn main() -> u32 {
                         ui.lod_groups.set_layout(layout) composed = ui.lod_groups.compose(composed, window.stylesheet())
                     }
                     composed = composed.with_display_overlay(hint_display, hint_clip)
-                    let _material_composed = material_editor.compose(composed, material_preview_environment(viewport_renderer, camera.position), environment_active)
+                    let pbr_composed = pbr_editor.compose(composed)
+                    let genai_composed = genai_editor.compose(composed)
+                    let material_composed = material_editor.compose(composed, material_preview_environment(viewport_renderer, camera.position), environment_active)
                     let image = ExternalVulkanImage::new(viewport_renderer.external_image() as u64,
                         viewport_renderer.allocation_width(), viewport_renderer.allocation_height(), viewport_renderer.external_layout(),)
                     .with_region(0, 0, render_width, render_height)
@@ -11537,7 +11860,7 @@ fn main() -> u32 {
                         viewport_redraw_pending = true
                     }
                     let submitted = camera_ready && composed.submit_external("viewport-surface", viewport_generation, image)
-                    rendered = submitted && window.present_prepared(composed)
+                    rendered = submitted && pbr_composed && genai_composed && material_composed && window.present_prepared(composed)
                     if rendered && simulation_mode_is_play(simulation_mode) {
                         last_play_frame = Option[PreparedFrame]::Some(composed)
                     }
@@ -11604,7 +11927,9 @@ fn main() -> u32 {
                 }
                 composed = composed.with_display_overlay(hint_display, hint_clip)
                 let material_composed = material_editor.compose(composed, material_preview_environment(viewport_renderer, camera.position), environment_active)
-                rendered = material_composed && window.present_prepared(composed)
+                let pbr_composed = pbr_editor.compose(composed)
+                let genai_composed = genai_editor.compose(composed)
+                rendered = pbr_composed && genai_composed && material_composed && window.present_prepared(composed)
             }
             profile_ui(window.ui_timings())
             profile_finish(rendered)
@@ -11689,6 +12014,7 @@ fn main() -> u32 {
         }
     }
     particle_editor.destroy()
+    material_thumbnails.destroy() pbr_editor.destroy() genai_editor.destroy() material_texture_loader.close()
     material_editor.destroy()
     match texture_upload {
         Option::Some(upload) => {

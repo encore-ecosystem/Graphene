@@ -2,9 +2,10 @@
 //! every actual producer/consumer frame retains a completion token.
 import core::result::Result
 import core::vec::Vec
-import mod::gpu_pack::{PackedSkinSource, pack_skin_source, append_pose_matrix}
-import mod::math::{PoseMatrix, animation_finite, animation_clamp}
-import mod::model::{Skeleton, SkeletalMesh}
+
+import mod::gpu_pack::{PackedSkinSource, append_pose_matrix, pack_skin_source}
+import mod::math::{PoseMatrix, animation_clamp, animation_finite}
+import mod::model::{SkeletalMesh, Skeleton}
 import refrain::rhi::*
 extern fn graphene_animation_shader_length(shader: u32) -> u32
 extern fn graphene_animation_shader_word(shader: u32, index: u32) -> u32
@@ -64,6 +65,11 @@ pub struct SkinGpuCache {
     weight_pairs: Vec[f32]
     uses: Vec[GpuCompletion]
     producer: GpuCompletion
+    all_info: GpuBuffer
+    all_shader: ShaderModule
+    all_pipeline: ComputePipeline
+    all_recorded: bool
+    all_completion: GpuCompletion
 }
 fn skin_storage(device: GraphicsDevice, bytes: u64) -> GpuBuffer {
     ret device.create_buffer(if bytes < 16_u64 {
@@ -98,7 +104,7 @@ impl for SkinGpuCache {
         let mut morph_deltas = 0_u64 for morph in mesh.morphs {
             morph_deltas += morph.deltas.len() as u64
         }
-        let bytes = capacity * 100_u64 + palette_count * 144_u64 + weight_count * 8_u64 +(mesh.vertices.len() as u64) * 136_u64 + morph_deltas * 64_u64
+        let bytes = capacity * 116_u64 + palette_count * 144_u64 + weight_count * 8_u64 +(mesh.vertices.len() as u64) * 136_u64 + morph_deltas * 64_u64 +(maximum_instances as u64) * 4 + 16
         if bytes > 536870912_u64 {
             ret Result::Err("Selected-vertex skin cache exceeds its 512 MiB allocation budget")
         }
@@ -115,30 +121,33 @@ impl for SkinGpuCache {
             }
         }
         let palette = skin_storage(device, palette_count * 48_u64) let previous_palette = skin_storage(device, palette_count * 48_u64) let models = skin_storage(device, palette_count * 48_u64)
-        let weights = skin_storage(device, weight_count * 8_u64) let requests = skin_storage(device, capacity * 32_u64) let output = skin_storage(device, capacity * 64_u64) let tags = skin_storage(device, capacity * 4_u64)
+        let weights = skin_storage(device, weight_count * 8_u64) let requests = skin_storage(device, capacity * 32_u64) let output = skin_storage(device, capacity * 80_u64) let tags = skin_storage(device, capacity * 4_u64)
         let dispatch = device.create_buffer(32_u64, buffer_storage() | buffer_transfer_source() | buffer_transfer_destination() | buffer_indirect(), false)
         let info = skin_storage(device, 32_u64) let status = skin_storage(device, 16_u64)
-        let mut entries = Vec[BindGroupLayoutEntry]::new() for i in 0_usize..10_usize {
+        let all_info = skin_storage(device, 16_u64 +(maximum_instances as u64) * 4_u64)
+        let mut entries = Vec[BindGroupLayoutEntry]::new() for i in 0_usize..12_usize {
             entries.push(BindGroupLayoutEntry::storage(i as u32, shader_stage_compute()))
         }
         let layout = device.create_bind_group_layout(entries) let shader = device.create_shader_module(animation_spirv(0_u32), shader_stage_compute()) let pipeline = device.create_compute_pipeline(shader, layout)
-        let buffers = vec![info, vertices, palette, previous_palette, spans, deltas, weights, requests, output, status]
+        let all_shader = device.create_shader_module(animation_spirv(10_u32), shader_stage_compute())
+        let all_pipeline = device.create_compute_pipeline(all_shader, layout)
+        let buffers = vec![info, vertices, palette, previous_palette, spans, deltas, weights, requests, output, status, all_info, tags]
         let mut bindings = Vec[u32]::new() let mut offsets = Vec[u64]::new() let mut ranges = Vec[u64]::new()
         let mut available = true
         for i in 0_usize..buffers.len() {
             let b = buffers.get_unchecked_borrowed(i) available = available && b.available() bindings.push(i as u32) offsets.push(0_u64) ranges.push(b.size())
         }
         let group = device.create_buffer_bind_group_many(layout, bindings, buffers, offsets, ranges)
-        if !available || !models.available() || !tags.available() || !dispatch.available() || !layout.available() || !shader.available() || !pipeline.available() || !group.available() {
-            group.destroy() pipeline.destroy() shader.destroy() layout.destroy()
+        if !available || !all_pipeline.available() || !all_shader.available() || !models.available() || !tags.available() || !dispatch.available() || !layout.available() || !shader.available() || !pipeline.available() || !group.available() {
+            group.destroy() pipeline.destroy() shader.destroy() all_pipeline.destroy() all_shader.destroy() layout.destroy()
             for buffer in buffers {
                 buffer.destroy()
             }
-            models.destroy() tags.destroy() dispatch.destroy()
+            models.destroy() dispatch.destroy()
             ret Result::Err("Unable to allocate skin deformation resources")
         }
         ret Result::Ok(SkinGpuCache<H> {
-                device, layout, shader, pipeline, group, vertices, spans, deltas, palette, previous_palette, models, weights, requests, output, tags, dispatch, info, status, mesh, skeleton.bones.len(), maximum_instances, capacity as usize, source.delta_count, false, 0_u64, false, 0_u64, 0_u32, true, Vec[f32]::new(), Vec[f32]::new(), Vec[f32]::new(), Vec[u64]::new(), Vec[bool]::new(), Vec[f32]::new(), Vec[u64]::new(), Vec[u32]::new(), Vec[f32]::new(), Vec[GpuCompletion]::new(), GpuCompletion::unavailable()
+                device, layout, shader, pipeline, group, vertices, spans, deltas, palette, previous_palette, models, weights, requests, output, tags, dispatch, info, status, mesh, skeleton.bones.len(), maximum_instances, capacity as usize, source.delta_count, false, 0_u64, false, 0_u64, 0_u32, true, Vec[f32]::new(), Vec[f32]::new(), Vec[f32]::new(), Vec[u64]::new(), Vec[bool]::new(), Vec[f32]::new(), Vec[u64]::new(), Vec[u32]::new(), Vec[f32]::new(), Vec[GpuCompletion]::new(), GpuCompletion::unavailable(), all_info, all_shader, all_pipeline, false, GpuCompletion::unavailable()
             }
             ,
         )
@@ -190,7 +199,7 @@ impl for SkinGpuCache {
         self.epoch += 1_u32 if self.epoch == 0_u32 {
             self.epoch = 1_u32 self.initialize_tags = true
         }
-        self.staged = true self.staged_frame = logical_frame ret Result::Ok(true)
+        self.all_recorded = false self.staged = true self.staged_frame = logical_frame ret Result::Ok(true)
     }
     pub fn upload(self: mut Self&, frame: RenderFrame) -> Result[bool, str] {
         if !self.staged {
@@ -262,6 +271,51 @@ impl for SkinGpuCache {
         }
         self.uploaded = true self.uploaded_frame = self.staged_frame self.initialize_tags = false ret Result::Ok(true)
     }
+    /// Displaced patches can request vertices outside the regular VG cut.
+    /// Evaluate the shared source cache once, on the GPU, before refinement.
+    pub fn record_all(self: mut Self&, frame: RenderFrame) -> bool {
+        if self.upload(frame).is_err() {
+            ret false
+        }
+        if self.all_recorded && self.all_completion.available() {
+            if self.all_completion.status() == GpuCompletionStatus::Cancelled {
+                self.all_recorded = false
+            } else {
+                let current = frame.completion()
+                let ordered = self.all_completion.same_submission(current) || self.all_completion.submitted()
+                current.destroy() ret ordered
+            }
+        }
+        if self.all_completion.available() {
+            self.all_completion.destroy()
+        }
+        self.all_completion = frame.completion()
+        let count =(self.mesh.vertices.len() * self.pending_keys.len()) as u32
+        if count == 0 {
+            ret true
+        }
+        let mut config = vec![self.mesh.vertices.len() as u32, self.bones as u32, self.mesh.morphs.len() as u32, self.epoch]
+        for flag in self.history {
+            config.push(flag)
+        }
+        let groups =(count + 63) / 64
+        let recorded = frame.update_u32s(self.all_info, 0, config) && frame.update_u32s(self.info, 0, vec![count]) && frame.transfer_storage_barrier() && frame.dispatch_compute(self.all_pipeline, self.group, if groups > 65535 {
+                65535_u32
+            } else {
+                groups
+            }
+            ,(groups + 65534) / 65535, 1,) && frame.compute_barrier()
+        self.all_recorded = recorded ret recorded
+    }
+    pub fn source_buffer(self: Self&) -> GpuBuffer {
+        ret self.vertices
+    }
+    pub fn morph_span_buffer(self: Self&) -> GpuBuffer {
+        ret self.spans
+    }
+    pub fn morph_delta_buffer(self: Self&) -> GpuBuffer {
+        ret self.deltas
+    }
     pub fn record_selected(self: mut Self&, frame: RenderFrame, group: BindGroup, dispatch_pipeline: ComputePipeline, request_pipeline: ComputePipeline) -> bool {
         if !self.uploaded || self.uploaded_frame != self.staged_frame {
             ret false
@@ -301,7 +355,10 @@ impl for SkinGpuCache {
         if self.producer.available() {
             self.producer.destroy()
         }
-        self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.layout.destroy()
+        if self.all_completion.available() {
+            self.all_completion.destroy() self.all_completion = GpuCompletion::unavailable()
+        }
+        self.group.destroy() self.pipeline.destroy() self.shader.destroy() self.all_pipeline.destroy() self.all_shader.destroy() self.all_info.destroy() self.layout.destroy()
         for b in vec![self.vertices, self.spans, self.deltas, self.palette, self.previous_palette, self.models, self.weights, self.requests, self.output, self.tags, self.dispatch, self.info, self.status] {
             b.destroy()
         }

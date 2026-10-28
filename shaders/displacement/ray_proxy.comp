@@ -1,0 +1,19 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x=64) in;
+layout(set=0,binding=45,std430) writeonly buffer RayVertices {vec4 data[];} rayVertices;
+layout(set=0,binding=46,std430) writeonly buffer RayIndices {uint data[];} rayIndices;
+layout(set=0,binding=47,std140) uniform RayProxy {uvec4 geometry;} rayProxy;
+void main() {
+    uvec2 patternRange=patchRanges.data[rayProxy.geometry.z*8u];
+    uint triangle=gl_GlobalInvocationID.x;
+    if(triangle>=rayProxy.geometry.y*patternRange.y) return;
+    uint face=rayProxy.geometry.x+triangle/patternRange.y;
+    uvec4 pattern=patchPatterns.data[patternRange.x+triangle%patternRange.y];
+    for(uint corner=0;corner<3;++corner) {
+        uint index=triangle*3u+corner;
+        rayVertices.data[index]=vec4(surfacePosition(face,patternBarycentric(pattern[corner],pattern.w),rayProxy.geometry.w,false),1);
+        rayIndices.data[index]=index;
+    }
+}

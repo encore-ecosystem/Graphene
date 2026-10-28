@@ -25,16 +25,18 @@ static void test_skin(void){
     _Static_assert(sizeof(v)==128,"Skin vertex ABI");
     float matrices[24]={2,0,0,2,0,1,0,0,0,0,.5f,0, 0,-3,0,-1,4,0,0,1,0,0,2,0};
     float previous[24]={1,0,0,0,0,1,0,0,0,0,1,0, 1,0,0,-1,0,1,0,0,0,0,1,0};
-    uint32_t span[2]={0,1};struct Delta{float p[4],n[4],t[4];uint32_t target[4];}delta={.p={0,0,2,0}};float weights[2]={.5f,.25f};
+    uint32_t span[2]={0,1};struct Delta{float p[4],n[4],t[4];uint32_t target[4];}delta={.p={0,0,2,0},.n={0,1,0,0}};float weights[2]={.5f,.25f};
     uint32_t requests[N+1][8];for(unsigned i=0;i<N+1;i++){uint32_t r[8]={i==N?1:0,0,0,i,0,i%2,0,0};memcpy(requests[i],r,sizeof r);}
-    float sentinel[(N+1)*16];for(unsigned i=0;i<(N+1)*16;i++)sentinel[i]=321;
+    float sentinel[(N+1)*20];for(unsigned i=0;i<(N+1)*20;i++)sentinel[i]=321;
     uint32_t status=0;const void *data[10]={info,&v,matrices,previous,span,&delta,weights,requests,sentinel,&status};uint64_t sizes[10]={sizeof info,sizeof v,sizeof matrices,sizeof previous,sizeof span,sizeof delta,sizeof weights,sizeof requests,sizeof sentinel,sizeof status};size_t buffers[10];for(unsigned i=0;i<10;i++)buffers[i]=create_buffer(data[i],sizes[i]);
     dispatch("target/animation/shaders/deform.spv",buffers,sizes,10,(N+1+63)/64);
-    float result[(N+1)*16];assert(encore_vk_buffer_read_f32s(buffers[8],0,result,(N+1)*16));
+    float result[(N+1)*20];assert(encore_vk_buffer_read_f32s(buffers[8],0,result,(N+1)*20));
     // Inverse transpose of the blended matrix, NOT a blend of transformed normals.
-    float determinant=.5f*.25f+2.25f*3,normal[3]={(.25f-3)/determinant,(2.25f+.5f)/determinant,1/1.625f};float length=sqrtf(normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2]);
-    for(unsigned i=0;i<N;i++){float *r=result+i*16;near(r[0],-4.25f);near(r[1],4.25f);near(r[2],6.5f);for(unsigned c=0;c<3;c++)near(r[4+c],normal[c]/length);if(i%2){near(r[12],.25f);near(r[13],2);near(r[14],3.5f);near(r[15],1);}else{for(unsigned c=0;c<3;c++)near(r[12+c],r[c]);near(r[15],0);}}
-    for(unsigned c=0;c<16;c++)near(result[N*16+c],321);
+    float determinant=.5f*.25f+2.25f*3,normal[3]={(.25f-3*1.5f)/determinant,(2.25f+.5f*1.5f)/determinant,1/1.625f};float length=sqrtf(normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2]);
+    for(unsigned i=0;i<N;i++){float *r=result+i*20;near(r[0],-4.25f);near(r[1],4.25f);near(r[2],6.5f);for(unsigned c=0;c<3;c++)near(r[4+c],normal[c]/length);if(i%2){near(r[12],.25f);near(r[13],2);near(r[14],3.5f);near(r[15],1);}else{for(unsigned c=0;c<3;c++)near(r[12+c],r[c]);near(r[15],0);}}
+    float old_normal[3]={1,1.25f,1},old_length=sqrtf(3.5625f);
+    for(unsigned i=0;i<N;i++){float *r=result+i*20;for(unsigned c=0;c<3;c++)near(r[16+c],i%2?old_normal[c]/old_length:r[4+c]);near(r[19],0);}
+    for(unsigned c=0;c<20;c++)near(result[N*20+c],321);
     assert(encore_vk_buffer_read_u32(buffers[9],0)==1);
     for(unsigned i=0;i<10;i++)encore_vk_buffer_destroy(buffers[i]);puts("GPU skin/morph: 129 requests, non-uniform normals, previous morph pose, invalid request: PASS");
 }

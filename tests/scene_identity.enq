@@ -17,7 +17,7 @@ fn main() -> u32 {
     if !migrated_ok {
         ret 1_u32
     }
-    if migrated.version() != 7_u32 || migrated.len() != 2_usize {
+    if migrated.version() != 8_u32 || migrated.len() != 2_usize {
         ret 2_u32
     }
     match migrated.actor(0_usize) {

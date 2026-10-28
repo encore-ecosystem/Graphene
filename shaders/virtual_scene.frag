@@ -1,4 +1,8 @@
-#version 450
+#version 460
+#ifdef GRAPHENE_RAY_LIGHTING
+#extension GL_EXT_ray_query : require
+#endif
+
 #extension GL_EXT_mesh_shader : require
 
 layout(location = 0) in vec3 world_normal;
@@ -26,10 +30,12 @@ layout(std430, set = 0, binding = 5) readonly buffer RadianceHistory {
 } gi_history;
 layout(set = 0, binding = 6) uniform sampler2D base_color_texture;
 layout(set = 0, binding = 7) uniform sampler2D normal_texture;
+layout(set = 0, binding = 18) uniform sampler2D material_orm;
 layout(location = 12) flat in vec4 material_texture;
 #include "material_normal.glsl"
 
 layout(std430, set = 0, binding = 8) readonly buffer ActorLights { vec4 actor_lighting[]; };
+#include "ray_lighting.glsl"
 #include "scene_lighting.glsl"
 #define GRAPHENE_SHELTER_BINDING 11
 #include "environment_surface.glsl"
@@ -184,6 +190,11 @@ void main() {
         normalize(-light_direction.xyz)), 0.0);
     float metallic = material_surface.x;
     float roughness = material_surface.y;
+    vec3 orm = texture(material_orm, texture_uv).rgb;
+    vec2 rm = orm.gb;
+    roughness *= mix(1.0, rm.x, material_texture.z);
+    metallic *= mix(1.0, rm.y, material_texture.w);
+
     float unlit = material_surface.z;
     float diffuseEnergy = (1.0 - metallic) * (1.0 - 0.25 * roughness);
     vec3 baseColor = color * material_base_color.rgb * texture(base_color_texture, texture_uv).rgb;
@@ -191,22 +202,23 @@ void main() {
     mg_position=world_position;mg_direction=normalize(world_position-camera_position);mg_uv=texture_uv;
     for(int i=0;i<8;++i)mg_environment[i]=actor_lighting[257+i];
     EnvironmentWeather mgLocal=environmentWeather(world_position);mg_environment[1]=mgLocal.sky;mg_environment[2]=mgLocal.wind;mg_environment[3].xy=mgLocal.surface.xy;
-    if(material_surface.z<.5)evaluateMaterial(baseColor,metallic,roughness);
+    {vec3 mgNormal;float mgHeight;float mgOcclusion;evaluateSurface(baseColor,metallic,roughness,mgNormal,mgOcclusion,mgHeight);orm.r=mgOcclusion;surfaceNormal=materialSampleNormal(mgNormal,world_position,world_normal,mg_uv,mgNormalStrength(),mgNormalFlip());diffuse=max(dot(surfaceNormal,normalize(-light_direction.xyz)),0.); }
 #endif
     environmentSurface(world_position, surfaceNormal, baseColor, roughness);
     diffuseEnergy=(1.-metallic)*(1.-.25*roughness);
     vec3 direct = light_color_intensity.xyz *
-        diffuse * light_color_intensity.w * diffuseEnergy + actorDirectLight(world_position, surfaceNormal) * diffuseEnergy;
+        diffuse * light_color_intensity.w * diffuseEnergy * lightingVisibility(world_position,surfaceNormal,normalize(-light_direction.xyz),10000.) + actorDirectLight(world_position, surfaceNormal) * diffuseEnergy;
     vec3 indirect = surfaceCacheIrradiance(world_position,
         surfaceNormal);
     vec3 viewDirection = normalize(camera_position - world_position);
     vec3 reflected = reflect(-viewDirection, surfaceNormal);
     vec3 reflectedRadiance = surfaceCacheReflection(
         world_position + reflected * 0.05, reflected, roughness);
+    reflectedRadiance=lightingReflection(world_position,surfaceNormal,reflected,roughness,reflectedRadiance);
     vec3 fresnelZero = mix(vec3(0.04), baseColor, metallic);
     float specularStrength = (1.0 - roughness) * (1.0 - roughness);
     vec3 indirectSpecular = reflectedRadiance * fresnelZero * specularStrength;
-    vec3 litColor = baseColor * (indirect + direct * environmentCloudShadow(world_position)) + indirectSpecular;
+    vec3 litColor = baseColor * (indirect * orm.r + direct * environmentCloudShadow(world_position)) + indirectSpecular * orm.r;
     vec3 linearColor = viewMode == 1u ? baseColor :
         mix(litColor, baseColor, unlit);
     if(viewMode==0u) linearColor = environmentFog(world_position, camera_position, linearColor);

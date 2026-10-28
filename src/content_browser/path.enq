@@ -25,7 +25,7 @@ pub fn content_kind(path: str) -> str {
         "material-graph"
     } elif ends(name, ".gsound") || ends(name, ".wav") || ends(name, ".flac") || ends(name, ".mp3") || ends(name, ".ogg") {
         "sound"
-    } elif ends(name, ".graphene-material.json") || ends(name, ".gmaterial") {
+    } elif ends(name, ".gmaterial") {
         "material"
     } elif ends(name, ".graphene-blueprint.json") {
         "blueprint"
@@ -46,7 +46,7 @@ pub fn content_kind(path: str) -> str {
 pub fn content_kind_name(kind: str) -> str {
     ret match kind {
         "terrain" => "Terrain" "ui" => "UI Screen" "character" => "Character" "skeleton" => "Skeleton" "skeletal-mesh" => "Skeletal Mesh" "animation-clip" => "Animation Clip" "particle-system" => "Particle System" "folder" => "Folder" "mesh" => "Static Mesh" "material" => "Material"
-        "material-graph" => "Material Graph" "texture" => "Texture" "blueprint" => "Blueprint"
+        "material-instance" => "Material Instance" "material-graph" => "Material Graph" "texture" => "Texture" "blueprint" => "Blueprint"
         "weather-preset" => "Weather Preset" "script" => "Encore Script" "scene" => "Scene" "sound" => "Sound" _ => "File"
     }
 }
@@ -90,8 +90,8 @@ pub fn content_name(path: str, kind: str) -> str {
         ".graphene-particle.json"
     } elif kind == "material-graph" {
         ".graphene-material-graph.json"
-    } elif kind == "material" {
-        ".graphene-material.json"
+    } elif kind == "material" || kind == "material-instance" {
+        ".gmaterial"
     } elif kind == "weather-preset" {
         ".graphene-weather.json"
     } elif kind == "blueprint" {

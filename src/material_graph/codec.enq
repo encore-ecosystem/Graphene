@@ -2,10 +2,12 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
 import json::{Json, field, parse, stringify}
 import linalg::Vec3
+
 import mod::model::*
-import refrain::scene::json_value::{vec3_json, json_vec3}
+import refrain::scene::json_value::{json_vec3, vec3_json}
 
 fn required[T](value: Option[T]) -> Result[T, str] {
     match value {
@@ -40,6 +42,12 @@ pub fn material_graph_stringify(graph: MaterialGraph, semantic: bool) -> str {
     for node in graph.nodes {
         let mut fields = vec![field("id", Json::Number(Debug::fmt(node.id))), field("operation", Json::String(node.operation)),
             field("kind", Json::String(node.kind)), field("value", vec3_json(node.value))]
+        if node.operation == "scalar-parameter" || node.operation == "color-parameter" || node.operation == "bool-parameter" || node.operation == "texture-parameter" {
+            fields.push(field("texture_encoding", Json::String(node.texture_encoding)))
+            if !semantic {
+                fields.push(field("parameter_name", Json::String(node.parameter_name))) fields.push(field("parameter_group", Json::String(node.parameter_group))) fields.push(field("texture_path", Json::String(node.texture_path)))
+            }
+        }
         if !semantic {
             fields.push(field("position", vec3_json(Vec3::new(node.x, node.y, 0))))
         }
@@ -49,7 +57,7 @@ pub fn material_graph_stringify(graph: MaterialGraph, semantic: bool) -> str {
         links.push(Json::Object(vec![field("source", Json::Number(Debug::fmt(link.source.node))), field("output", Json::String(link.source.pin)),
                     field("target", Json::Number(Debug::fmt(link.target.node))), field("input", Json::String(link.target.pin))],))
     }
-    ret stringify(Json::Object(vec![field("format", Json::String("graphene-material-graph")), field("version", Json::Number("2")), field("domain", Json::String(graph.domain.key())),
+    ret stringify(Json::Object(vec![field("format", Json::String("graphene-material-graph")), field("version", Json::Number("3")), field("domain", Json::String(graph.domain.key())),
                 field("name", Json::String(if semantic {
                             ""
                         } else {
@@ -73,7 +81,7 @@ fn decode(source: str) -> Result[MaterialGraph, str] {
             ret Result::Err("Invalid material graph")
         }
     }
-    if text(root, "format")? != "graphene-material-graph" ||(integer(root, "version")? != 1 && integer(root, "version")? != 2) {
+    if text(root, "format")? != "graphene-material-graph" ||(integer(root, "version")? != 1 && integer(root, "version")? != 2 && integer(root, "version")? != 3) {
         ret Result::Err("Invalid material graph")
     }
     let domain = match root.get("domain") {
@@ -99,7 +107,11 @@ fn decode(source: str) -> Result[MaterialGraph, str] {
             Some(p) => required(json_vec3(p))? None => Vec3::zero()
         }
         nodes.push(MaterialNode {
-                id, text(value, "operation")?, text(value, "kind")?, required(json_vec3(required(value.get("value"))?))?, position.x(), position.y()
+                id, text(value, "operation")?, text(value, "kind")?, required(json_vec3(required(value.get("value"))?))?, position.x(), position.y(),
+                value.get("parameter_name").unwrap_or(Json::String("")).as_str().unwrap_or(""),
+                value.get("parameter_group").unwrap_or(Json::String("Parameters")).as_str().unwrap_or("Parameters"),
+                value.get("texture_path").unwrap_or(Json::String("")).as_str().unwrap_or(""),
+                value.get("texture_encoding").unwrap_or(Json::String("srgb")).as_str().unwrap_or("srgb")
             }
             ,
         )

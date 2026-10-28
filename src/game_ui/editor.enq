@@ -1,3 +1,4 @@
+import luma::Window
 //! Visual screen authoring. Preview and Play use the same retained Luma tree.
 import core::fmt::Debug
 import core::option::Option
@@ -19,6 +20,7 @@ import refrain::blueprint::{BlueprintAsset, BlueprintComponent}
 import refrain::blueprint::editor::BlueprintEditor
 import refrain::command_bus::{EditorState, GrapheneCommand}
 import refrain::editor_values::parse_editor_scalar
+import refrain::scene::json_value::parse_number
 import refrain::scene::world::Scene
 
 fn fresh_template(name: str) -> UiScreenAsset {
@@ -262,10 +264,17 @@ impl for UiEditor {
         row.push(Widget::input("uid-field-" + key, if self.focused == key {
                     self.text.value()
                 } else {
-                    field_value(w, key)
+                    let raw = field_value(w, key)
+                    if key == "name" || key == "text" || key == "image" || key == "color" || key == "binding" {
+                        raw
+                    } else {
+                        match parse_number(raw) {
+                            Some(value) => luma::format_decimal(value, 4_u32) None => raw
+                        }
+                    }
                 }
                 ,
-            ).with_classes("ui-designer-input").with_focus(self.focused == key).with_selection(if self.focused == key {
+            ).with_classes("ui-designer-input").with_focus(self.focused == key).with_cursor(self.text.cursor()).with_selection(if self.focused == key {
                     self.text.selection_start()
                 } else {
                     0_usize
@@ -489,6 +498,9 @@ impl for UiEditor {
         }
         let mut w = self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas"))
         let key = self.focused let text = self.text.value()
+        if text == field_value(w, key) {
+            self.focused = "" self.dirty = true ret()
+        }
         if key == "name" {
             w.name = text
         } elif key == "text" {
@@ -556,7 +568,8 @@ impl for UiEditor {
         }
         self.focused = "" self.dirty = true
     }
-    pub fn input(self: mut Self, event: Event, hit_target: str, layout: WidgetLayout, sheet: StyleSheet, locked: bool) -> bool {
+    pub fn input(self: mut Self, event: Event, hit_target: str, layout: WidgetLayout, sheet: StyleSheet, locked: bool, window: Window) -> bool {
+
         let mut target = hit_target
         let mut kind = event.kind()
         if locked {
@@ -623,6 +636,19 @@ impl for UiEditor {
                 ret true
             }
         }
+        let text_field_id = if self.focused != "" {
+            "uid-field-" + self.focused
+        } else {
+            ""
+        }
+        if text_field_id != "" && self.owns_focus {
+            if self.text.pointer_handles(event, hit_target, text_field_id) {
+                self.text = self.text.pointer_input(event, layout, text_field_id, window) self.dirty = true ret true
+            }
+            if luma::text_edit_key(event) {
+                self.text = self.text.key_input(event, window) self.dirty = true ret true
+            }
+        }
         if kind == event_focus_lost() {
             self.interaction = self.interaction.pointer_cancel().pointer_move_to("")
             if self.graph_mode {
@@ -661,7 +687,7 @@ impl for UiEditor {
             if kind == event_pointer_down() &&(target.contains("uigraph-") || self.graph_editor.popup_open()) {
                 self.document.begin_gesture()
             }
-            if self.graph_editor.input(self.graph_state, event, raw, bounds, sheet) {
+            if self.graph_editor.input_with_text(self.graph_state, event, raw, bounds, sheet, layout, window) {
                 self.graph_dirty = true
                 if self.graph_state.revision() != revision {
                     let mut asset = self.document.asset() asset.graph = self.graph_state.blueprint_asset() self.document.replace(asset)
@@ -830,7 +856,7 @@ impl for UiEditor {
             ret true
         }
         if target.contains("uid-field-") {
-            self.focused = target.slice_bytes(10, target.byte_len() - 10) self.text = TextEditor::new(field_value(self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas")), self.focused)) self.dirty = true ret true
+            self.focused = target.slice_bytes(10, target.byte_len() - 10) self.text = TextEditor::new(field_value(self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas")), self.focused)) self.text = self.text.with_cursor(0).pointer_input(event, layout, target, window) self.dirty = true ret true
         }
         if target.contains("uid-parent-") || target.contains("uid-flag-") {
             let mut w = self.document.asset().widget(self.selection).unwrap_or(UiWidget::new(0, 0, "Canvas"))

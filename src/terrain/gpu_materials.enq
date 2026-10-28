@@ -1,0 +1,259 @@
+//! Terrain material policy, asynchronous blend-weight uploads and PBR draw inputs.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::Vec3
+
+import mod::model::TerrainAsset
+import refrain::assets::MeshAssets
+import refrain::displacement::renderer::DisplacementRenderer
+import refrain::displacement::scene::{DisplacementInput, DisplacementMaterial}
+import refrain::displacement::terrain_source::TerrainPatchMaterial
+import refrain::material_images::MaterialImageRequest
+import refrain::rhi::*
+import refrain::scene::renderable::{MaterialId, MeshId, RenderItem}
+import refrain::standard_material::{DisplacementSettings, StandardMaterial}
+import refrain::texture_gpu::TextureUpload
+import refrain::texture_image::TextureImage
+struct TerrainMaterialEntry {
+    mesh: MeshId
+    asset: TerrainAsset
+    pending_asset: TerrainAsset
+    revision: u64
+    weights: GpuTexture
+    upload: Option[TextureUpload]
+}
+pub struct TerrainGpuMaterials {
+    entries: Vec[TerrainMaterialEntry<H>]
+}
+fn legacy_key(texture: str) -> str {
+    ret "@terrain-texture:" + texture
+}
+
+impl for TerrainGpuMaterials {
+    pub fn new() -> TerrainGpuMaterials<H> {
+        ret TerrainGpuMaterials<H> {
+            Vec[TerrainMaterialEntry<H>]::new()
+        }
+    }
+    pub fn pending(self: Self&) -> bool {
+        for entry in self.entries {
+            if entry.upload.is_some() {
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn set(self: mut Self&, device: GraphicsDevice, mesh: MeshId, asset: TerrainAsset, revision: u64) -> bool {
+        if !mesh.valid() {
+            ret false
+        }
+        let mut index = self.entries.len()
+        for i in 0_usize..self.entries.len() {
+            if self.entries.get_unchecked_borrowed(i).mesh.value() == mesh.value() {
+                index = i break
+            }
+        }
+        if index < self.entries.len() {
+            let entry = self.entries.get_unchecked_borrowed(index)
+            if entry.revision == revision || entry.upload.is_some() {
+                ret false
+            }
+        }
+        if !asset.valid() {
+            ret false
+        }
+        let mut pixels = Vec[u32]::with_capacity(asset.weights.len())
+        for w in asset.weights {
+            let r =(w.x() * 255_f32 + 0.5_f32) as u32 let g =(w.y() * 255_f32 + 0.5_f32) as u32 let b =(w.z() * 255_f32 + 0.5_f32) as u32
+            pixels.push(4278190080_u32 | r |(g << 8) |(b << 16))
+        }
+        let upload = match TextureUpload::begin_linear(device, TextureImage {
+                asset.resolution, asset.resolution, pixels
+            }
+            ,
+        ) {
+            Some(u) => u None => {
+                ret false
+            }
+        }
+        if index == self.entries.len() {
+            self.entries.push(TerrainMaterialEntry<H> {
+                    mesh, asset, asset, revision, GpuTexture::unavailable(), Option::Some(upload)
+                }
+            )
+        } else {
+            let mut entry = self.entries.get_unchecked_borrowed(index) entry.pending_asset = asset entry.revision = revision entry.upload = Option[TextureUpload]::Some(upload)
+        }
+        ret true
+    }
+    /// The caller retires replaced images with the same fences as PBR textures.
+    pub fn poll(self: mut Self&) -> Vec[GpuTexture] {
+        let mut retired = Vec[GpuTexture]::new()
+        for i in 0_usize..self.entries.len() {
+            let mut entry = self.entries.get_unchecked_borrowed(i)
+            match entry.upload {
+                Some(upload) => {
+                    if upload.complete() {
+                        let old = entry.weights entry.weights = upload.finish() entry.asset = entry.pending_asset entry.upload = Option[TextureUpload]::None retired.push(old)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret retired
+    }
+    pub fn requests(self: Self&) -> Vec[MaterialImageRequest] {
+        let mut requests = Vec[MaterialImageRequest]::new()
+        for entry in self.entries {
+            for layer in entry.asset.layers {
+                if layer.material != "" {
+                    requests.push(MaterialImageRequest { layer.material, Option::None })
+                } elif layer.texture != "" {
+                    requests.push(MaterialImageRequest {
+                            legacy_key(layer.texture), Option::Some(StandardMaterial::default().with_base_color_texture(layer.texture))
+                        }
+                    )
+                }
+            }
+        }
+        ret requests
+    }
+    pub fn inputs(self: Self&, project: str, meshes: MeshAssets, items: Vec[RenderItem], registry: Vec[DisplacementMaterial], white: GpuTexture, normal: GpuTexture) -> Vec[DisplacementInput] {
+        let mut result = Vec[DisplacementInput]::new()
+        for entry in self.entries {
+            if !entry.weights.available() {
+                continue
+            }
+            let mut any = false for layer in entry.asset.layers {
+                if layer.material != "" {
+                    any = true
+                }
+            }
+            if !any {
+                continue
+            }
+            let mut layers = Vec[StandardMaterial]::new() let mut textures = Vec[GpuTexture]::new() let mut tilings = Vec[f32]::new()
+            let mut ready = true let mut magnitude = 0_f32 let mut quality = 0_u32
+            for layer in entry.asset.layers {
+                let mut material = StandardMaterial::new(layer.color, 0, 0.85_f32)
+                let mut maps = vec![white, normal, white, white]
+                let path = if layer.material != "" {
+                    layer.material
+                } elif layer.texture != "" {
+                    legacy_key(layer.texture)
+                } else {
+                    ""
+                }
+                if path != "" {
+                    let mut found = false
+                    for pbr in registry {
+                        if pbr.path == project + "/" + path {
+                            maps = Vec[GpuTexture]::new() for map in pbr.textures {
+                                maps.push(map)
+                            }
+                            found = true
+                            if layer.material != "" {
+                                material = pbr.material
+                            } else {
+                                material = material.with_base_color_texture(layer.texture)
+                            }
+                            break
+                        }
+                    }
+                    if !found {
+                        ready = false
+                    }
+                }
+                let d = material.displacement()
+                if d.enabled && material.height_texture() != "" {
+                    if d.magnitude > magnitude {
+                        magnitude = d.magnitude
+                    }
+                    if d.quality > quality {
+                        quality = d.quality
+                    }
+                }
+                layers.push(material) for map in maps {
+                    textures.push(map)
+                }
+                tilings.push(layer.tiling)
+            }
+            if !ready {
+                continue
+            }
+            let terrain = TerrainPatchMaterial {
+                layers, textures, entry.weights, entry.asset.extent(), tilings
+            }
+            let material = StandardMaterial::default().with_displacement(DisplacementSettings {
+                    true, magnitude, 0.5_f32, quality
+                }
+            ).with_double_sided()
+            let gpu = meshes.gpu_mesh(entry.mesh) if !gpu.available() {
+                continue
+            }
+            let capacity = DisplacementRenderer::instance_capacity(gpu.index_count() / 3) as usize
+            let mut matching = Vec[RenderItem]::new() for item in items {
+                if item.mesh().value() == entry.mesh.value() {
+                    matching.push(item)
+                }
+            }
+            let mut first = 0_usize
+            while first < matching.len() {
+                let end = if first + capacity < matching.len() {
+                    first + capacity
+                } else {
+                    matching.len()
+                }
+                let mut batch = Vec[RenderItem]::new() let mut lods = Vec[u32]::new()
+                for i in first..end {
+                    batch.push(matching.get_unchecked_borrowed(i)) lods.push(0)
+                }
+                let mut primary = Vec[GpuTexture]::new() for i in 0_usize..4_usize {
+                    primary.push(textures.get_unchecked_borrowed(i))
+                }
+                result.push(DisplacementInput {
+                        "terrain:" + entry.mesh.value().fmt() + ":" +(first / capacity).fmt(), entry.mesh.value(), gpu, Option::None, material, primary, if magnitude > 0 {
+                            1_f32
+                        } else {
+                            0_f32
+                        }
+                        , batch, lods, Option::None, Option::Some(terrain)
+                    }
+                )
+                first = end
+            }
+        }
+        ret result
+    }
+    pub fn drain(self: mut Self&) -> Vec[GpuTexture] {
+        let mut textures = Vec[GpuTexture]::new()
+        for entry in self.entries {
+            match entry.upload {
+                Some(upload) => {
+                    upload.wait() upload.finish().destroy()
+                }
+                None => {
+                }
+            }
+            if entry.weights.available() {
+                textures.push(entry.weights)
+            }
+        }
+        self.entries.clear() ret textures
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        for entry in self.entries {
+            match entry.upload {
+                Some(upload) => {
+                    upload.wait() upload.finish().destroy()
+                }
+                None => {
+                }
+            }
+            entry.weights.destroy()
+        }
+        self.entries.clear()
+    }
+}

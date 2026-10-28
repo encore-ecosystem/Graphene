@@ -2,15 +2,19 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::read_file
+
 import linalg::Vec3
+
 import mod::model::{ContentAsset, ContentThumb}
 import mod::path::ends
-import refrain::material_asset::{material_asset_parse, load_material_asset_file}
-import refrain::native_asset::{load_native_mesh, load_native_texture, asset_source_stamp}
+import refrain::material_asset::{load_material_asset_file, material_asset_parse}
+import refrain::native_asset::{asset_source_stamp, load_native_mesh, load_native_texture}
 import refrain::scene::obj::parse_obj
 import refrain::scene::primitive::{MeshData, cube_mesh, plane_mesh, sphere_mesh}
-import refrain::texture_asset::{decode_png, TextureImage}
-import std::os::read_file
+import refrain::texture_asset::{TextureImage, decode_png}
+import refrain::thumbnail_image::thumbnail_background_pixel
 
 extern fn graphene_content_pixels(address: usize, count: usize) -> str
 fn color(r: f32, g: f32, b: f32) -> u32 {
@@ -47,12 +51,7 @@ fn background() -> Vec[u32] {
     let mut pixels = vec![128_u32, 96_u32]
     for y in 0..96 {
         for x in 0..128 {
-            pixels.push(if (x / 8 + y / 8) % 2 == 0 {
-                    4280557860_u32
-                } else {
-                    4280821032_u32
-                }
-            )
+            pixels.push(thumbnail_background_pixel(x as usize, y as usize))
         }
     }
     ret pixels
@@ -136,7 +135,15 @@ fn mesh_pixels(mesh: MeshData, tint: Vec3) -> str {
         let area = edge(a, b, c.x(), c.y())
         if area > 0.00001_f32 || area < - 0.00001_f32 {
             let wa = world.get(ia).unwrap_or(Vec3::zero()) let wb = world.get(ib).unwrap_or(wa) let wc = world.get(ic).unwrap_or(wa)
-            let normal = wb.sub(wa).cross(wc.sub(wa)).normalized() let lambert = normal.dot(light)
+            // Thumbnails render both sides. Orient their lighting toward the
+            // camera so coincident opposite faces cannot produce depth speckles.
+            let face_normal = wb.sub(wa).cross(wc.sub(wa)).normalized()
+            let normal = if area > 0 {
+                face_normal
+            } else {
+                face_normal.scale( - 1)
+            }
+            let lambert = normal.dot(light)
             let shade = 0.38_f32 + if lambert > 0 {
                 lambert * 0.62_f32
             } else {
@@ -290,5 +297,7 @@ pub fn content_thumbnail(project: str, asset: ContentAsset, generation: u64) -> 
             }
         }
     }
-    ret ContentThumb { generation, project, asset.path, image }
+    ret ContentThumb {
+        generation, project, asset.path, image, ""
+    }
 }

@@ -31,6 +31,7 @@ pub struct ContentThumb {
     project: str
     path: str
     payload: str
+    error: str
 }
 pub struct SavedSearch {
     name: str
@@ -74,7 +75,7 @@ pub fn content_query_terms(query: str) -> Vec[str] {
     ret terms
 }
 fn type_term(kind: str, value: str) -> bool {
-    ret kind == value ||(value == "material" && kind == "material-graph") ||
+    ret kind == value ||(value == "material" && (kind == "material-graph" || kind == "material-instance")) ||
     (value == "obj" && kind == "mesh") ||(value == "png" && kind == "texture") ||
     (value == "bp" && kind == "blueprint") ||(value == "enq" && kind == "script") ||
     (match kind {
@@ -243,6 +244,8 @@ pub struct ContentBrowser {
     thumbnail_pending: usize
     thumbnail_published: u64
     dirty: bool
+    thumbnail_start: usize
+    thumbnail_end: usize
 }
 
 pub fn content_less(a: str, b: str) -> bool {

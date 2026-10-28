@@ -2,7 +2,8 @@
 
 import core::option::Option
 import mod::rhi::*
-import mod::texture_image::TextureImage
+import mod::texture_image::{TextureImage, HeightImage}
+import core::vec::Vec
 
 pub struct TextureUpload {
     texture: GpuTexture
@@ -42,6 +43,29 @@ impl for TextureUpload {
             submission.destroy() encoder.destroy() staging.destroy() texture.destroy()
             ret Option::None
         }
+        ret Option::Some(TextureUpload { texture, staging, encoder, submission })
+    }
+
+    /// R16_UNORM upload. Pairs are packed into aligned u32 staging words.
+    pub fn begin_height(device: GraphicsDevice, image: HeightImage) -> Option[TextureUpload] {
+        if !image.valid() { ret Option::None }
+        let mut packed = Vec[u32]::with_capacity((image.samples.len() + 1) / 2)
+        let mut i = 0_usize
+        while i < image.samples.len() {
+            let a = image.samples.get_unchecked_borrowed(i) as u32
+            let b = if i + 1 < image.samples.len() { image.samples.get_unchecked_borrowed(i + 1) as u32 } else { 0_u32 }
+            packed.push(a | (b << 16)) i += 2
+        }
+        let texture = device.create_texture_2d(image.width, image.height, 1, format_r16_unorm(), texture_sampled() | texture_transfer_destination())
+        // Older Vulkan packages conservatively validate uploads as RGBA8.
+        // Padding is unused by the R16 copy and preserves compatibility with them.
+        let staging = device.create_buffer((image.samples.len() as u64) * 4, buffer_transfer_source(), true)
+        let encoder = device.create_encoder()
+        if !texture.available() || !staging.available() || !encoder.available() || !staging.write_u32s(0, packed) || !encoder.transition_texture(texture, texture_layout_transfer_destination()) || !encoder.copy_buffer_to_texture(staging, texture, image.width, image.height, 0) || !encoder.transition_texture(texture, texture_layout_shader_read()) {
+            encoder.destroy() staging.destroy() texture.destroy() ret Option::None
+        }
+        let submission = encoder.submit()
+        if !submission.available() { submission.destroy() encoder.destroy() staging.destroy() texture.destroy() ret Option::None }
         ret Option::Some(TextureUpload { texture, staging, encoder, submission })
     }
 

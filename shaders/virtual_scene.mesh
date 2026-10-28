@@ -85,6 +85,10 @@ void main() {
     uint clusterBase = 64 + clusterIndex * 16;
     uint instanceBase = 64 + clusterCount * 16 +
         hierarchyCount * 12 + instanceIndex * 28;
+    if(valuef(instanceBase+19u)<.5) {
+        if(gl_LocalInvocationIndex==0)SetMeshOutputsEXT(0,0);
+        return;
+    }
     uint indexCount = uint(valuef(clusterBase + 8));
     uint triangleCount = indexCount / 3;
     uint firstIndex = uint(valuef(clusterBase + 9));

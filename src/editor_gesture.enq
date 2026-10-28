@@ -2,8 +2,10 @@
 import mod::editor_gizmo_handle::{gizmo_handle_components, gizmo_handle_vector, gizmo_handle_normal}
 import core::option::Option
 import core::vec::Vec
-import linalg::Vec3
+
 import std::math::tan
+
+import linalg::Vec3
 
 // Reduce by binary multiples of one turn: no native math library and no
 // float-to-integer conversion of an unbounded accumulated rotation. At most
@@ -199,7 +201,7 @@ pub struct GizmoSnap {
 
 impl for GizmoSnap {
     pub fn new() -> Self {
-        ret Self { true, true, true, 10, 10, 0.1 }
+        ret Self { true, true, true, 1_f32, 10_f32, 0.1_f32 }
     }
     pub fn enabled(self: Self, tool: str) -> bool {
         ret match tool {
@@ -333,7 +335,9 @@ impl for GizmoGesture {
     pub fn begin(tool: str, axis: u32, projection: GizmoProjection, pivot: Vec3,
         x: f32, y: f32, settings: GizmoSnap,) -> Self {
         let mut next = Self::idle()
-        if axis == 0 || axis > 7 || (tool == "rotate" && axis > 3) { ret next }
+        if axis == 0 || axis > 7 ||(tool == "rotate" && axis > 3) {
+            ret next
+        }
         next.tool = tool
         next.axis = axis
         next.projection = projection
@@ -371,8 +375,8 @@ impl for GizmoGesture {
             Option::None => {
             }
         }
-        if axis == 7 || (tool == "scale" && next.screen_axis.length() < 0.01) {
-            next.screen_axis = Vec3::new(0.70710678, -0.70710678, 0)
+        if axis == 7 ||(tool == "scale" && next.screen_axis.length() < 0.01) {
+            next.screen_axis = Vec3::new(0.70710678, - 0.70710678, 0)
         }
         match projection.plane_point(x, y, pivot, next.plane_normal) {
             Option::Some(point) => {
@@ -422,16 +426,31 @@ impl for GizmoGesture {
             match self.projection.plane_point(x, y, self.pivot, self.plane_normal) {
                 Some(point) => {
                     let delta = gizmo_handle_components(point.sub(self.start_point), self.axis)
-                        .add(if self.axis == 7 { self.projection.forward.scale(self.depth_offset) } else { Vec3::zero() })
+                    .add(if self.axis == 7 {
+                            self.projection.forward.scale(self.depth_offset)
+                        } else {
+                            Vec3::zero()
+                        }
+                    )
                     let next = Vec3::new(snap_delta(delta.x(), self.step, self.snapping),
-                        snap_delta(delta.y(), self.step, self.snapping), snap_delta(delta.z(), self.step, self.snapping))
+                        snap_delta(delta.y(), self.step, self.snapping), snap_delta(delta.z(), self.step, self.snapping),)
                     let changed = next.x() != self.translation.x() || next.y() != self.translation.y() || next.z() != self.translation.z()
                     self.translation = next
-                    self.raw = if self.axis > 3 { delta.length() } else { delta.dot(gesture_axis(self.axis)) }
-                    self.applied = if self.axis > 3 { next.length() } else { next.dot(gesture_axis(self.axis)) }
+                    self.raw = if self.axis > 3 {
+                        delta.length()
+                    } else {
+                        delta.dot(gesture_axis(self.axis))
+                    }
+                    self.applied = if self.axis > 3 {
+                        next.length()
+                    } else {
+                        next.dot(gesture_axis(self.axis))
+                    }
                     ret changed
                 }
-                None => { ret false }
+                None => {
+                    ret false
+                }
             }
         }
         let value = snap_delta(self.raw, self.step, self.snapping)
@@ -442,9 +461,17 @@ impl for GizmoGesture {
     /// Limit one shared delta, preserving the offsets of every selected scale.
     pub fn limit_scale(self: mut Self, smallest_start: f32) ->() {
         if self.axis > 3 {
-            let lower = if smallest_start > 0.1_f32 { 0.1_f32 / smallest_start - 1_f32 } else { 0_f32 }
+            let lower = if smallest_start > 0.1_f32 {
+                0.1_f32 / smallest_start - 1_f32
+            } else {
+                0_f32
+            }
             if self.applied < lower {
-                self.applied = if self.snapping { ((lower / self.step) as i64 as f32) * self.step } else { lower }
+                self.applied = if self.snapping {
+                    ((lower / self.step) as i64 as f32) * self.step
+                } else {
+                    lower
+                }
             }
             ret()
         }
@@ -472,13 +499,17 @@ impl for GizmoGesture {
     pub fn axis(self: Self) -> u32 {
         ret self.axis
     }
-    pub fn translation(self: Self) -> Vec3 { ret self.translation }
+    pub fn translation(self: Self) -> Vec3 {
+        ret self.translation
+    }
     /// The center move handle keeps its captured screen plane; the wheel adds depth.
     pub fn adjust_depth(self: mut Self, wheel: f32) ->() {
         if self.axis == 7 && self.tool == "move" {
             let distance = self.pivot.sub(self.projection.position).dot(self.projection.forward)
             self.depth_offset -= wheel * distance * 0.04
-            if self.depth_offset < 0.05 - distance { self.depth_offset = 0.05 - distance }
+            if self.depth_offset < 0.05 - distance {
+                self.depth_offset = 0.05 - distance
+            }
         }
         ret()
     }

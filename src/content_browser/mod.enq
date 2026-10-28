@@ -2,20 +2,22 @@
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::{copy_file, file_exists, mkdir_all, read_file, write_file_atomic}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
 import json::{Json, field, parse, stringify}
-import luma::{TextEditor, Rect, VirtualGrid, VirtualGridWindow}
+import luma::{Rect, TextEditor, VirtualGrid, VirtualGridWindow}
+
 import mod::files::*
+pub import mod::model::*
 import mod::thumbnail::content_thumbnail
+pub import mod::view::ContentIcons
 import refrain::automation_transport::automation_capability_token
 import refrain::blueprint::{BlueprintAsset, blueprint_parse, blueprint_stringify}
 import refrain::material_graph::{MaterialGraph, material_graph_stringify}
 import refrain::texture_asset::{TextureLoad, load_material_texture}
-import std::os::{read_file, write_file_atomic, mkdir_all, file_exists, copy_file}
-import std::thread::JoinHandle
-import std::time::perf_counter_ms
-pub import mod::model::*
-
-pub import mod::view::ContentIcons
 
 impl for ContentBrowser {
     pub fn new() -> Self {
@@ -24,7 +26,7 @@ impl for ContentBrowser {
             Vec[str]::new(), "", "", vec!["Content", "@engine", "@engine/Primitives"], Vec[str]::new(), Vec[SavedSearch]::new(), Vec[str]::new(),
             TextEditor::new(""), false, false, false, "grid", 96, "name", false, true, false,
             Rect::new(0, 0, 900, 150), 0, true, "", false, 0, 0, "", 8, 8, 0, TextEditor::new(""), "", "", "", "", "", false, "", 0, 0, false,
-            "", 0, Vec[ContentEdit]::new(), Vec[ContentEdit]::new(), Option::None, false, Vec[ContentThumb]::new(), Option::None, 0, 0, true
+            "", 0, Vec[ContentEdit]::new(), Vec[ContentEdit]::new(), Option::None, false, Vec[ContentThumb]::new(), Option::None, 0, 0, true, 0_usize, 0_usize
         }
     }
     pub fn busy(self: Self) -> bool {
@@ -130,7 +132,7 @@ impl for ContentBrowser {
         if finished {
             let thumb = match self.thumbnail {
                 Some(worker) => worker.join() None => ContentThumb {
-                    0, "", "", ""
+                    0, "", "", "", ""
                 }
             }
             self.thumbnail = Option[JoinHandle[ContentThumb]]::None
@@ -158,7 +160,7 @@ impl for ContentBrowser {
             for index in first..limited_end {
                 match self.visible.get(index) {
                     Some(asset) => {
-                        if (asset.kind == "texture" || asset.kind == "mesh" || asset.kind == "material" || asset.kind == "material-graph") && !self.has_thumbnail(asset.path) {
+                        if (asset.kind == "texture" || asset.kind == "mesh" || asset.kind == "material-graph") && !self.has_thumbnail(asset.path) {
                             self.thumbnail = Option[JoinHandle[ContentThumb]]::Some(spawn content_thumbnail(self.project, asset, self.generation)) break
                         }
                     }
@@ -166,6 +168,29 @@ impl for ContentBrowser {
                     }
                 }
             }
+        }
+        let current = self.window()
+        if current.start() != self.thumbnail_start || current.end() != self.thumbnail_end {
+            self.thumbnail_start = current.start() self.thumbnail_end = current.end()
+            let mut cold = Vec[ContentThumb]::new() let mut hot = Vec[ContentThumb]::new()
+            let first = current.start() let end = current.end()
+            for thumb in self.thumbnails {
+                let mut visible = false
+                for index in first..end {
+                    if self.visible.get(index).unwrap_or(ContentAsset::new("", "", "", 0_u64)).path == thumb.path {
+                        visible = true break
+                    }
+                }
+                if visible {
+                    hot.push(thumb)
+                } else {
+                    cold.push(thumb)
+                }
+            }
+            for thumb in hot {
+                cold.push(thumb)
+            }
+            self.thumbnails = cold
         }
         // Publish several completed previews together. Worker polling itself
         // must not invalidate the retained browser or restart its CSS cascade.
@@ -183,6 +208,43 @@ impl for ContentBrowser {
         }
         ret Option::None
     }
+    pub fn next_material_thumbnail(self: Self) -> Option[ContentAsset] {
+        if self.view != "grid" || self.scan.is_some() {
+            ret Option::None
+        }
+        let visible = self.window()
+        let first = visible.start() let end = visible.end()
+        for index in first..end {
+            match self.visible.get(index) {
+                Some(asset) => {
+                    if (asset.kind == "material" || asset.kind == "material-instance") && !self.has_thumbnail(asset.path) {
+                        ret Option::Some(asset)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret Option::None
+    }
+    pub fn publish_thumbnail(self: mut Self, thumb: ContentThumb) ->() {
+        if thumb.generation != self.generation || thumb.project != self.project || self.find(thumb.path).is_none() {
+            ret()
+        }
+        let mut next = Vec[ContentThumb]::new()
+        for previous in self.thumbnails {
+            if previous.path != thumb.path {
+                next.push(previous)
+            }
+        }
+        if next.len() >= 256 {
+            let mut retained = Vec[ContentThumb]::new() for i in 1_usize..next.len() {
+                retained.push(next.get_unchecked_borrowed(i))
+            }
+            next = retained
+        }
+        next.push(thumb) self.thumbnails = next self.thumbnail_pending += 1 self.dirty = true
+    }
     pub fn has_thumbnail(self: Self, path: str) -> bool {
         for t in self.thumbnails {
             if t.path == path {
@@ -190,6 +252,14 @@ impl for ContentBrowser {
             }
         }
         ret false
+    }
+    pub fn thumbnail_error(self: Self, path: str) -> str {
+        for thumbnail in self.thumbnails {
+            if thumbnail.path == path {
+                ret thumbnail.error
+            }
+        }
+        ret ""
     }
     pub fn thumbnail_payload(self: Self, path: str) -> str {
         for t in self.thumbnails {
@@ -224,7 +294,7 @@ impl for ContentBrowser {
             } elif self.directory == "@favorites" {
                 content_contains(self.favorites, asset.path)
             } elif self.directory == "@engine" {
-                asset.path == "@engine/Primitives"
+                asset.parent() == "@engine"
             } elif self.recursive || terms.len() > 0 {
                 asset.path != self.directory && content_under(asset.path, self.directory)
             } else {
@@ -232,7 +302,7 @@ impl for ContentBrowser {
             }
             let mut kind = self.types.len() == 0 || asset.kind == "folder"
             for value in self.types {
-                kind = kind || asset.kind == value ||(value == "material" && asset.kind == "material-graph")
+                kind = kind || asset.kind == value ||(value == "material" &&(asset.kind == "material-graph" || asset.kind == "material-instance"))
             }
             if source && kind && content_query_matches(asset, terms) {
                 visible.push(asset)

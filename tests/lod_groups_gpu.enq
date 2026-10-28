@@ -46,7 +46,7 @@ fn main() -> u32 {
             let gi_history = device.create_buffer(16_u64, buffer_storage(), true)
             gi_scene.write_f32(0_u64, 0.0_f32)
             gi_history.write_f32(12_u64, 0.0_f32)
-            let virtual_scene = GpuVirtualGeometry::create_from_mesh_textured_prepared(
+            let mut virtual_scene = GpuVirtualGeometry::create_from_mesh_textured_prepared(
                 device, target, data, geometry, 4_usize,
                 gi_scene, gi_surfaces, gi_history, vec![4294967295_u32], 1_u32, 1_u32,)
             let target_ready = target.available()

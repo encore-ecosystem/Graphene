@@ -1,6 +1,6 @@
 // Graphene VG skinning ABI. Static variants declare no additional descriptors.
 #ifdef GRAPHENE_SKINNED
-struct SkinDeformedVertex {vec4 position,normal,tangent,previous_position;};
+struct SkinDeformedVertex {vec4 position,normal,tangent,previous_position,previous_normal;};
 struct SkinDynamicBound {vec4 center_radius,minimum,maximum;};
 layout(set=0,binding=12,std430) readonly buffer SkinVertexCache {SkinDeformedVertex values[];} skin_cache;
 layout(set=0,binding=13,std430) readonly buffer SkinConfiguration {

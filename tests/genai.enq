@@ -1,0 +1,118 @@
+import core::option::Option
+import core::vec::Vec
+
+import graphene::{EditorState, GrapheneCommand, Scene, SceneActor, SceneAsset, StandardMaterial, Transform}
+import graphene::command_bus::ActorMaterialCommand
+import graphene::genai::importer::{GeneratedMap, validate_maps}
+import graphene::genai::model::{compatible, manifest_valid, value}
+import graphene::material_asset::{material_asset_parse, material_asset_stringify}
+import graphene::material_textures::pack_orm
+import graphene::texture_asset::TextureImage
+import json::{Json, field}
+fn main() -> u32 {
+    let path = "Content/Materials/Generated/Stone.gmaterial"
+    let material = StandardMaterial::default().with_roughness_texture("Content/Textures/Generated/Stone/roughness.gtexture").with_metallic_texture("Content/Textures/Generated/Stone/metallic.gtexture").with_height_texture("Content/Textures/Generated/Stone/height.gtexture")
+    let restored = match material_asset_parse(material_asset_stringify(material)) {
+        Some(m) => m None => {
+            ret 1
+        }
+    }
+    if restored.roughness_texture() != material.roughness_texture() || restored.metallic_texture() != material.metallic_texture() || restored.height_texture() != material.height_texture() {
+        ret 2
+    }
+    let old = "{\"format\":\"graphene-material\",\"version\":4,\"base_color\":[1,1,1],\"metallic\":0,\"roughness\":0.5,\"unlit\":false,\"double_sided\":false}"
+    match material_asset_parse(old) {
+        Some(m) => {
+            if m.roughness_texture() != "" || m.metallic_texture() != "" {
+                ret 3
+            }
+        }
+        None => {
+            ret 4
+        }
+    }
+    let rough = TextureImage { 2_u32, 1_u32, vec![4278190080_u32, 4278190335_u32] }
+    let metal = TextureImage { 1_u32, 1_u32, vec![4278190208_u32] }
+    let orm = pack_orm(rough, metal, 2, 1)
+    if ((orm.pixels.get_unchecked_borrowed(0) >> 8) & 255_u32) != 0 ||((orm.pixels.get_unchecked_borrowed(1) >> 8) & 255_u32) != 255 ||((orm.pixels.get_unchecked_borrowed(1) >> 16) & 255_u32) != 128 {
+        ret 5
+    }
+    let mut scene = Scene::new() let actor = scene.create_entity("Stone", Transform::identity())
+    let mut state = EditorState::new(scene)
+    if !state.execute(GrapheneCommand::SetMaterial(ActorMaterialCommand { actor, path })).success() {
+        ret 6
+    }
+    if state.scene().get(actor).unwrap_or(scene.entities().get_unchecked_borrowed(0)).material_path() != path {
+        ret 7
+    }
+    if !state.execute(GrapheneCommand::Undo).success() {
+        ret 8
+    }
+    match state.scene().get(actor) {
+        Some(e) => {
+            if e.material_path() != "" {
+                ret 9
+            }
+        }
+        None => {
+            ret 10
+        }
+    }
+    if !state.execute(GrapheneCommand::Redo).success() {
+        ret 11
+    }
+    let mut asset = SceneAsset::new() asset.add(SceneActor::new("Stone", "cube", Transform::identity()).with_identity(actor).with_material_path(path))
+    let parsed = match SceneAsset::parse(asset.stringify()) {
+        Some(s) => s None => {
+            ret 12
+        }
+    }
+    if parsed.version() != 8 || parsed.actor(0).unwrap_or(SceneActor::new("", "", Transform::identity())).material_path() != path {
+        ret 13
+    }
+    if scene.set_material_path(actor, "../../secret.gmaterial") {
+        ret 14
+    }
+    let model = value("{\"id\":\"test\",\"capability\":\"material.pbr-v1\",\"inputs\":[\"text\",\"image\"],\"resolutions\":[512],\"qualities\":[\"standard\"],\"maps\":[\"basecolor\",\"normal\",\"roughness\",\"metallic\"]}")
+    if !compatible(model) || compatible(value("{}")) || manifest_valid(value("{}")) {
+        ret 15
+    }
+    // Height is optional, but a supplied fifth map must agree with the full set.
+    let mut entries = Vec[Json]::new()
+    let mut maps = Vec[GeneratedMap]::new()
+    for role in vec!["basecolor", "normal", "roughness", "metallic", "height", "ao"] {
+        entries.push(Json::Object(vec![field("role", Json::String(role)), field("sha256", Json::String("0000000000000000000000000000000000000000000000000000000000000000")), field("format", Json::String(if role == "height" {
+                                "png-gray16"
+                            } else {
+                                "png-rgb8"
+                            }
+                        )), field("color_space", Json::String(if role == "basecolor" {
+                                "srgb"
+                            } else {
+                                "linear"
+                            }
+                        ))]))
+        maps.push(GeneratedMap {
+                role, "", TextureImage { 1_u32, 1_u32, vec![4294967295_u32] }
+            }
+        )
+    }
+    let manifest = Json::Object(vec![field("version", Json::Number("1")), field("normal_convention", Json::String("opengl")), field("maps", Json::Array(entries))])
+    if validate_maps(manifest, maps) != "" {
+        ret 16
+    }
+    maps.set(4, GeneratedMap {
+            "height", "", TextureImage {
+                2_u32, 1_u32, vec![4294967295_u32, 4294967295_u32]
+            }
+        }
+        ,
+    )
+    if validate_maps(manifest, maps) == "" {
+        ret 17
+    }
+    if validate_maps(manifest, Vec[GeneratedMap]::new()) == "" {
+        ret 18
+    }
+    ret 0
+}

@@ -26,6 +26,10 @@ pub struct AddActorCommand {
     asset_name: str
     component: SceneComponent
 }
+pub struct ActorMaterialCommand {
+    actor: u64
+    path: str
+}
 pub struct ActorPhysicsCommand {
     actor: u64
     value: PhysicsComponent
@@ -118,6 +122,7 @@ pub enum GrapheneCommand {
     SetParent(ActorParentCommand)
     Rename(ActorNameCommand)
     SetVisibility(ActorVisibilityCommand)
+    SetMaterial(ActorMaterialCommand)
     SetPhysics(ActorPhysicsCommand)
     SetComponent(ActorComponentCommand)
     SetTransform(ActorTransformCommand)
@@ -161,6 +166,7 @@ enum CommandEdit {
     Parent(ActorParentEdit)
     Rename(ActorNameCommand)
     Visibility(ActorVisibilityCommand)
+    Material(ActorMaterialCommand)
     Physics(ActorPhysicsCommand)
     Component(ActorComponentCommand)
     Transform(ActorTransformCommand)
@@ -791,7 +797,7 @@ impl for EditorState {
         }
         for command in commands {
             let allowed = match command {
-                GrapheneCommand::AddActor(_) => true GrapheneCommand::DuplicateActor(_) => true GrapheneCommand::DeleteActor(_) => true GrapheneCommand::SetParent(_) => true GrapheneCommand::Rename(_) => true GrapheneCommand::SetVisibility(_) => true GrapheneCommand::SetPhysics(_) => true GrapheneCommand::SetComponent(_) => true GrapheneCommand::SetTransform(_) => true GrapheneCommand::SetTransforms(_) => true _ => false
+                GrapheneCommand::AddActor(_) => true GrapheneCommand::DuplicateActor(_) => true GrapheneCommand::DeleteActor(_) => true GrapheneCommand::SetParent(_) => true GrapheneCommand::Rename(_) => true GrapheneCommand::SetVisibility(_) => true GrapheneCommand::SetMaterial(_) => true GrapheneCommand::SetPhysics(_) => true GrapheneCommand::SetComponent(_) => true GrapheneCommand::SetTransform(_) => true GrapheneCommand::SetTransforms(_) => true _ => false
             }
             if !allowed {
                 ret CommandResult::error(self.revision, "Only scene edits can be batched")
@@ -990,7 +996,7 @@ impl for EditorState {
                         self.scene.set_visible(actor, source.visible())
                         self.scene.set_parent(actor, source.parent())
                         self.scene.set_blueprint(actor, source.blueprint())
-                        self.scene.set_component(actor, source.component()) self.scene.set_physics(actor, source.physics())
+                        self.scene.set_component(actor, source.component()) self.scene.set_physics(actor, source.physics()) self.scene.set_material_path(actor, source.material_path())
                         self.set_asset_name(actor, self.asset_name(value.actor()))
                         ret self.commit(CommandEdit::RemoveActor(ActorCommand::new(actor)),
                             "scene.actor.duplicated", actor,)
@@ -1076,6 +1082,25 @@ impl for EditorState {
                         ret self.commit(inverse, "scene.actor.visibility-changed", value.actor())
                     }
                     Option::None => {
+                        ret CommandResult::error(self.revision, "Actor was not found")
+                    }
+                }
+            }
+            GrapheneCommand::SetMaterial(value) => {
+                if self.simulation_mode != "" {
+                    ret CommandResult::error(self.revision, "Stop Play before editing materials")
+                }
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if !self.scene.set_material_path(value.actor, value.path) {
+                            ret CommandResult::error(self.revision, "Invalid material reference")
+                        }
+                        ret self.commit(CommandEdit::Material(ActorMaterialCommand {
+                                    value.actor, actor.material_path()
+                                }
+                            ), "scene.actor.material-changed", value.actor)
+                    }
+                    None => {
                         ret CommandResult::error(self.revision, "Actor was not found")
                     }
                 }
@@ -1699,7 +1724,7 @@ impl for EditorState {
                     let entity = snapshot.entity
                     self.scene.create_entity_with_id(entity.id(), entity.name(), entity.transform())
                     self.scene.set_visible(entity.id(), entity.visible()) self.scene.set_renderable(entity.id(), entity.renderable())
-                    self.scene.set_component(entity.id(), entity.component()) self.scene.set_physics(entity.id(), entity.physics()) self.set_asset_name(entity.id(), snapshot.asset_name)
+                    self.scene.set_component(entity.id(), entity.component()) self.scene.set_physics(entity.id(), entity.physics()) self.scene.set_material_path(entity.id(), entity.material_path()) self.set_asset_name(entity.id(), snapshot.asset_name)
                     ids.push(entity.id())
                 }
                 ret Option[CommandEdit]::Some(CommandEdit::RemoveActors(ids))
@@ -1725,7 +1750,7 @@ impl for EditorState {
                     self.scene.set_visible(entity.id(), entity.visible())
                     self.scene.set_renderable(entity.id(), entity.renderable())
                     self.scene.set_blueprint(entity.id(), entity.blueprint())
-                    self.scene.set_component(entity.id(), entity.component()) self.scene.set_physics(entity.id(), entity.physics())
+                    self.scene.set_component(entity.id(), entity.component()) self.scene.set_physics(entity.id(), entity.physics()) self.scene.set_material_path(entity.id(), entity.material_path())
                     self.set_asset_name(entity.id(), value.asset_name)
                     self.scene.set_parent(entity.id(), entity.parent())
                     for child in value.children {
@@ -1772,6 +1797,20 @@ impl for EditorState {
                         }
                     }
                     Option::None => {
+                    }
+                }
+            }
+            CommandEdit::Material(value) => {
+                match self.scene.get(value.actor) {
+                    Some(actor) => {
+                        if self.scene.set_material_path(value.actor, value.path) {
+                            ret Option::Some(CommandEdit::Material(ActorMaterialCommand {
+                                        value.actor, actor.material_path()
+                                    }
+                                ))
+                        }
+                    }
+                    None => {
                     }
                 }
             }

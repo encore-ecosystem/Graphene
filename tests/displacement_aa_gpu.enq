@@ -1,0 +1,238 @@
+//! Displaced lighting survives target/sample recreation and per-view pipeline generations.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::println
+
+import graphene::displacement::ray_scene::DisplacementRayScene
+import graphene::displacement::renderer::DisplacementRenderer
+import graphene::dynamic_gi::{GpuDynamicGi, SurfaceCacheSample}
+import graphene::ray_lighting::RayLighting
+import graphene::rhi::*
+import graphene::scene::camera::PerspectiveCamera
+import graphene::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
+import graphene::standard_material::{DisplacementSettings, StandardMaterial}
+import graphene::temporal_view::TemporalView
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::{HeightImage, TextureImage}
+import linalg::{Mat4, Vec3}
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    let mut chosen = Option[AdapterInfo]::None
+    for a in instance.adapters() {
+        if a.capabilities().ray_query() {
+            chosen = Option[AdapterInfo]::Some(a)
+        }
+    }
+    let adapter = match chosen {
+        Some(a) => a None => {
+            println("SKIP: hardware ray query unavailable") ret 77
+        }
+    }
+    let device = instance.create_device_with_features(adapter, DeviceFeatures::ray_query(), DeviceFeatures::none())
+    let mut target = device.create_render_target(RenderTargetDescriptor::new(128, 128, format_rgba8_unorm()))
+    let upload = match TextureUpload::begin_linear(device, TextureImage {
+            1, 1, vec![4294967295_u32]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 1
+        }
+    }
+    if !upload.wait() {
+        ret 2
+    }
+    let white = upload.finish()
+    let h = match TextureUpload::begin_height(device, HeightImage { 1, 1, vec![65535_u16] }) {
+        Some(u) => u None => {
+            ret 3
+        }
+    }
+    if !h.wait() {
+        ret 4
+    }
+    let height = h.finish()
+    let sampler = device.create_repeat_sampler()
+    let mut vertices = Vec[f32]::new()
+    for p in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
+        for v in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1) * 0.5_f32,(p.y() + 1) * 0.5_f32] {
+            vertices.push(v)
+        }
+    }
+    let mesh = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
+    let mut tilted = Vec[f32]::new()
+    for i in 0_usize..4_usize {
+        for k in 0_usize..11_usize {
+            tilted.push(if k == 3 {
+                    0.5_f32
+                } elif k == 5 {
+                    0.8660254_f32
+                } else {
+                    vertices.get_unchecked_borrowed(i * 11 + k)
+                }
+            )
+        }
+    }
+    let mirror_mesh = device.create_mesh(tilted, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
+    let camera = PerspectiveCamera::new(Vec3::new(0, 0, 3), Vec3::zero(), 1, 0.1_f32, 100)
+    let history = TemporalView::new()
+    let receiver = RenderItem::new(1, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::identity())
+    let caster = RenderItem::new(2, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::translation(Vec3::new(0.5_f32, 0, 0.6_f32)).mul(Mat4::scale(Vec3::new(0.18_f32, 0.18_f32, 1))))
+    let mut renderer = DisplacementRenderer::new()
+    let mut rays = DisplacementRayScene::new() let mut lighting = RayLighting::new()
+    let mut gi = GpuDynamicGi::create(device, 8, 8)
+    let budget = renderer.budget()
+    let mut values = Vec[f32]::new() for _ in 0_usize..3172_usize {
+        values.push(0_f32)
+    }
+    for i in 0_usize..16_usize {
+        values.set(i, camera.view_projection(1).values().get_unchecked_borrowed(i))
+    }
+    values.set(16, - 1) values.set(18, - 1)
+    for i in 20_usize..24_usize {
+        values.set(i, 1)
+    }
+    for i in 24_usize..27_usize {
+        values.set(i, 0.1_f32)
+    }
+    values.set(30, 3)
+    let dummy = device.create_buffer(64, buffer_storage(), true)
+    dummy.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32])
+    let gi_scene = device.create_buffer(64, buffer_storage(), true)
+    let gi_surfaces = device.create_buffer(48, buffer_storage(), true)
+    let gi_history = device.create_buffer(16, buffer_storage(), true)
+    gi_scene.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32])
+    gi_history.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32])
+    let mut uniforms = Vec[GpuBuffer]::new() let mut scene = Vec[Vec[GpuBuffer]]::new()
+    for _ in 0_usize..target.frames_in_flight() as usize {
+        let u = device.create_buffer(12688, buffer_uniform(), true) u.write_f32s(0, values) uniforms.push(u) scene.push(vec![u, dummy, gi_scene, gi_surfaces, gi_history])
+    }
+    let mut gi_samples = Vec[f32]::new()
+    for step in 0_usize..12_usize {
+        if step > 0 && step % 3 == 0 {
+            if !target.wait_readback() || !target.destroy() {
+                ret 18
+            }
+            target = device.create_render_target(RenderTargetDescriptor::new(128, 128, format_rgba8_unorm()).with_samples(if step == 3 || step == 9 {
+                        4_u32
+                    } else {
+                        1_u32
+                    }
+                ))
+        }
+        let consumer = if step >= 9 {
+            4_u32
+        } else {
+            0_u32
+        }
+        if step == 3 {
+            gi_scene.write_f32s(0, vec![1_f32, 0_f32, 0_f32, 80_f32, 0.1_f32, 0.1_f32, 0.1_f32, 0_f32, 0_f32, 1_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32, 0_f32])
+            gi_surfaces.write_f32s(0, vec![1_f32, 0_f32, 0.6_f32, 1_f32, 0_f32, 0_f32, - 1_f32, 0_f32, 0.8_f32, 0.2_f32, 0.1_f32, 1_f32])
+            gi_history.write_f32s(0, vec![0.2_f32, 0.3_f32, 0.4_f32, 1_f32])
+        }
+        let frame = target.acquire_frame() renderer.begin(consumer)
+        let material = StandardMaterial::new(Vec3::new(1, 1, 1), 0, 1).with_double_sided().with_displacement(DisplacementSettings {
+                true, 0, 0.5_f32, 1
+            }
+        )
+        let raised = material.with_displacement(DisplacementSettings {
+                true, if step == 1 || step == 4 || step == 7 || step == 10 {
+                    0.6_f32
+                } else {
+                    0_f32
+                }
+                , 0.5_f32, 1
+            }
+        )
+        let reflected_material = StandardMaterial::new(Vec3::new(1, 1, 1), 1, 0).with_double_sided().with_displacement(DisplacementSettings {
+                true, 0, 0.5_f32, 1
+            }
+        )
+        let mirror = RenderItem::new(1, Renderable::new(MeshId::new(2), MaterialId::new(1)), Mat4::identity())
+        let reflection_caster = RenderItem::new(2, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::translation(Vec3::new(1, 0, 0.6_f32)).mul(Mat4::scale(Vec3::new(0.18_f32, 0.18_f32, 1))))
+        let gi_caster = RenderItem::new(2, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::translation(Vec3::new(0, 0, 0.6_f32)).mul(Mat4::scale(Vec3::new(1.8_f32, 1.8_f32, 1))))
+
+        for i in 0_usize..2_usize {
+            if !renderer.prepare_batch(device, frame, target, "lighting-" + i.fmt(), consumer, if i == 0 &&(step >= 3 && step < 6) {
+                    2_u64
+                } else {
+                    1_u64
+                }
+                , if i == 0 &&(step >= 3 && step < 6) {
+                    mirror_mesh
+                } else {
+                    mesh
+                }
+                , Option::None, if i == 0 {
+                    if (step >= 3 && step < 6) {
+                        reflected_material
+                    } else {
+                        material
+                    }
+                } else {
+                    raised
+                }
+                , vec![white, white, white, height], sampler, white, scene, vec![if i == 0 {
+                        if (step >= 3 && step < 6) {
+                            mirror
+                        } else {
+                            receiver
+                        }
+                    } else {
+                        if (step >= 3 && step < 6) {
+                            reflection_caster
+                        } elif step >= 6 && step < 9 {
+                            gi_caster
+                        } else {
+                            caster
+                        }
+                    }
+                ], vec![0_u32], camera.position(), camera.view_projection(1), history, 128, 128, false, false, 1, Vec[u64]::new(), Option::None,) {
+                println(renderer.error()) ret 5
+            }
+        }
+        let proxies = renderer.ray_instances_for(device, frame, consumer)
+        if proxies.len() != 2 {
+            println(renderer.error()) ret 6
+        }
+        let mut structures = Vec[AccelerationStructure]::new() let mut transforms = Vec[Mat4]::new() let mut key = "scene"
+        for proxy in proxies {
+            structures.push(proxy.acceleration) transforms.push(proxy.world) key += proxy.generation
+        }
+        let tlas = rays.prepare(device, frame, structures, transforms, key, budget)
+        if !tlas.available() {
+            println(rays.error()) ret 7
+        }
+        if step >= 6 && step < 9 &&(!gi.bind_ray_scene(tlas) || !gi.record_ray_query(frame, vec![SurfaceCacheSample::world_probe(Vec3::zero())], Vec3::new(1, 1, 1), 0.75_f32, 0)) {
+            ret 14
+        }
+        let view = lighting.prepare(device, frame, tlas, Vec3::new(0.1_f32, 0.1_f32, 0.1_f32))
+        if !view.available() || !renderer.prepare_ray_lighting(device, target, frame, consumer, view) {
+            println(lighting.error() + renderer.error()) ret 8
+        }
+        let pass = frame.begin_render_pass(renderer.pipeline(consumer), 0, 0, 0, 1)
+        if !renderer.draw(pass, frame.slot(), consumer) || !pass.end() || !frame.present() || !target.wait_readback() {
+            println(frame.error()) ret 9
+        }
+        if step >= 6 && step < 9 {
+            let value = gi.radiance(0).x() gi_samples.push(value) println("Displaced GI probe " + step.fmt() + ": " + value.fmt())
+        }
+        println("Displaced ray AA frame " + step.fmt() + " target signature " + target.render_signature().fmt())
+        frame.destroy()
+    }
+    if gi_samples.len() != 3 || !(gi_samples.get_unchecked_borrowed(0) > 0.82_f32 && gi_samples.get_unchecked_borrowed(0) < 0.85_f32) || gi_samples.get_unchecked_borrowed(1) < 0.99_f32 || !(gi_samples.get_unchecked_borrowed(2) > 0.82_f32 && gi_samples.get_unchecked_borrowed(2) < 0.85_f32) {
+        ret 15
+    }
+    if !gi.destroy() {
+        ret 16
+    }
+    if !rays.destroy(budget) || !lighting.destroy() || !renderer.destroy() || budget.used() != 0 {
+        ret 11
+    }
+    for u in uniforms {
+        u.destroy()
+    }
+    dummy.destroy() gi_scene.destroy() gi_surfaces.destroy() gi_history.destroy() mirror_mesh.destroy() mesh.destroy() sampler.destroy() height.destroy() white.destroy() target.destroy() device.destroy() instance.destroy()
+    println("Displacement ray lighting: repeated single/MSAA4 target recreation with the same caller keys, GI, preview consumer and GPU retirement: PASS") ret 0
+}

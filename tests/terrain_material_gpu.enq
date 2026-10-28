@@ -1,0 +1,149 @@
+//! Three material layers shade and displace the same procedural GPU surface.
+import core::option::Option
+import core::vec::Vec
+
+import std::io::println
+
+import graphene::displacement::renderer::DisplacementRenderer
+import graphene::displacement::terrain_source::TerrainPatchMaterial
+import graphene::rhi::*
+import graphene::scene::camera::PerspectiveCamera
+import graphene::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
+import graphene::standard_material::{DisplacementSettings, StandardMaterial}
+import graphene::temporal_view::TemporalView
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::{HeightImage, TextureImage}
+import linalg::{Mat4, Vec3}
+extern fn encore_str_from_buffer(data: u8*, count: usize) -> str
+fn main() -> u32 {
+    let instance = GraphicsInstance::create() let adapter = match instance.preferred_adapter() {
+        Some(a) => a None => {
+            ret 1
+        }
+    }
+    let device = instance.create_device(adapter) let target = device.create_offscreen_target(128, 128)
+    let upload = match TextureUpload::begin_linear(device, TextureImage {
+            1, 1, vec![4294967295_u32]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 2
+        }
+    }
+    if !upload.wait() {
+        ret 3
+    }
+    let white = upload.finish()
+    let height_upload = match TextureUpload::begin_height(device, HeightImage {
+            1, 1, vec![65535_u16]
+        }
+        ,
+    ) {
+        Some(u) => u None => {
+            ret 4
+        }
+    }
+    if !height_upload.wait() {
+        ret 5
+    }
+    let height = height_upload.finish() let sampler = device.create_repeat_sampler()
+    let mut weights = Vec[GpuTexture]::new()
+    for pixel in vec![4278190335_u32, 4278255360_u32, 4294901760_u32, 4278222720_u32] {
+        let weight = match TextureUpload::begin_linear(device, TextureImage { 1, 1, vec![pixel] }) {
+            Some(u) => u None => {
+                ret 6
+            }
+        }
+        if !weight.wait() {
+            ret 7
+        }
+        weights.push(weight.finish())
+    }
+    let mut vertices = Vec[f32]::new()
+    for p in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
+        for v in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1) * 0.5_f32,(p.y() + 1) * 0.5_f32] {
+            vertices.push(v)
+        }
+    }
+    let mesh = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
+    let mut parameters = Vec[f32]::new() for _ in 0_usize..3172_usize {
+        parameters.push(0_f32)
+    }
+    parameters.set(18, - 1) parameters.set(20, 1) parameters.set(21, 1) parameters.set(22, 1) parameters.set(23, 1) parameters.set(30, 3)
+    let mut buffers = Vec[Vec[GpuBuffer]]::new() let mut uniforms = Vec[GpuBuffer]::new()
+    let dummy = device.create_buffer(16, buffer_storage(), true) dummy.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32])
+    for _ in 0_usize..target.frames_in_flight() as usize {
+        let buffer = device.create_buffer(12688, buffer_uniform(), true) buffer.write_f32s(0, parameters) uniforms.push(buffer) buffers.push(vec![buffer, dummy, dummy, dummy, dummy])
+    }
+    let mut layers = Vec[StandardMaterial]::new()
+    for i in 0_usize..3_usize {
+        let color = if i == 0 {
+            Vec3::new(1, 0, 0)
+        } elif i == 1 {
+            Vec3::new(0, 1, 0)
+        } else {
+            Vec3::new(0, 0, 1)
+        }
+        layers.push(StandardMaterial::new(color, 0, 1).with_unlit().with_height_texture("Content/Height.gtexture").with_displacement(DisplacementSettings {
+                    true, if i == 0 {
+                        0_f32
+                    } elif i == 1 {
+                        0.6_f32
+                    } else {
+                        0.2_f32
+                    }
+                    , 0.5_f32, 1
+                }
+            ))
+    }
+    let mut textures = Vec[GpuTexture]::new() for _ in 0_usize..3_usize {
+        textures.push(white) textures.push(white) textures.push(white) textures.push(height)
+    }
+    let primary = StandardMaterial::default().with_double_sided().with_displacement(DisplacementSettings {
+            true, 0.6_f32, 0.5_f32, 1
+        }
+    )
+    let camera = PerspectiveCamera::new(Vec3::new(0, 0, 3), Vec3::zero(), 1, 0.1_f32, 100) let history = TemporalView::new()
+    let mut renderer = DisplacementRenderer::new() let mut areas = Vec[usize]::new()
+    let item = RenderItem::new(1, Renderable::new(MeshId::new(1), MaterialId::new(1)), Mat4::identity())
+    for i in 0_usize..4_usize {
+        let frame = target.acquire_frame() renderer.begin(0)
+        let terrain = TerrainPatchMaterial {
+            layers, textures, weights.get_unchecked_borrowed(i), 2, vec![1_f32, 1_f32, 1_f32]
+        }
+        if !renderer.prepare_terrain_batch(device, frame, target, "terrain-" + i.fmt(), 0, 1, mesh, Option::None, primary, vec![white, white, white, height], sampler, white, buffers, vec![item], vec![0_u32], camera.position(), camera.view_projection(1), history, 128, 128, false, false, 1, Vec[u64]::new(), Option::None, terrain) {
+            println(renderer.error()) ret 8
+        }
+        let pass = frame.begin_render_pass(renderer.pipeline(0), 0, 0, 0, 1)
+        if !renderer.draw(pass, frame.slot(), 0) || !pass.end() || !frame.present() || !target.wait_readback() {
+            println(frame.error()) ret 9
+        }
+        let image = unsafe {
+            encore_str_from_buffer(target.pixels() as u8*, 65536)
+        }
+        let center =(64 * 128 + 64) * 4 let red = image.byte_at(center + 2) let green = image.byte_at(center + 1) let blue = image.byte_at(center)
+        if (i == 0 &&(red < 200 || green > 10 || blue > 10)) ||(i == 1 &&(green < 200 || red > 10 || blue > 10)) ||(i == 2 &&(blue < 200 || red > 10 || green > 10)) ||(i == 3 &&(red < 100 || green < 100 || blue > 10)) {
+            println("Incorrect terrain layer color") ret 10
+        }
+        let mut area = 0_usize for pixel in 0_usize..16384_usize {
+            if image.byte_at(pixel * 4) > 10 || image.byte_at(pixel * 4 + 1) > 10 || image.byte_at(pixel * 4 + 2) > 10 {
+                area += 1
+            }
+        }
+        areas.push(area) println("Terrain layer " + i.fmt() + ": pixels=" + area.fmt()) frame.destroy()
+    }
+    if areas.get_unchecked_borrowed(0) >= areas.get_unchecked_borrowed(2) || areas.get_unchecked_borrowed(2) >= areas.get_unchecked_borrowed(1) || areas.get_unchecked_borrowed(3) <= areas.get_unchecked_borrowed(0) || areas.get_unchecked_borrowed(3) >= areas.get_unchecked_borrowed(1) {
+        ret 11
+    }
+    if !renderer.destroy() || renderer.memory_bytes() != 0 {
+        ret 12
+    }
+    for buffer in uniforms {
+        buffer.destroy()
+    }
+    dummy.destroy() mesh.destroy() sampler.destroy() height.destroy() white.destroy() for texture in weights {
+        texture.destroy()
+    }
+    target.destroy() device.destroy() instance.destroy() ret 0
+}

@@ -2,27 +2,44 @@
 import binary::{encode, decode}
 import core::result::Result
 import core::vec::Vec
-import mod::compiler::{MaterialBuild, material_runtime_variants, material_spirv}
-import refrain::native_asset::{save_environment_payload, load_environment_payload, asset_source_stamp}
+
 import std::os::read_file
+
+import mod::compiler::{MaterialBuild, material_runtime_variants, material_spirv}
+import refrain::material_schema::{MaterialAsset, MaterialShaderVariant}
+import refrain::native_asset::{asset_source_stamp, load_environment_payload, read_native_material_asset, save_environment_payload, save_native_material_asset}
 pub struct CookedMaterialGraph {
     version: u32
     domain: str
     semantic: str
-    variants: Vec[(str, str)]
+    variants: Vec[MaterialShaderVariant]
 }
 pub fn cook_material_graph(build: MaterialBuild, path: str) -> Result[CookedMaterialGraph, str] {
     let domain = read_file(build.directory + "/domain")
-    let mut variants = Vec[(str, str)]::new()
+    let mut variants = Vec[MaterialShaderVariant]::new()
     for name in material_runtime_variants(domain) {
         let code = read_file(build.directory + "/" + name + ".spv")
-        let _validated = material_spirv(code)?
-        variants.push((name, code))
+        let words = material_spirv(code)?
+        variants.push(MaterialShaderVariant { name, words })
     }
-    let asset = CookedMaterialGraph { 1, domain, build.semantic, variants }
+    let asset = CookedMaterialGraph { 3_u32, domain, build.semantic, variants }
     ret Result::Ok(asset)
 }
 pub fn save_cooked_material_graph(asset: CookedMaterialGraph, path: str) -> Result[CookedMaterialGraph, str] {
+    if path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" {
+        match read_native_material_asset(path)? {
+            Definition(definition) => {
+                let mut next = definition.snapshot() next.semantic = asset.semantic next.variants = asset.variants
+                if !save_native_material_asset(path, "", "", MaterialAsset::Definition(next)) {
+                    ret Result::Err("Unable to save cooked material")
+                }
+                ret Result::Ok(asset)
+            }
+            Instance(_) => {
+                ret Result::Err("A material instance cannot own a shader program")
+            }
+        }
+    }
     let bytes = match encode(asset) {
         Ok(bytes) => bytes Err(error) => {
             ret Result::Err(error.message())
@@ -49,7 +66,7 @@ pub fn load_cooked_material_graph(path: str) -> Result[CookedMaterialGraph, str]
             ret Result::Err(error.message())
         }
     }
-    if asset.version != 1 ||(asset.domain != "surface" && asset.domain != "sky" && asset.domain != "volume" && asset.domain != "particle") {
+    if asset.version != 3 ||(asset.domain != "surface" && asset.domain != "sky" && asset.domain != "volume" && asset.domain != "particle") {
         ret Result::Err("Unsupported cooked material domain")
     }
     let _shaders = asset.shaders()?
@@ -60,13 +77,16 @@ impl for CookedMaterialGraph {
     pub fn shaders(self: Self) -> Result[Vec[Vec[u32]], str] {
         let mut shaders = Vec[Vec[u32]]::new()
         for name in material_runtime_variants(self.domain) {
-            let mut found = ""
+            let mut found = Vec[u32]::new()
             for item in self.variants {
-                if item.0 == name {
-                    found = item.1
+                if item.name == name {
+                    found = item.code
                 }
             }
-            shaders.push(material_spirv(found)?)
+            if found.len() < 5_usize || found.get(0_usize).unwrap_or(0_u32) != 119734787_u32 {
+                ret Result::Err("Missing or invalid cooked material shader; rebuild this graph")
+            }
+            shaders.push(found)
         }
         ret Result::Ok(shaders)
     }

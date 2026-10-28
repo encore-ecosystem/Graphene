@@ -1,0 +1,456 @@
+//! Material previews use the scene PBR and adaptive displacement renderer.
+//! Texture and frame resources belong to this producer; only the budget is shared.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import linalg::{Mat4, Vec3}
+import luma::{ExternalVulkanImage, PreparedFrame, Window}
+
+import mod::displacement::patterns::DisplacementBudget
+import mod::displacement::ray_scene::DisplacementRayScene
+import mod::displacement::renderer::DisplacementRenderer
+import mod::material_images::MaterialImages
+import mod::material_program::MaterialProgram
+import mod::material_schema::{ResolvedMaterial, material_extra_linear}
+import mod::ray_lighting::{RayLighting, RayLightingView}
+import mod::rhi::*
+import mod::scene::camera::PerspectiveCamera
+import mod::scene::primitive::sphere_mesh
+import mod::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
+import mod::standard_material::StandardMaterial
+import mod::temporal_view::TemporalView
+import mod::texture_gpu::TextureUpload
+import mod::thumbnail_image::thumbnail_composite_pixel
+import mod::virtual_geometry::VirtualGeometry
+
+extern fn graphene_content_pixels(address: usize, count: usize) -> str
+extern fn graphene_asset_bytes(address: u8*, count: usize) -> str
+
+pub struct PbrPreview {
+    instance: GraphicsInstance
+    device: GraphicsDevice
+    target: Swapchain
+    consumer: usize
+    renderer: DisplacementRenderer<H>
+    ray_scene: DisplacementRayScene<H>
+    ray_lighting: RayLighting<H>
+    meshes: Vec[GpuMesh]
+    buffers: Vec[GpuBuffer]
+    dummy: GpuBuffer
+    sampler: GpuSampler
+    textures: Vec[GpuTexture]
+    uploads: Vec[TextureUpload]
+    material: StandardMaterial
+    height_range: f32
+    plane: bool
+    tiled: bool
+    pending: bool
+    width: u32
+    height: u32
+    visible: bool
+    error: str
+    target_width: u32
+    target_height: u32
+    readback: bool
+    program_source: Option[ResolvedMaterial]
+    program: Option[MaterialProgram<H>]
+    camera_position: Vec3
+}
+
+impl for PbrPreview {
+    pub fn create(window: Window, budget: DisplacementBudget<H>, images: MaterialImages) -> Result[PbrPreview<H>, str] {
+        ret Self::create_target(window, budget, images, 1024_u32, 1024_u32, false)
+    }
+    pub fn create_thumbnail(window: Window, budget: DisplacementBudget<H>, images: MaterialImages) -> Result[PbrPreview<H>, str] {
+        ret Self::create_target(window, budget, images, 128_u32, 96_u32, true)
+    }
+    fn create_target(window: Window, budget: DisplacementBudget<H>, images: MaterialImages, target_width: u32, target_height: u32, readback: bool) -> Result[PbrPreview<H>, str] {
+        if images.error != "" || images.images.len() != 3 || !images.height.valid() {
+            ret Result::Err("Invalid PBR preview images")
+        }
+        let interop = window.vulkan_interop()
+        if !interop.valid() {
+            ret Result::Err("PBR preview requires Vulkan interop")
+        }
+        let instance = GraphicsInstance::borrow(interop.instance(), interop.physical_device())
+        let adapter = match instance.preferred_adapter() {
+            Some(a) => a None => {
+                instance.destroy() ret Result::Err("PBR preview adapter unavailable")
+            }
+        }
+        let device = GraphicsDevice::borrow_backend(interop.render_device(), adapter)
+        let target = if readback {
+            device.create_offscreen_target(target_width, target_height)
+        } else {
+            device.create_shared_offscreen_target(target_width, target_height)
+        }
+        let dummy = device.create_buffer(64, buffer_storage(), true)
+        let sampler = device.create_repeat_sampler()
+        let mut buffers = Vec[GpuBuffer]::new()
+        for _ in 0_usize..target.frames_in_flight() as usize {
+            buffers.push(device.create_buffer(12688, buffer_uniform(), true))
+        }
+        let mut meshes = Vec[GpuMesh]::new()
+        for repeat in vec![1_f32, 3_f32] {
+            let sphere = sphere_mesh(1, 32, 48).with_uvs() let mut values = Vec[f32]::new() for value in sphere.vertices() {
+                values.push(value)
+            }
+            for i in 0_usize..sphere.vertex_count() {
+                values.set(i * 11 + 9, values.get_unchecked_borrowed(i * 11 + 9) * repeat) values.set(i * 11 + 10, values.get_unchecked_borrowed(i * 11 + 10) * repeat)
+            }
+            meshes.push(device.create_mesh(values, sphere.indices()))
+            let mut quad = Vec[f32]::new()
+            for p in vec![Vec3::new( - 1, - 1, 0), Vec3::new(1, - 1, 0), Vec3::new(1, 1, 0), Vec3::new( - 1, 1, 0)] {
+                for v in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1) * 0.5_f32 * repeat,(1 - p.y()) * 0.5_f32 * repeat] {
+                    quad.push(v)
+                }
+            }
+            meshes.push(device.create_mesh(quad, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32]))
+        }
+        let mut result = PbrPreview<H> {
+            instance, device, target, if readback {
+                0_usize
+            } else {
+                interop.swapchain()
+            }
+            , DisplacementRenderer::with_budget(budget), DisplacementRayScene::new(), RayLighting::new(), meshes, buffers, dummy, sampler, Vec[GpuTexture]::new(), Vec[TextureUpload]::new(), images.material, images.height_range, false, false, true, 0, 0, true, "", target_width, target_height, readback, images.program, Option::None, Vec3::new(0_f32, 0_f32, 3.2_f32)
+        }
+        let mut valid = target.available() && sampler.available() && dummy.available() && dummy.write_u32s(0, vec![0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32])
+        for mesh in meshes {
+            valid = valid && mesh.available()
+        }
+        for buffer in buffers {
+            valid = valid && buffer.available()
+        }
+        if !valid {
+            result.destroy() ret Result::Err("Unable to allocate PBR preview")
+        }
+        for i in 0_usize..4_usize {
+            let upload = if i == 3 {
+                TextureUpload::begin_height(device, images.height)
+            } elif i == 0 {
+                TextureUpload::begin(device, images.images.get_unchecked_borrowed(i))
+            } else {
+                TextureUpload::begin_linear(device, images.images.get_unchecked_borrowed(i))
+            }
+            match upload {
+                Some(u) => result.uploads.push(u) None => {
+                    result.destroy() ret Result::Err("Unable to upload PBR preview maps")
+                }
+            }
+        }
+        for i in 0_usize..images.extra.len() {
+            let image = images.extra.get_unchecked_borrowed(i)
+            match if match images.program {
+                Some(resolved) => material_extra_linear(resolved, i) None => false
+            }
+            {
+                TextureUpload::begin_linear(device, image)
+            } else {
+                TextureUpload::begin(device, image)
+            }
+            {
+                Some(upload) => result.uploads.push(upload) None => {
+                    result.destroy() ret Result::Err("Unable to upload material texture parameter")
+                }
+            }
+        }
+        ret Result::Ok(result)
+    }
+    pub fn camera_pose(self: mut Self&, yaw: f32, pitch: f32, distance: f32) ->() {
+        let position = Vec3::from_spherical(yaw, pitch).scale(distance)
+        if position.x() != self.camera_position.x() || position.y() != self.camera_position.y() || position.z() != self.camera_position.z() {
+            self.camera_position = position self.pending = true
+        }
+    }
+    pub fn mode(self: mut Self&, plane: bool, tiled: bool) ->() {
+        if plane != self.plane || tiled != self.tiled {
+            self.plane = plane self.tiled = tiled self.pending = true self.error = ""
+        }
+    }
+    pub fn material(self: mut Self&, material: StandardMaterial) ->() {
+        self.material = material self.pending = true self.error = ""
+    }
+    pub fn displacement(self: mut Self&, enabled: bool) ->() {
+        let mut settings = self.material.displacement() settings.enabled = enabled self.material = self.material.with_displacement(settings) self.pending = true self.error = ""
+    }
+    pub fn ready(self: Self&) -> bool {
+        for upload in self.uploads {
+            if !upload.complete() {
+                ret false
+            }
+        }
+        ret self.target.last_frame_complete() &&(self.consumer == 0 || Swapchain::borrow(self.consumer).last_frame_complete())
+    }
+    pub fn busy(self: Self&) -> bool {
+        ret self.visible && self.error == "" &&(self.pending || self.uploads.len() > 0)
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn compose(self: mut Self&, frame: mut PreparedFrame, surface: str) -> bool {
+        let slot = match frame.surface(surface) {
+            Some(s) => {
+                self.visible = true s
+            }
+            None => {
+                self.visible = false ret true
+            }
+        }
+        let width = slot.pixel_width() let height = slot.pixel_height()
+        if !self.render(width, height) {
+            ret false
+        }
+        ret frame.submit_external(surface, slot.generation(), ExternalVulkanImage::new(self.target.external_image() as u64, self.target_width, self.target_height, self.target.external_layout()).with_region(0, 0, width, height))
+    }
+    /// The same PBR producer serves on-demand previews and the browser's single thumbnail job.
+    pub fn render(self: mut Self&, width: u32, height: u32) -> bool {
+        if self.error != "" {
+            ret false
+        }
+        if self.uploads.len() > 0 {
+            for upload in self.uploads {
+                if !upload.complete() {
+                    ret false
+                }
+            }
+            let mut extra = Vec[GpuTexture]::new()
+            for i in 0_usize..self.uploads.len() {
+                let texture = self.uploads.get_unchecked_borrowed(i).finish() if i < 4 {
+                    self.textures.push(texture)
+                } else {
+                    extra.push(texture)
+                }
+            }
+            self.uploads.clear()
+            match self.program_source {
+                Some(source) => {
+                    match MaterialProgram::create(self.device, source, self.textures, extra) {
+                        Ok(program) => {
+                            self.renderer.set_material_program(self.textures.get_unchecked_borrowed(0_usize).native_handle(), Option[MaterialProgram<H>]::Some(program)) self.program = Option[MaterialProgram<H>]::Some(program)
+                        }
+                        Err(error) => {
+                            for texture in extra {
+                                texture.destroy()
+                            }
+                            self.error = error ret false
+                        }
+                    }
+                }
+                None => {
+                    for texture in extra {
+                        texture.destroy()
+                    }
+                }
+            }
+        }
+        if width == 0 || height == 0 {
+            ret true
+        }
+        if width > self.target_width || height > self.target_height {
+            self.error = "PBR preview exceeds its 1024 pixel surface budget" ret false
+        }
+        // compose() already owns the current UI frame. Waiting for that
+        // consumer here prevents the first preview from ever being produced.
+        // Both producers submit on the same ordered queue; the image barrier
+        // orders this write after earlier UI reads. ready() remains stricter
+        // for replacing or destroying resources outside composition.
+        if (self.pending || self.width != width || self.height != height) && self.target.last_frame_complete() {
+            let rendered = self.target.try_acquire_frame()
+            if rendered.available() {
+                // Keep the model inside a portrait panel as well as a square one.
+                let aspect =(width as f32) /(height as f32)
+                let camera_position = self.camera_position.scale(if aspect < 1_f32 {
+                        1_f32 / aspect
+                    } else {
+                        1_f32
+                    }
+                )
+                let camera = PerspectiveCamera::new(camera_position, Vec3::zero(), 0.7853982_f32, 0.05_f32, 100)
+                let projection = camera.view_projection(aspect)
+                let mut values = Vec[f32]::new() for _ in 0_usize..3172_usize {
+                    values.push(0_f32)
+                }
+                let matrix = projection.values() for i in 0_usize..16_usize {
+                    values.set(i, matrix.get_unchecked_borrowed(i))
+                }
+                values.set(16, 0.5_f32) values.set(17, - 0.8_f32) values.set(18, - 1)
+                for i in 20_usize..24_usize {
+                    values.set(i, 1)
+                }
+                values.set(24, 0.18_f32) values.set(25, 0.18_f32) values.set(26, 0.18_f32) values.set(28_usize, camera_position.x()) values.set(29_usize, camera_position.y()) values.set(30_usize, camera_position.z())
+                let buffer = self.buffers.get_unchecked_borrowed(rendered.slot() as usize)
+                let mut scene = Vec[Vec[GpuBuffer]]::new() for b in self.buffers {
+                    scene.push(vec![b, self.dummy, self.dummy, self.dummy, self.dummy])
+                }
+                let mesh_index =(if self.tiled {
+                        2_usize
+                    } else {
+                        0_usize
+                    }
+                ) +(if self.plane {
+                        1_usize
+                    } else {
+                        0_usize
+                    }
+                )
+                let mesh = self.meshes.get_unchecked_borrowed(mesh_index)
+                let item = RenderItem::new(1, Renderable::new(MeshId::new((mesh_index + 1) as u64), MaterialId::new(1)), Mat4::identity())
+                let mut material = self.material let mut settings = material.displacement()
+                // The same renderer also provides the unmodified PBR preview.
+                if !settings.enabled || material.height_texture() == "" {
+                    settings.enabled = true settings.magnitude = 0
+                }
+                material = material.with_displacement(settings).with_double_sided()
+                let history = TemporalView::new() self.renderer.begin(4)
+                let prepared =(self.readback || rendered.sampled_color_barrier()) && buffer.write_f32s(0, values) && self.renderer.prepare_batch(self.device, rendered, self.target, "preview-" + mesh_index.fmt(), 4,(mesh_index + 1) as u64, mesh, Option[VirtualGeometry]::None, material, self.textures, self.sampler, self.textures.get_unchecked_borrowed(0), scene, vec![item], vec![0_u32], camera.position(), projection, history, width, height, false, false, self.height_range, Vec[u64]::new(), Option::None)
+                let mut okay = false
+                if prepared && self.prepare_ray_lighting(rendered) {
+                    // Thumbnail readback keeps uncovered pixels transparent;
+                    // the browser background is composited after the GPU fence.
+                    let clear = if self.readback {
+                        0_f32
+                    } else {
+                        1_f32
+                    }
+                    let pass = rendered.begin_render_pass(self.renderer.pipeline(4), 0.028_f32 * clear, 0.034_f32 * clear, 0.043_f32 * clear, clear)
+                    okay = rendered.set_viewport(0, 0, width, height) && self.renderer.draw(pass, rendered.slot(), 4) && pass.end() && rendered.present()
+                }
+                if !okay {
+                    self.error = "PBR preview: " + self.renderer.error() + " " + rendered.error() self.pending = false
+                }
+                rendered.destroy() self.renderer.collect()
+                if okay {
+                    self.pending = false self.width = width self.height = height self.error = ""
+                }
+            } else {
+                rendered.destroy()
+            }
+        }
+        if self.pending || self.width != width || self.height != height {
+            ret false
+        }
+        ret self.error == ""
+    }
+    /// A completed frame fence makes the mapped readback safe without queue-idle waits.
+    #attr(safe)
+    pub fn thumbnail_payload(self: Self&) -> Option[str] {
+        if !self.readback || self.pending || !self.target.last_frame_complete() || self.target.pixels() == 0 || self.target.pitch() != self.target_width * 4 {
+            ret Option::None
+        }
+        let pixels = unsafe {
+            graphene_asset_bytes(self.target.pixels() as u8*,(self.target_width as usize) *(self.target_height as usize) * 4_usize)
+        }
+        // Vulkan's presentation target is BGRA8; Luma image payloads are RGBA8.
+        let mut rgba = vec![self.target_width, self.target_height]
+        for i in 0_usize..(self.target_width as usize) *(self.target_height as usize) {
+            let offset = i * 4_usize
+            let pixel =(pixels.byte_at(offset + 2) as u32) |((pixels.byte_at(offset + 1) as u32) << 8_u32) |((pixels.byte_at(offset) as u32) << 16_u32) |((pixels.byte_at(offset + 3) as u32) << 24_u32)
+            rgba.push(thumbnail_composite_pixel(i % self.target_width as usize, i / self.target_width as usize, pixel))
+        }
+        ret Option::Some(unsafe {
+                graphene_content_pixels(rgba.as_ptr() as usize, rgba.len())
+            }
+        )
+    }
+    pub fn replace_images(self: mut Self&, images: MaterialImages) -> bool {
+        if !self.ready() || images.error != "" || images.images.len() != 3 || !images.height.valid() {
+            ret false
+        }
+        self.renderer.invalidate() self.renderer.collect()
+        if self.textures.len() > 0 {
+            self.renderer.set_material_program(self.textures.get_unchecked_borrowed(0_usize).native_handle(), Option::None)
+        }
+        match self.program {
+            Some(program) => {
+                if !program.destroy() {
+                    ret false
+                }
+            }
+            None => {
+            }
+        }
+        self.program = Option[MaterialProgram<H>]::None self.program_source = images.program
+        for texture in self.textures {
+            texture.destroy()
+        }
+        self.textures.clear()
+        self.material = images.material self.height_range = images.height_range self.pending = true self.error = ""
+        for i in 0_usize..4_usize {
+            let upload = if i == 3 {
+                TextureUpload::begin_height(self.device, images.height)
+            } elif i == 0 {
+                TextureUpload::begin(self.device, images.images.get_unchecked_borrowed(i))
+            } else {
+                TextureUpload::begin_linear(self.device, images.images.get_unchecked_borrowed(i))
+            }
+            match upload {
+                Some(upload) => self.uploads.push(upload) None => {
+                    self.error = "Unable to upload preview maps" ret false
+                }
+            }
+        }
+        for i in 0_usize..images.extra.len() {
+            let image = images.extra.get_unchecked_borrowed(i)
+            match if match images.program {
+                Some(resolved) => material_extra_linear(resolved, i) None => false
+            }
+            {
+                TextureUpload::begin_linear(self.device, image)
+            } else {
+                TextureUpload::begin(self.device, image)
+            }
+            {
+                Some(upload) => self.uploads.push(upload) None => {
+                    self.error = "Unable to upload material texture parameter" ret false
+                }
+            }
+        }
+        ret true
+    }
+    fn prepare_ray_lighting(self: mut Self&, frame: RenderFrame) -> bool {
+        let budget = self.renderer.budget()
+        let lighting = if self.device.enabled_features().contains(DeviceFeatures::ray_query()) {
+            let proxies = self.renderer.ray_instances_for(self.device, frame, 4)
+            let mut structures = Vec[AccelerationStructure]::new() let mut transforms = Vec[Mat4]::new() let mut parts = vec!["preview"]
+            for proxy in proxies {
+                structures.push(proxy.acceleration) transforms.push(proxy.world) parts.push(proxy.generation)
+            }
+            let scene = self.ray_scene.prepare_parts(self.device, frame, structures, transforms, parts, budget)
+            self.ray_lighting.prepare(self.device, frame, scene, Vec3::new(0.18_f32, 0.18_f32, 0.18_f32))
+        } else {
+            RayLightingView::unavailable()
+        }
+        ret self.renderer.prepare_ray_lighting(self.device, self.target, frame, 4, lighting)
+    }
+    pub fn destroy(self: mut Self&) ->() {
+        self.target.wait_readback()
+        if self.consumer != 0 {
+            Swapchain::borrow(self.consumer).wait_readback()
+        }
+        self.ray_scene.destroy(self.renderer.budget()) self.ray_lighting.destroy()
+        self.renderer.destroy()
+        match self.program {
+            Some(program) => {
+                program.destroy()
+            }
+            None => {
+            }
+        }
+        self.program = Option[MaterialProgram<H>]::None
+        for upload in self.uploads {
+            upload.wait() upload.finish().destroy()
+        }
+        for texture in self.textures {
+            texture.destroy()
+        }
+        for mesh in self.meshes {
+            mesh.destroy()
+        }
+        for buffer in self.buffers {
+            buffer.destroy()
+        }
+        self.dummy.destroy() self.sampler.destroy() self.target.destroy() self.device.destroy() self.instance.destroy()
+    }
+}

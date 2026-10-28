@@ -1,0 +1,26 @@
+//! Shared image-space background for Content Browser thumbnails.
+
+pub fn thumbnail_background_pixel(x: usize, y: usize) -> u32 {
+    ret if (x / 8_usize + y / 8_usize) % 2_usize == 0_usize {
+        4280557860_u32
+    } else {
+        4280821032_u32
+    }
+}
+
+/// Composite straight-alpha RGBA onto the browser checker, preserving opaque black.
+pub fn thumbnail_composite_pixel(x: usize, y: usize, rgba: u32) -> u32 {
+    let alpha = rgba >> 24_u32
+    if alpha == 255_u32 {
+        ret rgba
+    }
+    let background = thumbnail_background_pixel(x, y)
+    if alpha == 0_u32 {
+        ret background
+    }
+    let inverse = 255_u32 - alpha
+    let red =((rgba & 255_u32) * alpha +(background & 255_u32) * inverse + 127_u32) / 255_u32
+    let green =(((rgba >> 8_u32) & 255_u32) * alpha +((background >> 8_u32) & 255_u32) * inverse + 127_u32) / 255_u32
+    let blue =(((rgba >> 16_u32) & 255_u32) * alpha +((background >> 16_u32) & 255_u32) * inverse + 127_u32) / 255_u32
+    ret red |(green << 8_u32) |(blue << 16_u32) | 4278190080_u32
+}

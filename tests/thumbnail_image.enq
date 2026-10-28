@@ -1,0 +1,31 @@
+//! Thumbnail compositing must distinguish background from opaque dark materials.
+import graphene::thumbnail_image::{thumbnail_background_pixel, thumbnail_composite_pixel}
+
+fn main() -> u32 {
+    if thumbnail_background_pixel(0_usize, 0_usize) != 0xff242124_u32 ||
+    thumbnail_background_pixel(7_usize, 7_usize) != 0xff242124_u32 ||
+    thumbnail_background_pixel(8_usize, 0_usize) != 0xff282528_u32 ||
+    thumbnail_background_pixel(0_usize, 8_usize) != 0xff282528_u32 ||
+    thumbnail_background_pixel(8_usize, 8_usize) != 0xff242124_u32 {
+        ret 1_u32
+    }
+    for y in 0_usize..96_usize {
+        for x in 0_usize..128_usize {
+            let background = thumbnail_background_pixel(x, y)
+            if thumbnail_composite_pixel(x, y, 0_u32) != background ||
+            thumbnail_composite_pixel(x, y, 0x00ffffff_u32) != background {
+                ret 2_u32
+            }
+            if thumbnail_composite_pixel(x, y, 0xff000000_u32) != 0xff000000_u32 ||
+            thumbnail_composite_pixel(x, y, 0xff090907_u32) != 0xff090907_u32 ||
+            thumbnail_composite_pixel(x, y, 0xff112233_u32) != 0xff112233_u32 {
+                ret 3_u32
+            }
+        }
+    }
+    if thumbnail_composite_pixel(0_usize, 0_usize, 0x80000000_u32) != 0xff121012_u32 ||
+    thumbnail_composite_pixel(0_usize, 0_usize, 0x80ff0000_u32) != 0xff921012_u32 {
+        ret 4_u32
+    }
+    ret 0_u32
+}

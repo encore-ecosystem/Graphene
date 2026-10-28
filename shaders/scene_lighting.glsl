@@ -24,7 +24,10 @@ vec3 actorDirectLight(vec3 position, vec3 normal) {
                 attenuation *= spot * spot * (3.0 - 2.0 * spot);
             }
         }
-        radiance += energy.rgb * energy.w * attenuation * max(dot(normal, toLight), 0.0);
+        float cosine=max(dot(normal,toLight),0.);
+        if(cosine>0. && attenuation>0.)
+            radiance += energy.rgb * energy.w * attenuation * cosine *
+                lightingVisibility(position,normal,toLight,directional?10000.:sqrt(distanceSquared));
     }
     return radiance;
 }

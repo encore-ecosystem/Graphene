@@ -1,0 +1,624 @@
+//! Native material authoring schema. Parameter identity is independent of its display name.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::Vec3
+
+import mod::material_graph::codec::material_graph_stringify
+import mod::material_graph::model::{MaterialDomain, MaterialEndpoint, MaterialGraph, MaterialLink, MaterialNode}
+import mod::standard_material::{StandardMaterial}
+import mod::texture_image::texture_path_valid
+
+pub fn standard_pbr_parent() -> str {
+    ret "Assets/Materials/M_StandardPBR.gmaterial"
+}
+
+pub struct MaterialValue {
+    kind: str
+    number: f32
+    vector: Vec3
+    path: str
+    flag: bool
+}
+
+impl for MaterialValue {
+    pub fn scalar(value: f32) -> Self {
+        ret Self { "scalar", value, Vec3::zero(), "", false }
+    }
+    pub fn color(value: Vec3) -> Self {
+        ret Self { "color", 0_f32, value, "", false }
+    }
+    pub fn texture(value: str) -> Self {
+        ret Self { "texture", 0_f32, Vec3::zero(), value, false }
+    }
+    pub fn boolean(value: bool) -> Self {
+        ret Self { "bool", 0_f32, Vec3::zero(), "", value }
+    }
+    pub fn valid(self: Self) -> bool {
+        if self.kind == "scalar" {
+            ret finite(self.number)
+        }
+        if self.kind == "color" {
+            ret finite(self.vector.x()) && finite(self.vector.y()) && finite(self.vector.z())
+        }
+        if self.kind == "texture" {
+            ret texture_path_valid(self.path)
+        }
+        ret self.kind == "bool"
+    }
+    pub fn same(self: Self, other: Self) -> bool {
+        ret self.kind == other.kind && self.number == other.number && self.vector.x() == other.vector.x() && self.vector.y() == other.vector.y() && self.vector.z() == other.vector.z() && self.path == other.path && self.flag == other.flag
+    }
+}
+fn finite(value: f32) -> bool {
+    ret value >= - 340282346638528859811704183484516925440_f32 && value <= 340282346638528859811704183484516925440_f32
+}
+
+pub struct MaterialParameter {
+    id: u64
+    name: str
+    group: str
+    binding: str
+    value: MaterialValue
+}
+pub struct MaterialOverride {
+    parameter: u64
+    value: MaterialValue
+    enabled: bool
+}
+pub struct MaterialShaderVariant {
+    name: str
+    code: Vec[u32]
+}
+pub struct MaterialDefinition {
+    graph: MaterialGraph
+    parameters: Vec[MaterialParameter]
+    surface: StandardMaterial
+    semantic: str
+    variants: Vec[MaterialShaderVariant]
+}
+pub struct MaterialInstance {
+    parent: str
+    overrides: Vec[MaterialOverride]
+}
+pub enum MaterialAsset {
+    Definition(MaterialDefinition)
+    Instance(MaterialInstance)
+}
+pub struct ResolvedMaterial {
+    definition_path: str
+    definition: MaterialDefinition
+    values: Vec[MaterialOverride]
+    surface: StandardMaterial
+    dependencies: Vec[str]
+    diagnostics: Vec[str]
+    fingerprint: str
+}
+
+impl for MaterialInstance {
+    pub fn new(parent: str) -> Self {
+        ret Self { parent, Vec[MaterialOverride]::new() }
+    }
+    pub fn set(self: Self, parameter: u64, value: MaterialValue, enabled: bool) -> Self {
+        let mut next = Self { self.parent, Vec[MaterialOverride]::new() }
+        let mut found = false
+        for item in self.overrides {
+            if item.parameter == parameter {
+                next.overrides.push(MaterialOverride {
+                        parameter, value, enabled
+                    }
+                ) found = true
+            } else {
+                next.overrides.push(item)
+            }
+        }
+        if !found {
+            next.overrides.push(MaterialOverride { parameter, value, enabled })
+        }
+        ret next
+    }
+    /// Reset removes a local value; disabling an override keeps it for later.
+    pub fn reset(self: Self, parameter: u64) -> Self {
+        let mut next = Self { self.parent, Vec[MaterialOverride]::new() }
+        for item in self.overrides {
+            if item.parameter != parameter {
+                next.overrides.push(item)
+            }
+        }
+        ret next
+    }
+    pub fn override_value(self: Self, parameter: u64) -> Option[MaterialOverride] {
+        for value in self.overrides {
+            if value.parameter == parameter {
+                ret Option::Some(value)
+            }
+        }
+        ret Option::None
+    }
+}
+
+impl for MaterialDefinition {
+    pub fn parameter(self: Self, id: u64) -> Option[MaterialParameter] {
+        for parameter in self.parameters {
+            if parameter.id == id {
+                ret Option::Some(parameter)
+            }
+        }
+        ret Option::None
+    }
+    pub fn valid(self: Self) -> bool {
+        if self.graph.domain.key() != "surface" || self.parameters.len() > 256 || self.graph.nodes.len() > 4096 || self.variants.len() > 32 {
+            ret false
+        }
+        let mut ids = Vec[u64]::new()
+        for parameter in self.parameters {
+            if parameter.id == 0 || parameter.name == "" || !material_binding_valid(parameter.binding, parameter.value) {
+                ret false
+            }
+            for id in ids {
+                if id == parameter.id {
+                    ret false
+                }
+            }
+            ids.push(parameter.id)
+        }
+        ret true
+    }
+}
+/// Reference syntax is deliberately project-relative. Only the shipped parent may cross into Assets.
+pub fn material_parent_valid(path: str) -> bool {
+    if path == standard_pbr_parent() {
+        ret true
+    }
+    if path.byte_len() < 19 || path.slice_bytes(0, 8) != "Content/" || path.slice_bytes(path.byte_len() - 10, 10) != ".gmaterial" {
+        ret false
+    }
+    let mut start = 0_usize
+    for index in 0_usize..path.byte_len() {
+        let byte = path.byte_at(index)
+        if byte == 0 || byte == 92 || byte == 58 {
+            ret false
+        }
+        if byte == 47 {
+            let part = path.slice_bytes(start, index - start)
+            if part == "" || part == "." || part == ".." {
+                ret false
+            }
+            start = index + 1
+        }
+    }
+    ret true
+}
+pub fn standard_pbr_parameters(m: StandardMaterial) -> Vec[MaterialParameter] {
+    ret vec![
+        MaterialParameter {
+            1_u64, "Base Color", "Surface", "base_color", MaterialValue::color(m.base_color())
+        }
+        ,
+        MaterialParameter {
+            2_u64, "Metallic", "Surface", "metallic", MaterialValue::scalar(m.metallic())
+        }
+        ,
+        MaterialParameter {
+            3_u64, "Roughness", "Surface", "roughness", MaterialValue::scalar(m.roughness())
+        }
+        ,
+        MaterialParameter { 4_u64, "Unlit", "Surface", "unlit", MaterialValue::boolean(m.unlit()) },
+        MaterialParameter {
+            5_u64, "Double Sided", "Surface", "double_sided", MaterialValue::boolean(m.double_sided())
+        }
+        ,
+        MaterialParameter {
+            6_u64, "Base Color Map", "Textures", "base_color_texture", MaterialValue::texture(m.base_color_texture())
+        }
+        ,
+        MaterialParameter {
+            7_u64, "Normal Map", "Textures", "normal_texture", MaterialValue::texture(m.normal_texture())
+        }
+        ,
+        MaterialParameter {
+            8_u64, "Normal Strength", "Surface", "normal_scale", MaterialValue::scalar(m.normal_scale())
+        }
+        ,
+        MaterialParameter {
+            9_u64, "Flip Normal Y", "Surface", "normal_flip_y", MaterialValue::boolean(m.normal_flip_y())
+        }
+        ,
+        MaterialParameter {
+            10_u64, "Roughness Map", "Textures", "roughness_texture", MaterialValue::texture(m.roughness_texture())
+        }
+        ,
+        MaterialParameter {
+            11_u64, "Metallic Map", "Textures", "metallic_texture", MaterialValue::texture(m.metallic_texture())
+        }
+        ,
+        MaterialParameter {
+            12_u64, "Height Map", "Textures", "height_texture", MaterialValue::texture(m.height_texture())
+        }
+        ,
+        MaterialParameter {
+            13_u64, "Ambient Occlusion Map", "Textures", "ao_texture", MaterialValue::texture(m.ao_texture())
+        }
+        ,
+        MaterialParameter {
+            14_u64, "AO Strength", "Surface", "ao_strength", MaterialValue::scalar(m.ao_strength())
+        }
+        ,
+        MaterialParameter {
+            15_u64, "Displacement", "Displacement", "displacement_enabled", MaterialValue::boolean(m.displacement().enabled)
+        }
+        ,
+        MaterialParameter {
+            16_u64, "Magnitude", "Displacement", "displacement_magnitude", MaterialValue::scalar(m.displacement().magnitude)
+        }
+        ,
+        MaterialParameter {
+            17_u64, "Center", "Displacement", "displacement_center", MaterialValue::scalar(m.displacement().center)
+        }
+        ,
+        MaterialParameter {
+            18_u64, "Quality", "Displacement", "displacement_quality", MaterialValue::scalar(m.displacement().quality as f32)
+        }
+    ]
+}
+pub fn standard_pbr_instance(material: StandardMaterial) -> MaterialInstance {
+    let mut instance = MaterialInstance::new(standard_pbr_parent())
+    for parameter in standard_pbr_parameters(material) {
+        instance = instance.set(parameter.id, parameter.value, true)
+    }
+    ret instance
+}
+/// Converts effective typed parameter data to the shared PBR runtime payload.
+pub fn material_surface_value(material: StandardMaterial, binding: str, value: MaterialValue) -> StandardMaterial {
+    let mut m = material
+    if binding == "base_color" {
+        ret m.with_base_color(value.vector)
+    }
+    if binding == "metallic" {
+        ret m.with_metallic(value.number)
+    }
+    if binding == "roughness" {
+        ret m.with_roughness(value.number)
+    }
+    if binding == "unlit" {
+        ret m.with_unlit_value(value.flag)
+    }
+    if binding == "double_sided" {
+        ret m.with_double_sided_value(value.flag)
+    }
+    if binding == "base_color_texture" {
+        ret m.with_base_color_texture(value.path)
+    }
+    if binding == "normal_texture" {
+        ret m.with_normal_texture(value.path)
+    }
+    if binding == "normal_scale" {
+        ret m.with_normal_scale(value.number)
+    }
+    if binding == "normal_flip_y" {
+        ret m.with_normal_flip_y(value.flag)
+    }
+    if binding == "roughness_texture" {
+        ret m.with_roughness_texture(value.path)
+    }
+    if binding == "metallic_texture" {
+        ret m.with_metallic_texture(value.path)
+    }
+    if binding == "height_texture" {
+        ret m.with_height_texture(value.path)
+    }
+    if binding == "ao_texture" {
+        ret m.with_ao_texture(value.path)
+    }
+    if binding == "ao_strength" {
+        ret m.with_ao_strength(value.number)
+    }
+    let mut d = m.displacement()
+    if binding == "displacement_enabled" {
+        d.enabled = value.flag
+    }
+    if binding == "displacement_magnitude" {
+        d.magnitude = value.number
+    }
+    if binding == "displacement_center" {
+        d.center = value.number
+    }
+    if binding == "displacement_quality" {
+        d.quality = value.number as u32
+    }
+    m = m.with_displacement(d)
+    ret m
+}
+pub fn standard_pbr_definition() -> MaterialDefinition {
+    let surface = StandardMaterial::default()
+    let parameters = standard_pbr_parameters(surface)
+    let mut nodes = Vec[MaterialNode]::new()
+    let mut links = Vec[MaterialLink]::new()
+    for parameter in parameters {
+        let operation = if parameter.value.kind == "texture" {
+            "texture-parameter"
+        } elif parameter.value.kind == "color" {
+            "color-parameter"
+        } elif parameter.value.kind == "bool" {
+            "bool-parameter"
+        } else {
+            "scalar-parameter"
+        }
+        nodes.push(MaterialNode::new(parameter.id, operation, 40_f32 +(((parameter.id - 1_u64) / 6_u64) as f32) * 250_f32, 40_f32 +(((parameter.id - 1_u64) % 6_u64) as f32) * 160_f32).with_value(if parameter.value.kind == "color" {
+                    parameter.value.vector
+                } else {
+                    Vec3::new(if parameter.value.kind == "bool" {
+                            if parameter.value.flag {
+                                1_f32
+                            } else {
+                                0_f32
+                            }
+                        } else {
+                            parameter.value.number
+                        }
+                        , parameter.value.number, parameter.value.number,)
+                }
+            ))
+    }
+    for i in 0_usize..nodes.len() {
+        let node = nodes.get_unchecked_borrowed(i)
+        let p = parameters.get_unchecked_borrowed(i)
+        nodes.set(i, node.with_parameter(p.name, p.group, p.value.path, if p.binding == "base_color_texture" {
+                    "srgb"
+                } else {
+                    "linear"
+                }
+                ,
+            ))
+    }
+    nodes.push(MaterialNode::new(100_u64, "output", 1120_f32, 210_f32))
+    nodes.push(MaterialNode::new(101_u64, "multiply", 840_f32, 50_f32).with_kind("vec3"))
+    nodes.push(MaterialNode::new(102_u64, "multiply", 840_f32, 210_f32))
+    nodes.push(MaterialNode::new(103_u64, "multiply", 840_f32, 370_f32))
+    links.push(MaterialLink {
+            MaterialEndpoint { 1_u64, "value" }, MaterialEndpoint { 101_u64, "a" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 6_u64, "rgb" }, MaterialEndpoint { 101_u64, "b" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 101_u64, "value" }, MaterialEndpoint {
+                100_u64, "base_color"
+            }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 2_u64, "value" }, MaterialEndpoint { 102_u64, "a" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 11_u64, "r" }, MaterialEndpoint { 102_u64, "b" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 102_u64, "value" }, MaterialEndpoint {
+                100_u64, "metallic"
+            }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 3_u64, "value" }, MaterialEndpoint { 103_u64, "a" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 10_u64, "r" }, MaterialEndpoint { 103_u64, "b" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 103_u64, "value" }, MaterialEndpoint {
+                100_u64, "roughness"
+            }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 7_u64, "rgb" }, MaterialEndpoint {
+                100_u64, "normal"
+            }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 13_u64, "r" }, MaterialEndpoint { 100_u64, "ao" }
+        }
+    )
+    links.push(MaterialLink {
+            MaterialEndpoint { 12_u64, "r" }, MaterialEndpoint {
+                100_u64, "height"
+            }
+        }
+    )
+    ret MaterialDefinition {
+        MaterialGraph {
+            "M_StandardPBR", MaterialDomain::Surface, nodes, links
+        }
+        , parameters, surface, "builtin-standard-pbr-v1", Vec[MaterialShaderVariant]::new()
+    }
+}
+
+/// Reconciles palette edits without assigning a new identity when a parameter is renamed.
+pub fn material_definition_graph(definition: MaterialDefinition, graph: MaterialGraph) -> MaterialDefinition {
+    let mut result = definition.snapshot()
+    result.graph = graph
+    let mut parameters = Vec[MaterialParameter]::new()
+    for node in graph.nodes {
+        let kind = match node.operation {
+            "scalar-parameter" => "scalar" "color-parameter" => "color" "bool-parameter" => "bool" "texture-parameter" => "texture" _ => ""
+        }
+        if kind != "" {
+            let mut parameter = result.parameter(node.id).unwrap_or(MaterialParameter {
+                    node.id, "Parameter " + node.id.fmt(), "Parameters", "", MaterialValue::scalar(0_f32)
+                }
+            )
+            parameter.name = if node.parameter_name == "" {
+                parameter.name
+            } else {
+                node.parameter_name
+            }
+            parameter.group = node.parameter_group
+            parameter.value = if kind == "color" {
+                MaterialValue::color(node.value)
+            } elif kind == "texture" {
+                MaterialValue::texture(node.texture_path)
+            } elif kind == "bool" {
+                MaterialValue::boolean(node.value.x() >= 0.5_f32)
+            } else {
+                MaterialValue::scalar(node.value.x())
+            }
+            parameters.push(parameter)
+        }
+    }
+    result.parameters = parameters
+    ret result
+}
+pub fn material_parameter_values(resolved: ResolvedMaterial) -> Vec[f32] {
+    let mut result = Vec[f32]::with_capacity(1024_usize)
+    for parameter in resolved.definition.parameters {
+        let mut value = parameter.value
+        for item in resolved.values {
+            if item.parameter == parameter.id {
+                value = item.value
+            }
+        }
+        if value.kind == "color" {
+            result.push(value.vector.x()) result.push(value.vector.y()) result.push(value.vector.z()) result.push(0_f32)
+        } else {
+            result.push(if value.kind == "bool" {
+                    if value.flag {
+                        1_f32
+                    } else {
+                        0_f32
+                    }
+                } else {
+                    value.number
+                }
+            ) result.push(0_f32) result.push(0_f32) result.push(0_f32)
+        }
+    }
+    while result.len() < 1024_usize {
+        result.push(0_f32)
+    }
+    ret result
+}
+
+impl for MaterialDefinition {
+    pub fn snapshot(self: Self) -> Self {
+        let mut parameters = Vec[MaterialParameter]::new()
+        for p in self.parameters {
+            parameters.push(MaterialParameter {
+                    p.id, p.name, p.group, p.binding, p.value
+                }
+            )
+        }
+        let mut variants = Vec[MaterialShaderVariant]::new() for variant in self.variants {
+            variants.push(MaterialShaderVariant { variant.name, variant.code })
+        }
+        ret Self { self.graph.snapshot(), parameters, self.surface, self.semantic, variants }
+    }
+}
+
+pub fn material_instances_equal(a: MaterialInstance, b: MaterialInstance) -> bool {
+    if a.parent != b.parent || a.overrides.len() != b.overrides.len() {
+        ret false
+    }
+    for value in a.overrides {
+        match b.override_value(value.parameter) {
+            Some(other) => {
+                if value.enabled != other.enabled || !value.value.same(other.value) {
+                    ret false
+                }
+            }
+            None => {
+                ret false
+            }
+        }
+    }
+    ret true
+}
+
+impl for ResolvedMaterial {
+    pub fn snapshot(self: Self) -> Self {
+        let mut values = Vec[MaterialOverride]::new()
+        for item in self.values {
+            values.push(MaterialOverride {
+                    item.parameter, item.value, item.enabled
+                }
+            )
+        }
+        let mut dependencies = Vec[str]::new() for item in self.dependencies {
+            dependencies.push(item)
+        }
+        let mut diagnostics = Vec[str]::new() for item in self.diagnostics {
+            diagnostics.push(item)
+        }
+        ret Self {
+            self.definition_path, self.definition.snapshot(), values, self.surface, dependencies, diagnostics, self.fingerprint
+        }
+    }
+}
+
+pub fn material_binding_valid(binding: str, value: MaterialValue) -> bool {
+    if !value.valid() {
+        ret false
+    }
+    if binding == "metallic" || binding == "roughness" || binding == "ao_strength" || binding == "displacement_center" {
+        ret value.kind == "scalar" && value.number >= 0_f32 && value.number <= 1_f32
+    }
+    if binding == "normal_scale" {
+        ret value.kind == "scalar" && value.number >= 0_f32 && value.number <= 4_f32
+    }
+    if binding == "displacement_magnitude" {
+        ret value.kind == "scalar" && value.number >= 0_f32 && value.number <= 1000000_f32
+    }
+    if binding == "displacement_quality" {
+        ret value.kind == "scalar" &&(value.number == 0_f32 || value.number == 1_f32 || value.number == 2_f32)
+    }
+    ret true
+}
+
+pub fn material_extra_linear(resolved: ResolvedMaterial, index: usize) -> bool {
+    let mut current = 0_usize
+    for p in resolved.definition.parameters {
+        if p.value.kind == "texture" && p.binding != "base_color_texture" && p.binding != "normal_texture" && p.binding != "roughness_texture" && p.binding != "metallic_texture" && p.binding != "height_texture" && p.binding != "ao_texture" {
+            if current == index {
+                ret match resolved.definition.graph.node(p.id) {
+                    Some(node) => node.texture_encoding == "linear" None => false
+                }
+            }
+            current += 1
+        }
+    }
+    ret false
+}
+
+/// Includes the uniform/texture layout while ignoring display labels and graph positions.
+pub fn material_definition_semantic(definition: MaterialDefinition) -> str {
+    let mut source = material_graph_stringify(definition.graph, true)
+    for p in definition.parameters {
+        source += ":parameter:" + p.id.fmt() + ":" + p.value.kind + ":" + p.binding
+    }
+    ret source
+}
+
+/// Own the complete mutable graph before handing a material packet to a worker.
+/// Ordinary snapshots keep immutable shader words shared inside the editor.
+impl for ResolvedMaterial {
+    pub fn worker_snapshot(self: Self) -> Self {
+        let mut result = self.snapshot()
+        let mut variants = Vec[MaterialShaderVariant]::new()
+        for variant in self.definition.variants {
+            let mut words = Vec[u32]::with_capacity(variant.code.len())
+            for word in variant.code {
+                words.push(word)
+            }
+            variants.push(MaterialShaderVariant { variant.name, words })
+        }
+        result.definition.variants = variants
+        ret result
+    }
+}

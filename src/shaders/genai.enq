@@ -1,0 +1,9 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn genai_preview_vertex_spirv() -> Vec[u32] {
+    ret builtin_spirv(1585205965_u32)
+}
+pub fn genai_preview_fragment_spirv() -> Vec[u32] {
+    ret builtin_spirv(1586661300_u32)
+}

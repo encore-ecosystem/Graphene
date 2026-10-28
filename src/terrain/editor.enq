@@ -1,3 +1,4 @@
+import luma::Window
 //! Terrain policy and compact retained controls; all authoring and geometry are Encore.
 import core::fmt::Debug
 import core::option::Option
@@ -20,6 +21,7 @@ import refrain::editor_camera::EditorCameraState
 import refrain::editor_gesture::{gizmo_cos, gizmo_sin}
 import refrain::editor_guides::gizmo_step_label
 import refrain::editor_values::parse_editor_scalar
+import refrain::material_asset::load_material_asset_file
 import refrain::preview::ViewportRenderer
 import refrain::scene::primitive::MeshData
 import refrain::scene::renderable::{MeshId, RenderItem, Renderable}
@@ -211,11 +213,24 @@ impl for TerrainEditor {
             self.pending_path = path self.pending_create = true
         }
     }
+    pub fn assign_material(self: mut Self, path: str) -> bool {
+        if !self.active() {
+            ret false
+        }
+        if path != "" &&(!terrain_path(path) || load_material_asset_file(self.project + "/" + path).is_none()) {
+            self.message = "Choose an existing PBR .gmaterial in Content/" self.dirty = true ret false
+        }
+        let mut entry = self.entries.get_unchecked_borrowed(self.active)
+        if !entry.document.set_layer_material(self.brush.layer, path) {
+            ret false
+        }
+        self.invalidate() self.message = "Updated material for layer " +(self.brush.layer + 1).fmt() ret true
+    }
     pub fn references(self: Self) -> Vec[str] {
         let mut paths = Vec[str]::new()
         for e in self.entries {
             paths.push(e.path) for layer in e.document.asset().layers {
-                paths.push(layer.texture)
+                paths.push(layer.texture) paths.push(layer.material)
             }
         }
         ret paths
@@ -326,6 +341,9 @@ impl for TerrainEditor {
                     }
                 }
             }
+            if renderer.set_terrain_material(e.mesh, asset, e.document.revision()) {
+                updated = true
+            }
         }
         if updated {
             self.last_upload = now
@@ -407,16 +425,21 @@ impl for TerrainEditor {
     }
     fn value(self: Self, key: str) -> str {
         ret match key {
-            "density" => gizmo_step_label(self.foliage.density)
-            "scale-min" => gizmo_step_label(self.foliage.minimum_scale)
-            "scale-max" => gizmo_step_label(self.foliage.maximum_scale)
-            "slope" => gizmo_step_label(self.foliage.slope)
-            "radius" => gizmo_step_label(self.brush.radius) "strength" => gizmo_step_label(self.brush.strength) "falloff" => gizmo_step_label(self.brush.falloff)
-            "spacing" => gizmo_step_label(self.spacing) "source" => self.source "range" => gizmo_step_label(self.range)
+            "density" =>(self.foliage.density).fmt()
+            "scale-min" =>(self.foliage.minimum_scale).fmt()
+            "scale-max" =>(self.foliage.maximum_scale).fmt()
+            "slope" =>(self.foliage.slope).fmt()
+            "radius" =>(self.brush.radius).fmt() "strength" =>(self.brush.strength).fmt() "falloff" =>(self.brush.falloff).fmt()
+            "spacing" =>(self.spacing).fmt() "source" => self.source "range" =>(self.range).fmt()
             "lod" => if self.active() {
-                gizmo_step_label(self.entries.get_unchecked_borrowed(self.active).document.asset().lod_distance)
+                (self.entries.get_unchecked_borrowed(self.active).document.asset().lod_distance).fmt()
             } else {
                 "48"
+            }
+            "material" => if self.active() {
+                self.entries.get_unchecked_borrowed(self.active).document.asset().layers.get_unchecked_borrowed(self.brush.layer as usize).material
+            } else {
+                ""
             }
             "texture" => if self.active() {
                 self.entries.get_unchecked_borrowed(self.active).document.asset().layers.get_unchecked_borrowed(self.brush.layer as usize).texture
@@ -424,7 +447,7 @@ impl for TerrainEditor {
                 ""
             }
             "tiling" => if self.active() {
-                gizmo_step_label(self.entries.get_unchecked_borrowed(self.active).document.asset().layers.get_unchecked_borrowed(self.brush.layer as usize).tiling)
+                (self.entries.get_unchecked_borrowed(self.active).document.asset().layers.get_unchecked_borrowed(self.brush.layer as usize).tiling).fmt()
             } else {
                 "4"
             }
@@ -432,13 +455,21 @@ impl for TerrainEditor {
         }
     }
     fn commit_field(self: mut Self) ->() {
-        let key = self.focused let text = self.text.value() let number = parse_editor_scalar(text)
+        let key = self.focused let text = self.text.value()
+        if key == "" || text == self.value(key) {
+            self.focused = "" self.dirty = true ret()
+        }
+        let number = parse_editor_scalar(text)
         let mut okay = true
         if key == "source" {
             if terrain_path(text) {
                 self.source = text
             } else {
                 okay = false
+            }
+        } elif key == "material" && self.active() {
+            if text != self.value("material") {
+                okay = self.assign_material(text)
             }
         } elif key == "texture" && self.active() {
             if text != "" && !terrain_path(text) {
@@ -637,7 +668,7 @@ impl for TerrainEditor {
         }
     }
     fn next_focus(self: mut Self, backwards: bool, locked: bool) ->() {
-        let ids = vec!["terrain-enable", "terrain-tool-raise", "terrain-tool-lower", "terrain-tool-smooth", "terrain-tool-flatten", "terrain-tool-paint", "terrain-undo", "terrain-redo", "terrain-save", "terrain-create", "terrain-resolution", "terrain-field-radius", "terrain-field-strength", "terrain-field-falloff", "terrain-field-source", "terrain-field-range", "terrain-field-spacing", "terrain-import", "terrain-layer-0", "terrain-layer-1", "terrain-layer-2", "terrain-field-texture", "terrain-field-tiling", "terrain-field-lod", "terrain-foliage-grass", "terrain-foliage-tree", "terrain-field-density", "terrain-field-scale-min", "terrain-field-scale-max", "terrain-field-slope"]
+        let ids = vec!["terrain-enable", "terrain-tool-raise", "terrain-tool-lower", "terrain-tool-smooth", "terrain-tool-flatten", "terrain-tool-paint", "terrain-undo", "terrain-redo", "terrain-save", "terrain-create", "terrain-resolution", "terrain-field-radius", "terrain-field-strength", "terrain-field-falloff", "terrain-field-source", "terrain-field-range", "terrain-field-spacing", "terrain-import", "terrain-layer-0", "terrain-layer-1", "terrain-layer-2", "terrain-field-material", "terrain-field-texture", "terrain-field-tiling", "terrain-field-lod", "terrain-foliage-grass", "terrain-foliage-tree", "terrain-field-density", "terrain-field-scale-min", "terrain-field-scale-max", "terrain-field-slope"]
         let controls = self.widget(locked)
         let mut start = 0_usize
         for i in 0_usize..ids.len() {
@@ -697,13 +728,27 @@ impl for TerrainEditor {
         ret false
     }
     /// Pointer capture survives leaving the viewport. RMB/MMB/wheel remain camera input.
-    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout, ray:(Vec3, Vec3), locked: bool, visible: bool) -> bool {
+    pub fn input(self: mut Self, event: Event, target: str, layout: WidgetLayout, ray:(Vec3, Vec3), locked: bool, visible: bool, window: Window) -> bool {
+
         let kind = event.kind()
         if kind == event_focus_lost() {
             self.end_stroke(true) self.owns_focus = false self.focused = "" self.pressed = "" self.hit = Option[Vec3]::None self.dirty = true ret false
         }
         if locked || !visible {
             self.end_stroke(false) self.hit = Option[Vec3]::None self.owns_focus = false self.focused = "" ret false
+        }
+        let text_field_id = if self.focused != "" {
+            "terrain-field-" + self.focused
+        } else {
+            ""
+        }
+        if text_field_id != "" && self.owns_focus {
+            if self.text.pointer_handles(event, target, text_field_id) {
+                self.text = self.text.pointer_input(event, layout, text_field_id, window) self.dirty = true ret true
+            }
+            if luma::text_edit_key(event) {
+                self.text = self.text.key_input(event, window) self.dirty = true ret true
+            }
         }
         let on_panel = target.contains("terrain-")
         if kind == event_pointer_move() {
@@ -788,7 +833,7 @@ impl for TerrainEditor {
             }
             self.owns_focus = true self.request = target
             if target.contains("terrain-field-") {
-                self.focused = target.slice_bytes(14, target.byte_len() - 14) self.text = TextEditor::new(self.value(self.focused))
+                self.focused = target.slice_bytes(14, target.byte_len() - 14) self.text = TextEditor::new(self.value(self.focused)) self.text = self.text.with_cursor(0).pointer_input(event, layout, target, window)
             } else {
                 self.focused = "" self.pressed = target
             }
@@ -894,10 +939,13 @@ impl for TerrainEditor {
         row.push(Widget::input(id, if self.focused == key {
                     self.text.value()
                 } else {
-                    self.value(key)
+                    let raw = self.value(key)
+                    match parse_editor_scalar(raw) {
+                        Some(value) => luma::format_decimal(value, 4_u32) None => raw
+                    }
                 }
                 ,
-            ).with_classes("terrain-input").with_disabled(disabled).with_focus(!disabled && self.owns_focus &&(self.focused == key || self.request == id)).with_attribute("aria-label", label))
+            ).with_cursor(self.text.cursor()).with_selection(self.text.selection_start(), self.text.selection_end()).with_classes("terrain-input").with_disabled(disabled).with_focus(!disabled && self.owns_focus &&(self.focused == key || self.request == id)).with_attribute("aria-label", label))
         ret row
     }
     pub fn widget(self: Self, locked: bool) -> Widget {
@@ -957,8 +1005,8 @@ impl for TerrainEditor {
                     , self.brush.layer == i, disabled,))
         }
         layers.push(choices)
-        layers.push(self.field("texture", "Albedo", disabled)) layers.push(self.field("tiling", "Tile size · m", disabled))
-        layers.push(Widget::label("PNG / .gtexture in Content/\nEmpty: layer's base color\nLayers blend with normalized weights").with_classes("terrain-hint").with_text_wrap(true)) body.push(layers)
+        layers.push(self.field("material", "PBR material", disabled)) layers.push(self.field("texture", "Fallback albedo", disabled)) layers.push(self.field("tiling", "Tile size · m", disabled))
+        layers.push(Widget::label("PBR .gmaterial in Content/\nEmpty material: fallback albedo / color\nLayers blend with normalized weights").with_classes("terrain-hint").with_text_wrap(true)) body.push(layers)
         let mut manage = Widget::panel("terrain-manage").with_classes("terrain-column").with_direction(vertical())
         manage.push(Widget::label("HEIGHTMAP & CREATION").with_classes("terrain-heading"))
         manage.push(self.field("source", "Heightmap", locked)) manage.push(self.field("range", "Height range · m", locked))

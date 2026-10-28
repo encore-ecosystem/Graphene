@@ -210,8 +210,8 @@ species. A held brush does not stack duplicates; each complete gesture shares
 Terrain Undo/Redo and Esc cancellation. Plants follow the terrain height after
 sculpting and inherit the landscape actor's transform and visibility.
 
-Foliage is stored inside the GTR2 terrain asset, not as individual scene actors;
-GTR1 heightfields are migrated when loaded. Save Terrain and Save Project persist
+Foliage and three PBR layer references are stored inside the GTR3 terrain asset;
+GTR1/GTR2 heightfields are migrated when loaded. Save Terrain and Save Project persist
 plants along with heights, weights and layer settings. This first implementation
 uses small built-in opaque meshes and the existing GPU instance path. It supports
 8,192 stored plants per terrain and at most 768 visible foliage instances within
@@ -225,3 +225,89 @@ full-resolution chunk borders. Editing invalidates affected chunks and their
 normal neighbours. Collision in Play always uses the full heightfield mesh,
 independently of rendering LOD. Terrain actors support the existing scene
 transforms, visibility, duplication, deletion and actor history.
+
+## GenAI materials
+
+Open **Window → GenAI**, enter a compatible material API URL and account API key,
+then select **Connect**. The sibling `GrapheneAI` service runs the Encore API and
+a private StableMaterials GPU worker; its README describes setup and key issuance.
+No weights or Python dependency are added to the editor.
+
+Describe a material, or switch to **Reference** and enter a PNG path. Choose the
+provider's model, resolution, quality, seed and seamless option, then **Generate**.
+Generation is asynchronous and cancellable. Reconnect resumes a known job or
+retries the same idempotent submission. Provider credentials and pending-job
+metadata are saved locally in owner-readable `~/.graphene/genai-settings.json`,
+outside the project.
+
+Inspect the sphere or plane, individual PBR maps and 3 × 3 tiling. The material
+preview shares the scene PBR/displacement renderer. **Import Material** validates
+the complete set and publishes one folder, for example:
+
+```text
+Content/Materials/Generated/Stone/
+  Stone.gmaterial
+  Textures/
+    BaseColor.gtexture
+    Normal.gtexture
+    Roughness.gtexture
+    Metallic.gtexture
+    AO.gtexture
+    Height.gtexture
+```
+
+Optional maps are included when supplied. Name collisions use `_2`, `_3`, etc.
+Publication and Content Browser Undo/Redo move the complete folder atomically;
+referenced materials are protected. New imports do not create `generation.json`.
+Existing imported files remain in their original locations.
+
+**Apply to Selected** assigns the imported material to a static or skeletal mesh,
+or to the active paint layer of a selected terrain. Terrain layer assignments
+use Terrain Undo/Redo. Each layer can reference a PBR material; layer weights and
+world-space tiling blend its albedo, normal, roughness, metallic, AO and height on
+the GPU. With an empty material reference, the layer retains its fallback color
+or albedo texture.
+
+Double-click a `.gmaterial` in Content Browser, or choose **Edit Material** in
+Details. A **Material** opens its Surface graph; a **Material Instance** opens
+its inherited parameter editor. Enable a parameter override to edit it. Disabling
+an override remembers its local value; Reset clears it and returns to the
+immediate parent's value. Both editors have Save and local
+Undo/Redo. Parameter IDs remain stable when their names change.
+
+Imported PBR materials inherit the read-only built-in
+`Assets/Materials/M_StandardPBR.gmaterial`. **Open Parent** shows that graph.
+**Create Editable Copy** saves a project Material under `Content/Materials` and
+reparents only the current instance. Use **Apply** after compiling a changed
+parent graph to update its dependent instances. Content Browser's context menu
+also offers **Create Material Instance**.
+
+File buttons import PNG or native textures in the background; map imports use
+content-addressed native paths. The PBR preview offers sphere, plane and tiling
+modes. Browser thumbnails use this same renderer on demand, with bounded texture
+samples and a local `.graphene/Thumbnails` cache.
+
+Base Color uses sRGB. Normal, Roughness, Metallic, AO and Height are linear.
+Roughness and metallic maps multiply their scalar values. AO affects indirect
+lighting, with white as the neutral value. Grayscale PNGs are supported for mask
+maps. Height uses native R16 storage and preserves authored 16-bit grayscale PNGs.
+
+Displacement defaults to Off, with magnitude `0.05` in mesh-local units and center
+`0.5`. Low/Medium/High target 8/4/2 pixels per rendered edge. Adaptive GPU patches
+change the rendered silhouette, depth and selection mask; skinning precedes
+height evaluation. Source AutoLOD remains distance based. Physics continues to
+use the original geometry. Tessellation resources across scene, camera, selection
+and material previews share a 256 MiB allocation budget. Hardware GI, direct-light
+shadows and reflected ray hits share bounded, height-evaluated trace proxies.
+Static instances reuse local-space proxies; terrain accounts for world-space
+layer coordinates, and skeletal proxies evaluate the current deformed surface.
+Trace detail is independent of camera distance and limited by texture resolution
+and the selected material quality. Builds are recorded in the frame without a
+CPU/GPU wait; replaced geometry, descriptors and pipelines retire after their
+producer and consumer fences. Non-ray-query adapters retain the existing GI path.
+
+Native material containers are version 4, with separate definition and instance
+payloads. Versions 1–3 read as instances of the built-in PBR material without
+rewriting their files; an explicit Save upgrades them. Ordinary materials use
+`.gmaterial` exclusively. Native textures are version 2 (RGBA8 or R16), terrain
+version 3, and scenes version 8.

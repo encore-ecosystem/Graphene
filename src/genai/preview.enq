@@ -1,0 +1,292 @@
+//! Isolated textured sphere/plane preview on Luma's Vulkan device.
+import core::result::Result
+import core::option::Option
+import core::vec::Vec
+
+import linalg::Vec3
+import luma::{ExternalVulkanImage, PreparedFrame, Window}
+
+import mod::maps::GeneratedMap
+import refrain::displacement::patterns::DisplacementBudget
+import refrain::material_images::{MaterialImages, pack_orm_ao}
+import refrain::pbr_preview::PbrPreview
+import refrain::rhi::*
+import refrain::scene::camera::PerspectiveCamera
+import refrain::scene::primitive::sphere_mesh
+import refrain::shaders::genai::{genai_preview_fragment_spirv, genai_preview_vertex_spirv}
+import refrain::standard_material::StandardMaterial
+import refrain::texture_asset::{TextureImage, decode_height_png}
+import refrain::texture_gpu::TextureUpload
+import refrain::texture_image::HeightImage
+
+pub struct GenAiPreview {
+    instance: GraphicsInstance
+    device: GraphicsDevice
+    target: Swapchain
+    consumer: usize
+    layout: BindGroupLayout
+    mesh: GpuMesh
+    quad: GpuMesh
+    vertex: ShaderModule
+    fragment: ShaderModule
+    pipeline: RenderPipeline
+    buffers: Vec[GpuBuffer]
+    groups: Vec[BindGroup]
+    sampler: GpuSampler
+    textures: Vec[GpuTexture]
+    uploads: Vec[TextureUpload]
+    width: u32
+    height: u32
+    pending: bool
+    visible: bool
+    view: u32
+    plane: bool
+    tiled: bool
+    flip: bool
+    beauty: Option[PbrPreview<H>]
+}
+
+impl for GenAiPreview {
+    pub fn create(window: Window, maps: Vec[GeneratedMap], flip: bool, budget: DisplacementBudget<H>) -> Result[GenAiPreview<H>, str] {
+        let interop = window.vulkan_interop()
+        if !interop.valid() {
+            ret Result::Err("GenAI preview requires Vulkan interop")
+        }
+        let instance = GraphicsInstance::borrow(interop.instance(), interop.physical_device())
+        let adapter = match instance.preferred_adapter() {
+            Some(a) => a None => {
+                instance.destroy() ret Result::Err("Preview adapter unavailable")
+            }
+        }
+        let device = GraphicsDevice::borrow_backend(interop.render_device(), adapter)
+        let target = device.create_shared_offscreen_target(1024, 1024)
+        let mut entries = vec![BindGroupLayoutEntry::uniform(0, shader_stage_vertex() | shader_stage_fragment())]
+        for binding in 1_usize..5_usize {
+            entries.push(BindGroupLayoutEntry::texture_sampler(binding as u32, shader_stage_fragment()))
+        }
+        let layout = device.create_bind_group_layout(entries)
+        let sphere = sphere_mesh(1_f32, 32, 48).with_uvs()
+        let mesh = device.create_mesh(sphere.vertices(), sphere.indices())
+        let mut vertices = Vec[f32]::new()
+        for p in vec![Vec3::new( - 1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, - 1_f32, 0_f32), Vec3::new(1_f32, 1_f32, 0_f32), Vec3::new( - 1_f32, 1_f32, 0_f32)] {
+            for v in vec![p.x(), p.y(), p.z(), 0_f32, 0_f32, 1_f32, 1_f32, 1_f32, 1_f32,(p.x() + 1) * 0.5_f32,(1 - p.y()) * 0.5_f32] {
+                vertices.push(v)
+            }
+        }
+        let quad = device.create_mesh(vertices, vec![0_u32, 1_u32, 2_u32, 2_u32, 3_u32, 0_u32])
+        let vertex = device.create_shader_module(genai_preview_vertex_spirv(), shader_stage_vertex())
+        let fragment = device.create_shader_module(genai_preview_fragment_spirv(), shader_stage_fragment())
+        let pipeline = device.create_render_pipeline_with_options(target, vertex, fragment, VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0), VertexAttribute::new(1, vertex_format_float32x3(), 12), VertexAttribute::new(3, vertex_format_float32x2(), 36)]), layout, RenderPipelineOptions::depth())
+        let mut buffers = Vec[GpuBuffer]::new() for _ in 0_usize..target.frames_in_flight() as usize {
+            buffers.push(device.create_buffer(96, buffer_uniform(), true))
+        }
+        let mut source = Vec[TextureImage]::new()
+        for role in vec!["basecolor", "normal", "roughness", "metallic", "height", "ao"] {
+            let mut image = TextureImage {
+                1_u32, 1_u32, vec![4294967295_u32]
+            }
+            for map in maps {
+                if map.role == role {
+                    image = map.image
+                }
+            }
+            source.push(image)
+        }
+        let rough = source.get_unchecked_borrowed(2) let metal = source.get_unchecked_borrowed(3)
+        let images = vec![source.get_unchecked_borrowed(0), source.get_unchecked_borrowed(1), pack_orm_ao(source.get_unchecked_borrowed(5), rough, metal, rough.width, rough.height, 1_f32), source.get_unchecked_borrowed(4)]
+        let mut result = GenAiPreview<H> {
+            instance, device, target, interop.swapchain(), layout, mesh, quad, vertex, fragment, pipeline, buffers, Vec[BindGroup]::new(), device.create_repeat_sampler(), Vec[GpuTexture]::new(), Vec[TextureUpload]::new(), 0, 0, true, true, 0, false, false, flip, Option::None
+        }
+        if !target.available() || !layout.available() || !mesh.available() || !quad.available() || !vertex.available() || !fragment.available() || !pipeline.available() || !result.sampler.available() {
+            result.destroy() ret Result::Err("Unable to create material preview resources")
+        }
+        for buffer in buffers {
+            if !buffer.available() {
+                result.destroy() ret Result::Err("Unable to allocate preview uniforms")
+            }
+        }
+        for i in 0_usize..images.len() {
+            match if i == 0 {
+                TextureUpload::begin(device, images.get_unchecked_borrowed(i))
+            } else {
+                TextureUpload::begin_linear(device, images.get_unchecked_borrowed(i))
+            }
+            {
+                Some(upload) => result.uploads.push(upload)
+                None => {
+                    result.destroy() ret Result::Err("Unable to upload material preview")
+                }
+            }
+        }
+        let mut material = StandardMaterial::default().with_metallic(1).with_roughness(1).with_normal_flip_y(flip).with_base_color_texture("Content/Preview/BaseColor.gtexture").with_normal_texture("Content/Preview/Normal.gtexture").with_roughness_texture("Content/Preview/Roughness.gtexture").with_metallic_texture("Content/Preview/Metallic.gtexture")
+        let mut height_image = HeightImage { 1, 1, vec![32768_u16] }
+        for map in maps {
+            if map.role == "height" {
+                height_image = decode_height_png(map.bytes).unwrap_or(height_image) material = material.with_height_texture("Content/Preview/Height.gtexture")
+            }
+        }
+        let mut low = 65535_u16 let mut high = 0_u16 for h in height_image.samples {
+            if h < low {
+                low = h
+            }
+            if h > high {
+                high = h
+            }
+        }
+        let loaded = MaterialImages {
+            "", material, vec![images.get_unchecked_borrowed(0), images.get_unchecked_borrowed(1), images.get_unchecked_borrowed(2)], "", height_image,((high as f32) -(low as f32)) / 65535_f32, Option::None, Vec[TextureImage]::new()
+}
+        match PbrPreview::create(window, budget, loaded) {
+            Ok(preview) => {
+                result.beauty = Option[PbrPreview<H>]::Some(preview)
+            }
+            Err(e) => {
+                result.destroy() ret Result::Err(e)
+            }
+        }
+        ret Result::Ok(result)
+    }
+    pub fn mode(self: mut Self&, view: u32, plane: bool, tiled: bool) ->() {
+        self.view = view self.plane = plane self.tiled = tiled self.pending = true
+        match self.beauty {
+            Some(preview) => preview.mode(plane, tiled) None => {
+            }
+        }
+        ret()
+    }
+    pub fn displacement(self: mut Self&, enabled: bool) ->() {
+        match self.beauty {
+            Some(preview) => preview.displacement(enabled) None => {
+            }
+        }
+    }
+    pub fn error(self: Self&) -> str {
+        ret match self.beauty {
+            Some(preview) => preview.error() None => ""
+        }
+    }
+    pub fn busy(self: Self&) -> bool {
+        if self.view == 0 {
+            match self.beauty {
+                Some(p) => {
+                    if p.error() == "" {
+                        ret p.busy()
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret self.visible &&(self.pending || self.uploads.len() > 0)
+    }
+    pub fn ready(self: Self&) -> bool {
+        let beauty_ready = match self.beauty {
+            Some(p) => p.ready() None => true
+        }
+        ret beauty_ready && self.target.last_frame_complete() &&(self.consumer == 0 || Swapchain::borrow(self.consumer).last_frame_complete())
+    }
+    pub fn compose(self: mut Self&, frame: mut PreparedFrame) -> bool {
+        let slot = match frame.surface("genai-preview-surface") {
+            Some(s) => {
+                self.visible = true s
+            }
+            None => {
+                self.visible = false ret true
+            }
+        }
+        if self.uploads.len() > 0 {
+            for upload in self.uploads {
+                if !upload.complete() {
+                    ret false
+                }
+            }
+            for upload in self.uploads {
+                self.textures.push(upload.finish())
+            }
+            self.uploads.clear()
+            let sampler = self.sampler
+            for buffer in self.buffers {
+                self.groups.push(self.device.create_buffer_textures_bind_group_many(self.layout, vec![0_u32], vec![buffer], vec![0_u64], vec![96_u64], vec![1_u32, 2_u32, 3_u32, 4_u32], self.textures, vec![sampler, sampler, sampler, sampler]))
+            }
+        }
+        if self.view == 0 {
+            match self.beauty {
+                Some(preview) => {
+                    if preview.error() == "" {
+                        ret preview.compose(frame, "genai-preview-surface")
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        let width = slot.pixel_width()
+        let height = slot.pixel_height()
+        // The UI caps physical dimensions to the target budget. Never submit a
+        // silently clamped region: Luma requires the exact prepared slot extent.
+        if width > 1024 || height > 1024 {
+            ret false
+        }
+        if width == 0 || height == 0 {
+            ret true
+        }
+        if (self.pending || width != self.width || height != self.height) && self.ready() {
+            let rendered = self.target.try_acquire_frame()
+            if rendered.available() {
+                let position = Vec3::new(0_f32, 0_f32, 3.2_f32) let camera = PerspectiveCamera::new(position, Vec3::zero(), 0.7853982_f32, 0.05_f32, 100_f32)
+                let buffer = self.buffers.get_unchecked_borrowed(rendered.slot() as usize) let group = self.groups.get_unchecked_borrowed(rendered.slot() as usize)
+                let pass = rendered.begin_render_pass(self.pipeline, 0.028_f32, 0.034_f32, 0.043_f32, 1_f32)
+                let okay = rendered.set_viewport(0, 0, width, height) && buffer.write_f32s(0, camera.view_projection((width as f32) /(height as f32)).values()) && buffer.write_f32s(64, vec![0_f32, 0_f32, 3.2_f32, self.view as f32, if self.plane {
+                            1_f32
+                        } else {
+                            0_f32
+                        }
+                        , if self.tiled {
+                            3_f32
+                        } else {
+                            1_f32
+                        }
+                        , if self.flip {
+                            - 1_f32
+                        } else {
+                            1_f32
+                        }
+                        ,(width as f32) /(height as f32)]) && pass.bind_group(group) && pass.draw_mesh(if self.plane || self.view > 0 {
+                        self.quad
+                    } else {
+                        self.mesh
+                    }
+                ) && pass.end() && rendered.present()
+                rendered.destroy()
+                if okay {
+                    self.pending = false self.width = width self.height = height
+                }
+            } else {
+                rendered.destroy()
+            }
+        }
+        if self.pending || self.width != width || self.height != height {
+            ret false
+        }
+        ret frame.submit_external("genai-preview-surface", slot.generation(), ExternalVulkanImage::new(self.target.external_image() as u64, 1024, 1024, self.target.external_layout()).with_region(0, 0, width, height))
+    }
+    pub fn destroy(self: Self&) ->() {
+        match self.beauty {
+            Some(preview) => preview.destroy() None => {
+            }
+        }
+        self.target.destroy() self.pipeline.destroy() for g in self.groups {
+            g.destroy()
+        }
+        for b in self.buffers {
+            b.destroy()
+        }
+        for t in self.textures {
+            t.destroy()
+        }
+        for u in self.uploads {
+            u.wait() u.finish().destroy()
+        }
+        self.sampler.destroy() self.mesh.destroy() self.quad.destroy() self.layout.destroy() self.vertex.destroy() self.fragment.destroy() self.device.destroy() self.instance.destroy() ret()
+    }
+}

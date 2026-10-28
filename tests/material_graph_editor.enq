@@ -5,17 +5,29 @@ import std::os::{mkdir_all, read_file, write_file_atomic}
 import std::time::perf_counter_ms
 
 import binary::{decode, encode}
+import graphene::content_browser::{ContentBrowser, ContentEdit, ContentMove}
 import graphene::material_graph::*
 import graphene::material_graph::cooked::CookedMaterialGraph
 import graphene::material_graph::editor::{MaterialEditor, material_display_number}
-import luma::{Event, Rect, StyleSheet, Widget, event_pointer_down, event_pointer_up, layout_widget, widget_render_surface}
+import graphene::material_schema::MaterialShaderVariant
+import luma::{Event, Rect, RendererKind, StyleSheet, Widget, Window, event_pointer_down, event_pointer_up, layout_widget, widget_render_surface}
 
 fn pointer(kind: u32, x: f32, y: f32, buttons: u32) -> Event {
     ret Event { kind, x, y, 0, 0, buttons, 0, 0, 0, 0, "", 0 }
 }
 fn main() -> u32 {
+    // Encore #171: retain imported browser/history container layouts in standalone tests.
+    let browser = ContentBrowser::new()
+    let history = ContentEdit { Vec[ContentMove]::new(), "fixture" }
+    if browser.undo.len() != 0_usize || browser.redo.len() != 0_usize || history.moves.len() != 0_usize {
+        ret 94_u32
+    }
+    let window = Window::create_with_renderer("Editor input test", 320, 200, RendererKind::Software)
     let sample = CookedMaterialGraph {
-        1_u32, "surface", "codec fixture", vec![("name", "payload")]
+        3_u32, "surface", "codec fixture", vec![MaterialShaderVariant {
+                "name", vec![119734787_u32, 65536_u32, 0_u32, 1_u32, 0_u32]
+            }
+        ]
     }
     let bytes = match encode(sample) {
         Ok(value) => value Err(_) => {
@@ -27,7 +39,7 @@ fn main() -> u32 {
             ret 92
         }
     }
-    if decoded.variants.get(0).unwrap_or(("", "")).1 != "payload" {
+    if decoded.variants.get(0_usize).unwrap_or(MaterialShaderVariant { "", Vec[u32]::new() }).code.get(0_usize).unwrap_or(0_u32) != 119734787_u32 {
         ret 93
     }
 
@@ -39,7 +51,9 @@ fn main() -> u32 {
         ))
     let mut editor = MaterialEditor::new()
     let project = f"target/material-editor-test-{perf_counter_ms()}"
-    editor.open(project, sheet)
+    mkdir_all(project + "/Content/Materials")
+    write_file_atomic(project + "/Content/Materials/M_Graph.graphene-material-graph.json", material_graph_stringify(MaterialGraph::default(), false))
+    editor.open_path(project, project + "/Content/Materials/M_Graph.graphene-material-graph.json", sheet)
     // Restoring the Material tab precedes the asynchronous shader build.
     // A surface with no producer image makes the initial frame unpresentable.
     if editor.widget().find("material-preview-surface").unwrap_or(Widget::label("")).kind() == widget_render_surface() {
@@ -55,20 +69,20 @@ fn main() -> u32 {
     if bounds.width() < 600 || bounds.height() < 400 || preview.height() < 150 {
         ret 2
     }
-    let _down = editor.input(pointer(event_pointer_down(), bounds.x() + 100, bounds.y() + 90, 1), "material-canvas", bounds, preview, sheet)
-    let _move = editor.input(Event::pointer_move(bounds.x() + 140, bounds.y() + 120, 40, 30, 1), "material-canvas", bounds, preview, sheet)
-    let _up = editor.input(pointer(event_pointer_up(), bounds.x() + 140, bounds.y() + 120, 0), "material-canvas", bounds, preview, sheet)
+    let _down = editor.input(pointer(event_pointer_down(), bounds.x() + 100, bounds.y() + 90, 1), "material-canvas", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _move = editor.input(Event::pointer_move(bounds.x() + 140, bounds.y() + 120, 40, 30, 1), "material-canvas", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _up = editor.input(pointer(event_pointer_up(), bounds.x() + 140, bounds.y() + 120, 0), "material-canvas", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).x != 80 {
         ret 3
     }
-    let _undo = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet)
+    let _undo = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).x != 40 {
         ret 4
     }
-    let _field = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-value-0", bounds, preview, sheet)
-    let _all = editor.input(Event::key_down(97, 192), "", bounds, preview, sheet)
-    let _text = editor.input(Event::text_input("0.8"), "", bounds, preview, sheet)
-    let _commit = editor.input(Event::key_down(13, 0), "", bounds, preview, sheet)
+    let _field = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-value-0", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _all = editor.input(Event::key_down(97, 192), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _text = editor.input(Event::text_input("0.8"), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _commit = editor.input(Event::key_down(13, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.x() < 0.799 {
         ret 5
     }
@@ -78,47 +92,47 @@ fn main() -> u32 {
     if editor.widget().find("mg-undo").unwrap_or(Widget::label("")).disabled() {
         ret 31
     }
-    let _field_again = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-value-0", bounds, preview, sheet)
-    let _all_again = editor.input(Event::key_down(97, 192), "", bounds, preview, sheet)
-    let _bad_text = editor.input(Event::text_input("invalid"), "", bounds, preview, sheet)
-    let _reject = editor.input(Event::key_down(13, 0), "", bounds, preview, sheet)
+    let _field_again = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-value-0", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _all_again = editor.input(Event::key_down(97, 192), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _bad_text = editor.input(Event::text_input("invalid"), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _reject = editor.input(Event::key_down(13, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.message() == "" || editor.graph().node(1).unwrap_or(MaterialNode::new(0, "", 0, 0)).value.x() < 0.799 {
         ret 6
     }
-    let _escape = editor.input(Event::key_down(27, 0), "", bounds, preview, sheet)
+    let _escape = editor.input(Event::key_down(27, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     let count = editor.graph().nodes.len()
-    let _add = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-add-multiply", bounds, preview, sheet)
+    let _add = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-add-multiply", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().nodes.len() != count + 1 {
         ret 7
     }
-    let _undo_add = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet)
+    let _undo_add = editor.input(Event::key_down(122, 192), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().nodes.len() != count {
         ret 8
     }
-    let _search = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-search", bounds, preview, sheet)
-    let _query = editor.input(Event::text_input("MuLti"), "", bounds, preview, sheet)
+    let _search = editor.input(pointer(event_pointer_down(), 0, 0, 1), "mg-search", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _query = editor.input(Event::text_input("MuLti"), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     let widget = editor.widget()
     if widget.find("mg-add-multiply").is_none() || widget.find("mg-add-color").is_some() {
         ret 9
     }
-    let _tab = editor.input(Event::key_down(9, 0), "", bounds, preview, sheet)
+    let _tab = editor.input(Event::key_down(9, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if !editor.widget().find("mg-add-multiply").unwrap_or(Widget::label("")).focused() {
         ret 10
     }
-    let _activate = editor.input(Event::key_down(13, 0), "", bounds, preview, sheet)
+    let _activate = editor.input(Event::key_down(13, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.graph().nodes.len() != count + 1 {
         ret 11
     }
-    if material_display_number(0.12) != "0.12" || material_display_number( - 0.1236) != "-0.124" {
+    if material_display_number(0.12) != "0.12" || material_display_number( - 0.1236) != "-0.1236" {
         ret 12
     }
-    let _shortcut = editor.input(Event::key_down(32, 0), "", bounds, preview, sheet)
-    let _opening_space = editor.input(Event::text_input(" "), "", bounds, preview, sheet)
-    let _shortcut_query = editor.input(Event::text_input("Add"), "", bounds, preview, sheet)
+    let _shortcut = editor.input(Event::key_down(32, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _opening_space = editor.input(Event::text_input(" "), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
+    let _shortcut_query = editor.input(Event::text_input("Add"), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if editor.widget().find("mg-add-add").is_none() {
         ret 17
     }
-    let _escape_search = editor.input(Event::key_down(27, 0), "", bounds, preview, sheet)
+    let _escape_search = editor.input(Event::key_down(27, 0), "", bounds, preview, sheet, layout_widget(Widget::panel("input-test"), bounds), window)
     if !editor.save(sheet) {
         ret 13
     }
@@ -127,7 +141,7 @@ fn main() -> u32 {
         ret 14
     }
     let before = editor.graph().nodes.len()
-    editor.open(project + "/invalid", sheet)
+    editor.open_path(project + "/invalid", invalid + "/M_Graph.graphene-material-graph.json", sheet)
     if editor.message() == "" || editor.graph().nodes.len() != before {
         ret 15
     }

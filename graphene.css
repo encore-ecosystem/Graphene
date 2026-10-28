@@ -36,3 +36,7 @@
 @import "styles/game-ui.css";
 
 @import "styles/terrain.css";
+
+@import "styles/genai.css";
+
+@import "styles/pbr.css";

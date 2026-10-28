@@ -1,17 +1,21 @@
 //! Visible selection silhouette, independent of actor materials and topology.
+import mod::displacement::scene::{DisplacementInput, DisplacementMaterial, DisplacementActorIdentity, prepare_displacement_inputs}
 import core::option::Option
 import core::vec::Vec
-import linalg::Vec3
+
+import linalg::{Mat4, Vec3}
+
 import mod::animation::scene::SceneAnimation
-import mod::animation::scene_gpu::{SceneCharacters,CharacterRenderView}
-import linalg::Mat4
+import mod::animation::scene_gpu::{CharacterRenderView, SceneCharacters}
 import mod::assets::{MaterialAssets, MeshAssets, StandardMaterial}
+import mod::displacement::renderer::DisplacementRenderer
 import mod::renderer::SceneRenderer
 import mod::rhi::*
 import mod::scene::camera::PerspectiveCamera
 import mod::scene::light::DirectionalLight
-import mod::scene::renderable::{MaterialId, Renderable, RenderItem}
-import mod::shaders::selection::{selection_mask_vert_spirv, selection_mask_frag_spirv, selection_outline_vert_spirv, selection_outline_frag_spirv}
+import mod::scene::renderable::{MaterialId, RenderItem, Renderable}
+import mod::shaders::selection::{selection_mask_frag_spirv, selection_mask_vert_spirv, selection_outline_frag_spirv, selection_outline_vert_spirv}
+import mod::temporal_view::TemporalView
 
 struct MaskViews {
     target: Swapchain
@@ -151,7 +155,7 @@ impl for SelectionOutline {
     }
     /// Called before submitting a viewport frame, on the same graphics queue.
     pub fn prepare(self: mut Self&, items: Vec[RenderItem], selected: Vec[u64], camera: PerspectiveCamera,
-        light: DirectionalLight, meshes: MeshAssets, width: u32, height: u32, consumers_complete: bool,characters: mut SceneCharacters<H>,animation: SceneAnimation<H>,source_selected: Vec[u64],gi_scene: GpuBuffer,gi_surfaces: GpuBuffer,gi_history: GpuBuffer,) -> bool {
+        light: DirectionalLight, meshes: MeshAssets, width: u32, height: u32, consumers_complete: bool, characters: mut SceneCharacters<H>, animation: SceneAnimation<H>, source_selected: Vec[u64], gi_scene: GpuBuffer, gi_surfaces: GpuBuffer, gi_history: GpuBuffer, displaced: Vec[DisplacementInput], displacement: mut DisplacementRenderer&, sampler: GpuSampler, shelter: GpuTexture, material_sets: Vec[DisplacementMaterial], identities: Vec[DisplacementActorIdentity],) -> bool {
         self.ready = false
         if consumers_complete {
             let mut pending = Vec[MaskViews]::new()
@@ -165,6 +169,7 @@ impl for SelectionOutline {
             self.retired = pending
         }
         if selected.len() == 0 {
+            displacement.begin(2) displacement.begin(3) displacement.collect()
             ret true
         }
         if width > self.views.target.width() || height > self.views.target.height() {
@@ -185,11 +190,42 @@ impl for SelectionOutline {
             frame.destroy() ret false
         }
         let ordered = frame.sampled_color_barrier()
-        let character_ready=characters.prepare_selection(animation,frame,CharacterRenderView{self.views.target,camera,width,height,1_u32,false,Mat4::identity(),light,Vec3::zero(),Vec[f32]::new(),0_u32,GpuTexture::unavailable()},source_selected,false,gi_scene,gi_surfaces,gi_history)
+        let character_ready = characters.prepare_selection(animation, frame, CharacterRenderView {
+                self.views.target, camera, width, height, 1_u32, false, Mat4::identity(), light, Vec3::zero(), Vec[f32]::new(), 0_u32, GpuTexture::unavailable()
+            }
+            , source_selected, false, gi_scene, gi_surfaces, gi_history,)
+        let mut mask_displaced = Vec[DisplacementInput]::new()
+        for input in displaced {
+            mask_displaced.push(input)
+        }
+        match characters.displacement_inputs(animation, frame, camera, material_sets, identities) {
+            Ok(animated) => {
+                for input in animated {
+                    mask_displaced.push(input)
+                }
+            }
+            Err(_) => {
+                frame.destroy() ret false
+            }
+        }
+        let history = TemporalView::new()
+        let mut scene_buffers = Vec[Vec[GpuBuffer]]::new()
+        for slot in 0_usize..self.views.target.frames_in_flight() as usize {
+            let frame_buffers = self.renderer.frame_bindings(slot)
+            scene_buffers.push(vec![frame_buffers.get_unchecked_borrowed(0), frame_buffers.get_unchecked_borrowed(1), gi_scene, gi_surfaces, gi_history])
+        }
+        let displaced_ready = prepare_displacement_inputs(displacement, self.device, frame, self.views.target, 2, mask_displaced, sampler, shelter, scene_buffers, camera, history, width, height, width as f32 / height as f32, false, false, selected)
+        let mut base_items = Vec[RenderItem]::new()
+        for item in items {
+            if !displacement.handles(item.entity(), 2) {
+                base_items.push(item)
+            }
+        }
+        let suppressed = characters.suppress_displaced(frame, 2, displacement, identities)
         let pass = frame.begin_render_pass(self.mask_pipeline, 0, 1, 1, 1)
-        let recorded = character_ready && ordered && frame.set_viewport(0, 0, width, height) && self.renderer.render_items(
-            selection_mask_items(items, selected, self.selected, self.unselected), camera, light, meshes, self.materials,
-            pass, frame.slot(),(width as f32) /(height as f32),) && characters.draw_selection(pass,frame.slot(),false)
+        let recorded = suppressed && displaced_ready && character_ready && ordered && frame.set_viewport(0, 0, width, height) && self.renderer.render_items(
+            selection_mask_items(base_items, selected, self.selected, self.unselected), camera, light, meshes, self.materials,
+            pass, frame.slot(),(width as f32) /(height as f32),) && displacement.draw(pass, frame.slot(), 2) && characters.draw_selection(pass, frame.slot(), false)
         let submitted = recorded && pass.end() && frame.present()
         frame.destroy()
         if !submitted {
@@ -202,11 +238,41 @@ impl for SelectionOutline {
             silhouette_frame.destroy() ret false
         }
         let silhouette_ordered = silhouette_frame.sampled_color_barrier()
-        let silhouette_character_ready=characters.prepare_selection(animation,silhouette_frame,CharacterRenderView{self.views.silhouette,camera,width,height,1_u32,false,Mat4::identity(),light,Vec3::zero(),Vec[f32]::new(),0_u32,GpuTexture::unavailable()},source_selected,true,gi_scene,gi_surfaces,gi_history)
+        let silhouette_character_ready = characters.prepare_selection(animation, silhouette_frame, CharacterRenderView {
+                self.views.silhouette, camera, width, height, 1_u32, false, Mat4::identity(), light, Vec3::zero(), Vec[f32]::new(), 0_u32, GpuTexture::unavailable()
+            }
+            , source_selected, true, gi_scene, gi_surfaces, gi_history,)
+        let mut silhouette_displaced_inputs = Vec[DisplacementInput]::new()
+        for input in displaced {
+            silhouette_displaced_inputs.push(input)
+        }
+        match characters.displacement_inputs(animation, silhouette_frame, camera, material_sets, identities) {
+            Ok(animated) => {
+                for input in animated {
+                    silhouette_displaced_inputs.push(input)
+                }
+            }
+            Err(_) => {
+                silhouette_frame.destroy() ret false
+            }
+        }
+        let mut silhouette_buffers = Vec[Vec[GpuBuffer]]::new()
+        for slot in 0_usize..self.views.silhouette.frames_in_flight() as usize {
+            let frame_buffers = self.silhouette_renderer.frame_bindings(slot)
+            silhouette_buffers.push(vec![frame_buffers.get_unchecked_borrowed(0), frame_buffers.get_unchecked_borrowed(1), gi_scene, gi_surfaces, gi_history])
+        }
+        let silhouette_displaced = prepare_displacement_inputs(displacement, self.device, silhouette_frame, self.views.silhouette, 3, silhouette_displaced_inputs, sampler, shelter, silhouette_buffers, camera, history, width, height, width as f32 / height as f32, false, false, selected)
+        let mut silhouette_items = Vec[RenderItem]::new()
+        for item in items {
+            if !displacement.handles(item.entity(), 3) {
+                silhouette_items.push(item)
+            }
+        }
+        let silhouette_suppressed = characters.suppress_displaced(silhouette_frame, 3, displacement, identities)
         let silhouette_pass = silhouette_frame.begin_render_pass(self.mask_pipeline, 0, 1, 1, 1)
-        let silhouette_recorded = silhouette_character_ready && silhouette_ordered && silhouette_frame.set_viewport(0, 0, width, height) && self.silhouette_renderer.render_items(
-            selection_silhouette_items(items, selected, self.selected), camera, light, meshes, self.materials,
-            silhouette_pass, silhouette_frame.slot(),(width as f32) /(height as f32),) && characters.draw_selection(silhouette_pass,silhouette_frame.slot(),true)
+        let silhouette_recorded = silhouette_suppressed && silhouette_displaced && silhouette_character_ready && silhouette_ordered && silhouette_frame.set_viewport(0, 0, width, height) && self.silhouette_renderer.render_items(
+            selection_silhouette_items(silhouette_items, selected, self.selected), camera, light, meshes, self.materials,
+            silhouette_pass, silhouette_frame.slot(),(width as f32) /(height as f32),) && displacement.draw(silhouette_pass, silhouette_frame.slot(), 3) && characters.draw_selection(silhouette_pass, silhouette_frame.slot(), true)
         let silhouette_submitted = silhouette_recorded && silhouette_pass.end() && silhouette_frame.present()
         silhouette_frame.destroy()
         self.ready = silhouette_submitted
@@ -255,6 +321,17 @@ impl for SelectionOutline {
         let uploaded = uniform.write_f32s(0, vec![x as f32, y as f32, width as f32, height as f32])
         let pass = frame.continue_render_pass(self.outline_pipeline)
         ret uploaded && pass.available() && pass.bind_group(group) && pass.draw_mesh(self.quad)
+    }
+    pub fn wait(self: Self&) -> bool {
+        if !self.views.target.wait_readback() || !self.views.silhouette.wait_readback() {
+            ret false
+        }
+        for views in self.retired {
+            if !views.target.wait_readback() || !views.silhouette.wait_readback() {
+                ret false
+            }
+        }
+        ret true
     }
     pub fn destroy(self: mut Self&) ->() {
         for views in self.retired {

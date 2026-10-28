@@ -1,6 +1,7 @@
 //! Material expression documents are independent of Blueprint execution graphs.
 import core::option::Option
 import core::vec::Vec
+
 import linalg::Vec3
 
 pub struct MaterialNode {
@@ -10,6 +11,10 @@ pub struct MaterialNode {
     value: Vec3
     x: f32
     y: f32
+    parameter_name: str
+    parameter_group: str
+    texture_path: str
+    texture_encoding: str
 }
 pub struct MaterialEndpoint {
     node: u64
@@ -42,7 +47,7 @@ pub fn material_polymorphic(node: MaterialNode) -> bool {
     ret node.operation == "add" || node.operation == "multiply" || node.operation == "subtract" || node.operation == "divide" || node.operation == "lerp" || node.operation == "clamp" || node.operation == "step" || node.operation == "gradient"
 }
 pub fn material_has_value(node: MaterialNode) -> bool {
-    ret node.operation == "scalar" || node.operation == "color" || node.operation == "noise" || material_polymorphic(node)
+    ret node.operation == "scalar" || node.operation == "color" || node.operation == "scalar-parameter" || node.operation == "color-parameter" || node.operation == "bool-parameter" || node.operation == "noise" || material_polymorphic(node)
 }
 pub fn material_is_output(node: MaterialNode) -> bool {
     ret node.operation == "output" || node.operation == "output-sky" || node.operation == "output-volume" || node.operation == "output-particle"
@@ -65,11 +70,11 @@ pub struct MaterialDiagnostic {
 }
 
 pub fn material_operations() -> Vec[str] {
-    ret vec!["scalar", "color", "add", "multiply", "subtract", "divide", "lerp", "clamp", "step", "noise", "gradient", "world-position", "view-direction", "uv", "time", "time-of-day", "sun-direction", "moon-direction", "wind", "cloudiness", "rain", "snow", "fog", "wetness", "snow-coverage", "temperature", "sky-light"]
+    ret vec!["scalar", "color", "scalar-parameter", "color-parameter", "bool-parameter", "texture-parameter", "add", "multiply", "subtract", "divide", "lerp", "clamp", "step", "noise", "gradient", "world-position", "view-direction", "uv", "time", "time-of-day", "sun-direction", "moon-direction", "wind", "cloudiness", "rain", "snow", "fog", "wetness", "snow-coverage", "temperature", "sky-light"]
 }
 pub fn material_node_title(operation: str) -> str {
     ret match operation {
-        "scalar" => "Scalar" "color" => "Color" "add" => "Add" "multiply" => "Multiply"
+        "scalar" => "Scalar" "color" => "Color" "scalar-parameter" => "Scalar Parameter" "color-parameter" => "Color Parameter" "bool-parameter" => "Boolean Parameter" "texture-parameter" => "Texture Parameter" "add" => "Add" "multiply" => "Multiply"
         "output" => "Surface Output" "output-sky" => "Sky Output" "output-volume" => "Volume Output" "output-particle" => "Particle Output"
         "subtract" => "Subtract" "divide" => "Divide" "lerp" => "Lerp" "clamp" => "Clamp 0–1" "step" => "Stepped color" "noise" => "3D Noise" "gradient" => "Gradient"
         "world-position" => "World Position" "view-direction" => "View Direction" "uv" => "UV" "time" => "Time" "time-of-day" => "Time of Day"
@@ -106,13 +111,40 @@ pub fn material_pins(node: MaterialNode) -> Vec[MaterialPin] {
             , MaterialPin {
                 "roughness", "scalar", false
             }
+            , MaterialPin {
+                "normal", "vec3", false
+            }
+            , MaterialPin {
+                "ao", "scalar", false
+            }
+            , MaterialPin {
+                "height", "scalar", false
+            }
         ]
     }
-    if node.operation == "scalar" {
-        ret vec![MaterialPin { "value", "scalar", true }]
+    if node.operation == "scalar" || node.operation == "scalar-parameter" || node.operation == "bool-parameter" {
+        ret vec![MaterialPin {
+                "value", "scalar", true
+            }
+        ]
     }
-    if node.operation == "color" {
-        ret vec![MaterialPin { "value", "vec3", true }]
+    if node.operation == "color" || node.operation == "color-parameter" {
+        ret vec![MaterialPin {
+                "value", "vec3", true
+            }
+        ]
+    }
+    if node.operation == "texture-parameter" {
+        ret vec![MaterialPin { "uv", "vec3", false }, MaterialPin { "rgb", "vec3", true }, MaterialPin {
+                "r", "scalar", true
+            }
+            , MaterialPin {
+                "g", "scalar", true
+            }
+            , MaterialPin {
+                "b", "scalar", true
+            }
+        ]
     }
     if node.operation == "lerp" {
         ret vec![MaterialPin { "a", node.kind, false }, MaterialPin {
@@ -169,7 +201,7 @@ pub fn material_pin(node: MaterialNode, key: str, output: bool) -> Option[Materi
 impl for MaterialNode {
     pub fn new(id: u64, operation: str, x: f32, y: f32) -> MaterialNode {
         ret MaterialNode {
-            id, operation, if operation == "color" || operation == "output" || operation == "world-position" || operation == "view-direction" || operation == "uv" || operation == "sun-direction" || operation == "moon-direction" || operation == "wind" || operation == "sky-light" {
+            id, operation, if operation == "color" || operation == "color-parameter" || operation == "texture-parameter" || operation == "output" || operation == "world-position" || operation == "view-direction" || operation == "uv" || operation == "sun-direction" || operation == "moon-direction" || operation == "wind" || operation == "sky-light" {
                 "vec3"
             } else {
                 "scalar"
@@ -180,22 +212,27 @@ impl for MaterialNode {
             } else {
                 Vec3::new(0.5, 0.5, 0.5)
             }
-            , x, y
+            , x, y, if operation == "scalar-parameter" || operation == "color-parameter" || operation == "bool-parameter" || operation == "texture-parameter" { material_node_title(operation) + " " + id.fmt() } else { "" }, "Parameters", "", "srgb"
+        }
+    }
+    pub fn with_parameter(self: Self, name: str, group: str, path: str, encoding: str) -> Self {
+        ret MaterialNode {
+            self.id, self.operation, self.kind, self.value, self.x, self.y, name, group, path, encoding
         }
     }
     pub fn at(self: Self, x: f32, y: f32) -> Self {
         ret MaterialNode {
-            self.id, self.operation, self.kind, self.value, x, y
+            self.id, self.operation, self.kind, self.value, x, y, self.parameter_name, self.parameter_group, self.texture_path, self.texture_encoding
         }
     }
     pub fn with_value(self: Self, value: Vec3) -> Self {
         ret MaterialNode {
-            self.id, self.operation, self.kind, value, self.x, self.y
+            self.id, self.operation, self.kind, value, self.x, self.y, self.parameter_name, self.parameter_group, self.texture_path, self.texture_encoding
         }
     }
     pub fn with_kind(self: Self, kind: str) -> Self {
         ret MaterialNode {
-            self.id, self.operation, kind, self.value, self.x, self.y
+            self.id, self.operation, kind, self.value, self.x, self.y, self.parameter_name, self.parameter_group, self.texture_path, self.texture_encoding
         }
     }
 }

@@ -77,7 +77,7 @@ impl for MaterialPreview {
     }
     fn pipeline(device: GraphicsDevice, target: Swapchain, layout: BindGroupLayout, vertex: ShaderModule, fragment: ShaderModule) -> RenderPipeline {
         ret device.create_render_pipeline_with_options(target, vertex, fragment,
-            VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0), VertexAttribute::new(1, vertex_format_float32x3(), 12)]),
+            VertexBufferLayout::new(44, vec![VertexAttribute::new(0, vertex_format_float32x3(), 0), VertexAttribute::new(1, vertex_format_float32x3(), 12), VertexAttribute::new(3, vertex_format_float32x2(), 36)]),
             layout, RenderPipelineOptions::depth(),)
     }
     pub fn ready(self: Self) -> bool {

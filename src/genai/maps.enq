@@ -1,0 +1,8 @@
+//! Decoded, immutable map data shared by generation validation and previews.
+import refrain::texture_image::TextureImage
+
+pub struct GeneratedMap {
+    role: str
+    bytes: str
+    image: TextureImage
+}

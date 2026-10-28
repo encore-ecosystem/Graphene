@@ -1,7 +1,8 @@
 import mod::lod_groups::LodGroups
 //! Shared mesh-asset controls shown for a selected asset or one of its actors.
 import core::vec::Vec
-import luma::{Widget, SvgDocument, property_row, horizontal, vertical}
+import luma::{SvgDocument, Widget, horizontal, property_row, vertical}
+
 import mod::autolod_settings::AutoLodSettings
 import mod::project_assets::ImportedMeshAsset
 import mod::scene::renderable::MeshId
@@ -14,35 +15,70 @@ pub struct MeshDetails {
     settings: AutoLodSettings
     statistics: str
     disabled: bool
+    builtin_project: str
 }
 
 impl for MeshDetails {
     pub fn new() -> Self {
         ret Self {
-            "", "", MeshId::new(0), 0, AutoLodSettings::defaults(), "", false
+            "", "", MeshId::new(0), 0, AutoLodSettings::defaults(), "", false, ""
         }
     }
-    pub fn sync(self: mut Self, assets: Vec[ImportedMeshAsset], gpu: Vec[MeshId], selected_asset: str, actor_mesh: str, disabled: bool) ->() {
-        self.disabled = disabled
-        let mut path = ""
+    pub fn sync(self: mut Self, project: str, assets: Vec[ImportedMeshAsset], gpu: Vec[MeshId], builtins: Vec[MeshId], builtin_triangles: Vec[usize], selected_asset: str, actor_mesh: str, actor_selected: bool, disabled: bool) ->() {
+        self.disabled = disabled || project == ""
+        let mut path = "" let mut name = "" let mut mesh = MeshId::new(0) let mut triangles = 0_usize let mut builtin_project = ""
         for index in 0_usize..assets.len() {
             let asset = assets.get_unchecked_borrowed(index)
-            if selected_asset == "asset-imported-mesh-" + index.fmt() ||(selected_asset == "" && actor_mesh != "" && asset.name() == actor_mesh) {
+            if selected_asset == "asset-imported-mesh-" + index.fmt() ||(selected_asset == "" && actor_selected && actor_mesh != "" && asset.name() == actor_mesh) {
                 path = asset.project_path()
-                if path != self.path {
-                    self.settings = AutoLodSettings::load(path)
-                    self.name = asset.name()
-                    self.source_triangles = asset.mesh().index_count() / 3_usize
-                    self.statistics = "Waiting for rendered frame"
-                }
-                self.mesh = gpu.get(index).unwrap_or(MeshId::new(0))
+                name = asset.name() mesh = gpu.get(index).unwrap_or(MeshId::new(0)) triangles = asset.mesh().index_count() / 3_usize
                 break
             }
         }
-        self.path = path
+        let actor = selected_asset == "" && actor_selected
+        let index = if selected_asset == "asset-cube" ||(actor && actor_mesh == "") {
+            0_usize
+        } elif selected_asset == "asset-plane" ||(actor && actor_mesh == "@plane") {
+            1_usize
+        } elif selected_asset == "asset-sphere" ||(actor && actor_mesh == "@sphere") {
+            2_usize
+        } else {
+            3_usize
+        }
+        if path == "" && project != "" && index < 3 {
+            name = if index == 0 {
+                "Cube"
+            } elif index == 1 {
+                "Plane"
+            } else {
+                "Sphere"
+            }
+            path = AutoLodSettings::builtin_path(project, name)
+            mesh = builtins.get(index).unwrap_or(MeshId::new(0)) triangles = builtin_triangles.get(index).unwrap_or(0)
+            builtin_project = project
+        }
+        if path != self.path || mesh.value() != self.mesh.value() {
+            self.settings = if path == "" {
+                AutoLodSettings::defaults()
+            } else {
+                AutoLodSettings::load(path)
+            }
+            self.statistics = "Waiting for rendered frame"
+        }
+        self.path = path self.name = name self.mesh = mesh self.source_triangles = triangles self.builtin_project = builtin_project
     }
     pub fn available(self: Self) -> bool {
-        ret self.path != ""
+        ret self.path != "" && self.mesh.valid()
+    }
+    pub fn save_settings(self: Self, settings: AutoLodSettings) -> bool {
+        if !self.available() {
+            ret false
+        }
+        ret if self.builtin_project != "" {
+            settings.save_builtin(self.builtin_project, self.name)
+        } else {
+            settings.save(self.path)
+        }
     }
     pub fn statistics_widget(self: Self) -> Widget {
         ret Widget::label(self.statistics).with_text_wrap(true).with_id("autolod-mesh-statistics").with_classes("g-autolod-runtime")
@@ -76,10 +112,16 @@ impl for MeshDetails {
         controls.push(selector)
         controls.push(Widget::button("autolod-edit-group", "…").with_classes("g-property-menu").with_attribute("aria-label", "Edit LOD group").with_disabled(self.disabled))
         content.push(property_row("autolod-group-row", "LOD Group", controls))
+        if self.builtin_project != "" {
+            content.push(Widget::label("Shared by all " + self.name + " meshes in this project").with_text_wrap(true).with_classes("g-autolod-help"))
+        }
         if groups.find(self.settings.group_id).is_none() && groups.resolve(self.settings.group_id).id == "default" && self.settings.group_id != "default" {
             content.push(Widget::label("Missing group · using Default").with_classes("g-lod-message"))
         }
         content.push(self.statistics_widget())
+        if self.statistics.contains("Displaced surface") {
+            content.push(Widget::label("Additional displacement detail uses the material quality setting").with_text_wrap(true).with_classes("g-autolod-help"))
+        }
         content.push(Widget::label("Drawn after culling · min = simplification limit").with_classes("g-autolod-help"))
         ret content
     }

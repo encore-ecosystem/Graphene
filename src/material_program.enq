@@ -1,0 +1,275 @@
+//! Per-material GPU data and fence-owned shader generations. Instances share shader code.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import mod::material_graph::compiler::{material_runtime_variants}
+import mod::material_schema::{ResolvedMaterial, material_parameter_values}
+import mod::ray_lighting::RayLightingView
+import mod::rhi::*
+
+pub fn material_program_layout() -> Vec[BindGroupLayoutEntry] {
+    let mut entries = vec![BindGroupLayoutEntry::uniform(63_u32, shader_stage_fragment())]
+    for index in 64_usize..72_usize {
+        entries.push(BindGroupLayoutEntry::texture_sampler(index as u32, shader_stage_fragment()))
+    }
+    ret entries
+}
+/// Complete descriptors are required even when baseline shaders do not read them.
+/// Borrow existing uniform storage and a valid texture; no dummy GPU allocation.
+pub fn material_program_fallback(uniform: GpuBuffer, texture: GpuTexture, sampler: GpuSampler, bindings: mut Vec[u32], buffers: mut Vec[GpuBuffer], offsets: mut Vec[u64], ranges: mut Vec[u64], texture_bindings: mut Vec[u32], textures: mut Vec[GpuTexture], samplers: mut Vec[GpuSampler]) ->() {
+    bindings.push(63_u32) buffers.push(uniform) offsets.push(0_u64)
+    ranges.push(if uniform.size() < 4096_u64 {
+            uniform.size()
+        } else {
+            4096_u64
+        }
+    )
+    for binding in 64_usize..72_usize {
+        texture_bindings.push(binding as u32) textures.push(texture) samplers.push(sampler)
+    }
+}
+pub struct MaterialProgram {
+    key: str
+    generation: str
+    shaders: Vec[Vec[u32]]
+    parameters: GpuBuffer
+    maps: Vec[GpuTexture]
+    owned: Vec[GpuTexture]
+    uses: Vec[GpuCompletion]
+}
+
+impl for MaterialProgram {
+    pub fn create(device: GraphicsDevice, resolved: ResolvedMaterial, textures: Vec[GpuTexture], extra: Vec[GpuTexture]) -> Result[MaterialProgram<H>, str] {
+        ret Self::create_shared(device, resolved, textures, extra, Vec[Vec[u32]]::new())
+    }
+    pub fn create_shared(device: GraphicsDevice, resolved: ResolvedMaterial, textures: Vec[GpuTexture], extra: Vec[GpuTexture], shared: Vec[Vec[u32]]) -> Result[MaterialProgram<H>, str] {
+        if textures.len() != 4 {
+            ret Result::Err("Invalid material program textures")
+        }
+        let mut shaders = Vec[Vec[u32]]::new()
+        if shared.len() == material_runtime_variants("surface").len() {
+            shaders = shared
+        } else {
+            for name in material_runtime_variants("surface") {
+                let mut code = Vec[u32]::new()
+                for variant in resolved.definition.variants {
+                    if variant.name == name {
+                        code = variant.code
+                    }
+                }
+                if code.len() < 5_usize || code.get(0_usize).unwrap_or(0_u32) != 119734787_u32 {
+                    ret Result::Err("Missing or invalid material shader variant")
+                }
+                shaders.push(code)
+            }
+        }
+        let parameters = device.create_buffer(4096_u64, buffer_uniform(), true)
+        if !parameters.available() || !parameters.write_f32s(0_u64, material_parameter_values(resolved)) {
+            parameters.destroy() ret Result::Err("Unable to upload material parameters")
+        }
+        let mut maps = Vec[GpuTexture]::new() let mut next_extra = 0_usize
+        for parameter in resolved.definition.parameters {
+            if parameter.value.kind == "texture" {
+                let source = match parameter.binding {
+                    "base_color_texture" => 0_usize "normal_texture" => 1_usize "height_texture" => 3_usize "roughness_texture" => 2_usize "metallic_texture" => 2_usize "ao_texture" => 2_usize _ => 4_usize
+                }
+                if source < 4 {
+                    maps.push(textures.get_unchecked_borrowed(source))
+                } else {
+                    if next_extra >= extra.len() {
+                        parameters.destroy() ret Result::Err("A material texture parameter was not uploaded")
+                    }
+                    maps.push(extra.get_unchecked_borrowed(next_extra)) next_extra += 1
+                }
+            }
+        }
+        if maps.len() > 8 {
+            parameters.destroy() ret Result::Err("Too many material texture parameters")
+        }
+        while maps.len() < 8 {
+            maps.push(textures.get_unchecked_borrowed(0_usize))
+        }
+        ret Result::Ok(MaterialProgram<H> {
+                material_program_key(resolved), resolved.fingerprint, shaders, parameters, maps, extra, Vec[GpuCompletion]::new()
+            }
+        )
+    }
+    pub fn key(self: Self&) -> str {
+        ret self.key
+    }
+    pub fn generation(self: Self&) -> str {
+        ret self.generation
+    }
+    pub fn shaders(self: Self&) -> Vec[Vec[u32]] {
+        ret self.shaders
+    }
+    pub fn append(self: Self&, bindings: mut Vec[u32], buffers: mut Vec[GpuBuffer], offsets: mut Vec[u64], ranges: mut Vec[u64], texture_bindings: mut Vec[u32], textures: mut Vec[GpuTexture], samplers: mut Vec[GpuSampler], sampler: GpuSampler) ->() {
+        bindings.push(63_u32) buffers.push(self.parameters) offsets.push(0_u64) ranges.push(4096_u64)
+        for i in 0_usize..8_usize {
+            texture_bindings.push((64_usize + i) as u32) textures.push(self.maps.get_unchecked_borrowed(i)) samplers.push(sampler)
+        }
+    }
+    pub fn use_frame(self: mut Self&, frame: RenderFrame) ->() {
+        let token = frame.completion() if token.available() {
+            let mut duplicate = false
+            for previous in self.uses {
+                if previous.same_submission(token) {
+                    duplicate = true break
+                }
+            }
+            if duplicate {
+                token.destroy()
+            } else {
+                self.uses.push(token)
+            }
+        }
+        self.collect()
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut pending = Vec[GpuCompletion]::new() for token in self.uses {
+            if token.ready() {
+                token.destroy()
+            } else {
+                pending.push(token)
+            }
+        }
+        self.uses = pending
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        self.collect() if self.uses.len() > 0 {
+            ret false
+        }
+        for texture in self.owned {
+            texture.destroy()
+        }
+        self.owned.clear() self.parameters.destroy() self.parameters = GpuBuffer::unavailable() ret true
+    }
+}
+struct MaterialPipelineGeneration {
+    key: str
+    shader: ShaderModule
+    solid: RenderPipeline
+    double_sided: RenderPipeline
+    uses: Vec[GpuCompletion]
+}
+pub struct MaterialPipelines {
+    generations: Vec[MaterialPipelineGeneration<H>]
+    active: str
+    solid: RenderPipeline
+    double_sided: RenderPipeline
+    lighting: RayLightingView
+    error: str
+}
+
+impl for MaterialPipelines {
+    pub fn new() -> MaterialPipelines<H> {
+        ret MaterialPipelines<H> {
+            Vec[MaterialPipelineGeneration<H>]::new(), "", RenderPipeline::unavailable(), RenderPipeline::unavailable(), RayLightingView::unavailable(), ""
+        }
+    }
+    pub fn prepare(self: mut Self&, device: GraphicsDevice, target: Swapchain, frame: RenderFrame, vertex: ShaderModule, layout: BindGroupLayout, vertices: VertexBufferLayout, program: MaterialProgram<H>, variant: usize, cull: bool, lighting: RayLightingView) -> bool {
+        // The shader generation remains stable when only instance parameter data changes.
+        let key = program.key() + ":" + target.render_signature().fmt() + ":" + layout.handle.fmt() + ":" + vertex.handle.fmt() + ":" + variant.fmt() + ":" + lighting.layout.handle.fmt()
+        let mut chosen = self.generations.len()
+        for i in 0_usize..self.generations.len() {
+            if self.generations.get_unchecked_borrowed(i).key == key {
+                chosen = i break
+            }
+        }
+        if chosen == self.generations.len() {
+            let shader = device.create_shader_module(program.shaders().get(if lighting.available() {
+                        variant + 9_usize
+                    } else {
+                        variant
+                    }
+                ).unwrap_or(Vec[u32]::new()), shader_stage_fragment())
+            let options = if cull {
+                RenderPipelineOptions::depth().with_backface_culling()
+            } else {
+                RenderPipelineOptions::depth()
+            }
+            let solid = if lighting.available() {
+                device.create_render_pipeline_two_sets(target, vertex, shader, vertices, layout, lighting.layout, options)
+            } else {
+                device.create_render_pipeline_with_options(target, vertex, shader, vertices, layout, options)
+            }
+            let double_sided = if lighting.available() {
+                device.create_render_pipeline_two_sets(target, vertex, shader, vertices, layout, lighting.layout, RenderPipelineOptions::depth())
+            } else {
+                device.create_render_pipeline_with_options(target, vertex, shader, vertices, layout, RenderPipelineOptions::depth())
+            }
+            if !shader.available() || !solid.available() || !double_sided.available() {
+                self.error = solid.error() + " " + shader.error() solid.destroy() double_sided.destroy() shader.destroy() ret false
+            }
+            self.generations.push(MaterialPipelineGeneration<H> {
+                    key, shader, solid, double_sided, Vec[GpuCompletion]::new()
+                }
+            )
+        }
+        let mut selected = self.generations.get_unchecked_borrowed(chosen)
+        let token = frame.completion() if !token.available() {
+            ret false
+        }
+        let mut same = false for previous in selected.uses {
+            if previous.same_submission(token) {
+                same = true break
+            }
+        }
+        if same {
+            token.destroy()
+        } else {
+            selected.uses.push(token)
+        }
+        self.active = key self.solid = selected.solid self.double_sided = selected.double_sided self.lighting = lighting self.error = "" self.collect() ret true
+    }
+    pub fn pipeline(self: Self&, double_sided: bool) -> RenderPipeline {
+        ret if double_sided {
+            self.double_sided
+        } else {
+            self.solid
+        }
+    }
+    pub fn bind(self: Self&, pass: RenderPassEncoder) -> bool {
+        ret self.lighting.bind(pass)
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn collect(self: mut Self&) ->() {
+        let mut count = 0_usize
+        for i in 0_usize..self.generations.len() {
+            let mut entry = self.generations.get_unchecked_borrowed(i) let mut pending = Vec[GpuCompletion]::new()
+            for token in entry.uses {
+                if token.ready() {
+                    token.destroy()
+                } else {
+                    pending.push(token)
+                }
+            }
+            entry.uses = pending
+            if entry.key != self.active && entry.uses.len() == 0 {
+                entry.solid.destroy() entry.double_sided.destroy() entry.shader.destroy()
+            } else {
+                self.generations.set(count, entry) count += 1
+            }
+        }
+        while self.generations.len() > count {
+            self.generations.pop()
+        }
+    }
+    pub fn destroy(self: mut Self&) -> bool {
+        self.active = "" self.collect() ret self.generations.len() == 0
+    }
+}
+
+extern fn encore_text_sha256(source: str) -> str
+extern fn graphene_asset_bytes(data: u8*, size: usize) -> str
+#attr(safe)
+pub fn material_program_key(resolved: ResolvedMaterial) -> str {
+    let mut key = "graphene-material-program-3"
+    for variant in resolved.definition.variants {
+        key += ":" + variant.name + ":" + encore_text_sha256(graphene_asset_bytes(variant.code.as_ptr() as u8*, variant.code.len() * 4_usize))
+    }
+    ret encore_text_sha256(key)
+}

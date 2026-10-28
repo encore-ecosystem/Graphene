@@ -282,6 +282,7 @@ pub fn sphere_mesh(radius: f32, rings: u32, segments: u32) -> MeshData {
             let z = horizontal_radius * ring_sin(theta)
             vertices = append_vertex(vertices, x * safe_radius, y * safe_radius, z * safe_radius,
                 x, y, z, 0.82_f32, 0.84_f32, 0.88_f32,)
+            vertices.push(horizontal) vertices.push(vertical)
             segment = segment + 1_u32
         }
         ring = ring + 1_u32
@@ -303,7 +304,7 @@ pub fn sphere_mesh(radius: f32, rings: u32, segments: u32) -> MeshData {
         }
         ring = ring + 1_u32
     }
-    ret MeshData::new(vertices, indices, 36_u32)
+    ret MeshData::new(vertices, indices, 44_u32)
 }
 
 pub fn gizmo_tip_mesh(size: f32, height: f32) -> MeshData {

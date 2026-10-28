@@ -12,6 +12,10 @@ import luma::{Rect, Size, Style, StyleSheet, Widget, anchored_popup_bounds, layo
 
 fn main() -> u32 {
     let mut settings = GizmoSnap::new()
+    if settings.step("move") != 1_f32 || settings.step("rotate") != 10_f32 || settings.step("scale") != 0.1_f32 ||
+    !settings.enabled("move") || !settings.enabled("rotate") || !settings.enabled("scale") {
+        ret 10_u32
+    }
     for action in vec!["snap-value-move-0.5", "snap-value-rotate-45", "snap-value-scale-0.25"] {
         match snap_value_action(action) {
             Option::Some(choice) => {

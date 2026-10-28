@@ -1,0 +1,18 @@
+import core::vec::Vec
+import mod::builtin::builtin_spirv
+
+pub fn terrain_refine_spirv() -> Vec[u32] {
+    ret builtin_spirv(2143937283_u32)
+}
+pub fn terrain_vertex_spirv() -> Vec[u32] {
+    ret builtin_spirv(1416019344_u32)
+}
+pub fn terrain_fragment_spirv() -> Vec[u32] {
+    ret builtin_spirv(1630687582_u32)
+}
+pub fn terrain_linear_spirv() -> Vec[u32] {
+    ret builtin_spirv(507530282_u32)
+}
+pub fn terrain_temporal_spirv() -> Vec[u32] {
+    ret builtin_spirv(3961039444_u32)
+}

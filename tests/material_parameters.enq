@@ -1,0 +1,146 @@
+//! Shader parameter ABI and bounded native sample preparation.
+import core::option::Option
+import core::result::Result
+import core::vec::Vec
+
+import std::io::println
+import std::os::{mkdir_all, read_file, write_file}
+import std::time::perf_counter_ns
+
+import binary::{decode, encode}
+import graphene::material_graph::{MaterialCommand, MaterialDocument, MaterialEndpoint, MaterialLink, MaterialNode, generate_material, generate_material_definition, material_graph_parse, material_graph_stringify, prepare_material_build, run_material_build}
+import graphene::material_graph::cooked::{CookedMaterialGraph, cook_material_graph}
+import graphene::material_images::prepare_material_preview
+import graphene::material_schema::*
+import graphene::native_asset::{load_native_height_preview, load_native_texture_preview, read_native_material_asset, resolve_material_instance, save_builtin_pbr_material, save_native_height, save_native_material_asset, save_native_texture}
+import graphene::texture_image::{HeightImage, TextureImage}
+import linalg::Vec3
+
+fn run() -> Result[u32, str] {
+    let root = "target/material-parameters-" + perf_counter_ns().fmt()
+    mkdir_all(root + "/Content/Materials")
+    mkdir_all(root + "/Content/Textures")
+    let mut pixels = Vec[u32]::new() let mut heights = Vec[u16]::new()
+    for y in 0_usize..513_usize {
+        for x in 0_usize..777_usize {
+            pixels.push(4278190080_u32 |(x as u32) |((y as u32) << 16_u32)) heights.push(((x * 37_usize + y * 13_usize) % 65536_usize) as u16)
+        }
+    }
+    let texture = root + "/Content/Textures/Large.gtexture" let height = root + "/Content/Textures/Height.gtexture"
+    if !save_native_texture(texture, "", "", TextureImage { 777_u32, 513_u32, pixels }) || !save_native_height(height, "", "", HeightImage {
+            777_u32, 513_u32, heights
+        }
+        ,
+    ) {
+        ret Result::Ok(1_u32)
+    }
+    let small = load_native_texture_preview(texture, 256_u32)?
+    let h = load_native_height_preview(height, 256_u32)?
+    if small.width != 256_u32 || small.height != 256_u32 || h.samples.len() != 65536_usize || h.width != 256_u32 {
+        ret Result::Ok(2_u32)
+    }
+    for y in 0_usize..256_usize {
+        for x in 0_usize..256_usize {
+            let source_x = x * 777_usize / 256_usize let source_y = y * 513_usize / 256_usize
+            if small.pixels.get_unchecked_borrowed(y * 256_usize + x) != pixels.get_unchecked_borrowed(source_y * 777_usize + source_x) || h.samples.get_unchecked_borrowed(y * 256_usize + x) != heights.get_unchecked_borrowed(source_y * 777_usize + source_x) {
+                ret Result::Ok(3_u32)
+            }
+        }
+    }
+    if load_native_texture_preview(texture, 0_u32).is_ok() || load_native_texture_preview(texture, 8192_u32).is_ok() {
+        ret Result::Ok(4_u32)
+    }
+    let mut preview_instance = MaterialInstance::new(standard_pbr_parent())
+    for id in vec![6_u64, 7_u64, 10_u64, 11_u64, 13_u64] {
+        preview_instance = preview_instance.set(id, MaterialValue::texture("Content/Textures/Large.gtexture"), true)
+    }
+    preview_instance = preview_instance.set(12_u64, MaterialValue::texture("Content/Textures/Height.gtexture"), true)
+    let resolved_preview = resolve_material_instance(root, "Content/Materials/MI_Preview.gmaterial", preview_instance)?
+    let preview = prepare_material_preview(root, "Content/Materials/MI_Preview.gmaterial", resolved_preview, 32_u32)?
+    if preview.error != "" || preview.images.len() != 3_usize || preview.height.samples.len() != 1024_usize {
+        ret Result::Ok(30_u32)
+    }
+    for map in preview.images {
+        if map.width != 32_u32 || map.height != 32_u32 || map.pixels.len() != 1024_usize {
+            ret Result::Ok(31_u32)
+        }
+    }
+    if prepare_material_preview(root, "Content/Materials/MI_Preview.gmaterial", resolved_preview, 0_u32).is_ok() || prepare_material_preview(root, "Content/Materials/MI_Preview.gmaterial", resolved_preview, 1025_u32).is_ok() {
+        ret Result::Ok(32_u32)
+    }
+    let data = read_file(texture)
+    if write_file(root + "/Truncated.gtexture", data.slice_bytes(0_usize, data.byte_len() - 3_usize)) != 0 || load_native_texture_preview(root + "/Truncated.gtexture", 64_u32).is_ok() {
+        ret Result::Ok(5_u32)
+    }
+    let mut definition = standard_pbr_definition()
+    let generated = generate_material_definition(definition)
+    for diagnostic in generated.diagnostics {
+        println(diagnostic.message)
+    }
+    if generated.diagnostics.len() != 0_usize || !generated.source.contains("binding=63") || !generated.source.contains("evaluateSurface") || !generated.source.contains("mgNormalStrength") {
+        ret Result::Ok(6_u32)
+    }
+    let mut document = MaterialDocument::new(definition.graph)
+    let p = definition.graph.node(3_u64).unwrap_or(MaterialNode::new(0_u64, "", 0_f32, 0_f32))
+    let renamed = p.with_parameter("Finish", "Coating", "", "linear")
+    let _changed = document.execute(MaterialCommand::Set(renamed))?
+    definition = material_definition_graph(definition, document.graph())
+    if definition.parameter(3_u64).unwrap_or(standard_pbr_parameters(definition.surface).get_unchecked_borrowed(0_usize)).name != "Finish" {
+        ret Result::Ok(7_u32)
+    }
+    let _undone = document.execute(MaterialCommand::Undo)?
+    if document.graph().node(3_u64).unwrap_or(p).parameter_name != "Roughness" {
+        ret Result::Ok(8_u32)
+    }
+    let restored = match material_graph_parse(material_graph_stringify(definition.graph, false)) {
+        Some(graph) => graph None => {
+            ret Result::Ok(9_u32)
+        }
+    }
+    if restored.node(3_u64).unwrap_or(p).parameter_name != "Finish" {
+        ret Result::Ok(10_u32)
+    }
+    // Compile and validate the actual scene, mesh, triangle and ray shader variants.
+    let semantic = material_definition_semantic(definition)
+    let build = prepare_material_build(root, semantic, generate_material_definition(definition).source)?
+    if !build.cached && run_material_build(build.directory, build.compiler, build.validator, build.cache) != 0 {
+        println(read_file(build.directory + "/compile-frag.log")) println(read_file(build.directory + "/runtime.log")) ret Result::Ok(11_u32)
+    }
+    let cooked = cook_material_graph(build, root + "/Content/Materials/M_Test.gmaterial")?
+    let bytes = match encode(cooked) {
+        Ok(v) => v Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    let decoded = match decode[CookedMaterialGraph](bytes) {
+        Ok(v) => v Err(error) => {
+            ret Result::Err(error.message())
+        }
+    }
+    if decoded.variants.len() != 18_usize {
+        ret Result::Ok(12_u32)
+    }
+    definition.variants = decoded.variants definition.semantic = decoded.semantic
+    if !save_native_material_asset(root + "/Content/Materials/M_Test.gmaterial", "", "", MaterialAsset::Definition(definition)) || !save_builtin_pbr_material(root + "/Builtin.gmaterial") {
+        ret Result::Ok(13_u32)
+    }
+    match read_native_material_asset(root + "/Content/Materials/M_Test.gmaterial")? {
+        Definition(loaded) => {
+            if loaded.variants.len() != 18_usize || loaded.variants.get_unchecked_borrowed(0_usize).code.get_unchecked_borrowed(0_usize) != 119734787_u32 {
+                ret Result::Ok(14_u32)
+            }
+        }
+        Instance(_) => {
+            ret Result::Ok(15_u32)
+        }
+    }
+    println(root)
+    ret Result::Ok(0_u32)
+}
+fn main() -> u32 {
+    ret match run() {
+        Ok(code) => code Err(error) => {
+            println(error) 99_u32
+        }
+    }
+}

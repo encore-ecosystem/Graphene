@@ -1,4 +1,6 @@
 import std::os::read_file
+
+import luma::{RendererKind, Window}
 //! Routing regressions use the actual inspector and scene command history.
 import core::vec::Vec
 import graphene::animation::component::{CharacterMorphChoice, CharacterMorphControl, SkeletalMeshComponent}
@@ -22,6 +24,7 @@ fn component(state: EditorState, id: u64) -> SkeletalMeshComponent {
     }
 }
 fn main() -> u32 {
+    let window = Window::create_with_renderer("Editor input test", 320, 200, RendererKind::Software)
     let mut scene = Scene::new() let id = scene.create_entity("Character", Transform::identity())
     let mut c = SkeletalMeshComponent::defaults() c.clip = "idle"
     scene.set_component(id, SceneComponent::SkeletalMesh(c))
@@ -30,7 +33,7 @@ fn main() -> u32 {
     details.set_clip_choices(vec![("idle", "Idle"),("walk", "Walk"),("run", "Run")])
     details.set_animation_info(vec![CharacterMorphChoice { "Blink", 0_f32, 1_f32, 0_f32 }], "")
     let layout = layout_widget(Widget::panel("test").with_child(details.widget()), Rect::new(0_f32, 0_f32, 320_f32, 600_f32))
-    if !details.input(down(), "actor-anim-clip", layout, state) || !details.popup_open() {
+    if !details.input(down(), "actor-anim-clip", layout, state, window) || !details.popup_open() {
         ret 1_u32
     }
     let sheet = StyleSheet::default().merge((match StyleSheet::from_file("graphene.css") {
@@ -50,12 +53,12 @@ fn main() -> u32 {
             ret 11_u32
         }
     }
-    details.input(Event::key_down(key_down(), 0_u32), "actor-anim-clip", layout, state)
-    details.input(Event::key_down(key_enter(), 0_u32), "actor-anim-clip", layout, state)
+    details.input(Event::key_down(key_down(), 0_u32), "actor-anim-clip", layout, state, window)
+    details.input(Event::key_down(key_enter(), 0_u32), "actor-anim-clip", layout, state, window)
     if component(state, id).clip != "walk" || details.popup_open() || details.editing() {
         ret 2_u32
     }
-    if details.input(Event::key_down(122_u32, 192_u32), "actor-anim-clip", layout, state) {
+    if details.input(Event::key_down(122_u32, 192_u32), "actor-anim-clip", layout, state, window) {
         ret 3_u32
     }
     if !state.execute(GrapheneCommand::Undo).success() || component(state, id).clip != "idle" {
@@ -65,35 +68,36 @@ fn main() -> u32 {
         ret 5_u32
     }
     details.sync(state.scene(), id, false)
-    details.input(down(), "actor-anim-morph-0", layout, state)
-    details.input(Event::text_input("0.8"), "actor-anim-morph-0", layout, state)
-    details.input(Event::key_down(key_enter(), 0_u32), "actor-anim-morph-0", layout, state)
+    details.input(down(), "actor-anim-morph-0", layout, state, window)
+    details.input(Event::key_down(97, 192), "actor-anim-morph-0", layout, state, window)
+    details.input(Event::text_input("0.8"), "actor-anim-morph-0", layout, state, window)
+    details.input(Event::key_down(key_enter(), 0_u32), "actor-anim-morph-0", layout, state, window)
     let edited = component(state, id)
     if edited.morphs.len() != 1_usize || edited.morphs.get_unchecked_borrowed(0_usize).weight != 0.8_f32 {
         ret 6_u32
     }
-    details.input(down(), "actor-anim-morph-reset", layout, state)
+    details.input(down(), "actor-anim-morph-reset", layout, state, window)
     if details.focused_id() != "actor-anim-clip" {
         ret 14_u32
     }
     if component(state, id).morphs.len() != 0_usize || details.editing() {
         ret 7_u32
     }
-    details.input(down(), "actor-anim-clip", layout, state)
-    details.input(Event::key_down(key_escape(), 0_u32), "actor-anim-clip", layout, state)
+    details.input(down(), "actor-anim-clip", layout, state, window)
+    details.input(Event::key_down(key_escape(), 0_u32), "actor-anim-clip", layout, state, window)
     if details.popup_open() {
         ret 8_u32
     }
     details.sync(state.scene(), id, true)
-    if details.input(down(), "actor-anim-loop", layout, state) || !component(state, id).looping {
+    if details.input(down(), "actor-anim-loop", layout, state, window) || !component(state, id).looping {
         ret 9_u32
     }
     details.sync(state.scene(), id, false)
     let mut choices = Vec[(str, str)]::new() for i in 0_usize..50_usize {
         choices.push(("clip-" + i.fmt(), "Clip " + i.fmt()))
     }
-    details.set_clip_choices(choices) details.input(down(), "actor-anim-clip", layout, state)
-    details.input(Event::key_down(key_end(), 0_u32), "actor-anim-clip", layout, state)
+    details.set_clip_choices(choices) details.input(down(), "actor-anim-clip", layout, state, window)
+    details.input(Event::key_down(key_end(), 0_u32), "actor-anim-clip", layout, state, window)
     let last_page = layout_widget(sheet.apply(Widget::panel("overlay").with_child(details.popup(1600_f32, 1000_f32, layout)), "", "", ""), Rect::new(0_f32, 0_f32, 1600_f32, 1000_f32))
     if last_page.find_bounds("actor-anim-choice-49").is_none() || last_page.find_bounds("actor-anim-choice-0").is_some() {
         ret 12_u32
@@ -101,8 +105,8 @@ fn main() -> u32 {
     details.input(Event {
             event_scroll(), 0_f32, 0_f32, 0_f32, 0_f32, 0_u32, 0_u32, 0_u32, 0_f32, 1_f32, "", 0_u64
         }
-        , "actor-anim-clip-menu", layout, state,)
-    details.input(Event::key_down(key_home(), 0_u32), "actor-anim-clip", layout, state)
+        , "actor-anim-clip-menu", layout, state, window,)
+    details.input(Event::key_down(key_home(), 0_u32), "actor-anim-clip", layout, state, window)
     let first_page = layout_widget(sheet.apply(Widget::panel("overlay").with_child(details.popup(1600_f32, 1000_f32, layout)), "", "", ""), Rect::new(0_f32, 0_f32, 1600_f32, 1000_f32))
     if first_page.find_bounds("actor-anim-choice-0").is_none() || first_page.find_bounds("actor-anim-choice-49").is_some() {
         ret 13_u32

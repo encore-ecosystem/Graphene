@@ -1,9 +1,11 @@
-import mod::rhi::buffer_transfer_destination
+import mod::rhi::{GpuCompletion, buffer_transfer_destination}
 //! Residency and temporal policy for Graphene Dynamic GI.
 
 import core::option::Option
 import core::vec::Vec
+
 import linalg::Vec3
+
 import mod::rhi::{AccelerationStructure, BindGroup, BindGroupLayout, BindGroupLayoutEntry, ComputePipeline, GpuBuffer, GraphicsDevice, RenderFrame, ShaderModule, buffer_storage, shader_stage_compute}
 import mod::shaders::{gi_spatial_filter_spirv, ray_query_gi_spirv, screen_probe_place_spirv, software_gi_spirv}
 
@@ -65,6 +67,10 @@ pub struct GpuGiResult {
 
 /// Persistent surface-cache tracer. Resources and temporal history survive
 /// across frames; `trace` only updates active scene/sample ranges.
+struct RetiredRayGroup {
+    group: BindGroup
+    uses: Vec[GpuCompletion]
+}
 pub struct GpuDynamicGi {
     device: GraphicsDevice
     layout: BindGroupLayout
@@ -73,6 +79,8 @@ pub struct GpuDynamicGi {
     pipeline: ComputePipeline
     ray_layout: BindGroupLayout
     ray_group: BindGroup
+    ray_uses: Vec[GpuCompletion]
+    retired_ray_groups: Vec[RetiredRayGroup]
     ray_shader: ShaderModule
     ray_pipeline: ComputePipeline
     screen_probe_shader: ShaderModule
@@ -183,7 +191,7 @@ impl for GpuDynamicGi {
         filter_shader.available() && filter_pipeline.available()
         ret Self {
             device, layout, group, shader, pipeline,
-            ray_layout, ray_group, ray_shader, ray_pipeline,
+            ray_layout, ray_group, Vec[GpuCompletion]::new(), Vec[RetiredRayGroup]::new(), ray_shader, ray_pipeline,
             screen_probe_shader, screen_probe_pipeline, ray_available,
             filter_layout, filter_group, filter_shader, filter_pipeline,
             scene_buffer, surface_buffer, history_buffer, filtered_buffer,
@@ -206,13 +214,52 @@ impl for GpuDynamicGi {
     pub fn hardware_available(self: Self) -> bool {
         ret self.ray_available
     }
+    fn collect_ray_groups(self: mut Self) ->() {
+        let mut count = 0_usize
+        for entry in self.retired_ray_groups {
+            let mut pending = Vec[GpuCompletion]::new()
+            for token in entry.uses {
+                if token.ready() {
+                    token.destroy()
+                } else {
+                    pending.push(token)
+                }
+            }
+            if pending.len() == 0 {
+                entry.group.destroy()
+            } else {
+                self.retired_ray_groups.set(count, RetiredRayGroup { entry.group, pending }) count += 1
+            }
+        }
+        while self.retired_ray_groups.len() > count {
+            self.retired_ray_groups.pop()
+        }
+        let mut pending = Vec[GpuCompletion]::new()
+        for token in self.ray_uses {
+            if token.ready() {
+                token.destroy()
+            } else {
+                pending.push(token)
+            }
+        }
+        self.ray_uses = pending ret()
+    }
+    fn retain_ray_frame(self: mut Self, frame: RenderFrame) ->() {
+        self.collect_ray_groups() let token = frame.completion()
+        if token.available() {
+            self.ray_uses.push(token)
+        }
+        ret()
+    }
     pub fn bind_ray_scene(self: mut Self,
         acceleration: AccelerationStructure,) -> bool {
         if !self.ray_available || !acceleration.available() {
             ret false
         }
+        self.collect_ray_groups()
         if self.ray_group.available() {
-            self.ray_group.destroy()
+            self.retired_ray_groups.push(RetiredRayGroup { self.ray_group, self.ray_uses })
+            self.ray_uses = Vec[GpuCompletion]::new()
         }
         let mut bindings = Vec[u32]::new()
         bindings.push(1_u32) bindings.push(2_u32)
@@ -428,6 +475,7 @@ impl for GpuDynamicGi {
         }
         let uploaded = frame.update_f32s(self.scene_buffer, 0_u64, scene_values) &&
         frame.update_f32s(self.surface_buffer, 0_u64, surface_values)
+        self.retain_ray_frame(frame)
         let traced = uploaded && frame.dispatch_compute(
             self.ray_pipeline, self.ray_group,
             ((sample_count + 63_usize) / 64_usize) as u32,
@@ -517,6 +565,7 @@ impl for GpuDynamicGi {
             self.screen_probe_pipeline, self.ray_group,
             ((screen_count + 63_usize) / 64_usize) as u32,
             1_u32, 1_u32,) && frame.compute_barrier()
+        self.retain_ray_frame(frame)
         let traced = placed && frame.dispatch_compute(
             self.ray_pipeline, self.ray_group,
             ((sample_count + 63_usize) / 64_usize) as u32,
@@ -547,6 +596,16 @@ impl for GpuDynamicGi {
         }
     }
     pub fn destroy(self: mut Self) -> bool {
+        self.collect_ray_groups()
+        for entry in self.retired_ray_groups {
+            entry.group.destroy() for token in entry.uses {
+                token.destroy()
+            }
+        }
+        for token in self.ray_uses {
+            token.destroy()
+        }
+
         let ray_group = if self.ray_group.available() {
             self.ray_group.destroy()
         } else {
@@ -604,7 +663,7 @@ impl for GpuGiResult {
             self.history.read_f32((sample as u64) * 16_u64 + 12_u64)
         }
     }
-    pub fn destroy(self: Self) -> bool {
+    pub fn destroy(self: mut Self) -> bool {
         ret if self.history.available() {
             self.history.destroy()
         } else {

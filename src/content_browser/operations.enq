@@ -13,6 +13,8 @@ import refrain::blueprint::{BlueprintAsset, blueprint_parse, blueprint_stringify
 import refrain::game_ui::asset::{ui_asset_parse, ui_asset_stringify}
 import refrain::game_ui::templates::ui_template
 import refrain::material_graph::{MaterialGraph, material_graph_stringify}
+import refrain::material_schema::{MaterialAsset, MaterialInstance, standard_pbr_definition, standard_pbr_parent}
+import refrain::native_asset::save_native_material_asset
 import refrain::particles::codec::particle_system_stringify
 import refrain::particles::presets::particle_template
 
@@ -24,7 +26,7 @@ pub fn content_suffix(asset: ContentAsset) -> str {
     }
     ret match asset.kind {
         "ui" => ".graphene-ui.json" "particle-system" => ".graphene-particle.json" "mesh" => ".obj" "texture" => ".png" "script" => ".enq"
-        "blueprint" => ".graphene-blueprint.json" "material" => ".graphene-material.json"
+        "blueprint" => ".graphene-blueprint.json" "material" => ".gmaterial"
         "material-graph" => ".graphene-material-graph.json" "scene" => ".graphene.json"
         "folder" => "" _ => {
             let extension = Path::new(asset.path).extension().unwrap_or("") if extension == "" {
@@ -68,20 +70,23 @@ fn record(browser: mut ContentBrowser, moves: Vec[ContentMove], label: str) ->()
     browser.popup = "" browser.error = "" browser.message = label browser.emit("rescan", "") browser.refresh()
 }
 pub fn content_blocked(browser: ContentBrowser, asset: ContentAsset, live: Vec[str]) -> str {
+    ret content_blocked_with_entries(browser, asset, live, browser.entries)
+}
+fn content_blocked_with_entries(browser: ContentBrowser, asset: ContentAsset, live: Vec[str], referencers: Vec[ContentAsset]) -> str {
     if !asset.mutable() {
         ret "Built-in and source assets are read-only here"
     }
     if asset.kind == "folder" {
         for child in browser.entries {
             if content_under(child.path, asset.path) {
-                let reference = content_referencer(browser.project, child, browser.entries, live)
+                let reference = content_referencer(browser.project, child, referencers, live)
                 if reference != "" {
                     ret "Used by " + reference
                 }
             }
         }
     }
-    let reference = content_referencer(browser.project, asset, browser.entries, live)
+    let reference = content_referencer(browser.project, asset, referencers, live)
     ret if reference == "" {
         ""
     } else {
@@ -107,7 +112,7 @@ pub fn content_create(browser: mut ContentBrowser) ->() {
     } elif kind == "particle" {
         ".graphene-particle.json"
     } elif kind == "material" {
-        ".graphene-material-graph.json"
+        ".gmaterial"
     } elif kind == "blueprint" {
         ".graphene-blueprint.json"
     } else {
@@ -121,10 +126,8 @@ pub fn content_create(browser: mut ContentBrowser) ->() {
     if kind == "folder" {
         success = mkdir_all(browser.project + "/" + path) == 0
     } elif kind == "material" {
-        let base = MaterialGraph::default() let graph = MaterialGraph {
-            name, base.domain, base.nodes, base.links
-        }
-        success = write_file_atomic(browser.project + "/" + path, material_graph_stringify(graph, false) + "\n") == 0
+        let mut definition = standard_pbr_definition() definition.graph.name = name definition.semantic = "" definition.variants.clear()
+        success = save_native_material_asset(browser.project + "/" + path, "", "", MaterialAsset::Definition(definition))
     } elif kind == "ui" {
         let mut asset = ui_template("HUD") let token = automation_capability_token()
         asset.id = "UI_" + token asset.name = name asset.graph.id = asset.id asset.graph.name = name
@@ -298,13 +301,26 @@ pub fn content_history(browser: mut ContentBrowser, redo: bool, live: Vec[str]) 
             }
         }
     }
+    // Assets moving in this same transaction are not external referencers.
+    // Keep live-scene and all other content references protected.
+    let mut referencers = Vec[ContentAsset]::new()
+    for asset in browser.entries {
+        let mut moving = false for change in steps {
+            if asset.path == change.from || content_under(asset.path, change.from) {
+                moving = true
+            }
+        }
+        if !moving {
+            referencers.push(asset)
+        }
+    }
     for change in steps {
         if file_exists(browser.project + "/" + change.to) {
             browser.message = "Undo/redo blocked: destination already exists" browser.dirty = true ret()
         }
         match browser.find(change.from) {
             Some(asset) => {
-                let blocked = content_blocked(browser, asset, live) if blocked != "" {
+                let blocked = content_blocked_with_entries(browser, asset, live, referencers) if blocked != "" {
                     browser.message = "Undo/redo blocked: " + blocked browser.dirty = true ret()
                 }
             }
@@ -392,4 +408,58 @@ pub fn content_move_selection(browser: mut ContentBrowser, live: Vec[str]) ->() 
     } else {
         browser.popup = "" browser.dirty = true
     }
+}
+
+/// Publish the complete material folder atomically, with one reversible move.
+pub fn content_publish_generated(browser: mut ContentBrowser, directory_from: str, directory_to: str, material_from: str, material_to: str) -> bool {
+    if browser.busy() || mkdir_all(browser.project + "/Content/Materials/Generated") != 0 {
+        ret false
+    }
+    let stage = ".graphene/Trash/GenAI-"
+    let target = "Content/Materials/Generated/"
+    if directory_from.byte_len() <= stage.byte_len() || directory_from.slice_bytes(0, stage.byte_len()) != stage ||
+    directory_to.byte_len() <= target.byte_len() || directory_to.slice_bytes(0, target.byte_len()) != target ||
+    !content_under(material_from, directory_from) || !content_under(material_to, directory_to) ||
+    material_from.slice_bytes(directory_from.byte_len(), material_from.byte_len() - directory_from.byte_len()) != material_to.slice_bytes(directory_to.byte_len(), material_to.byte_len() - directory_to.byte_len()) {
+        ret false
+    }
+    if content_stat(browser.project, directory_from) != 2 ||(content_stat(browser.project, material_from) & 3) != 1 || content_stat(browser.project, directory_to) != 0 {
+        ret false
+    }
+    if !content_move(browser.project, directory_from, directory_to) {
+        ret false
+    }
+    record(browser, vec![ContentMove { directory_from, directory_to }], "Generated PBR material")
+    browser.primary = material_to browser.selection = vec![material_to] browser.dirty = true ret true
+}
+
+/// Creates an inherited native asset; the parent graph remains shared.
+pub fn content_create_instance(browser: mut ContentBrowser) ->() {
+    let asset = match browser.find(browser.primary) {
+        Some(value) => value None => {
+            ret()
+        }
+    }
+    if asset.kind != "material" && asset.kind != "material-instance" {
+        ret()
+    }
+    let parent = if asset.path == "@engine/Materials/M_StandardPBR.gmaterial" {
+        standard_pbr_parent()
+    } else {
+        asset.path
+    }
+    if mkdir_all(browser.project + "/Content/Materials") != 0 {
+        browser.error = "Unable to create Materials folder" browser.dirty = true ret()
+    }
+    let path = content_unique_path(browser.project, "Content/Materials", "MI_" + asset.name, ".gmaterial")
+    if path == "" || !save_native_material_asset(browser.project + "/" + path, "", "", MaterialAsset::Instance(MaterialInstance::new(parent))) {
+        browser.error = "Unable to create material instance" browser.dirty = true ret()
+    }
+    let trash = content_trash(browser, content_leaf(path))
+    if trash != "" {
+        record(browser, vec![ContentMove { trash, path }], "Created material instance")
+    } else {
+        browser.error = "Created instance; unable to prepare undo" browser.refresh()
+    }
+    browser.primary = path browser.selection = vec![path] browser.anchor = path browser.popup = "" browser.emit("open", path)
 }

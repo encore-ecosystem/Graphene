@@ -3,20 +3,29 @@ import core::fmt::Debug
 import core::option::Option
 import core::result::Result
 import core::vec::Vec
+
+import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
+import std::thread::JoinHandle
+import std::time::perf_counter_ms
+
 import linalg::Vec3
-import luma::{CanvasScene, CanvasView, DisplayList, DisplayPoint, Event, Point, Rect, StyleSheet, TextEditor, Widget, Window, PreparedFrame, canvas_cubic, horizontal, vertical, event_pointer_down, event_pointer_up, event_pointer_move, event_scroll, event_key_down, event_text_input, event_focus_lost, key_enter, key_escape, key_delete, key_backspace, key_left, key_right, key_home, key_end, key_tab}
-import luma::{canvas_grid, Style, ColorPicker, PickerColor, WidgetLayout, anchored_popup_bounds, property_row}
+import luma::{CanvasScene, CanvasView, ColorPicker, DisplayList, DisplayPoint, Event, PickerColor, Point, PreparedFrame, Rect, Style, StyleSheet, TextEditor, Widget, WidgetLayout, Window, anchored_popup_bounds, canvas_cubic, canvas_grid, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_scroll, event_text_input, horizontal, key_backspace, key_delete, key_end, key_enter, key_escape, key_home, key_left, key_right, key_tab, property_row, vertical}
+
 import mod::codec::{material_graph_parse, material_graph_stringify}
 import mod::compiler::*
 import mod::cooked::{CookedMaterialGraph, cook_material_graph, save_cooked_material_graph}
 import mod::document::*
 import mod::model::*
 import mod::preview::MaterialPreview
+import refrain::content_browser::files::content_unique_path
 import refrain::content_search::search_matches
+import refrain::displacement::patterns::DisplacementBudget
+import refrain::material_images::{MaterialImages, load_material_preview}
+import refrain::material_schema::*
+import refrain::native_asset::{read_native_material_asset, save_native_material_asset}
+import refrain::pbr_preview::PbrPreview
 import refrain::scene::json_value::parse_number
-import std::os::{file_exists, mkdir_all, read_file, write_file_atomic}
-import std::thread::JoinHandle
-import std::time::perf_counter_ms
+import refrain::texture_image::texture_path_valid
 
 fn bp_style(sheet: StyleSheet, classes: str) -> Style {
     ret sheet.style(Widget::panel("").with_classes(classes), false, false, false)
@@ -69,6 +78,14 @@ pub struct MaterialEditor {
     published: Option[CookedMaterialGraph]
     runtime: Option[CookedMaterialGraph]
     applied: bool
+    definition: Option[MaterialDefinition]
+    read_only: bool
+    native_preview: Option[PbrPreview<H>]
+    native_worker: Option[JoinHandle[MaterialImages]]
+    native_preview_pending: bool
+    native_job_path: str
+    changed_path: str
+    budget: DisplacementBudget<H>
 }
 fn has(ids: Vec[u64], id: u64) -> bool {
     for value in ids {
@@ -87,37 +104,28 @@ fn abs(value: f32) -> f32 {
 }
 /// Compact labels do not change the document's stored floating point values.
 pub fn material_display_number(value: f32) -> str {
-    if value > 1000000 || value < - 1000000 {
-        ret Debug::fmt(value)
-    }
-    let scaled =(abs(value) * 1000 + 0.5) as u64
-    let sign = if value < 0 {
-        "-"
-    } else {
-        ""
-    }
-    let whole = Debug::fmt(scaled / 1000)
-    let fraction = scaled % 1000
-    if fraction == 0 {
-        ret sign + whole
-    }
-    let padded = Debug::fmt(fraction + 1000)
-    let mut decimal = padded.slice_bytes(1, 3)
-    while decimal.byte_len() > 1 && decimal.slice_bytes(decimal.byte_len() - 1, 1) == "0" {
-        decimal = decimal.slice_bytes(0, decimal.byte_len() - 1)
-    }
-    ret sign + whole + "." + decimal
+    ret luma::format_decimal(value, 4_u32)
 }
 
 pub fn material_node_bounds(node: MaterialNode) -> Rect {
-    ret Rect::new(node.x, node.y, 220, if material_pins(node).len() > 3 {
-            172_f32
-        } elif material_is_output(node) {
-            152_f32
-        } elif material_polymorphic(node) {
-            128_f32
+    let mut inputs = 0_usize let mut outputs = 0_usize
+    for pin in material_pins(node) {
+        if pin.output {
+            outputs += 1
         } else {
+            inputs += 1
+        }
+    }
+    let rows = if inputs > outputs {
+        inputs
+    } else {
+        outputs
+    }
+    let height = 78_f32 +(rows as f32) * 28_f32
+    ret Rect::new(node.x, node.y, 220_f32, if height < 106_f32 {
             106_f32
+        } else {
+            height
         }
         ,
     )
@@ -196,22 +204,41 @@ impl for MaterialEditor {
         ret MaterialEditor {
             MaterialDocument::new(MaterialGraph::default()), CanvasView::new(), CanvasScene::new(), Rect::new(0, 0, 0, 0), Vec[u64]::new(),
             false, "", Vec[TextEditor]::new(), TextEditor::new(""), false, false, false, false, Point::new(0, 0), Point::new(0, 0), Vec[MaterialNode]::new(), Option::None, "", "Ready", 0,
-            false, false, "", "", 0, "", "", false, Option::None, Option::None, Option::None, 0.5, 0.25, 3.2, true, ColorPicker::new("mg-picker", PickerColor::linear(0, 0, 0)), false, 0, false, "", Option::None, Option::None, false
+            false, false, "", "", 0, "", "", false, Option::None, Option::None, Option::None, 0.5, 0.25, 3.2, true, ColorPicker::new("mg-picker", PickerColor::linear(0, 0, 0)), false, 0, false, "", Option::None, Option::None, false, Option::None, false, Option::None, Option::None, false, "", "", DisplacementBudget::new()
         }
     }
     pub fn open(self: mut Self, project: str, sheet: StyleSheet) ->() {
-        self.open_path(project, project + "/Content/Materials/M_Graph.graphene-material-graph.json", sheet)
+        self.open_path(project, project + "/Content/Materials/M_Graph.gmaterial", sheet)
     }
     pub fn open_path(self: mut Self, project: str, path: str, sheet: StyleSheet) ->() {
         if !self.opened || self.project != project || self.path != path {
             if self.dirty() {
                 self.message = "Save the open material before opening another asset" ret()
             }
-            let saved_file = file_exists(path)
-            let graph = if saved_file {
+            let saved_file = file_exists(path) || path == standard_pbr_parent()
+            self.definition = Option[MaterialDefinition]::None self.read_only = path == standard_pbr_parent()
+            let graph = if path.byte_len() >= 10 && path.slice_bytes(path.byte_len() - 10, 10) == ".gmaterial" {
+                let loaded = if saved_file {
+                    read_native_material_asset(path)
+                } else {
+                    let mut definition = standard_pbr_definition() definition.graph.name = std::path::Path::new(path).stem().unwrap_or("M_Graph") definition.semantic = "" Result::Ok(MaterialAsset::Definition(definition))
+                }
+                match loaded {
+                    Ok(asset) => match asset {
+                        Definition(definition) => {
+                            self.definition = Option[MaterialDefinition]::Some(definition) definition.graph
+                        }
+                        Instance(_) => {
+                            self.message = "Open this asset in the Material Instance Editor" self.controls_dirty = true ret()
+                        }
+                    }
+                    Err(error) => {
+                        self.message = error self.controls_dirty = true ret()
+                    }
+                }
+            } elif saved_file {
                 match material_graph_parse(read_file(path)) {
-                    Some(graph) => graph
-                    None => {
+                    Some(graph) => graph None => {
                         self.message = "Material graph is invalid; the file has been preserved" self.controls_dirty = true ret()
                     }
                 }
@@ -224,6 +251,27 @@ impl for MaterialEditor {
         }
         self.focused = true self.refresh(sheet) self.controls_dirty = true
     }
+    pub fn displacement_budget(self: mut Self, budget: DisplacementBudget<H>) ->() {
+        self.budget = budget
+    }
+    pub fn take_changed(self: mut Self) -> str {
+        let path = self.changed_path self.changed_path = "" ret path
+    }
+    fn save_as_native(self: mut Self, sheet: StyleSheet) ->() {
+        if self.document.graph().domain.key() != "surface" || self.definition.is_some() || !self.commit_field(sheet) {
+            ret()
+        }
+        if mkdir_all(self.project + "/Content/Materials") != 0 {
+            self.message = "Unable to create Materials folder" self.controls_dirty = true ret()
+        }
+        let relative = content_unique_path(self.project, "Content/Materials", self.document.graph().name, ".gmaterial")
+        if relative == "" {
+            self.message = "Unable to reserve material name" self.controls_dirty = true ret()
+        }
+        self.definition = Option[MaterialDefinition]::Some(material_definition_graph(standard_pbr_definition(), self.document.graph()))
+        self.path = self.project + "/" + relative self.saved_file = false self.read_only = false
+        self.save(sheet) self.force_compile = true self.controls_dirty = true
+    }
     pub fn asset_path(self: Self) -> str {
         ret if self.opened {
             self.path
@@ -235,6 +283,9 @@ impl for MaterialEditor {
         ret self.opened &&(!self.saved_file || self.document.dirty())
     }
     pub fn save(self: mut Self, sheet: StyleSheet) -> bool {
+        if self.read_only {
+            ret true
+        }
         if self.picker_open {
             self.message = "Finish color selection before saving" self.controls_dirty = true ret false
         }
@@ -244,12 +295,21 @@ impl for MaterialEditor {
         if !self.opened ||(self.saved_file && !self.document.dirty()) {
             ret true
         }
-        if mkdir_all(std::path::Path::new(self.path).parent().unwrap_or(std::path::Path::new(self.project + "/Content/Materials")).as_str()) != 0 || write_file_atomic(self.path, material_graph_stringify(self.document.graph(), false) + "\n") != 0 {
+        let stored = match self.definition {
+            Some(definition) => {
+                let next = material_definition_graph(definition, self.document.graph())
+                mkdir_all(std::path::Path::new(self.path).parent().unwrap_or(std::path::Path::new(self.project + "/Content/Materials")).as_str()) == 0 && save_native_material_asset(self.path, "", "", MaterialAsset::Definition(next))
+            }
+            None => {
+                mkdir_all(std::path::Path::new(self.path).parent().unwrap_or(std::path::Path::new(self.project + "/Content/Materials")).as_str()) == 0 && write_file_atomic(self.path, material_graph_stringify(self.document.graph(), false) + "\n") == 0
+            }
+        }
+        if !stored {
             self.message = "Unable to save material graph" self.controls_dirty = true ret false
         }
         match self.published {
             Some(asset) => {
-                if asset.semantic == self.document.semantic() {
+                if asset.semantic == self.semantic() {
                     match save_cooked_material_graph(asset, self.path) {
                         Ok(_) => {
                         }
@@ -262,7 +322,7 @@ impl for MaterialEditor {
             None => {
             }
         }
-        self.document.mark_saved() self.saved_file = true self.message = "" self.controls_dirty = true ret true
+        self.document.mark_saved() self.saved_file = true self.changed_path = self.path self.message = "" self.controls_dirty = true ret true
     }
     pub fn discard(self: mut Self) ->() {
         self.picker_open = false self.picker_dirty = true
@@ -288,7 +348,7 @@ impl for MaterialEditor {
         let _cancelled = self.edit(MaterialCommand::CancelGesture, sheet)
         self.picker_open = false self.picker_dirty = true self.select(sheet) self.field = "mg-color-open"
     }
-    pub fn color_input(self: mut Self, event: Event, target: str, layout: WidgetLayout, sheet: StyleSheet) -> bool {
+    pub fn color_input(self: mut Self, event: Event, target: str, layout: WidgetLayout, sheet: StyleSheet, window: Window) -> bool {
         if !self.picker_open || event.kind() == 0 {
             ret false
         }
@@ -300,7 +360,7 @@ impl for MaterialEditor {
             self.cancel_color(sheet) ret true
         }
         let dragging = self.picker.dragging()
-        let outcome = self.picker.input(event, target, layout)
+        let outcome = self.picker.input_with_text(event, target, layout, window)
         self.picker_dirty = self.picker_dirty || dragging || event.kind() != event_pointer_move() || self.picker_hover != target
         self.picker_hover = target
         if outcome == 3 {
@@ -326,6 +386,11 @@ impl for MaterialEditor {
     pub fn take_runtime(self: mut Self) -> Option[CookedMaterialGraph] {
         let asset = self.runtime self.runtime = Option[CookedMaterialGraph]::None ret asset
     }
+    fn semantic(self: Self) -> str {
+        ret match self.definition {
+            Some(definition) => material_definition_semantic(material_definition_graph(definition, self.document.graph())) None => self.document.semantic()
+        }
+    }
     pub fn graph(self: Self) -> MaterialGraph {
         ret self.document.graph()
     }
@@ -335,8 +400,14 @@ impl for MaterialEditor {
     pub fn message(self: Self) -> str {
         ret self.message
     }
+    fn compiling(self: Self) -> bool {
+        ret self.worker.is_some() || self.job.is_some() ||(self.opened &&(self.force_compile || self.semantic() != self.attempted))
+    }
     pub fn busy(self: Self) -> bool {
-        ret self.worker.is_some() || self.job.is_some() ||(self.opened &&(self.force_compile || self.document.semantic() != self.attempted))
+        ret self.native_worker.is_some() || self.native_preview_pending || match self.native_preview {
+            Some(preview) => preview.busy() None => false
+        }
+        || self.compiling()
     }
     pub fn take_controls_dirty(self: mut Self) -> bool {
         let dirty = self.controls_dirty self.controls_dirty = false ret dirty
@@ -395,7 +466,13 @@ impl for MaterialEditor {
                 }
                 ,
             ).background(), true)
-        paint.styled_text(node.x + 12, node.y + 10, material_node_title(node.operation), title)
+        paint.clip(Rect::new(node.x + 8_f32, node.y + 4_f32, 204_f32, 28_f32))
+        paint.styled_text(node.x + 12, node.y + 10, if node.parameter_name != "" {
+                node.parameter_name
+            } else {
+                material_node_title(node.operation)
+            }
+            , title,) paint.clear_clip()
         for pin in material_pins(node) {
             let p = material_pin_point(node, pin)
             paint.round_rect(Rect::new(p.x() - 4, p.y() - 4, 8, 8), 4, bp_style(sheet, if pin.kind == "scalar" {
@@ -457,15 +534,28 @@ impl for MaterialEditor {
         }
     }
     fn edit(self: mut Self, command: MaterialCommand, sheet: StyleSheet) -> bool {
-        let previous = self.document.semantic()
+        if self.read_only {
+            self.message = "Built-in materials are read-only. Create an editable copy from an instance." self.controls_dirty = true ret false
+        }
+        let previous = self.semantic()
         let was_dirty = self.document.dirty()
         match self.document.execute(command) {
             Ok(changed) => {
-                if previous != self.document.semantic() {
+                if previous != self.semantic() {
                     self.last_edit = perf_counter_ms() self.status = "Needs compile"
                     self.controls_dirty = true
                 }
                 if changed {
+                    match self.definition {
+                        Some(definition) => {
+                            self.definition = Option[MaterialDefinition]::Some(material_definition_graph(definition, self.document.graph()))
+                            if previous == self.semantic() {
+                                self.native_preview_pending = true
+                            }
+                        }
+                        None => {
+                        }
+                    }
                     self.message = ""
                     self.controls_dirty = self.controls_dirty || was_dirty != self.document.dirty()
                 }
@@ -481,7 +571,8 @@ impl for MaterialEditor {
         if self.selection.len() == 1 {
             match self.document.graph().node(self.selection.get(0).unwrap_or(0)) {
                 Some(node) => {
-                    self.fields.push(TextEditor::new(material_display_number(node.value.x()))) self.fields.push(TextEditor::new(material_display_number(node.value.y()))) self.fields.push(TextEditor::new(material_display_number(node.value.z())))
+                    self.fields.push(TextEditor::new(node.value.x().fmt())) self.fields.push(TextEditor::new(node.value.y().fmt())) self.fields.push(TextEditor::new(node.value.z().fmt()))
+                    self.fields.push(TextEditor::new(node.parameter_name)) self.fields.push(TextEditor::new(node.parameter_group)) self.fields.push(TextEditor::new(node.texture_path))
                 }
                 None => {
                 }
@@ -497,9 +588,42 @@ impl for MaterialEditor {
             ret true
         }
         let mut index = 0_usize
-        for candidate in 0..3 {
-            if self.field == f "mg-value-{candidate}" {
+        for candidate in 0_usize..6_usize {
+            if self.field == f"mg-value-{candidate}" {
                 index = candidate
+            }
+        }
+        if index >= 3 {
+            match self.document.graph().node(self.selection.get(0_usize).unwrap_or(0_u64)) {
+                Some(node) => {
+                    let text = self.fields.get(index).unwrap_or(TextEditor::new("")).value()
+                    if text.byte_len() > 256 ||(index == 3 && text == "") ||(index == 5 && !texture_path_valid(text)) {
+                        self.message = "Enter a parameter name or a project-relative texture path" self.controls_dirty = true ret false
+                    }
+                    let next = node.with_parameter(if index == 3 {
+                            text
+                        } else {
+                            node.parameter_name
+                        }
+                        , if index == 4 {
+                            text
+                        } else {
+                            node.parameter_group
+                        }
+                        , if index == 5 {
+                            text
+                        } else {
+                            node.texture_path
+                        }
+                        , node.texture_encoding,)
+                    let changed = self.edit(MaterialCommand::Set(next), sheet) if changed {
+                        self.field = ""
+                    }
+                    ret true
+                }
+                None => {
+                    ret true
+                }
             }
         }
         let value = match parse_number(self.fields.get(index).unwrap_or(TextEditor::new("")).value()) {
@@ -539,8 +663,11 @@ impl for MaterialEditor {
         let mut order = Vec[str]::new()
         if self.dirty() {
             order.push("mg-save")
+            if self.definition.is_none() && self.document.graph().domain.key() == "surface" {
+                order.push("mg-save-native")
+            }
         }
-        if self.opened && !self.busy() {
+        if self.opened && !self.compiling() {
             order.push("mg-compile")
         }
         if self.document.can_undo() {
@@ -550,7 +677,7 @@ impl for MaterialEditor {
             order.push("mg-redo")
         }
         order.push("mg-frame")
-        if self.published.is_some() && !self.busy() {
+        if self.published.is_some() && !self.compiling() {
             order.push("mg-apply")
         }
         if self.opened {
@@ -574,7 +701,20 @@ impl for MaterialEditor {
                             1_usize
                         }
                         {
-                            order.push(f "mg-value-{index}")
+                            order.push(f"mg-value-{index}")
+                        }
+                        if node.operation == "scalar-parameter" || node.operation == "color-parameter" || node.operation == "bool-parameter" || node.operation == "texture-parameter" {
+                            for index in 3_usize..if node.operation == "texture-parameter" {
+                                6_usize
+                            } else {
+                                5_usize
+                            }
+                            {
+                                order.push("mg-value-" + index.fmt())
+                            }
+                            if node.operation == "texture-parameter" {
+                                order.push("mg-texture-encoding")
+                            }
                         }
                         order.push("mg-delete")
                     }
@@ -589,10 +729,23 @@ impl for MaterialEditor {
                 order.push("mg-add-" + operation)
             }
         }
-        ret order
+        let controls = self.widget()
+        let mut enabled = Vec[str]::new()
+        for id in order {
+            match controls.find(id) {
+                Some(control) => {
+                    if !control.disabled() {
+                        enabled.push(id)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret enabled
     }
     fn button(self: Self, id: str, title: str, disabled: bool) -> Widget {
-        ret Widget::button(id, title).with_classes("bp-button mg-button").with_disabled(disabled).with_focus(self.field == id)
+        ret Widget::button(id, title).with_classes("bp-button mg-button").with_disabled(disabled ||(self.read_only && id != "mg-frame")).with_focus(self.field == id)
     }
     pub fn widget(self: Self) -> Widget {
         let mut root = Widget::panel("material-editor").with_classes("blueprint-editor material-editor").with_direction(vertical())
@@ -604,13 +757,16 @@ impl for MaterialEditor {
                 }
             ).with_classes("bp-document-name"))
         toolbar.push(self.button("mg-save", "Save", !self.opened || !self.dirty()))
-        toolbar.push(self.button("mg-compile", "Compile", !self.opened || self.busy()))
-        toolbar.push(self.button("mg-apply", "Apply to scene", self.published.is_none() || self.busy()))
+        if self.definition.is_none() && self.document.graph().domain.key() == "surface" {
+            toolbar.push(self.button("mg-save-native", "Save As Material", !self.opened))
+        }
+        toolbar.push(self.button("mg-compile", "Compile", !self.opened || self.compiling()))
+        toolbar.push(self.button("mg-apply", "Apply", self.published.is_none() || self.compiling()))
         toolbar.push(self.button("mg-undo", "Undo", !self.document.can_undo()))
         toolbar.push(self.button("mg-redo", "Redo", !self.document.can_redo()))
         toolbar.push(self.button("mg-frame", "Frame", false))
         for domain in vec!["surface", "sky", "volume", "particle"] {
-            toolbar.push(self.button("mg-domain-" + domain, domain, !self.opened).with_added_classes(if self.document.graph().domain.key() == domain {
+            toolbar.push(self.button("mg-domain-" + domain, domain, !self.opened || self.definition.is_some()).with_added_classes(if self.document.graph().domain.key() == domain {
                         " bp-selected"
                     } else {
                         ""
@@ -618,13 +774,16 @@ impl for MaterialEditor {
                 ))
         }
         toolbar.push(Widget::spacer(1)) toolbar.push(Widget::label(self.status).with_classes("bp-status")) root.push(toolbar)
+        if self.read_only {
+            root.push(Widget::label("Built-in · Read-only. Use Create Editable Copy in the Material Instance Editor to change this graph.").with_classes("bp-section-label").with_text_wrap(true))
+        }
         let mut workspace = Widget::panel("mg-workspace").with_classes("bp-workspace").with_direction(horizontal())
         workspace.push(Widget::canvas("material-canvas").with_classes("blueprint-canvas"))
         let mut sidebar = Widget::panel("mg-sidebar").with_classes("bp-sidebar mg-sidebar").with_direction(vertical())
         sidebar.push(Widget::label("MATERIAL PREVIEW").with_classes("bp-section-label"))
         // An external surface requires an image on the very first frame.
         // Restored tabs must remain presentable while compilation is pending.
-        sidebar.push((if self.preview.is_some() {
+        sidebar.push((if (self.definition.is_some() && self.native_preview.is_some()) ||(self.definition.is_none() && self.preview.is_some()) {
                     Widget::render_surface("material-preview-surface")
                 } else {
                     Widget::panel("material-preview-surface")
@@ -656,7 +815,7 @@ impl for MaterialEditor {
                         }
                         if node.kind == "vec3" && material_has_value(node) {
                             let color = PickerColor::linear(node.value.x(), node.value.y(), node.value.z())
-                            properties.push(property_row("mg-color-row", "Color", Widget::color_picker("mg-color-open", color.hex(), color.display()).with_classes("bp-button mg-color-button").with_focus(self.field == "mg-color-open")))
+                            properties.push(property_row("mg-color-row", "Color", Widget::color_picker("mg-color-open", color.hex(), color.display()).with_classes("bp-button mg-color-button").with_focus(self.field == "mg-color-open").with_disabled(self.read_only)))
                         }
                         for index in 0..if node.kind == "vec3" || !material_has_value(node) {
                             0_usize
@@ -664,8 +823,40 @@ impl for MaterialEditor {
                             1_usize
                         }
                         {
-                            let id = f "mg-value-{index}"
-                            properties.push(property_row("mg-scalar-row", "Value", Widget::input(id, self.fields.get(index).unwrap_or(TextEditor::new("0")).value()).with_classes("bp-input").with_focus(self.field == id)))
+                            let id = f"mg-value-{index}"
+                            properties.push(property_row("mg-scalar-row", "Value", Widget::input(id, if self.field == id {
+                                            self.fields.get(index).unwrap_or(TextEditor::new("0")).value()
+                                        } else {
+                                            material_display_number(parse_number(self.fields.get(index).unwrap_or(TextEditor::new("0")).value()).unwrap_or(0))
+                                        }
+                                        ,
+                                    ).with_classes("bp-input").with_focus(self.field == id).with_cursor(self.fields.get(index).unwrap_or(TextEditor::new("0")).cursor()).with_selection(self.fields.get(index).unwrap_or(TextEditor::new("0")).selection_start(), self.fields.get(index).unwrap_or(TextEditor::new("0")).selection_end()).with_disabled(self.read_only)))
+                        }
+                        if node.operation == "scalar-parameter" || node.operation == "color-parameter" || node.operation == "bool-parameter" || node.operation == "texture-parameter" {
+                            for index in 3_usize..if node.operation == "texture-parameter" {
+                                6_usize
+                            } else {
+                                5_usize
+                            }
+                            {
+                                let id = "mg-value-" + index.fmt() let text = self.fields.get(index).unwrap_or(TextEditor::new(""))
+                                properties.push(property_row("mg-parameter-row-" + index.fmt(), if index == 3 {
+                                            "Name"
+                                        } elif index == 4 {
+                                            "Group"
+                                        } else {
+                                            "Default texture"
+                                        }
+                                        , Widget::input(id, text.value()).with_classes("bp-input").with_focus(self.field == id).with_cursor(text.cursor()).with_selection(text.selection_start(), text.selection_end()).with_disabled(self.read_only),))
+                            }
+                            if node.operation == "texture-parameter" {
+                                properties.push(self.button("mg-texture-encoding", if node.texture_encoding == "linear" {
+                                            "Color space: Linear data"
+                                        } else {
+                                            "Color space: sRGB color"
+                                        }
+                                        , self.read_only,))
+                            }
                         }
                         properties.push(self.button("mg-delete", "Delete expression", false))
                     }
@@ -714,6 +905,22 @@ impl for MaterialEditor {
                     }
                 }
             }
+        } elif target == "mg-texture-encoding" {
+            match self.document.graph().node(self.selection.get(0_usize).unwrap_or(0_u64)) {
+                Some(node) => {
+                    let _changed = self.edit(MaterialCommand::Set(node.with_parameter(node.parameter_name, node.parameter_group, node.texture_path, if node.texture_encoding == "linear" {
+                                    "srgb"
+                                } else {
+                                    "linear"
+                                }
+                                ,
+                            )), sheet) self.select(sheet)
+                }
+                None => {
+                }
+            }
+        } elif target == "mg-save-native" {
+            self.save_as_native(sheet)
         } elif target == "mg-save" {
             let _saved = self.save(sheet)
         } elif target == "mg-compile" {
@@ -799,7 +1006,7 @@ impl for MaterialEditor {
             }
         } else {
             for domain in vec!["surface", "sky", "volume", "particle"] {
-                if target == "mg-domain-" + domain {
+                if target == "mg-domain-" + domain && self.definition.is_none() {
                     let _edited = self.edit(MaterialCommand::Domain(MaterialDomain::parse(domain).unwrap_or(MaterialDomain::Surface)), sheet)
                 }
             }
@@ -814,7 +1021,20 @@ impl for MaterialEditor {
         }
         self.controls_dirty = true self.refresh(sheet)
     }
-    pub fn input(self: mut Self, event: Event, target: str, canvas: Rect, preview: Rect, sheet: StyleSheet) -> bool {
+    pub fn input(self: mut Self, event: Event, target: str, canvas: Rect, preview: Rect, sheet: StyleSheet, layout: WidgetLayout, window: Window) -> bool {
+        if self.focused && self.field.contains("mg-value-") {
+            for index in 0_usize..self.fields.len() {
+                if self.field == "mg-value-" + index.fmt() {
+                    let text = self.fields.get_unchecked_borrowed(index)
+                    if text.pointer_handles(event, target, self.field) {
+                        self.fields.set(index, text.pointer_input(event, layout, self.field, window)) self.controls_dirty = true ret true
+                    }
+                    if luma::text_edit_key(event) {
+                        self.fields.set(index, text.key_input(event, window)) self.controls_dirty = true ret true
+                    }
+                }
+            }
+        }
         self.bounds = canvas
         let local = Point::new(event.x() - canvas.x(), event.y() - canvas.y())
         let world = self.view.world(local.x(), local.y())
@@ -834,7 +1054,13 @@ impl for MaterialEditor {
                 if self.field != target && !self.commit_field(sheet) {
                     ret true
                 }
-                self.field = target self.controls_dirty = true ret true
+                self.field = target
+                for index in 0_usize..self.fields.len() {
+                    if target == "mg-value-" + index.fmt() {
+                        self.fields.set(index, self.fields.get_unchecked_borrowed(index).with_cursor(0).pointer_input(event, layout, target, window))
+                    }
+                }
+                self.controls_dirty = true ret true
             }
             if event.primary_down() {
                 self.action(target, sheet) self.field = target self.controls_dirty = true ret true
@@ -895,7 +1121,7 @@ impl for MaterialEditor {
                     }
                 } else {
                     for index in 0..self.fields.len() {
-                        if self.field == f "mg-value-{index}" {
+                        if self.field == f"mg-value-{index}" {
                             self.fields.set(index, edit_text(self.fields.get(index).unwrap_or(TextEditor::new("")), event))
                         }
                     }
@@ -1111,6 +1337,57 @@ impl for MaterialEditor {
     }
     pub fn tick(self: mut Self, window: Window, sheet: StyleSheet) -> bool {
         let mut changed = false
+        let native_ready = match self.native_preview {
+            Some(preview) => preview.ready() None => true
+        }
+        match self.native_worker {
+            Some(worker) => {
+                if worker.is_finished() && native_ready {
+                    let images = worker.join() self.native_worker = Option[JoinHandle[MaterialImages]]::None
+                    if self.native_job_path == self.path && !self.native_preview_pending {
+                        if images.error != "" {
+                            self.message = images.error
+                        } else {
+                            match PbrPreview::create(window, self.budget, images) {
+                                Ok(preview) => {
+                                    match self.native_preview {
+                                        Some(old) => old.destroy() None => {
+                                        }
+                                    }
+                                    self.native_preview = Option[PbrPreview<H>]::Some(preview)
+                                }
+                                Err(error) => {
+                                    self.message = error
+                                }
+                            }
+                        }
+                        changed = true
+                    }
+                }
+            }
+            None => {
+            }
+        }
+        if self.native_preview_pending && self.native_worker.is_none() {
+            match self.definition {
+                Some(definition) => {
+                    let mut values = Vec[MaterialOverride]::new() let mut surface = definition.surface
+                    for parameter in definition.parameters {
+                        values.push(MaterialOverride {
+                                parameter.id, parameter.value, true
+                            }
+                        ) surface = material_surface_value(surface, parameter.binding, parameter.value)
+                    }
+                    let resolved = ResolvedMaterial {
+                        self.path, definition, values, surface, vec![self.path], Vec[str]::new(), self.semantic()
+                    }
+                    self.native_worker = Option[JoinHandle[MaterialImages]]::Some(spawn load_material_preview(self.project, self.path, resolved.worker_snapshot())) self.native_job_path = self.path self.native_preview_pending = false
+                }
+                None => {
+                    self.native_preview_pending = false
+                }
+            }
+        }
         let finished = match self.worker {
             Some(worker) => worker.is_finished() None => false
         }
@@ -1134,7 +1411,7 @@ impl for MaterialEditor {
         if self.worker.is_none() {
             match self.job {
                 Some(job) => {
-                    if !self.opened || job.project != self.project || job.semantic != self.document.semantic() {
+                    if !self.opened || job.project != self.project || job.semantic != self.semantic() {
                         self.job = Option[MaterialBuild]::None self.status = "Needs compile" changed = true
                     } else {
                         let vertex = material_spirv(read_file(job.directory + "/preview.vert.spv"))
@@ -1161,10 +1438,18 @@ impl for MaterialEditor {
                                                         self.preview = Option[MaterialPreview]::Some(preview)
                                                         match cook_material_graph(job, self.path) {
                                                             Ok(asset) => {
-                                                                if self.saved_file && !self.document.dirty() {
+                                                                if self.saved_file && !self.document.dirty() && !self.read_only {
                                                                     let _cooked = save_cooked_material_graph(asset, self.path)
                                                                 }
-                                                                self.published = Option[CookedMaterialGraph]::Some(asset) if self.applied {
+                                                                self.published = Option[CookedMaterialGraph]::Some(asset)
+                                                                match self.definition {
+                                                                    Some(definition) => {
+                                                                        let mut next = material_definition_graph(definition, self.document.graph()) next.semantic = asset.semantic next.variants = asset.variants self.definition = Option[MaterialDefinition]::Some(next) self.native_preview_pending = true
+                                                                    }
+                                                                    None => {
+                                                                    }
+                                                                }
+                                                                if self.applied {
                                                                     self.runtime = self.published
                                                                 }
                                                             }
@@ -1204,13 +1489,15 @@ impl for MaterialEditor {
                 }
             }
         }
-        let semantic = self.document.semantic()
+        let semantic = self.semantic()
         if self.opened && self.job.is_none() && self.worker.is_none() &&(self.force_compile || self.attempted != semantic) &&(self.force_compile || perf_counter_ms() >= self.last_edit + 250) {
             self.force_compile = false self.attempted = semantic
-            let generated = generate_material(self.document.graph())
+            let generated = match self.definition {
+                Some(definition) => generate_material_definition(material_definition_graph(definition, self.document.graph())) None => generate_material(self.document.graph())
+            }
             if generated.diagnostics.len() > 0 {
                 self.message = "" for diagnostic in generated.diagnostics {
-                    self.message += f "Node {diagnostic.node} {diagnostic.pin}: {diagnostic.message}\n"
+                    self.message += f"Node {diagnostic.node} {diagnostic.pin}: {diagnostic.message}\n"
                 }
                 self.status = "Graph error"
             } else {
@@ -1234,6 +1521,14 @@ impl for MaterialEditor {
         ret changed
     }
     pub fn compose(self: mut Self, frame: mut PreparedFrame, environment: Vec[f32], animated: bool) -> bool {
+        if self.definition.is_some() {
+            ret match self.native_preview {
+                Some(preview) => {
+                    preview.camera_pose(self.yaw, self.pitch, self.distance) preview.compose(frame, "material-preview-surface")
+                }
+                None => true
+            }
+        }
         match self.preview {
             Some(preview) => {
                 let result = preview.compose(frame, self.yaw, self.pitch, self.distance, self.document.graph().domain.key(), environment, animated)
@@ -1245,6 +1540,19 @@ impl for MaterialEditor {
         }
     }
     pub fn destroy(self: mut Self) ->() {
+        match self.native_worker {
+            Some(worker) => {
+                worker.join()
+            }
+            None => {
+            }
+        }
+        self.native_worker = Option[JoinHandle[MaterialImages]]::None
+        match self.native_preview {
+            Some(preview) => preview.destroy() None => {
+            }
+        }
+        self.native_preview = Option[PbrPreview<H>]::None
         match self.worker {
             Some(worker) => {
                 let _code = worker.join()

@@ -1,5 +1,18 @@
 # Confirmed Encore compiler issues
 
+- **#166 — qualified exported calls lose the callee with an unsuffixed u32 argument.**
+  `luma::format_decimal(value, 4)` passes checking but native compilation fails
+  with `missing native LLVM callee: format_decimal`. A two-package reduction
+  with a public `(f32, u32) -> str` function and nested re-exports reproduces
+  the failure; its generated call uses a bare symbol and `usize` argument.
+  Explicit `4_u32` builds and runs successfully with the same frozen local
+  compiler (`f61f7a7950e66d79f90a14d310a4bfb3dfa8d651f9a2bccb3b324616d15f0971`).
+  https://github.com/encore-ecosystem/encore/issues/166
+  Status: reported; Graphene supplies explicitly typed precision arguments as
+  a verified compatibility workaround. The compiler is unchanged.
+  Regression: check, build and run unsuffixed and suffixed calls through nested
+  package re-exports, requiring the same correctly typed callee and result.
+
 - **#158 — mixed suffixed/unsuffixed numeric vector literals emit invalid LLVM IR.**
   `vec![16_u32, 17, 13]` passes `encore check`, but dev compilation with the local
   Encore 0.1.6-neumann executable passes `i64` elements to `Vec__push__u32`.
@@ -32,6 +45,10 @@
   the test entry point makes the complete original editor test pass (exit 0).
   That roundtrip is retained as codec coverage and a current-compiler
   compatibility workaround; the material format and production code are unchanged.
+  The same missing-symbol failure also occurred in `material_color_picker.enq`;
+  adding the cooked-material codec roundtrip there makes the test pass with
+  the same frozen compiler (26.1 seconds). Both consumers should be included
+  in the compiler's reflection-retention regression coverage.
   Suspected reflection specialization/retention defect; the cause remains
   unisolated. Simple tuple/vector roundtrips within and across packages pass
   in `target/compiler-repros/nested-binary{,-cross}/`.
@@ -78,3 +95,46 @@
   No compiler change or application import workaround was applied.
   Regression to add: benchmark check/format on generated large modules with
   many imports and UTF-8 lines, recording time as source size doubles.
+
+## Encore #168 — sending a vector of tuples with nested vectors
+
+Confirmed on installed Encore 0.1.6-neumann: returning a fresh `sending` packet
+with `Vec[(str, Vec[u32])]` reports `non-transferable-region`. An equivalent
+`Vec[MaterialShaderVariant]` with named `name` and `code` fields passes the
+minimal check. Graphene uses the named record for material shader variants.
+Report: https://github.com/encore-ecosystem/encore/issues/168.
+Regression: accept a fresh packet with the tuple element for both `sending`
+returns and worker argument transfer, while still rejecting live aliases.
+
+## Encore #169 — transitive nested fields behind a public wildcard re-export
+
+Installed Encore 0.1.10-neumann reports `unknown-field` on
+`resolved.definition.graph.name` when `MaterialGraph` is only transitively
+imported through a public wildcard re-export. A dependency-free five-file
+reproducer passes with pinned 0.1.6; adding a direct owner-type import makes
+0.1.10 pass. The same direct-import workaround also passes the material editor
+check in an isolated fixture. Graphene now imports the graph owner explicitly
+when checking/building with 0.1.10; this workaround does not fix the compiler.
+Report: https://github.com/encore-ecosystem/encore/issues/169.
+Regression: resolve nested inline struct fields through re-exports without
+requiring consumers to import every nested record type directly.
+
+## Encore #171 — unused vector fields have no native container layout
+
+Official installed Encore 0.1.10-neumann (SHA-256 `40f587f9dcbc90bf3cdda2bfbcbdb7d3b8edc7bbd67ec334ecb782a96b2d6213`)
+accepts unused public `Step` and `HistoryEntry { moves: Vec[Step], label: str }`
+records, but native compilation emits ownership helpers referring to an
+undefined vector layout. A dependency-free reduction fails both normal builds
+and standalone tests; explicitly constructing `Vec[Step]` makes the normal
+build and executable pass. Reproducer and logs:
+`target/material-instances-work/llvm-vector-repro/`.
+
+The material Color Picker standalone test reproduced the same failure twice:
+`ContentEdit` refers to missing `Vec_ContentMove` and other unused browser
+containers. Material editor test entries now explicitly retain browser/history
+types as a compatibility workaround; both the Color Picker (96.3 seconds) and
+material editor (95.1 seconds) regressions pass with it. This does not fix the compiler or change production
+material behavior. Report: https://github.com/encore-ecosystem/encore/issues/171.
+Regression: compile unused public records containing vector fields in both
+normal and standalone paths, with and without reachable vector construction;
+all emitted ownership helpers must have complete container layouts.

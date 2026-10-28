@@ -2,6 +2,43 @@
 import core::vec::Vec
 import linalg::Vec3
 
+/// Height displacement in mesh-local units; never changes physics geometry.
+pub struct DisplacementSettings {
+    enabled: bool
+    magnitude: f32
+    center: f32
+    quality: u32
+}
+
+impl for DisplacementSettings {
+    pub fn default() -> Self {
+        ret Self { false, 0.05_f32, 0.5_f32, 1_u32 }
+    }
+    pub fn valid(self: Self) -> bool {
+        ret self.magnitude >= 0_f32 && self.magnitude <= 1000000_f32 && self.center >= 0_f32 && self.center <= 1_f32 && self.quality <= 2
+    }
+    pub fn target_pixels(self: Self) -> f32 {
+        ret if self.quality == 0 {
+            8_f32
+        } elif self.quality == 2 {
+            2_f32
+        } else {
+            4_f32
+        }
+    }
+    pub fn bound(self: Self) -> f32 {
+        ret if !self.enabled {
+            0_f32
+        } else {
+            self.magnitude * if self.center > 0.5_f32 {
+                self.center
+            } else {
+                1_f32 - self.center
+            }
+        }
+    }
+}
+
 pub struct StandardMaterial {
     base_color: Vec3
     metallic: f32
@@ -12,6 +49,12 @@ pub struct StandardMaterial {
     normal_texture: str
     normal_scale: f32
     normal_flip_y: bool
+    roughness_texture: str
+    metallic_texture: str
+    height_texture: str
+    ao_texture: str
+    ao_strength: f32
+    displacement: DisplacementSettings
 }
 
 fn saturate(value: f32) -> f32 {
@@ -29,7 +72,7 @@ fn saturate(value: f32) -> f32 {
 impl for StandardMaterial {
     pub fn new(base_color: Vec3, metallic: f32, roughness: f32) -> StandardMaterial {
         ret StandardMaterial {
-            base_color, saturate(metallic), saturate(roughness), false, false, "", "", 1.0, false
+            base_color, saturate(metallic), saturate(roughness), false, false, "", "", 1.0, false, "", "", "", "", 1_f32, DisplacementSettings::default()
         }
     }
     pub fn default() -> StandardMaterial {
@@ -37,6 +80,48 @@ impl for StandardMaterial {
     }
     pub fn editor_default() -> StandardMaterial {
         ret StandardMaterial::new(Vec3::new(0.34_f32, 0.38_f32, 0.44_f32), 0.08_f32, 0.48_f32)
+    }
+    pub fn ao_texture(self: Self) -> str {
+        ret self.ao_texture
+    }
+    pub fn ao_strength(self: Self) -> f32 {
+        ret self.ao_strength
+    }
+    pub fn displacement(self: Self) -> DisplacementSettings {
+        ret self.displacement
+    }
+    pub fn with_ao_texture(self: Self, path: str) -> Self {
+        let mut result = self result.ao_texture = path ret result
+    }
+    pub fn with_ao_strength(self: Self, strength: f32) -> Self {
+        let mut result = self result.ao_strength = saturate(strength) ret result
+    }
+    pub fn with_displacement(self: Self, settings: DisplacementSettings) -> Self {
+        let mut result = self result.displacement = settings ret result
+    }
+    pub fn roughness_texture(self: Self) -> str {
+        ret self.roughness_texture
+    }
+    pub fn metallic_texture(self: Self) -> str {
+        ret self.metallic_texture
+    }
+    pub fn height_texture(self: Self) -> str {
+        ret self.height_texture
+    }
+    pub fn with_roughness_texture(self: Self, path: str) -> Self {
+        ret Self {
+            self.base_color, self.metallic, self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, path, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
+        }
+    }
+    pub fn with_metallic_texture(self: Self, path: str) -> Self {
+        ret Self {
+            self.base_color, self.metallic, self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, path, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
+        }
+    }
+    pub fn with_height_texture(self: Self, path: str) -> Self {
+        ret Self {
+            self.base_color, self.metallic, self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, path, self.ao_texture, self.ao_strength, self.displacement
+        }
     }
     pub fn base_color(self: Self) -> Vec3 {
         ret self.base_color
@@ -68,7 +153,7 @@ impl for StandardMaterial {
     pub fn with_normal_texture(self: Self, path: str) -> StandardMaterial {
         ret StandardMaterial {
             self.base_color, self.metallic, self.roughness,
-            self.unlit, self.double_sided, self.base_color_texture, path, self.normal_scale, self.normal_flip_y
+            self.unlit, self.double_sided, self.base_color_texture, path, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_normal_scale(self: Self, value: f32) -> StandardMaterial {
@@ -81,13 +166,13 @@ impl for StandardMaterial {
         }
         ret StandardMaterial {
             self.base_color, self.metallic, self.roughness,
-            self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, scale, self.normal_flip_y
+            self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_normal_flip_y(self: Self, value: bool) -> StandardMaterial {
         ret StandardMaterial {
             self.base_color, self.metallic, self.roughness,
-            self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, value
+            self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, value, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     /// Separate from the legacy material uniform: per-instance texture parameters.
@@ -103,32 +188,42 @@ impl for StandardMaterial {
             } else {
                 1.0_f32
             }
-            , 0.0_f32, 0.0_f32]
+            , if self.roughness_texture != "" {
+                1_f32
+            } else {
+                0_f32
+            }
+            , if self.metallic_texture != "" {
+                1_f32
+            } else {
+                0_f32
+            }
+        ]
     }
     pub fn with_base_color_texture(self: Self, path: str) -> StandardMaterial {
         ret StandardMaterial {
             self.base_color, self.metallic, self.roughness,
-            self.unlit, self.double_sided, path, self.normal_texture, self.normal_scale, self.normal_flip_y
+            self.unlit, self.double_sided, path, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_base_color(self: Self, value: Vec3) -> StandardMaterial {
         ret StandardMaterial {
-            value, self.metallic, self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+            value, self.metallic, self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_metallic(self: Self, value: f32) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, saturate(value), self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+            self.base_color, saturate(value), self.roughness, self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_roughness(self: Self, value: f32) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, self.metallic, saturate(value), self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+            self.base_color, self.metallic, saturate(value), self.unlit, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_unlit_value(self: Self, value: bool) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, self.metallic, self.roughness, value, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+            self.base_color, self.metallic, self.roughness, value, self.double_sided, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_unlit(self: Self) -> StandardMaterial {
@@ -136,7 +231,7 @@ impl for StandardMaterial {
     }
     pub fn with_double_sided_value(self: Self, value: bool) -> StandardMaterial {
         ret StandardMaterial {
-            self.base_color, self.metallic, self.roughness, self.unlit, value, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y
+            self.base_color, self.metallic, self.roughness, self.unlit, value, self.base_color_texture, self.normal_texture, self.normal_scale, self.normal_flip_y, self.roughness_texture, self.metallic_texture, self.height_texture, self.ao_texture, self.ao_strength, self.displacement
         }
     }
     pub fn with_double_sided(self: Self) -> StandardMaterial {

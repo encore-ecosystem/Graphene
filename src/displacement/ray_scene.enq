@@ -1,0 +1,180 @@
+//! Queue-ordered TLAS generations. Old scenes survive their last GPU consumer;
+//! build scratch is released after the producer fence without blocking a frame.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::Mat4
+
+import mod::patterns::DisplacementBudget
+import refrain::rhi::*
+
+struct RaySceneGeneration {
+    acceleration: AccelerationStructure
+    producer: GpuCompletion
+    consumers: Vec[GpuCompletion]
+    bytes: u64
+    parts: Vec[str]
+    structures: Vec[usize]
+    transforms: Vec[Mat4]
+}
+pub struct DisplacementRayScene {
+    generations: Vec[RaySceneGeneration<H>]
+    active: usize
+    error: str
+}
+
+fn same_transform(a: Mat4, b: Mat4) -> bool {
+    ret a.m00 == b.m00 &&
+    a.m01 == b.m01 &&
+    a.m02 == b.m02 &&
+    a.m03 == b.m03 &&
+    a.m10 == b.m10 &&
+    a.m11 == b.m11 &&
+    a.m12 == b.m12 &&
+    a.m13 == b.m13 &&
+    a.m20 == b.m20 &&
+    a.m21 == b.m21 &&
+    a.m22 == b.m22 &&
+    a.m23 == b.m23 &&
+    a.m30 == b.m30 &&
+    a.m31 == b.m31 &&
+    a.m32 == b.m32 &&
+    a.m33 == b.m33
+}
+
+impl for DisplacementRayScene {
+    pub fn new() -> DisplacementRayScene<H> {
+        ret DisplacementRayScene<H>{ Vec[RaySceneGeneration<H>]::new(), 0, "" }
+    }
+    pub fn error(self: Self&) -> str {
+        ret self.error
+    }
+    pub fn prepare(self: mut Self&, device: GraphicsDevice, frame: RenderFrame,
+        structures: Vec[AccelerationStructure], transforms: Vec[Mat4], key: str,
+        budget: mut DisplacementBudget&,) -> AccelerationStructure {
+        ret self.prepare_parts(device, frame, structures, transforms, vec![key], budget)
+    }
+    // Keep per-instance cache keys separate. Concatenating all transforms into
+    // one string copied the growing scene key for every scalar on every frame.
+    pub fn prepare_parts(self: mut Self&, device: GraphicsDevice, frame: RenderFrame,
+        structures: Vec[AccelerationStructure], transforms: Vec[Mat4], parts: Vec[str],
+        budget: mut DisplacementBudget&,) -> AccelerationStructure {
+        self.error = ""
+        if structures.len() == 0 || structures.len() != transforms.len() {
+            self.active = 0 self.collect(budget) ret AccelerationStructure::unavailable()
+        }
+        for i in 0_usize..self.generations.len() {
+            let mut entry = self.generations.get_unchecked_borrowed(i)
+            let mut matches = entry.parts.len() == parts.len() && entry.structures.len() == structures.len()
+            if matches {
+                for j in 0_usize..parts.len() {
+                    if entry.parts.get_unchecked_borrowed(j) != parts.get_unchecked_borrowed(j) {
+                        matches = false break
+                    }
+                }
+            }
+            if matches {
+                for j in 0_usize..structures.len() {
+                    if entry.structures.get_unchecked_borrowed(j) != structures.get_unchecked_borrowed(j).handle ||
+                    !same_transform(entry.transforms.get_unchecked_borrowed(j), transforms.get_unchecked_borrowed(j)) {
+                        matches = false break
+                    }
+                }
+            }
+            if matches && entry.acceleration.available() &&
+            entry.producer.status() != GpuCompletionStatus::Cancelled {
+                self.active = entry.acceleration.handle
+                let token = frame.completion()
+                if !token.available() {
+                    ret AccelerationStructure::unavailable()
+                }
+                entry.consumers.push(token)
+                self.collect(budget) ret entry.acceleration
+            }
+        }
+        let acceleration = device.record_tlas(frame, structures, transforms, budget.limit - budget.used())
+        let bytes = acceleration.memory_bytes()
+        if !budget.reserve(bytes) {
+            // Native allocation checks the same quota before recording commands.
+            self.error = "Ray scene exceeded the shared displacement budget"
+        }
+        let token = frame.completion()
+        let valid = acceleration.available() && token.available()
+        let mut handles = Vec[usize]::new()
+        let mut stored_transforms = Vec[Mat4]::new()
+        let mut stored_parts = Vec[str]::new()
+        for structure in structures {
+            handles.push(structure.handle)
+        }
+        for transform in transforms {
+            stored_transforms.push(transform)
+        }
+        for part in parts {
+            stored_parts.push(part)
+        }
+        self.generations.push(RaySceneGeneration<H> {
+                acceleration, token, vec![frame.completion()], bytes, stored_parts, handles, stored_transforms
+            }
+        )
+        self.active = if valid {
+            acceleration.handle
+        } else {
+            0_usize
+        }
+        if !valid {
+            self.error = acceleration.error()
+        }
+        self.collect(budget)
+        ret if valid {
+            acceleration
+        } else {
+            AccelerationStructure::unavailable()
+        }
+    }
+    pub fn retain(self: mut Self&, frame: RenderFrame, acceleration: AccelerationStructure) -> bool {
+        for i in 0_usize..self.generations.len() {
+            let mut entry = self.generations.get_unchecked_borrowed(i)
+            if entry.acceleration.handle == acceleration.handle {
+                let token = frame.completion() if !token.available() {
+                    ret false
+                }
+                entry.consumers.push(token) ret true
+            }
+        }
+        ret false
+    }
+    pub fn collect(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        let mut count = 0_usize
+        for i in 0_usize..self.generations.len() {
+            let mut entry = self.generations.get_unchecked_borrowed(i)
+            let mut pending = Vec[GpuCompletion]::new()
+            for token in entry.consumers {
+                if token.ready() {
+                    token.destroy()
+                } else {
+                    pending.push(token)
+                }
+            }
+            entry.consumers = pending
+            if entry.acceleration.release_build_resources() {
+                let current = entry.acceleration.memory_bytes()
+                if current <= entry.bytes {
+                    budget.release(entry.bytes - current) entry.bytes = current
+                }
+            }
+            let complete = !entry.producer.available() || entry.producer.ready()
+            if entry.acceleration.handle != self.active && complete && entry.consumers.len() == 0 &&(entry.acceleration.handle == 0 || entry.acceleration.destroy()) {
+                entry.producer.destroy() budget.release(entry.bytes)
+            } else {
+                self.generations.set(count, entry) count += 1
+            }
+        }
+        while self.generations.len() > count {
+            self.generations.pop()
+        }
+        ret self.generations.len() == 0
+    }
+    pub fn destroy(self: mut Self&, budget: mut DisplacementBudget&) -> bool {
+        self.active = 0 ret self.collect(budget)
+    }
+}

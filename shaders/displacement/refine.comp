@@ -1,0 +1,125 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x=128) in;
+shared uint scanValues[128];
+uint levelAt(uint patchIndex) { return patchLevels.data[patchFrame.control.y*patchCount()+patchIndex]; }
+uint effectiveLevel(uint patchIndex) { return min(levelAt(patchIndex),8u)-min(min(levelAt(patchIndex),8u),patchState.data[1]); }
+uint code(vec4 p,float radius) {
+    return (p.x < -p.w-radius?1u:0u)|(p.x>p.w+radius?2u:0u)|
+           (p.y < -p.w-radius?4u:0u)|(p.y>p.w+radius?8u:0u)|
+           (p.z < -radius?16u:0u)|(p.z>p.w+radius?32u:0u);
+}
+float heightTexelSpan(uvec3 corners,uint instance,mat4 model) {
+    vec2 uv[3];
+    for(uint k=0u;k<3u;++k)uv[k]=sourceUV(corners[k])*patchFrame.displacement.z;
+#ifdef GRAPHENE_TERRAIN
+    // Painted weights and world-tiled height layers both contain relief detail.
+    float span=0.;
+    vec2 world[3];
+    for(uint k=0u;k<3u;++k)world[k]=(model*vec4(sourcePosition(corners[k],instance,false),1)).xz;
+    vec2 dimensions[3]=vec2[3](vec2(textureSize(patchHeight,0)),
+        vec2(textureSize(terrainHeight1,0)),vec2(textureSize(terrainHeight2,0)));
+    for(uint edge=0u;edge<3u;++edge) {
+        uint next=(edge+1u)%3u;
+        span=max(span,length((uv[edge]-uv[next])*vec2(textureSize(terrainWeights,0))));
+        for(uint layer=0u;layer<3u;++layer) {
+            vec4 mapping=terrainMaterial.mapping[layer];
+            if(mapping.w!=0. && mapping.y!=0.)span=max(span,
+                length((world[edge]-world[next])*dimensions[layer]/max(mapping.x,.0001)));
+        }
+    }
+    return span;
+#else
+    vec2 dimensions=vec2(textureSize(patchHeight,0));
+    return max(max(length((uv[0]-uv[1])*dimensions),
+                   length((uv[1]-uv[2])*dimensions)),length((uv[2]-uv[0])*dimensions));
+#endif
+}
+void desired(uint patchIndex) {
+    uint face=patchFace(patchIndex),instance=patchInstance(patchIndex);
+    uvec4 selected=uvec4(patchInstances.data[instance].geometry);
+    if(face<selected.x || face-selected.x>=selected.y) { patchLevels.data[patchIndex]=0xffffffffu;return; }
+    uvec3 c=patchCorners(face);mat4 m=patchInstances.data[instance].model;
+    vec4 p[3];for(int k=0;k<3;++k) p[k]=patchFrame.viewProjection*m*vec4(sourcePosition(c[k],instance,false),1);
+    float bound=abs(patchFrame.displacement.x)*max(max(length(m[0].xyz),length(m[1].xyz)),length(m[2].xyz));
+    bound*=max(max(length(patchFrame.viewProjection[0]),length(patchFrame.viewProjection[1])),length(patchFrame.viewProjection[2]))*2.;
+    if((code(p[0],bound)&code(p[1],bound)&code(p[2],bound))!=0u) { patchLevels.data[patchIndex]=0xffffffffu;return; }
+    uint level=0;
+    float scale=max(max(length(m[0].xyz),length(m[1].xyz)),length(m[2].xyz));
+    vec3 rowX=vec3(patchFrame.viewProjection[0][0],patchFrame.viewProjection[1][0],patchFrame.viewProjection[2][0]);
+    vec3 rowY=vec3(patchFrame.viewProjection[0][1],patchFrame.viewProjection[1][1],patchFrame.viewProjection[2][1]);
+    float nearest=max(min(min(abs(p[0].w),abs(p[1].w)),abs(p[2].w)),.0001);
+    float reliefPixels=abs(patchFrame.displacement.x)*patchFrame.displacement.w*scale*
+        max(length(rowX)*patchFrame.viewport.x,length(rowY)*patchFrame.viewport.y)*.5/nearest;
+    // Keep the displaced base LOD when the whole height range is smaller than
+    // the selected detail threshold. Small relief needs no extra microgeometry.
+    if(reliefPixels>max(patchFrame.viewport.z,1.)) {
+        vec2 screen[3];for(int k=0;k<3;++k)screen[k]=p[k].xy/max(abs(p[k].w),.0001)*patchFrame.viewport.xy*.5;
+        float edge=max(max(length(screen[0]-screen[1]),length(screen[1]-screen[2])),length(screen[2]-screen[0]));
+        // Screen coverage alone over-dices low-resolution maps, especially
+        // near the camera. Low/Medium/High stop at 4/2/1 height texels per edge.
+        float screenSegments=edge/max(patchFrame.viewport.z,1.);
+        float heightSegments=heightTexelSpan(c,instance,m)/max(patchFrame.viewport.z*.5,1.);
+        level=uint(clamp(ceil(log2(max(min(screenSegments,heightSegments),1.))),0.,float(patchFrame.geometry.w)));
+    }
+    patchLevels.data[patchIndex]=level;
+}
+void main() {
+    uint patchIndex=gl_GlobalInvocationID.x,phase=patchFrame.control.x,count=patchCount();
+    if(phase==0u) {
+        if(patchIndex==0u)for(uint i=0u;i<16u;++i)patchState.data[i]=0u;
+        if(patchIndex<count)desired(patchIndex);return;
+    }
+    if(phase==1u) {
+        if(patchIndex>=count)return;
+        uint level=levelAt(patchIndex);
+        if(level!=0xffffffffu) {
+            uint face=patchFace(patchIndex),base=patchIndex-patchFace(patchIndex);
+            for(uint k=0;k<3;++k) {
+                uint edge=patchNeighbours.data[face*3+k];if(edge==0xffffffffu)continue;
+                uint other=levelAt(base+edge/3);
+                if(other!=0xffffffffu)level=max(level,other>0u?other-1u:0u);
+            }
+        }
+        patchLevels.data[(1u-patchFrame.control.y)*count+patchIndex]=level;return;
+    }
+    if(phase==2u) {
+        if(patchState.data[2]!=0u)return;
+        uint jobs=0,pattern=0,triangles=0;
+        if(patchIndex<count && levelAt(patchIndex)!=0xffffffffu) {
+            uint level=effectiveLevel(patchIndex),edges=0,face=patchFace(patchIndex),base=patchIndex-face;
+            for(uint k=0;k<3;++k) {
+                uint edge=patchNeighbours.data[face*3+k];if(edge==0xffffffffu)continue;
+                uint neighbour=base+edge/3;
+                if(levelAt(neighbour)!=0xffffffffu && effectiveLevel(neighbour)>level)edges|=1u<<k;
+            }
+            pattern=level*8u+edges;triangles=patchRanges.data[pattern].y;jobs=(triangles+20u)/21u;
+        }
+        uint lane=gl_LocalInvocationIndex;scanValues[lane]=jobs;barrier();
+        for(uint step=1u;step<128u;step*=2u) {
+            uint add=lane>=step?scanValues[lane-step]:0u;barrier();scanValues[lane]+=add;barrier();
+        }
+        if(patchIndex<count)patchOffsets.data[patchIndex]=uvec4(scanValues[lane]-jobs,jobs,pattern,triangles);
+        if(lane==127u)patchBlocks.data[gl_WorkGroupID.x]=uvec2(scanValues[127],0);return;
+    }
+    if(phase==3u) {
+        if(patchIndex!=0u || patchState.data[2]!=0u)return;
+        uint total=0,blocks=(count+127u)/128u;
+        for(uint i=0;i<blocks;++i) { patchBlocks.data[i].y=total;total+=patchBlocks.data[i].x; }
+        if(total>patchFrame.geometry.z) { ++patchState.data[1];patchState.data[3]=total;return; }
+        patchState.data[0]=total;patchState.data[2]=1u;
+        patchState.data[4]=min(total,65535u);patchState.data[5]=(total+65534u)/65535u;patchState.data[6]=1u;
+        // One indexed instanced draw is also a portable vertex-shader fallback:
+        // each instance evaluates a job using the same 63 sequential indices.
+        patchState.data[7]=63u;patchState.data[8]=total;
+        patchState.data[12]=1u;return;
+    }
+    if(phase==4u) {
+        if(patchIndex>=count || patchState.data[2]==0u)return;
+        uvec4 offset=patchOffsets.data[patchIndex];uint first=offset.x+patchBlocks.data[patchIndex/128u].y;
+        if(first>patchFrame.geometry.z || offset.y>patchFrame.geometry.z-first) { atomicOr(patchState.data[14],1u);return; }
+        for(uint i=0;i<offset.y;++i)patchJobs.data[first+i]=uvec4(patchIndex,patchRanges.data[offset.z].x,i*21u,offset.w);
+        atomicAdd(patchState.data[13],offset.w);
+    }
+}

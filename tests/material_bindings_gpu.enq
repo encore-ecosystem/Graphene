@@ -1,0 +1,71 @@
+//! Baseline shaders still need complete descriptor sets in a material-capable scene.
+import core::option::Option
+import core::vec::Vec
+
+import graphene::material_program::material_program_layout
+import graphene::renderer::SceneRenderer
+import graphene::rhi::*
+import graphene::shaders::{material_fragment_spirv, material_vertex_spirv}
+import graphene::texture_gpu::TextureUpload
+import graphene::texture_image::TextureImage
+
+fn main() -> u32 {
+    let instance = GraphicsInstance::create()
+    let adapter = match instance.preferred_adapter() {
+        Some(value) => value None => {
+            ret 77_u32
+        }
+    }
+    let device = instance.create_device(adapter)
+    let target = device.create_offscreen_target(16_u32, 16_u32)
+    let mut entries = vec![BindGroupLayoutEntry::uniform(0_u32, shader_stage_vertex() | shader_stage_fragment()), BindGroupLayoutEntry::storage(1_u32, shader_stage_vertex())]
+    for binding in 2_usize..5_usize {
+        entries.push(BindGroupLayoutEntry::storage(binding as u32, shader_stage_fragment()))
+    }
+    for binding in 5_usize..9_usize {
+        entries.push(BindGroupLayoutEntry::texture_sampler(binding as u32, shader_stage_fragment()))
+    }
+    for entry in material_program_layout() {
+        entries.push(entry)
+    }
+    let layout = device.create_bind_group_layout(entries)
+    let vertex = device.create_shader_module(material_vertex_spirv(), shader_stage_vertex())
+    let fragment = device.create_shader_module(material_fragment_spirv(), shader_stage_fragment())
+    let vertices = VertexBufferLayout::new(44_u32, vec![VertexAttribute::new(0_u32, vertex_format_float32x3(), 0_u32), VertexAttribute::new(1_u32, vertex_format_float32x3(), 12_u32), VertexAttribute::new(2_u32, vertex_format_float32x3(), 24_u32), VertexAttribute::new(3_u32, vertex_format_float32x2(), 36_u32)])
+    let pipeline = device.create_render_pipeline_with_options(target, vertex, fragment, vertices, layout, RenderPipelineOptions::depth())
+    if !device.available() || !target.available() || !layout.available() || !pipeline.available() {
+        ret 1_u32
+    }
+    let upload = match TextureUpload::begin_linear(device, TextureImage {
+            1_u32, 1_u32, vec![4294967295_u32]
+        }
+        ,
+    ) {
+        Some(value) => value None => {
+            ret 2_u32
+        }
+    }
+    if !upload.wait() {
+        ret 3_u32
+    }
+    let texture = upload.finish()
+    let sampler = device.create_repeat_sampler()
+    let storage = device.create_buffer(64_u64, buffer_storage(), true)
+    let mut renderer = SceneRenderer::create_with_material_programs(device, layout, target.frames_in_flight(), pipeline, pipeline, storage, storage, storage, texture, texture, sampler)
+    if !renderer.available() {
+        ret 4_u32
+    }
+    let replacements = renderer.pbr_groups(texture, texture, texture, sampler)
+    if replacements.len() != target.frames_in_flight() as usize {
+        ret 5_u32
+    }
+    for group in replacements {
+        if !group.available() {
+            ret 6_u32
+        }
+        group.destroy()
+    }
+    renderer.destroy() storage.destroy() sampler.destroy() texture.destroy()
+    pipeline.destroy() vertex.destroy() fragment.destroy() layout.destroy() target.destroy() device.destroy() instance.destroy()
+    ret 0_u32
+}

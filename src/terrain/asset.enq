@@ -1,4 +1,4 @@
-//! GTR2 terrain with GTR1 migration, encoded with Encore's format-independent binary library.
+//! GTR3 terrain with GTR1/GTR2 migration, encoded with Encore's format-independent binary library.
 import binary::{encode, decode}
 import core::result::Result
 import core::vec::Vec
@@ -8,21 +8,48 @@ import std::os::write_file_atomic
 import linalg::Vec3
 
 import mod::model::{FoliageInstance, TerrainAsset, TerrainLayer}
-import refrain::native_asset::load_native_texture
-import refrain::texture_asset::{TextureImage, decode_png}
+import refrain::native_asset::{load_native_height, load_native_texture}
+import refrain::texture_asset::{TextureImage, decode_height_png, decode_png}
 extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
 extern fn encore_file_open(path: str, writing: bool) -> u64
 extern fn encore_file_read(id: u64, size: usize) -> str
 extern fn encore_file_close(id: u64) -> bool
 extern fn encore_file_error_code() -> i32
+// Keep the historical field layouts exact; adding a layer field changes binary ABI.
+struct LegacyLayer {
+    name: str
+    color: Vec3
+    texture: str
+    tiling: f32
+}
 struct LegacyTerrain {
     version: u32
     resolution: u32
     spacing: f32
     heights: Vec[f32]
     weights: Vec[Vec3]
-    layers: Vec[TerrainLayer]
+    layers: Vec[LegacyLayer]
     lod_distance: f32
+}
+struct LegacyTerrain2 {
+    version: u32
+    resolution: u32
+    spacing: f32
+    heights: Vec[f32]
+    weights: Vec[Vec3]
+    layers: Vec[LegacyLayer]
+    lod_distance: f32
+    foliage: Vec[FoliageInstance]
+}
+fn migrate_layers(layers: Vec[LegacyLayer]) -> Vec[TerrainLayer] {
+    let mut result = Vec[TerrainLayer]::new()
+    for layer in layers {
+        result.push(TerrainLayer {
+                layer.name, layer.color, layer.texture, layer.tiling, ""
+            }
+        )
+    }
+    ret result
 }
 #attr(safe)
 pub fn terrain_bytes(asset: TerrainAsset) -> Result[str, str] {
@@ -32,7 +59,7 @@ pub fn terrain_bytes(asset: TerrainAsset) -> Result[str, str] {
     match encode(asset) {
         Ok(bytes) => {
             unsafe {
-                ret Result::Ok("GTR2" + graphene_asset_bytes(bytes.as_ptr(), bytes.len()))
+                ret Result::Ok("GTR3" + graphene_asset_bytes(bytes.as_ptr(), bytes.len()))
             }
         }
         Err(_) => {
@@ -41,7 +68,7 @@ pub fn terrain_bytes(asset: TerrainAsset) -> Result[str, str] {
     }
 }
 pub fn terrain_decode(source: str) -> Result[TerrainAsset, str] {
-    if source.byte_len() < 8 || source.byte_len() > 8388608 ||(source.slice_bytes(0, 4) != "GTR1" && source.slice_bytes(0, 4) != "GTR2") {
+    if source.byte_len() < 8 || source.byte_len() > 8388608 ||(source.slice_bytes(0, 4) != "GTR1" && source.slice_bytes(0, 4) != "GTR2" && source.slice_bytes(0, 4) != "GTR3") {
         ret Result::Err("Invalid terrain signature or size")
     }
     let mut bytes = Vec[u8]::with_capacity(source.byte_len() - 4)
@@ -52,9 +79,24 @@ pub fn terrain_decode(source: str) -> Result[TerrainAsset, str] {
         match decode[LegacyTerrain](bytes) {
             Ok(old) => {
                 let converted = TerrainAsset {
-                    2_u32, old.resolution, old.spacing, old.heights, old.weights, old.layers, old.lod_distance, Vec[FoliageInstance]::new()
+                    3_u32, old.resolution, old.spacing, old.heights, old.weights, migrate_layers(old.layers), old.lod_distance, Vec[FoliageInstance]::new()
                 }
                 if old.version == 1 && converted.valid() {
+                    ret Result::Ok(converted)
+                }
+            }
+            Err(_) => {
+            }
+        }
+        ret Result::Err("Invalid legacy terrain asset")
+    }
+    if source.slice_bytes(0, 4) == "GTR2" {
+        match decode[LegacyTerrain2](bytes) {
+            Ok(old) => {
+                let converted = TerrainAsset {
+                    3_u32, old.resolution, old.spacing, old.heights, old.weights, migrate_layers(old.layers), old.lod_distance, old.foliage
+                }
+                if old.version == 2 && converted.valid() {
                     ret Result::Ok(converted)
                 }
             }
@@ -114,14 +156,18 @@ pub fn import_heightmap(path: str, asset: TerrainAsset, range: f32) -> Result[Te
             next.heights.set(i,((value as f32) / 65535_f32 - 0.5_f32) * range)
         }
     } else {
-        let image = terrain_texture(path)?
+        let native = path.byte_len() >= 9 && path.slice_bytes(path.byte_len() - 9, 9) == ".gtexture"
+        let image = if native {
+            load_native_height(path, "")?
+        } else {
+            decode_height_png(terrain_read(path, 67108864)?)?
+        }
         if image.width != asset.resolution || image.height != asset.resolution {
             ret Result::Err("Heightmap dimensions must match terrain resolution")
         }
         for i in 0_usize..next.heights.len() {
-            let p = image.pixels.get(i).unwrap_or(0_u32)
-            let gray =((p & 255) as f32) * 0.2126_f32 +(((p >> 8) & 255) as f32) * 0.7152_f32 +(((p >> 16) & 255) as f32) * 0.0722_f32
-            next.heights.set(i,(gray / 255_f32 - 0.5_f32) * range)
+            let height = image.samples.get_unchecked_borrowed(i) as f32
+            next.heights.set(i,(height / 65535_f32 - 0.5_f32) * range)
         }
     }
     ret Result::Ok(next)

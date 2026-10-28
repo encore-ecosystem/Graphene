@@ -144,6 +144,10 @@ fn gpu_name(label: u64) -> str {
         "FSR / DLSS / DLAA"
     } elif label == 22 {
         "Frame generation"
+    } elif label == 23 {
+        "Displacement refinement"
+    } elif label == 24 {
+        "Displacement geometry"
     } elif label == 16 {
         "Weather shelter map"
     } else {
@@ -190,6 +194,7 @@ pub struct PerformancePanel {
     row_count: usize
     had_frames: bool
     reconstruction_summary: str
+    displacement_summary: str
     reconstruction_sample: u64
     reconstruction_counts:(u64, u64, u64)
 }
@@ -197,7 +202,7 @@ pub struct PerformancePanel {
 impl for PerformancePanel {
     pub fn new() -> Self {
         ret Self {
-            false, false, false, false, 60_u32, 0_u64, true, Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), DisplayList::new(), 0_usize, false, "", 0_u64,(0_u64, 0_u64, 0_u64)
+            false, false, false, false, 60_u32, 0_u64, true, Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), DisplayList::new(), 0_usize, false, "", "", 0_u64,(0_u64, 0_u64, 0_u64)
         }
     }
     pub fn sync(self: mut Self, device: usize, opened: bool, drawable: bool) ->() {
@@ -212,6 +217,10 @@ impl for PerformancePanel {
             }
             self.running = running self.opened = opened self.changed = true
         }
+    }
+    pub fn displacement(self: mut Self, bytes: u64, error: str, source: u64, triangles: u64, pending: bool) -> () {
+        let summary=if error!="" {"Displacement: "+error} elif bytes>0 {"Displacement "+((bytes+524288_u64)/1048576_u64).fmt()+" / 256 MiB"+if pending {" · triangles pending"} else {" · "+source.fmt()+" → "+triangles.fmt()+" tris"}} else {""}
+        if self.displacement_summary!=summary {self.displacement_summary=summary self.changed=true}
     }
     pub fn reconstruction(self: mut Self, counts:(u64, u64, u64), input_width: u32, input_height: u32, output_width: u32, output_height: u32, tracked_bytes: u64) ->() {
         if !self.opened {
@@ -453,7 +462,7 @@ impl for PerformancePanel {
                 "Frame #" + selected(2_u32).fmt() + "  " + duration(selected(3_u32)) + "  ·  CPU " + duration(selected(4_u32)) + "  ·  GPU " + gpu_state(selected(7_u32)) + "  ·  Wait " + duration(selected(6_u32))
             }
             , color(sheet, "text"),)
-        list.text(x, y + 18, self.reconstruction_summary, color(sheet, "muted"))
+        list.text(x, y + 18, self.reconstruction_summary+if self.displacement_summary!="" {"  ·  "+self.displacement_summary} else {""}, color(sheet, "muted"))
         if self.summary_bounds.width() > 1050 {
             list.text(self.summary_bounds.right() - 210, y, "Mean " + duration(mean) + "  P95 " + duration(p95), color(sheet, "muted"))
         }

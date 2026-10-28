@@ -3,6 +3,26 @@
     flex-direction: column;
 }
 
+#mesh-component .g-actor-material {
+    flex: 1 1 0px;
+    min-width: 0px;
+    max-width: 10000px;
+    height: 24px;
+    padding: 2px 5px;
+    gap: 5px;
+    cursor: pointer;
+    color: var(--graphene-text);
+    background: var(--graphene-control);
+    border: 1px solid var(--graphene-border);
+    border-radius: 2px;
+}
+#mesh-component .g-actor-material:hover { background: var(--graphene-control-hover); border-color: var(--graphene-border-hover); }
+#mesh-component .g-actor-material:active { background: var(--graphene-raised); border-color: var(--graphene-focus); }
+#mesh-component .g-actor-material:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+#mesh-component .g-actor-material:disabled { color: var(--graphene-muted); opacity: 0.45; cursor: default; }
+.g-actor-material-icon { flex: 0 0 14px; width: 14px; height: 14px; pointer-events: none; }
+.g-actor-material-name { flex: 1 1 0px; min-width: 0px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+
 .g-parent-selector:hover .g-parent-selector-2 {
     background: #2b2c31;
 }
