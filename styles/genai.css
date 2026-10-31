@@ -1,22 +1,22 @@
 .genai-panel { flex-direction: column; background: var(--graphene-surface); padding: 8px; gap: 7px; min-width: 0; }
 .genai-toolbar,.genai-row { flex-direction: row; align-items: center; gap: 5px; min-width: 0; flex-wrap: wrap; }
-.genai-heading { color: var(--graphene-muted); font-size: 11px; font-weight: 600; flex-grow: 1; }
+.genai-heading { color: var(--graphene-muted); font-size: 13px; font-weight: 600; flex-grow: 1; }
 .genai-body { flex-direction: row; gap: 12px; overflow-y: auto; flex-grow: 1; min-height: 0; flex-wrap: wrap; }
 .genai-settings { flex-direction: column; width: 320px; min-width: 260px; gap: 5px; }
 .genai-result { flex-direction: column; flex-grow: 1; min-width: 340px; gap: 6px; }
-.genai-button { min-width: 0; height: 26px; padding: 4px 8px; border-radius: 4px; background: var(--graphene-control); border: 1px solid var(--graphene-border-hover); color: var(--graphene-text-strong); font-size: 12px; cursor: pointer; }
+.genai-button { min-width: 0; height: 26px; padding: 4px 8px; border-radius: 4px; background: var(--graphene-control); border: 1px solid var(--graphene-border-hover); color: var(--graphene-text-strong); font-size: 14px; cursor: pointer; }
 .genai-button.is-hovered { background: var(--graphene-control-hover); }
 .genai-button.is-active { background: #285b7e; border: 1px solid var(--graphene-accent-hover); }
 .genai-button.is-pressed { background: #44647d; }
-.genai-button:focus,.genai-input:focus,.genai-prompt:focus { outline: 2px solid var(--graphene-focus); outline-offset: 1px; }
+.genai-button:focus-visible,.genai-input:focus-visible,.genai-prompt:focus-visible { outline: 2px solid var(--graphene-focus); outline-offset: 1px; }
 .genai-button:disabled,.genai-input:disabled,.genai-prompt:disabled { opacity: 0.45; }
 .genai-property { flex-direction: row; align-items: center; gap: 6px; min-width: 0; }
-.genai-label { width: 78px; flex-shrink: 0; color: #bac4d1; font-size: 12px; }
+.genai-label { width: 78px; flex-shrink: 0; color: #bac4d1; font-size: 14px; }
 .genai-input,.genai-prompt { background: var(--graphene-bg); color: var(--graphene-text-strong); border: 1px solid var(--graphene-border-hover); border-radius: 3px; padding: 4px 6px; height: 26px; min-width: 0; flex-grow: 1; cursor: text; }
 .genai-prompt { height: 88px; width: 100%; }
 .genai-preview { min-height: 220px; height: 260px; flex-grow: 1; background: #101419; border: 1px solid #3b4552; border-radius: 4px; overflow: hidden; }
 .genai-placeholder { color: var(--graphene-muted); text-align: center; padding: 20px; }
-.genai-status { color: var(--graphene-text); font-size: 12px; min-height: 20px; line-height: 1.4; }
+.genai-status { color: var(--graphene-text); font-size: 14px; min-height: 20px; line-height: 1.4; }
 
 .genai-reference { width: 128px; height: 128px; border: 1px solid var(--graphene-border-hover); border-radius: 4px; }
 

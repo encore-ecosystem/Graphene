@@ -4,12 +4,12 @@
 #actor-physics-details .luma-property-label { flex-basis: 100px; }
 #actor-component-details .state-invalid, #actor-physics-details .state-invalid { border-color: #c04343; }
 .g-camera-preview { position: absolute; right: 14px; bottom: 36px; width: var(--camera-preview-width, 244px); height: var(--camera-preview-height, 162px); padding: 1px; gap: 0; flex-direction: column; background: #15171c; border: 1px solid #626771; border-radius: 4px; z-index: 15; }
-.g-camera-preview-title { flex: 0 0 23px; min-height: 23px; height: 23px; padding: 4px 7px; font-size: 11px; color: var(--graphene-text); }
+.g-camera-preview-title { flex: 0 0 23px; min-height: 23px; height: 23px; padding: 4px 7px; font-size: 13px; color: var(--graphene-text); }
 .g-camera-preview-surface { width: var(--camera-preview-image-width, 240px); height: var(--camera-preview-image-height, 135px); min-height: var(--camera-preview-image-height, 135px); flex: 0 0 var(--camera-preview-image-height, 135px); }
 .g-camera-pilot-banner { position: absolute; left: 14px; top: 42px; height: 25px; padding: 5px 9px; color: #ffcc82; background: #17191de8; border: 1px solid #9e713c; border-radius: 3px; z-index: 15; }
 
 #actor-component-details .g-property-value:hover, #actor-physics-details .g-property-value:hover { border-color: var(--graphene-border-hover); }
-#actor-component-details .g-property-value:focus, #actor-physics-details .g-property-value:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+#actor-component-details .g-property-value:focus-visible, #actor-physics-details .g-property-value:focus-visible { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
 #actor-component-details .g-property-value.state-active:hover, #actor-physics-details .g-property-value.state-active:hover { border-color: var(--graphene-accent); background: var(--graphene-control-hover); }
 #actor-component-details .g-property-value.state-invalid, #actor-component-details .g-property-value.state-invalid:hover, #actor-physics-details .g-property-value.state-invalid, #actor-physics-details .g-property-value.state-invalid:hover { border-color: #c04343; }
-#actor-physics-details .g-property-value.state-invalid:focus { outline-color: #c04343; }
+#actor-physics-details .g-property-value.state-invalid:focus-visible { outline-color: #c04343; }

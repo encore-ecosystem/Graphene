@@ -36,7 +36,7 @@
     border-color: #26272c;
     padding: 9px 5px;
     font-family: "Roboto Mono";
-    font-size: 11px;
+    font-size: 13px;
     text-align: right;
     overflow: hidden;
     pointer-events: none;
@@ -52,7 +52,7 @@
     border-radius: 0px;
     padding: 9px;
     font-family: "Roboto Mono";
-    font-size: 11px;
+    font-size: 13px;
     flex: 1 1 0px;
 }
 
@@ -70,7 +70,7 @@
 .g-code-position {
     color: #8e9198;
     font-family: "Roboto Mono";
-    font-size: 9px;
+    font-size: 11px;
     pointer-events: none;
     flex: 0 1 92px;
 }

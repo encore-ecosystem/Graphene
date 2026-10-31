@@ -25,7 +25,7 @@
 
 .g-status-text {
     color: #adb0b6;
-    font-size: 9px;
+    font-size: 11px;
     pointer-events: none;
     flex: 1 1 0px;
 }
@@ -47,7 +47,7 @@
 .g-log-category {
     color: var(--tone);
     font-family: "Roboto Mono";
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 600;
     flex: 0 1 48px;
 }
@@ -55,7 +55,7 @@
 .g-log-message {
     color: #b6b8be;
     font-family: "Roboto Mono";
-    font-size: 9px;
+    font-size: 11px;
     flex: 1 1 0px;
 }
 
@@ -73,7 +73,7 @@
     border-color: #2a2b30;
     padding: 5px 7px;
     font-family: "Roboto Mono";
-    font-size: 9px;
+    font-size: 11px;
     flex: 0 1 38px;
 }
 
@@ -84,7 +84,7 @@
     border-style: solid;
     padding: 5px 7px;
     font-family: "Roboto Mono";
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 30px;
 }
 

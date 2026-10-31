@@ -1,6 +1,6 @@
 /* Project rendering controls use the existing popup action state palette. */
 .g-aa-choices { flex: 0 0 250px; min-height: 250px; height: 250px; gap: 2px; }
-.g-aa-help { font-size: 11px; color: var(--graphene-muted); padding: 6px 8px; }
+.g-aa-help { font-size: 13px; color: var(--graphene-muted); padding: 6px 8px; }
 .g-project-render-settings { padding: 10px; gap: 5px; }
 
 .g-aa-choices .popup-action { flex: 0 0 26px; min-height: 26px; height: 26px; }

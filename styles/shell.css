@@ -26,7 +26,7 @@ body,
     background: var(--graphene-bg);
     color: var(--graphene-text);
     font-family: "Roboto";
-    font-size: 12px;
+    font-size: 14px;
 }
 
 .editor-menu-bar,
@@ -39,7 +39,7 @@ body,
 }
 
 .editor-menu-bar {
-    flex: 0 0 25px;
+    flex: 0 0 29px;
     padding: 3px 8px;
     gap: 8px;
     background: #0f0f11;
@@ -51,7 +51,7 @@ body,
     border: 0px solid transparent;
     border-radius: 2px;
     padding: 3px 6px;
-    font-size: 10px;
+    font-size: 12px;
 }
 
 .menu-item:hover,
@@ -65,14 +65,19 @@ body,
     color: #ffffff;
 }
 
-.menu-item:focus,
-.toolbar-icon:focus,
-.toolbar-button:focus,
-.popup-action:focus,
-select:focus,
-input:focus {
+.toolbar-icon:focus-visible,
+.toolbar-button:focus-visible,
+.popup-action:focus-visible,
+select:focus-visible,
+input:focus-visible {
     outline: 2px solid var(--graphene-focus);
     outline-offset: -2px;
+}
+
+.menu-item:focus-visible {
+    outline: none;
+    background: var(--graphene-control-hover);
+    color: var(--graphene-text-strong);
 }
 
 .viewport-surface {
@@ -80,7 +85,7 @@ input:focus {
     transition: border-color 90ms ease-out;
 }
 
-.viewport-surface:focus {
+.viewport-surface:focus-visible {
     border-color: var(--graphene-accent);
 }
 
@@ -100,7 +105,7 @@ input:focus {
     border: 0px solid transparent;
     border-radius: 1px;
     padding: 2px 7px;
-    font-size: 9px;
+    font-size: 11px;
 }
 
 .popup-action:hover {
@@ -131,7 +136,7 @@ input:focus {
     border: 1px solid var(--graphene-border);
     border-radius: 2px;
     padding: 5px;
-    font-size: 11px;
+    font-size: 13px;
 }
 
 .toolbar-button {
@@ -287,9 +292,9 @@ input:focus {
     background: #10547d;
 }
 
-.selector-control:focus,
-.viewport-tool:focus,
-.viewport-option:focus {
+.selector-control:focus-visible,
+.viewport-tool:focus-visible,
+.viewport-option:focus-visible {
     outline: 2px solid var(--graphene-focus);
     outline-offset: -2px;
 }

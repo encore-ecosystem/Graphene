@@ -4,7 +4,7 @@
 .g-reconstruction-chip { flex-grow: 1; min-width: 0px; padding: 4px 6px; }
 
 
-.g-reconstruction-chip:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-reconstruction-chip:focus-visible { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
 .g-reconstruction-chip:active { background: var(--graphene-control-hover); }
 .g-reconstruction-chip.active:active { background: #285a78; }
 

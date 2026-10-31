@@ -11,21 +11,21 @@
 }
 
 .g-editor-menu-bar {
-    color: #2a93d2;
-    padding: 2px;
+    color: var(--graphene-brand);
+    padding: 0px;
     flex: 0 1 18px;
 }
 
 .g-editor-menu-bar-2 {
     color: #e8e9ec;
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     flex: 0 1 72px;
 }
 
 .g-editor-menu-bar-3 {
     color: #898c93;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 280px;
     min-width: 0;
     overflow: hidden;
@@ -50,7 +50,7 @@
 
 .g-status-bar {
     color: #a3a6ad;
-    font-size: 10px;
+    font-size: 12px;
     flex: 1 1 0px;
 }
 
@@ -98,7 +98,7 @@
     flex: 0 0 64px;
     width: 64px;
     height: 64px;
-    color: var(--graphene-accent);
+    color: var(--graphene-brand);
 }
 
 .loading-caption {
@@ -137,7 +137,7 @@
     width: 100%;
     flex: 0 0 24px;
     color: var(--graphene-muted);
-    font-size: 12px;
+    font-size: 14px;
     text-align: center;
 }
 
@@ -342,7 +342,7 @@
 .dock-splitter,
 .dock-splitter:hover,
 .dock-splitter:active,
-.dock-splitter:focus,
+.dock-splitter:focus-visible,
 .dock-splitter:focus-visible {
     border: 0;
     border-radius: 0;
@@ -365,8 +365,8 @@
 
 .g-transform-property-label, .g-transform-label-spacer { flex: 0 0 var(--transform-label-width); }
 .g-axis-stepper-label { text-align: center; }
-.menu-item { flex: 0 1 40px; }
-.menu-item.wide-menu-item { flex-basis: 52px; }
+.menu-item { flex: 0 1 48px; }
+.menu-item.wide-menu-item { flex-basis: 62px; }
 
 .editor-dock-workspace {
     flex: 1 1 0px;

@@ -23,14 +23,14 @@
 
 .g-project-dialog-title {
     color: #ebecef;
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 600;
     flex: 0 1 28px;
 }
 
 .g-project-dialog-description {
     color: #9da0a7;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 20px;
 }
 
@@ -41,7 +41,7 @@
     border-style: solid;
     border-radius: 3px;
     padding: 7px 9px;
-    font-size: 11px;
+    font-size: 13px;
     flex: 0 1 38px;
 }
 
@@ -55,7 +55,7 @@
 
 .g-project-dialog-error {
     color: #da675e;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 20px;
 }
 
@@ -72,7 +72,7 @@
     border-style: solid;
     border-color: var(--graphene-border-hover);
     border-radius: 3px;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 88px;
 }
 
@@ -83,7 +83,7 @@
     border-style: solid;
     border-color: #37a6e2;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 600;
     flex: 0 1 96px;
 }
@@ -111,21 +111,21 @@
 
 .g-unsaved-changes-dialog-3 {
     color: #ebecef;
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 600;
     flex: 0 1 28px;
 }
 
 .g-unsaved-changes-dialog-4 {
     color: #aeb1b8;
-    font-size: 11px;
+    font-size: 13px;
     pointer-events: none;
     flex: 0 1 20px;
 }
 
 .g-unsaved-changes-dialog-5 {
     color: #91949b;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 20px;
 }
 
@@ -194,20 +194,20 @@
 
 .g-approval-dialog-3 {
     color: #ebecef;
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 600;
     flex: 0 1 28px;
 }
 
 .g-approval-dialog-4 {
     color: #d4d6dc;
-    font-size: 12px;
+    font-size: 14px;
     flex: 0 1 24px;
 }
 
 .g-approval-dialog-5 {
     color: #979aa2;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 20px;
 }
 
@@ -275,14 +275,14 @@
 
 .g-asset-import-dialog-3 {
     color: #ebecef;
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 600;
     flex: 0 1 28px;
 }
 
 .g-asset-import-dialog-4 {
     color: #9da0a7;
-    font-size: 10px;
+    font-size: 12px;
     flex: 0 1 20px;
 }
 
@@ -301,7 +301,7 @@
 }
 
 .g-asset-import-dialog-6 {
-    font-size: 9px;
+    font-size: 11px;
     flex: 1 1 0px;
 }
 

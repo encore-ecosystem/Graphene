@@ -63,7 +63,7 @@
 
 .g-asset-name {
     color: #dadce0;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 500;
     pointer-events: none;
     flex: 0 1 18px;
@@ -71,7 +71,7 @@
 
 .g-asset-kind {
     color: #84878f;
-    font-size: 8px;
+    font-size: 10px;
     pointer-events: none;
     flex: 0 1 15px;
 }
@@ -102,7 +102,7 @@
 
 .g-content-browser-10 {
     color: #84878f;
-    font-size: 10px;
+    font-size: 12px;
     padding: 12px 8px;
     pointer-events: none;
     flex: 1 1 0px;

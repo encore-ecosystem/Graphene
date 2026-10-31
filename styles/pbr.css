@@ -1,16 +1,16 @@
 .pbr-properties { flex-direction: column; gap: 5px; padding: 9px; min-width: 0; overflow-y: auto; background: var(--graphene-surface); }
-.pbr-heading { flex: 0 0 26px; height: 26px; color: var(--graphene-text-strong); font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbr-heading { flex: 0 0 26px; height: 26px; color: var(--graphene-text-strong); font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pbr-row { flex: 0 0 28px; min-height: 28px; flex-direction: row; gap: 6px; align-items: center; min-width: 0; }
-.pbr-label { flex: 0 0 86px; width: 86px; font-size: 12px; color: var(--graphene-text); }
+.pbr-label { flex: 0 0 86px; width: 86px; font-size: 14px; color: var(--graphene-text); }
 .pbr-input { flex: 1 1 0px; min-width: 0; height: 26px; padding: 4px 6px; border: 1px solid var(--graphene-border-hover); border-radius: 3px; color: var(--graphene-text-strong); background: var(--graphene-bg); cursor: text; }
 .pbr-button { flex: 0 0 28px; min-height: 28px; padding: 4px 8px; border: 1px solid var(--graphene-border-hover); border-radius: 4px; color: var(--graphene-text-strong); background: var(--graphene-control); cursor: pointer; }
 .pbr-button.is-hovered { background: var(--graphene-control-hover); }
 .pbr-button.is-active { background: #285b7e; border-color: var(--graphene-accent-hover); }
 .pbr-button.is-active.is-hovered { background: #316f94; }
 .pbr-button.is-pressed { background: #44647d; }
-.pbr-button:focus,.pbr-input:focus { outline: 2px solid var(--graphene-focus); outline-offset: 1px; }
+.pbr-button:focus-visible,.pbr-input:focus-visible { outline: 2px solid var(--graphene-focus); outline-offset: 1px; }
 .pbr-button:disabled { opacity: 0.45; cursor: default; }
-.pbr-error { color: var(--graphene-text); font-size: 12px; line-height: 1.4; }
+.pbr-error { color: var(--graphene-text); font-size: 14px; line-height: 1.4; }
 
 .pbr-preview { flex: 0 0 200px; height: 200px; min-height: 0; max-width: var(--pbr-preview-limit); max-height: var(--pbr-preview-limit); background: var(--graphene-bg); border: 1px solid var(--graphene-border); border-radius: 4px; overflow: hidden; }
 .pbr-preview-controls { flex: 0 0 28px; height: 28px; gap: 4px; flex-direction: row; }
@@ -20,7 +20,7 @@
 
 .pbr-instance-editor { flex: 1 1 0px; min-height: 0; }
 .pbr-instance-editor .pbr-preview { flex-basis: 220px; height: 220px; }
-.pbr-group { flex: 0 0 22px; min-height: 22px; padding: 5px 0 1px; font-size: 10px; font-weight: 600; color: var(--graphene-muted); }
+.pbr-group { flex: 0 0 22px; min-height: 22px; padding: 5px 0 1px; font-size: 12px; font-weight: 600; color: var(--graphene-muted); }
 .pbr-override { flex: 0 0 24px; width: 24px; min-width: 24px; height: 24px; min-height: 24px; padding: 2px; }
 .pbr-parameter-value { flex: 1 1 0px; min-width: 0; }
 .pbr-input:disabled { color: var(--graphene-muted); border-color: var(--graphene-border); cursor: default; }
@@ -30,7 +30,7 @@
 .pbr-preview-column { flex: 0 0 260px; min-width: 190px; min-height: 0; gap: 5px; }
 .pbr-preview-column .pbr-preview { flex: 1 1 0px; height: auto; min-height: 160px; max-height: var(--pbr-preview-limit); }
 .pbr-parameters { flex: 1 1 0px; min-height: 0; min-width: 0; gap: 3px; padding: 0 3px 5px; overflow-y: auto; }
-.pbr-instance-editor .pbr-label { flex: 0 0 108px; width: 108px; min-width: 0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbr-instance-editor .pbr-label { flex: 0 0 108px; width: 108px; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pbr-instance-workspace.compact { flex-direction: column; }
 .pbr-instance-workspace.compact .pbr-preview-column { flex: 0 0 170px; min-height: 0; }
 .pbr-instance-workspace.compact .pbr-preview { min-height: 120px; }

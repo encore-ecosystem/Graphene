@@ -1,45 +1,60 @@
+/* Every main menu uses the same content-sized container and row style. */
 .g-menu-popup {
-    width: 192px;
+    width: auto;
+    min-width: 224px;
+    height: auto;
     position: absolute;
-    top: 24px;
+    top: 25px;
     z-index: 90;
     flex-direction: column;
+    background: var(--graphene-surface);
+    border: 1px solid var(--graphene-border-hover);
+    border-radius: 4px;
+    padding: 5px;
+    gap: 2px;
 }
 
-.g-menu-popup.state-menu-menu-edit {
-    height: 158px;
-}
+.g-menu-popup.state-menu-file { left: 114px; }
+.g-menu-popup.state-menu-edit { left: 170px; }
+.g-menu-popup.state-menu-window { left: 226px; }
+.g-menu-popup.state-menu-tools { left: 296px; }
 
-.g-menu-popup:not(.state-menu-menu-edit).state-menu-menu-file {
-    height: 122px;
+.g-menu-popup .popup-action {
+    flex: 0 0 28px;
+    min-height: 28px;
+    height: 28px;
+    padding: 4px 8px;
+    gap: 8px;
+    font-size: 13px;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--graphene-text);
+    text-align: left;
+    outline: none;
 }
-
-.g-menu-popup:not(.state-menu-menu-edit):not(.state-menu-menu-file).state-menu-menu-window {
-    height: 145px;
+.g-menu-popup .popup-action.active {
+    background: var(--graphene-raised);
+    color: var(--graphene-text-strong);
 }
-
-.g-menu-popup:not(.state-menu-menu-edit):not(.state-menu-menu-file):not(.state-menu-menu-window) {
-    height: 29px;
+.g-menu-popup .popup-action:hover,
+.g-menu-popup .popup-action.active:hover,
+.g-menu-popup .popup-action:focus-visible {
+    background: var(--graphene-control-hover);
+    color: var(--graphene-text-strong);
+    outline: none;
 }
-
-.g-menu-popup.state-menu-menu-file {
-    left: 112px;
+.g-menu-popup .popup-action:active {
+    background: var(--graphene-raised);
 }
-
-.g-menu-popup:not(.state-menu-menu-file).state-menu-menu-edit {
-    left: 154px;
+.g-menu-popup .popup-action:disabled {
+    background: transparent;
+    color: var(--graphene-muted);
+    opacity: 0.42;
 }
-
-.g-menu-popup:not(.state-menu-menu-file):not(.state-menu-menu-edit).state-menu-menu-window {
-    left: 196px;
-}
-
-.g-menu-popup:not(.state-menu-menu-file):not(.state-menu-menu-edit):not(.state-menu-menu-window).state-menu-menu-tools {
-    left: 250px;
-}
-
-.g-menu-popup:not(.state-menu-menu-file):not(.state-menu-menu-edit):not(.state-menu-menu-window):not(.state-menu-menu-tools) {
-    left: 292px;
+.g-menu-popup hr {
+    flex: 0 0 8px;
+    height: 8px;
+    min-height: 8px;
 }
 
 .g-add-actor-popup {
@@ -61,7 +76,7 @@
 
 .g-add-actor-popup-2 {
     color: #74777e;
-    font-size: 8px;
+    font-size: 10px;
     font-weight: 700;
     padding: 2px 6px;
     pointer-events: none;
@@ -70,7 +85,7 @@
 
 .g-add-actor-popup-4 {
     color: #74777e;
-    font-size: 8px;
+    font-size: 10px;
     font-weight: 700;
     padding: 2px 6px;
     pointer-events: none;
@@ -97,7 +112,7 @@
 
 .g-outliner-settings-popup-2 {
     color: #74777e;
-    font-size: 8px;
+    font-size: 10px;
     font-weight: 700;
     padding: 2px 6px;
     pointer-events: none;

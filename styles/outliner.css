@@ -70,7 +70,7 @@
 }
 
 .g-actor-name {
-    font-size: 10px;
+    font-size: 12px;
     overflow: hidden;
     pointer-events: none;
     flex: 1 1 0px;
@@ -78,7 +78,7 @@
 
 .g-actor-kind {
     color: #6f7279;
-    font-size: 7px;
+    font-size: 9px;
     overflow: hidden;
     pointer-events: none;
     flex: 0 1 32px;
@@ -149,7 +149,7 @@
 
 .g-collection-row-4 {
     color: #a9acb2;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 600;
     pointer-events: none;
     flex: 1 1 0px;
@@ -163,7 +163,7 @@
 
 .g-hierarchy-5 {
     color: #82858c;
-    font-size: 9px;
+    font-size: 11px;
     padding: 8px 6px;
     pointer-events: none;
     flex: 0 1 32px;

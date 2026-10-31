@@ -2,24 +2,24 @@
 .g-autolod-toggle { flex: 1 1 0px; height: 24px; min-height: 24px; padding: 2px 6px; border-radius: 2px; background: var(--graphene-control); color: var(--graphene-text); }
 .g-autolod-toggle.state-active, .g-autolod-toggle.state-active:hover { color: var(--graphene-text-strong); background: #28556f; border-color: var(--graphene-accent); }
 .g-autolod-toggle:hover { background: var(--graphene-control-hover); }
-.g-autolod-toggle:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-autolod-toggle:focus-visible { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
 .g-autolod-toggle:disabled, .g-autolod-quality .g-property-menu:disabled { opacity: 0.45; cursor: default; }
 .g-autolod-quality { flex: 1 1 0px; min-width: 0; height: 24px; gap: 3px; align-items: center; }
-.g-autolod-error-value { flex: 1 1 0px; min-width: 0; height: 24px; padding: 3px; font-size: 11px; text-align: center; background: var(--graphene-bg); }
-.g-autolod-runtime { flex: 0 0 38px; height: 38px; padding: 4px 0; font-size: 11px; color: var(--graphene-text); }
-.g-autolod-help { flex: 0 0 20px; height: 20px; padding: 2px 0; font-size: 10px; color: var(--graphene-muted); }
+.g-autolod-error-value { flex: 1 1 0px; min-width: 0; height: 24px; padding: 3px; font-size: 13px; text-align: center; background: var(--graphene-bg); }
+.g-autolod-runtime { flex: 0 0 38px; height: 38px; padding: 4px 0; font-size: 13px; color: var(--graphene-text); }
+.g-autolod-help { flex: 0 0 20px; height: 20px; padding: 2px 0; font-size: 12px; color: var(--graphene-muted); }
 
 .g-autolod-group { flex: 1 1 0px; min-width: 0; height: 24px; padding: 2px 5px; background: var(--graphene-control); color: var(--graphene-text); border-radius: 2px; text-align: left; }
 .g-autolod-group:hover, .g-lod-button:hover { background: var(--graphene-control-hover); }
-.g-autolod-group:focus, .g-lod-button:focus, .g-lod-input:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-autolod-group:focus-visible, .g-lod-button:focus-visible, .g-lod-input:focus-visible { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
 .g-lod-editor { padding: 12px; gap: 8px; }
 .g-lod-body { flex: 1 1 0px; min-height: 0; gap: 12px; }
 .g-lod-list { flex: 0 0 152px; min-height: 0; gap: 4px; overflow-y: auto; }
 .g-lod-fields { flex: 1 1 0px; min-width: 0; min-height: 0; gap: 5px; overflow-y: auto; }
 .g-lod-fields > *, .g-lod-list > * { flex-shrink: 0; }
 .g-lod-point { flex: 0 0 26px; height: 26px; gap: 6px; }
-.g-lod-input { flex: 1 1 0px; min-width: 0; height: 26px; min-height: 26px; padding: 3px 6px; font-size: 12px; background: var(--graphene-bg); color: var(--graphene-text); }
-.g-lod-button { flex: 0 0 26px; height: 26px; min-height: 26px; padding: 3px 8px; border-radius: 2px; font-size: 12px; background: var(--graphene-control); color: var(--graphene-text); }
+.g-lod-input { flex: 1 1 0px; min-width: 0; height: 26px; min-height: 26px; padding: 3px 6px; font-size: 14px; background: var(--graphene-bg); color: var(--graphene-text); }
+.g-lod-button { flex: 0 0 26px; height: 26px; min-height: 26px; padding: 3px 8px; border-radius: 2px; font-size: 14px; background: var(--graphene-control); color: var(--graphene-text); }
 .g-lod-button.state-active, .g-lod-button.state-active:hover { background: #28556f; color: var(--graphene-text-strong); }
 .g-lod-button:active, .g-autolod-group:active, .g-autolod-toggle:active { border-color: var(--graphene-accent-hover); }
 .g-lod-button:disabled, .g-lod-input:disabled, .g-autolod-group:disabled { opacity: 0.45; cursor: default; }
@@ -27,7 +27,7 @@
 .g-lod-tools { flex: 0 0 28px; height: 28px; gap: 6px; }
 .g-lod-tools > .g-lod-button { flex: 1 1 0px; min-width: 0; }
 .g-lod-curve { flex: 0 0 96px; height: 96px; width: 280px; color: var(--graphene-accent); }
-.g-lod-message { flex: 0 0 32px; height: 32px; font-size: 11px; color: var(--graphene-focus); }
+.g-lod-message { flex: 0 0 32px; height: 32px; font-size: 13px; color: var(--graphene-focus); }
 
 .g-lod-button, .g-autolod-group { border: 1px solid var(--graphene-border); cursor: pointer; }
 .g-lod-button:active, .g-autolod-group:active { background: #304e61; border-color: var(--graphene-accent); }
@@ -40,4 +40,4 @@
 .g-lod-curve { cursor: default; }
 
 .g-autolod-group { gap: 5px; align-items: center; }
-.g-autolod-group-name { flex: 1 1 0px; min-width: 0; font-size: 11px; }
+.g-autolod-group-name { flex: 1 1 0px; min-width: 0; font-size: 13px; }

@@ -119,11 +119,15 @@ struct EditorIcons {
     content: ContentIcons
 }
 
+fn graphene_brand() -> SvgDocument {
+    ret SvgDocument::parse(read_file("Assets/Icons/graphene.svg"))
+}
+
 impl for EditorIcons {
     pub fn load(manager: IconManager) -> EditorIcons {
         let camera = manager.document("camera")
         ret EditorIcons {
-            manager.document("hexagon"), manager.document("save"), manager.document("undo"), manager.document("redo"),
+            graphene_brand(), manager.document("save"), manager.document("undo"), manager.document("redo"),
             manager.document("copy"), manager.document("trash-2"), manager.document("hammer"), manager.document("play"),
             manager.document("mouse-pointer-2"),
             manager.document("move-3d"), manager.document("rotate-3d"), manager.document("scale-3d"),
@@ -497,58 +501,8 @@ fn menu_popup(menu: str, hovered: str, project_loaded: bool, project_dirty: bool
     bool, selected_cube: u32,
     simulating: bool, building: bool, show_outliner: bool, show_details: bool, show_content: bool, icons:
     EditorIcons,) -> Widget {
-    let left = if menu == "menu-file" {
-        112.0_f32
-    } else {
-        if menu == "menu-edit" {
-            154.0_f32
-        } else {
-            if menu == "menu-window" {
-                196.0_f32
-            } else {
-                if menu == "menu-tools" {
-                    250.0_f32
-                } else {
-                    292.0_f32
-                }
-            }
-        }
-    }
-    let height = if menu == "menu-edit" {
-        158.0_f32
-    } else {
-        if menu == "menu-file" {
-            122.0_f32
-        } else {
-            if menu == "menu-window" {
-                76.0_f32
-            } else {
-                29.0_f32
-            }
-        }
-    }
     let mut popup = Nav::new("menu-popup").with_classes("menu-popup")
-    .with_added_classes("g-menu-popup" + if menu == "menu-edit" {
-            " state-menu-menu-edit"
-        } else {
-            ""
-        }
-        + if menu == "menu-file" {
-            " state-menu-menu-file"
-        } else {
-            ""
-        }
-        + if menu == "menu-window" {
-            " state-menu-menu-window"
-        } else {
-            ""
-        }
-        + if menu == "menu-tools" {
-            " state-menu-menu-tools"
-        } else {
-            ""
-        }
-    )
+    .with_added_classes("g-menu-popup state-" + menu)
     if menu == "menu-file" {
         popup.push(popup_action("menu-new-project-action", "New Project", icons.add, hovered, building
                 || simulating, false,))
@@ -2178,7 +2132,8 @@ fn viewport(simulation_mode: str, dragging: bool, object_count: u32,
     compact: bool, icons: EditorIcons, ui: EditorUiState,) -> Widget {
     let simulating = simulation_mode_active(simulation_mode)
     let mut viewport = Section::new("viewport").with_classes(state_classes("viewport", dragging))
-    let mut viewport_bar = Nav::new("viewport-bar").with_classes("viewport-bar")
+    let mut viewport_header = Nav::new("viewport-bar").with_classes("viewport-bar stats-viewport-header")
+    let mut viewport_bar = Nav::new("viewport-tools").with_classes("stats-viewport-tools")
     if simulation_mode_is_play(simulation_mode) {
         viewport_bar.push(Widget::icon("", icons.play).with_added_classes("g-viewport"))
         viewport_bar.push(label("PLAY IN EDITOR").with_added_classes("size-112-grow-0"))
@@ -2208,7 +2163,9 @@ fn viewport(simulation_mode: str, dragging: bool, object_count: u32,
         viewport_bar.push(Widget::spacer(1.0_f32))
 
     }
-    viewport.push(viewport_bar)
+    viewport_header.push(viewport_bar)
+    viewport_header.push(Widget::button("viewport-stats-toggle", "Stats").with_classes(state_classes("toolbar-button stats-toggle", ui.viewport_stats)).with_attribute("aria-pressed", if ui.viewport_stats { "true" } else { "false" }).with_attribute("title", "Show frame statistics and graph"))
+    viewport.push(viewport_header)
     if !simulation_mode_is_play(simulation_mode) && open_viewport_menu == "camera" {
         viewport.push(viewport_camera_strip(camera_mode, hovered, icons))
     }
@@ -4711,7 +4668,7 @@ fn main() -> u32 {
     // editor tree and Vulkan viewport are prepared. Luma completes the initial
     // compositor configuration before recording the opaque loading frame.
     let icon_manager = IconManager::with_lazy_bundled("../Luma/assets/icons")
-    let loading_brand = icon_manager.document("hexagon")
+    let loading_brand = graphene_brand()
     if !present_loading(window, project_at_startup, loading_brand, "Loading interface resources", 0) {
         window.destroy()
         ret 0
@@ -5689,7 +5646,7 @@ fn main() -> u32 {
         if audio_panel.project != project_root {
             audio_panel.configure(project_root) particle_editor.configure(project_root)
         }
-        performance_panel.sync_capture(viewport_renderer.profiling_device(), dock_workspace.location(PanelId::new("performance")).is_some(), viewport_visible && window.frame_status() != 3, mcp_profile_enabled)
+        performance_panel.sync_capture(viewport_renderer.profiling_device(), dock_workspace.location(PanelId::new("performance")).is_some(), viewport_visible && window.frame_status() != 3, mcp_profile_enabled || ui.viewport_stats)
         let profiler_active = performance_panel.running()
         viewport_renderer.set_environment_project(project_root)
         let environment_active = viewport_renderer.environment_animating(simulation_mode_is_play(simulation_mode))
@@ -7328,6 +7285,13 @@ fn main() -> u32 {
                 }
             }
             event_target = target
+            if target == "viewport-stats-toggle" {
+                ui.viewport_stats = !ui.viewport_stats
+                ui.focus(target)
+                ui_chrome_dirty = true dirty = true
+                let _stats_staged = window.stage_component(reactive_ui, "viewport-stats-toggle", Widget::button("viewport-stats-toggle", "Stats").with_classes(state_classes("toolbar-button stats-toggle", ui.viewport_stats)).with_attribute("aria-pressed", if ui.viewport_stats { "true" } else { "false" }).with_attribute("title", "Show frame statistics and graph"))
+                target = ""
+            }
             if target == "menu-genai-action" || target == "menu-terrain-action" || target == "menu-performance-action" || target == "menu-environment-action" || target == "menu-audio-action" || target == "menu-particles-action" || target == "menu-widget-action" {
                 let panel = PanelId::new(if target == "menu-genai-action" {
                         "genai"
@@ -11843,7 +11807,8 @@ fn main() -> u32 {
                     if ui.popup() == "ui-lod-groups" {
                         ui.lod_groups.set_layout(layout) composed = ui.lod_groups.compose(composed, window.stylesheet())
                     }
-                    composed = composed.with_display_overlay(hint_display, hint_clip)
+                    composed = performance_panel.compose_stats(composed, window.stylesheet(), ui.viewport_stats)
+                composed = composed.with_display_overlay(hint_display, hint_clip)
                     let pbr_composed = pbr_editor.compose(composed)
                     let genai_composed = genai_editor.compose(composed)
                     let material_composed = material_editor.compose(composed, material_preview_environment(viewport_renderer, camera.position), environment_active)
@@ -11925,6 +11890,7 @@ fn main() -> u32 {
                 if ui.popup() == "ui-lod-groups" {
                     ui.lod_groups.set_layout(layout) composed = ui.lod_groups.compose(composed, window.stylesheet())
                 }
+                composed = performance_panel.compose_stats(composed, window.stylesheet(), ui.viewport_stats)
                 composed = composed.with_display_overlay(hint_display, hint_clip)
                 let material_composed = material_editor.compose(composed, material_preview_environment(viewport_renderer, camera.position), environment_active)
                 let pbr_composed = pbr_editor.compose(composed)

@@ -2,15 +2,15 @@
 .terrain-toolbar { flex: 0 0 38px; height: 38px; min-height: 38px; padding: 5px 10px; gap: 5px; background: #20242b; border-bottom: 1px solid #343943; align-items: center; }
 .terrain-body { flex: 1 1 0px; min-height: 0; min-width: 0; overflow-x: auto; }
 .terrain-column { flex: 1 1 260px; min-width: 240px; min-height: 0; padding: 8px 12px; gap: 5px; overflow-y: auto; border-right: 1px solid #343943; }
-.terrain-heading { flex: 0 0 20px; height: 20px; font-size: 10px; font-weight: 600; color: #a8b6c8; }
-.terrain-button { flex: 0 0 auto; min-height: 26px; height: 26px; font-size: 11px; padding: 4px 9px; border: 1px solid #414a59; border-radius: 4px; background: #303640; color: #e1e6ef; white-space: nowrap; }
+.terrain-heading { flex: 0 0 20px; height: 20px; font-size: 12px; font-weight: 600; color: #a8b6c8; }
+.terrain-button { flex: 0 0 auto; min-height: 26px; height: 26px; font-size: 13px; padding: 4px 9px; border: 1px solid #414a59; border-radius: 4px; background: #303640; color: #e1e6ef; white-space: nowrap; }
 .terrain-row { flex: 0 0 28px; height: 28px; gap: 5px; align-items: center; }
 .terrain-row .terrain-button { flex: 1 1 0px; min-width: 50px; }
 .terrain-property { flex: 0 0 27px; height: 27px; gap: 6px; align-items: center; }
-.terrain-label { flex: 0 0 104px; width: 104px; min-width: 104px; font-size: 11px; color: #b0b9c8; }
-.terrain-input { flex: 1 1 0px; min-width: 40px; height: 24px; min-height: 24px; padding: 3px 6px; font-size: 11px; background: #151a22; color: #e5ebf4; border: 1px solid #343e4d; border-radius: 3px; }
-.terrain-hint { flex: 0 0 52px; height: 52px; font-size: 10px; color: #8e9cb0; white-space: pre-wrap; padding-top: 4px; }
-.terrain-status { flex: 0 0 22px; height: 22px; min-height: 22px; font-size: 11px; color: #aebed3; background: #1a1e25; padding: 3px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.terrain-label { flex: 0 0 104px; width: 104px; min-width: 104px; font-size: 13px; color: #b0b9c8; }
+.terrain-input { flex: 1 1 0px; min-width: 40px; height: 24px; min-height: 24px; padding: 3px 6px; font-size: 13px; background: #151a22; color: #e5ebf4; border: 1px solid #343e4d; border-radius: 3px; }
+.terrain-hint { flex: 0 0 52px; height: 52px; font-size: 12px; color: #8e9cb0; white-space: pre-wrap; padding-top: 4px; }
+.terrain-status { flex: 0 0 22px; height: 22px; min-height: 22px; font-size: 13px; color: #aebed3; background: #1a1e25; padding: 3px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .terrain-button:hover, .terrain-button.is-hovered { background: #3c485b; }
 .terrain-button:active, .terrain-button.is-pressed { background: #274d70; border-color: #8bc8ff; }
 .terrain-button.is-active { background: #234663; border-color: #6ab5f1; color: #e9f5ff; }

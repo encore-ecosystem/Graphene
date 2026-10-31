@@ -3,14 +3,14 @@
 .g-snap-toggle, .g-snap-step { height: 24px; min-height: 24px; padding: 3px; border: 0; border-radius: 2px; background: var(--graphene-control); color: var(--graphene-text-strong); cursor: pointer; }
 .g-snap-toggle { flex: 0 0 24px; min-width: 24px; }
 .g-snap-step { flex: 1 1 0px; min-width: 0; flex-direction: row; align-items: center; gap: 2px; }
-.g-snap-readout { flex: 1 1 0px; min-width: 0; font-size: 11px; }
+.g-snap-readout { flex: 1 1 0px; min-width: 0; font-size: 13px; }
 .g-snap-chevron { flex: 0 0 8px; width: 8px; height: 8px; }
 .g-snap-toggle:hover, .g-snap-step:hover, .g-snap-choice:hover { background: var(--graphene-control-hover); }
 .g-snap-toggle.state-active, .g-snap-toggle.state-active:hover, .g-snap-step.state-active, .g-snap-step.state-active:hover, .g-snap-choice.state-active, .g-snap-choice.state-active:hover { background: #28556f; color: #f3f8fc; }
 .g-snap-toggle:active, .g-snap-step:active, .g-snap-choice:active { background: var(--graphene-raised); }
-.g-snap-toggle:focus, .g-snap-step:focus, .g-snap-choice:focus { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
+.g-snap-toggle:focus-visible, .g-snap-step:focus-visible, .g-snap-choice:focus-visible { outline: 1px solid var(--graphene-focus); outline-offset: -1px; }
 .g-snap-popup .g-popup-caption { height: 20px; min-height: 20px; }
 .g-snap-grid { flex: 0 0 auto; min-height: 0; gap: 4px; padding: 0; }
 .g-snap-row { flex: 0 0 24px; min-height: 24px; height: 24px; padding: 0; gap: 4px; }
-.g-snap-choice, .g-snap-empty { flex: 1 1 0px; min-width: 0; height: 24px; min-height: 24px; padding: 3px; font-size: 11px; border: 1px solid var(--graphene-border); border-radius: 2px; background: var(--graphene-control); color: var(--graphene-text); cursor: pointer; }
+.g-snap-choice, .g-snap-empty { flex: 1 1 0px; min-width: 0; height: 24px; min-height: 24px; padding: 3px; font-size: 13px; border: 1px solid var(--graphene-border); border-radius: 2px; background: var(--graphene-control); color: var(--graphene-text); cursor: pointer; }
 .g-snap-empty { background: transparent; border: 0; cursor: default; }
