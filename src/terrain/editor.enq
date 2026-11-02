@@ -12,7 +12,7 @@ import linalg::{Mat4, Vec3}
 import luma::{Color, DisplayList, Event, Point, PreparedFrame, ReactiveUi, Rect, StyleSheet, TextEditor, Widget, WidgetLayout, event_focus_lost, event_key_down, event_pointer_down, event_pointer_move, event_pointer_up, event_text_input, horizontal, key_backspace, key_delete, key_enter, key_escape, key_left, key_right, key_tab, vertical}
 
 import mod::asset::{import_heightmap, load_terrain, save_terrain, terrain_texture}
-import mod::brush::{TerrainBrush}
+import mod::brush::TerrainBrush
 import mod::document::TerrainDocument
 import mod::foliage::{FoliageBrush, foliage_mesh}
 import mod::geometry::{merge_terrain_chunks, terrain_chunk, terrain_collision, terrain_local_ray, terrain_lod, terrain_ray}
@@ -27,7 +27,7 @@ import refrain::scene::primitive::MeshData
 import refrain::scene::renderable::{MeshId, RenderItem, Renderable}
 import refrain::scene::transform::Transform
 import refrain::scene::world::Scene
-import refrain::texture_asset::{TextureImage}
+import refrain::texture_asset::TextureImage
 
 struct TerrainEntry {
     path: str
@@ -267,6 +267,14 @@ impl for TerrainEditor {
             }
         }
         ret MeshId::new(0_u64)
+    }
+    pub fn navigation_asset(self: Self, key: str) -> Option[TerrainAsset] {
+        let path = terrain_key_path(key) for e in self.entries {
+            if e.path == path {
+                ret Option::Some(e.document.asset())
+            }
+        }
+        ret Option::None
     }
     pub fn collision(self: Self, key: str) -> Option[MeshData] {
         let path = terrain_key_path(key) for e in self.entries {

@@ -150,7 +150,7 @@ fn palette(domain: str) -> Vec[str] {
     for key in blueprint_operations() {
         let category = operation_info(key).category
         if domain == "ui" {
-            if category != "Transform" && category != "Appearance" && key != "input-pressed" && key != "input-released" {
+            if category != "Transform" && category != "Appearance" && category != "Interaction" && category != "Navigation" && key != "input-pressed" && key != "input-released" {
                 result.push(key)
             }
         } elif !key.contains("ui-") {
@@ -715,7 +715,7 @@ impl for BlueprintEditor {
                                     ).with_disabled(locked))
                             }
                         }
-                        if node.operation == "input-pressed" || node.operation == "input-released" || node.operation == "ui-click" || node.operation == "ui-change" {
+                        if node.operation == "game-event" || node.operation == "input-pressed" || node.operation == "input-released" || node.operation == "ui-click" || node.operation == "ui-change" {
                             inspector.push(property_row("bp-action-name-row", "Action", self.entry("bp-action-name", self.value.value())))
                             for action in self.actions {
                                 inspector.push(self.button("bp-action-" + action, action, "keyboard").with_disabled(locked))
@@ -940,7 +940,7 @@ impl for BlueprintEditor {
     }
     fn load_node(self: mut Self, node: BlueprintNode) ->() {
         self.property = 0 self.component = 0 self.load_value(node.value)
-        if node.operation == "input-pressed" || node.operation == "input-released" || node.operation == "ui-click" || node.operation == "ui-change" {
+        if node.operation == "game-event" || node.operation == "input-pressed" || node.operation == "input-released" || node.operation == "ui-click" || node.operation == "ui-change" {
             self.value = TextEditor::new(node.text) self.active_type = "action"
         }
     }

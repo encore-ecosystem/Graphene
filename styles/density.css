@@ -101,3 +101,6 @@ button:disabled { cursor: default; }
 .g-local-popup .popup-action { font-size: 14px; min-height: 24px; height: 26px; padding: 3px 6px; }
 .g-local-popup .g-axis-step-button { max-width: 10000px; padding: 3px; }
 .bp-sidebar #bp-value-row .luma-property-label { flex-basis: 64px; }
+
+/* Vector controls fill the property control column, not a 26px flex basis. */
+.bp-sidebar .luma-property-control.bp-transform-row { flex: 1 1 0px; min-width: 0; }

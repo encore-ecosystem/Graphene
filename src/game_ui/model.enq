@@ -43,7 +43,7 @@ pub struct UiScreenAsset {
     graph: BlueprintAsset
 }
 pub fn ui_kinds() -> Vec[str] {
-    ret vec!["Canvas", "Overlay", "Horizontal", "Vertical", "Scroll", "Spacer", "Text", "Image", "Button", "Progress", "Slider", "Checkbox", "Select", "Input"]
+    ret vec!["Canvas", "Overlay", "Horizontal", "Vertical", "Scroll", "Spacer", "Text", "Image", "Minimap", "Button", "Progress", "Slider", "Checkbox", "Select", "Input"]
 }
 pub fn ui_container(kind: str) -> bool {
     ret kind == "Canvas" || kind == "Overlay" || kind == "Horizontal" || kind == "Vertical" || kind == "Scroll"
@@ -70,6 +70,13 @@ impl for UiWidget {
 }
 
 impl for UiScreenAsset {
+    /// Visual projections own their widget vector and share the immutable
+    /// compiled graph. Editing/Undo still use the deep snapshot below.
+    pub fn view_with_widgets(self: Self, widgets: Vec[UiWidget]) -> Self {
+        ret Self {
+            self.id, self.name, self.reference_width, self.reference_height, widgets, self.graph
+        }
+    }
     pub fn snapshot(self: Self) -> Self {
         let mut widgets = Vec[UiWidget]::new() for w in self.widgets {
             widgets.push(w.snapshot())

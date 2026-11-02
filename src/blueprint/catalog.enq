@@ -3,6 +3,7 @@ import core::vec::Vec
 import linalg::Vec3
 
 import mod::model::{BlueprintNode, BlueprintType, BlueprintValue}
+import refrain::gameplay::service::{gameplay_operation, gameplay_operations}
 
 pub struct OperationInfo {
     key: str
@@ -12,10 +13,77 @@ pub struct OperationInfo {
     description: str
 }
 pub fn blueprint_operations() -> Vec[str] {
-    ret vec!["ui-resume", "ui-open-settings", "ui-open-pause", "ui-close", "ui-apply-settings", "ui-reset-settings", "ui-cancel-settings", "ui-stop-play", "ui-click", "ui-change", "ui-destruct", "construction", "begin-play", "tick", "input-pressed", "input-released", "constant", "get-variable", "set-variable", "add", "subtract", "multiply", "divide", "equal", "less", "greater", "and", "or", "not", "make-vector", "break-vector", "branch", "sequence", "get-position", "get-rotation", "get-scale", "set-position", "set-rotation", "set-scale", "add-offset", "add-rotation", "get-visible", "set-visible", "print"]
+    let mut operations = vec!["publish-value", "to-text", "strategy-camera", "game-event", "emit-event", "begin-placement", "cancel-placement", "placement-completed", "placement-failed", "placement-cancelled", "primary-pressed", "secondary-pressed", "cursor-position", "cursor-actor", "self-actor", "cursor-valid", "is-selected", "set-selected", "move-to", "stop-movement", "move-completed", "move-failed", "ui-resume", "ui-open-settings", "ui-open-pause", "ui-close", "ui-apply-settings", "ui-reset-settings", "ui-cancel-settings", "ui-stop-play", "ui-click", "ui-change", "ui-destruct", "construction", "begin-play", "tick", "input-pressed", "input-released", "constant", "get-variable", "set-variable", "add", "subtract", "multiply", "divide", "equal", "less", "greater", "and", "or", "not", "make-vector", "break-vector", "branch", "sequence", "get-position", "get-rotation", "get-scale", "set-position", "set-rotation", "set-scale", "add-offset", "add-rotation", "get-visible", "set-visible", "print"]
+    for operation in gameplay_operations() {
+        operations.push(operation)
+    }
+    ret operations
 }
 pub fn operation_info(key: str) -> OperationInfo {
     let metadata = match key {
+        "control-body" =>("Get Player Body", "Player Control", "user", "Read the engineer or remote android, including while that body is driving a vehicle.")
+        "control-set-power" =>("Set Terminal Power", "Player Control", "power", "Publish power availability from the game's power logic. Power loss releases remote control.")
+        "physics-static-box" =>("Register Static Box", "Physics", "box", "Attach a static box collider to an unparented root actor. Extents are positive world-space half sizes.")
+        "world-broadcast" =>("Broadcast World Event", "World", "radio", "Send a named event to actor graphs through the bounded world command queue.")
+        "actor-find" =>("Find Actor By Name", "World", "search", "Find a runtime root actor by its authored name.")
+        "find-nearest" =>("Find Nearest Blueprint", "World", "search", "Find the nearest other living actor of a Blueprint class. Count returns distance in centimetres.")
+        "distance-to" =>("Distance To Actor", "World", "ruler", "Read world distance in centimetres between two actors.")
+        "spawn-blueprint" =>("Spawn Blueprint Near Actor", "World", "box", "Spawn a preloaded class around an anchor. Distance and clearance are metres; blocked locations fail.")
+        "move-to-actor" =>("Move To Actor", "Navigation", "move-3d", "Route a unit to a runtime actor using speed and clearance in metres.")
+        "actor-teleport" =>("Teleport To Actor", "World", "move-3d", "Move a body to another actor, keeping identity and inventory.")
+        "team-value-get" =>("Get Team Value", "Team", "users", "Read an authoritative named team counter or progression flag. Unset values are zero.")
+        "team-value-set" =>("Set Team Value", "Team", "users", "Set an authoritative team counter shared by the team and saved with the world.")
+        "health-register" =>("Register Health", "Combat", "heart", "Create bounded health for an actor and its team.")
+        "health-get" =>("Get Health", "Combat", "heart", "Read remaining health.")
+        "health-team" =>("Get Actor Team", "Combat", "users", "Read the team registered with an actor's health component.")
+        "health-damage" =>("Apply Damage", "Combat", "crosshair", "Subtract health without underflow. Emits Died once on the victim.")
+        "health-heal" =>("Restore Health", "Combat", "heart", "Restore health up to its authored maximum.")
+        "inventory-transfer-all" =>("Transfer All Cargo", "Inventory", "package", "Atomically move all cargo to another inventory or fail without changing either.")
+        "control-autonomy" =>("Set Vehicle Autonomy", "Player Control", "truck", "Enable empty-vehicle AI orders. Direct control still requires a driver.")
+        "control-seat-ai" =>("Board AI Driver", "Player Control", "user", "Seat a nearby unpossessed human or android in a free team vehicle.")
+        "world-save" =>("Save Game World", "World", "save", "Save inventories, machines, cargo in transit, actors and control state to a project Saves slot. Finish placement first.")
+        "world-load" =>("Load Game World", "World", "folder-open", "Restore a game-world slot belonging to this exact Blueprint program without changing the editor scene.")
+        "inventory-create" =>("Create Inventory", "Inventory", "package", "Create bounded cargo on an actor. Capacity counts individual items. Completion is deferred until the world processes the command.")
+        "inventory-add" =>("Add Items", "Inventory", "package-plus", "Add an exact quantity. Fails without changing cargo if capacity is insufficient.")
+        "inventory-remove" =>("Remove Items", "Inventory", "package-minus", "Remove an exact quantity. Fails without changing cargo if items are missing.")
+        "inventory-count" =>("Count Items", "Inventory", "hash", "Read physical cargo. Count is available on the Completed branch.")
+        "inventory-transfer" =>("Transfer Items", "Inventory", "arrow-right-left", "Atomically transfer an exact quantity between two actors. No shared resource bank.")
+        "craft-recipe" =>("Craft Recipe", "Production", "hammer", "Atomically exchange ingredients for products using a project recipe asset.")
+        "production-configure" =>("Configure Production", "Production", "factory", "Assign a timed recipe and explicit power grid to an actor with an inventory.")
+        "production-status" =>("Get Production Status", "Production", "timer", "Read completed cycles and running, input, output or power state.")
+        "production-enable" =>("Enable Production", "Production", "power", "Enable (1) or pause (0) a machine without discarding reserved inputs or progress.")
+        "conveyor-connect" =>("Connect Conveyor", "Logistics", "arrow-right-left", "Connect two physical inventories with an item filter, rate and travel time. Cargo remains in transit if the receiver is full.")
+        "control-register" =>("Register Control Body", "Player Control", "user", "Register engineer, android, human, vehicle or terminal for a team.")
+        "control-start" =>("Start Player Control", "Player Control", "play", "Associate a player identity and team with a living engineer.")
+        "control-terminal" =>("Use Command Terminal", "Player Control", "monitor", "Enter strategy mode from a nearby powered team terminal.")
+        "control-possess" =>("Possess Android", "Player Control", "bot", "From a command terminal, exclusively control an available team android.")
+        "control-board" =>("Board Vehicle", "Player Control", "truck", "Physically board a nearby free team driver seat with the current body.")
+        "control-leave-vehicle" =>("Leave Vehicle", "Player Control", "log-out", "Exit beside the vehicle and return to its driver body.")
+        "control-return" =>("Return Remote Control", "Player Control", "undo", "Release the android and return to the command terminal.")
+        "control-exit-terminal" =>("Leave Command Terminal", "Player Control", "log-out", "Return to the engineer body at the terminal.")
+        "control-state" =>("Get Player Control", "Player Control", "user", "Read the controlled actor and current mode on Completed.")
+        "publish-value" =>("Publish Value", "Flow", "radio", "Publish a named text value to HUD widgets with a value:name binding.")
+        "to-text" =>("To Text", "Values", "type", "Format a number or boolean as text.")
+        "strategy-camera" =>("Enable Strategy Camera", "Navigation", "move-3d", "Enable WASD panning and mouse-wheel zoom for the scene camera during Play.")
+        "game-event" =>("Game Event", "Events", "keyboard", "Receive a named event from the HUD or another Blueprint.")
+        "emit-event" =>("Emit Game Event", "Flow", "keyboard", "Send one named event to the game or HUD.")
+        "begin-placement" =>("Begin Placement", "Navigation", "box", "Preview and place a preloaded Blueprint on navigable terrain. Radius reserves its footprint.")
+        "cancel-placement" =>("Cancel Placement", "Navigation", "square", "Cancel the active placement preview.")
+        "placement-completed" =>("Placement Completed", "Navigation", "check", "Run after creating a runtime building instance.")
+        "placement-failed" =>("Placement Failed", "Navigation", "square", "Run when the clicked footprint is blocked.")
+        "placement-cancelled" =>("Placement Cancelled", "Navigation", "square", "Run after cancelling placement.")
+        "primary-pressed" =>("Primary Click", "Interaction", "mouse-pointer", "Run on a primary click in the game viewport.")
+        "secondary-pressed" =>("Secondary Click", "Interaction", "mouse-pointer", "Run on a secondary click in the game viewport.")
+        "cursor-position" =>("Cursor World Position", "Interaction", "move-3d", "World point on static collision under the cursor. Check Cursor Hit first.")
+        "cursor-actor" =>("Actor Under Cursor", "Interaction", "box", "Blueprint actor under the cursor, or zero.")
+        "self-actor" =>("Self Actor", "Interaction", "box", "Runtime identity of this actor.")
+        "cursor-valid" =>("Cursor Hit", "Interaction", "check", "Whether the click hit a static collision surface.")
+        "is-selected" =>("Is Selected", "Interaction", "check", "Read this actor selection state.")
+        "set-selected" =>("Set Selected", "Interaction", "check", "Set this actor selection state.")
+        "move-to" =>("Move To", "Navigation", "move-3d", "Request a route to a world point at Speed units per second. Radius controls obstacle clearance. Replaces the previous route.")
+        "stop-movement" =>("Stop Movement", "Navigation", "square", "Cancel the current route.")
+        "move-completed" =>("Move Completed", "Navigation", "check", "Run once on reaching the destination.")
+        "move-failed" =>("Move Failed", "Navigation", "circle-help", "Run once if no route exists. The actor stays in place.")
         "ui-resume" =>("Resume Game", "UI", "play", "Close modal menus and resume gameplay.")
         "ui-open-settings" =>("Open Settings", "UI", "settings", "Open player settings while the game is paused.")
         "ui-open-pause" =>("Open Pause", "UI", "pause", "Pause simulation and show the pause screen.")
@@ -73,6 +141,9 @@ pub fn blueprint_default(kind: str) -> BlueprintValue {
     }
 }
 pub fn operation_types(key: str) -> Vec[str] {
+    if key == "to-text" {
+        ret vec!["i32", "f32", "bool"]
+    }
     if key == "constant" || key == "equal" {
         ret vec!["bool", "i32", "f32", "str", "vec3", "actor", "component"]
     }
@@ -83,6 +154,18 @@ pub fn operation_types(key: str) -> Vec[str] {
 }
 pub fn operation_node(id: u64, key: str) -> BlueprintNode {
     let mut kind = BlueprintType::F32
+    if gameplay_operation(key) {
+        ret BlueprintNode::new(id, key, BlueprintType::Exec)
+    }
+    if key == "is-selected" || key == "cursor-valid" || key == "set-selected" {
+        kind = BlueprintType::Bool
+    }
+    if key == "cursor-actor" || key == "self-actor" {
+        kind = BlueprintType::Actor
+    }
+    if key == "cursor-position" {
+        kind = BlueprintType::Vector
+    }
     if key == "and" || key == "or" || key == "not" || key == "get-visible" || key == "set-visible" {
         kind = BlueprintType::Bool
     }
@@ -92,7 +175,10 @@ pub fn operation_node(id: u64, key: str) -> BlueprintNode {
     if key == "print" {
         kind = BlueprintType::String
     }
-    if key.contains("ui-") || key == "construction" || key == "begin-play" || key == "tick" || key == "input-pressed" || key == "input-released" || key == "sequence" || key == "branch" {
+    if key == "publish-value" || key == "emit-event" || key == "game-event" || key == "strategy-camera" || key == "begin-placement" || key == "cancel-placement" || key == "placement-completed" || key == "placement-failed" || key == "placement-cancelled" || key.contains("ui-") || key == "construction" || key == "begin-play" || key == "tick" || key == "input-pressed" || key == "input-released" || key == "sequence" || key == "branch" {
+        kind = BlueprintType::Exec
+    }
+    if key == "primary-pressed" || key == "secondary-pressed" || key == "move-completed" || key == "move-failed" || key == "stop-movement" || key == "move-to" {
         kind = BlueprintType::Exec
     }
     ret BlueprintNode::new(id, key, kind)

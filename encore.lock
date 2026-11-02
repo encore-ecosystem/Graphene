@@ -42,9 +42,12 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "luma"
-ref = "path@../Luma"
-version = "0.0.1"
+ref = "index@luma@>=0.0.2, >=0.0.3"
+version = "0.0.3"
 features = ["fonts"]
+archive = "http://127.0.0.1:8137/archives/112f0e691547a3d8265824744508b55addf220e3ba6faf30fd01fb19c3ed1140.tar.gz"
+checksum = "112f0e691547a3d8265824744508b55addf220e3ba6faf30fd01fb19c3ed1140"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "sdl"
@@ -64,8 +67,11 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "audio"
-ref = "path@../Audio"
+ref = "index@audio@>=0.1.0"
 version = "0.1.0"
+archive = "http://192.168.0.36:8137/archives/7a3ca012838ff38f7c0dd5b7b598e449085de744b4b3775c891c4c73110a6939.tar.gz"
+checksum = "7a3ca012838ff38f7c0dd5b7b598e449085de744b4b3775c891c4c73110a6939"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "serialize"
@@ -77,13 +83,19 @@ registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "blaze"
-ref = "path@../Blaze"
-version = "0.1.0-beta.2"
+ref = "index@blaze@>=0.1.0-beta.3"
+version = "0.1.0-beta.3"
+archive = "http://192.168.0.36:8137/archives/065f504ac11a728e0970a7aafe6254395758b5d0162dfb9355893b36f9ab60be.tar.gz"
+checksum = "065f504ac11a728e0970a7aafe6254395758b5d0162dfb9355893b36f9ab60be"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "physics"
-ref = "path@../Physics"
+ref = "index@physics@>=0.1.0"
 version = "0.1.0"
+archive = "http://192.168.0.36:8137/archives/a9c8f42e7440db7512e4c86443f3d26d8fbc3276ea26e88576020ac474809f84.tar.gz"
+checksum = "a9c8f42e7440db7512e4c86443f3d26d8fbc3276ea26e88576020ac474809f84"
+registry = "http://127.0.0.1:8137/index"
 
 [[packages]]
 name = "core"
@@ -101,6 +113,7 @@ ref = "workspace@color"
 version = "0.0.0"
 source = "embedded@luma"
 path = "workspace/color"
+distribution-checksum = "112f0e691547a3d8265824744508b55addf220e3ba6faf30fd01fb19c3ed1140"
 
 [[packages]]
 name = "ui_native"
@@ -108,3 +121,4 @@ ref = "workspace@ui_native"
 version = "0.0.0"
 source = "embedded@luma"
 path = "workspace/ui_native"
+distribution-checksum = "112f0e691547a3d8265824744508b55addf220e3ba6faf30fd01fb19c3ed1140"

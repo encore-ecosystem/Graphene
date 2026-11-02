@@ -1,0 +1,62 @@
+//! Stable mesh-to-render-group lookup, including material views of one mesh.
+import core::option::Option
+import core::vec::Vec
+
+import mod::runtime::index::ActorIndex
+
+pub struct VirtualInstanceIndex {
+    keys: Vec[(u64, u64)]
+    heads: ActorIndex
+    links: Vec[Option[usize]]
+    rebuilds: u64
+}
+
+impl for VirtualInstanceIndex {
+    pub fn new() -> Self {
+        ret Self { Vec[(u64, u64)]::new(), ActorIndex::new(), Vec[Option[usize]]::new(), 0 }
+    }
+    /// Ordinary mesh IDs use bounded direct lookup. Oversized imported IDs
+    /// keep a checked fallback instead of allocating an ID-sized table.
+    pub fn head(self: Self, mesh: u64) -> Option[usize] {
+        if mesh == 0 {
+            ret Option[usize]::None
+        }
+        if mesh < 262144 {
+            ret self.heads.get(mesh)
+        }
+        let mut i = self.keys.len()
+        while i > 0 {
+            i -= 1
+            if self.keys.get_unchecked_borrowed(i).0 == mesh {
+                ret Option[usize]::Some(i)
+            }
+        }
+        ret Option[usize]::None
+    }
+    pub fn next(self: Self, index: usize) -> Option[usize] {
+        ret self.links.get(index).unwrap_or(Option[usize]::None)
+    }
+    pub fn material(self: Self, index: usize) -> u64 {
+        ret self.keys.get_unchecked_borrowed(index).1
+    }
+    pub fn update(self: mut Self, keys: Vec[(u64, u64)]) -> bool {
+        let mut same = keys.len() == self.keys.len()
+        if same {
+            for i in 0_usize..keys.len() {
+                if keys.get_unchecked_borrowed(i) != self.keys.get_unchecked_borrowed(i) {
+                    same = false break
+                }
+            }
+        }
+        if same {
+            ret false
+        }
+        self.keys = Vec[(u64, u64)]::with_capacity(keys.len())
+        self.heads = ActorIndex::new() self.links = Vec[Option[usize]]::with_capacity(keys.len())
+        for key in keys {
+            let previous = self.head(key.0) let index = self.keys.len()
+            self.keys.push(key) self.links.push(previous) self.heads.insert(key.0, index)
+        }
+        self.rebuilds += 1 ret true
+    }
+}

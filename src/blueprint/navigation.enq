@@ -1,0 +1,389 @@
+//! Bounded surface grid for static box collision. Built once per Play session;
+//! routes use four neighbours so agents cannot cut blocked corners.
+import core::option::Option
+import core::vec::Vec
+
+import linalg::{Mat4, Vec3}
+
+import refrain::scene::world::Scene
+import refrain::terrain::geometry::terrain_ray
+import refrain::terrain::model::TerrainAsset
+
+/// Remaining movement owned by a selected actor. Points share the navigator's
+/// immutable route; the overlay never asks the pathfinder to recompute it.
+pub struct NavigationRoute {
+    actor: u64
+    origin: Vec3
+    points: Vec[Vec3]
+    next: usize
+}
+
+pub struct NavigationBox {
+    low: Vec3
+    high: Vec3
+}
+pub struct NavigationTerrain {
+    asset: TerrainAsset
+    world: Mat4
+    inverse: Mat4
+}
+pub struct NavigationGrid {
+    origin: Vec3
+    pitch: f32
+    width: usize
+    depth: usize
+    heights: Vec[f32]
+    boxes: Vec[NavigationBox]
+    terrains: Vec[NavigationTerrain]
+}
+fn absolute(v: f32) -> f32 {
+    ret if v < 0 {
+        - v
+    } else {
+        v
+    }
+}
+
+impl for NavigationGrid {
+    pub fn map_origin(self: Self) -> Vec3 {
+        ret self.origin
+    }
+    pub fn map_extent(self: Self) -> Vec3 {
+        ret Vec3::new((self.width as f32) * self.pitch, 0,(self.depth as f32) * self.pitch)
+    }
+    pub fn surface_height(self: Self, x: f32, z: f32) -> f32 {
+        ret self.surface(x, z)
+    }
+    pub fn empty() -> Self {
+        ret Self {
+            Vec3::zero(), 2, 0, 0, Vec[f32]::new(), Vec[NavigationBox]::new(), Vec[NavigationTerrain]::new()
+        }
+    }
+    pub fn from_scene(scene: Scene) -> Self {
+        let mut boxes = Vec[NavigationBox]::new()
+        for actor in scene.entities() {
+            let physics = actor.physics()
+            if actor.visible() && physics.mode == "static" && !physics.sensor && physics.shape == "box" {
+                match scene.world_matrix(actor.id()) {
+                    Some(world) => {
+                        let e = physics.half_extents
+                        let mut low = Vec3::new(1000000, 1000000, 1000000)
+                        let mut high = low.scale( - 1)
+                        for x in vec![ - 1_f32, 1_f32] {
+                            for y in vec![ - 1_f32, 1_f32] {
+                                for z in vec![ - 1_f32, 1_f32] {
+                                    let p = world.transform_point(Vec3::new(e.x() * x, e.y() * y, e.z() * z))
+                                    low = Vec3::new(if p.x() < low.x() {
+                                            p.x()
+                                        } else {
+                                            low.x()
+                                        }
+                                        , if p.y() < low.y() {
+                                            p.y()
+                                        } else {
+                                            low.y()
+                                        }
+                                        , if p.z() < low.z() {
+                                            p.z()
+                                        } else {
+                                            low.z()
+                                        }
+                                        ,
+                                    )
+                                    high = Vec3::new(if p.x() > high.x() {
+                                            p.x()
+                                        } else {
+                                            high.x()
+                                        }
+                                        , if p.y() > high.y() {
+                                            p.y()
+                                        } else {
+                                            high.y()
+                                        }
+                                        , if p.z() > high.z() {
+                                            p.z()
+                                        } else {
+                                            high.z()
+                                        }
+                                        ,
+                                    )
+                                }
+                            }
+                        }
+                        boxes.push(NavigationBox { low, high })
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+        ret Self::from_boxes(boxes, 2)
+    }
+    pub fn from_boxes(boxes: Vec[NavigationBox], pitch: f32) -> Self {
+        ret Self::from_surfaces(boxes, Vec[NavigationTerrain]::new(), pitch)
+    }
+    pub fn with_terrains(self: Self, terrains: Vec[NavigationTerrain]) -> Self {
+        ret Self::from_surfaces(self.boxes, terrains, self.pitch)
+    }
+    pub fn from_surfaces(boxes: Vec[NavigationBox], terrains: Vec[NavigationTerrain], requested_pitch: f32) -> Self {
+        let mut bounds = Vec[NavigationBox]::new() for box in boxes {
+            bounds.push(box)
+        }
+        for terrain in terrains {
+            let half = terrain.asset.extent() * 0.5_f32
+            let a = terrain.world.transform_point(Vec3::new( - half, 0, - half))
+            let b = terrain.world.transform_point(Vec3::new(half, 0, half))
+            bounds.push(NavigationBox {
+                    Vec3::new(a.x(), - 1000000, a.z()), Vec3::new(b.x(), - 1000000, b.z())
+                }
+            )
+        }
+        let mut pitch = requested_pitch
+        if bounds.len() == 0 || pitch != pitch || pitch < 0.25 || pitch > 100 {
+            ret Self::empty()
+        }
+        let mut low = Vec3::new(1000000, 0, 1000000)
+        let mut high = low.scale( - 1)
+        for b in bounds {
+            if !(b.low.x() >= - 1000000 && b.low.z() >= - 1000000 && b.high.x() <= 1000000 && b.high.z() <= 1000000 && b.high.y() >= - 1000000 && b.high.y() <= 1000000 && b.high.x() > b.low.x() && b.high.z() > b.low.z()) {
+                ret Self::empty()
+            }
+            low = Vec3::new(if b.low.x() < low.x() {
+                    b.low.x()
+                } else {
+                    low.x()
+                }
+                , 0, if b.low.z() < low.z() {
+                    b.low.z()
+                } else {
+                    low.z()
+                }
+                ,
+            )
+            high = Vec3::new(if b.high.x() > high.x() {
+                    b.high.x()
+                } else {
+                    high.x()
+                }
+                , 0, if b.high.z() > high.z() {
+                    b.high.z()
+                } else {
+                    high.z()
+                }
+                ,
+            )
+        }
+        while (high.x() - low.x()) / pitch > 256 ||(high.z() - low.z()) / pitch > 256 {
+            pitch *= 2
+        }
+        while ((high.x() - low.x()) / pitch) *((high.z() - low.z()) / pitch) > 65536 {
+            pitch *= 2
+        }
+        let width =((high.x() - low.x()) / pitch) as usize
+        let depth =((high.z() - low.z()) / pitch) as usize
+        if width == 0 || depth == 0 || width > 256 || depth > 256 || width * depth > 65536 {
+            ret Self::empty()
+        }
+        let mut grid = Self { low, pitch, width, depth, Vec[f32]::new(), boxes, terrains }
+        for z in 0..depth {
+            for x in 0..width {
+                let p = Vec3::new(low.x() +(x as f32 + 0.5) * pitch, 0, low.z() +(z as f32 + 0.5) * pitch)
+                let mut height = grid.surface(p.x(), p.z())
+                // Erode ledges by the default agent radius (0.45 units).
+                for dx in vec![ - 0.45_f32, 0.45_f32] {
+                    for dz in vec![ - 0.45_f32, 0.45_f32] {
+                        if absolute(grid.surface(p.x() + dx, p.z() + dz) - height) > 0.6 {
+                            height = - 1000000
+                        }
+                    }
+                }
+                grid.heights.push(height)
+            }
+        }
+        ret grid
+    }
+    fn surface(self: Self, x: f32, z: f32) -> f32 {
+        let mut height = - 1000000_f32
+        for terrain in self.terrains {
+            let local = terrain.inverse.transform_point(Vec3::new(x, terrain.world.transform_point(Vec3::zero()).y(), z))
+            let half = terrain.asset.extent() * 0.5_f32
+            if local.x() >= - half && local.x() <= half && local.z() >= - half && local.z() <= half {
+                let p = terrain.world.transform_point(Vec3::new(local.x(), terrain.asset.sample(local.x(), local.z()), local.z()))
+                if p.y() > height {
+                    height = p.y()
+                }
+            }
+        }
+        for b in self.boxes {
+            if x >= b.low.x() && x <= b.high.x() && z >= b.low.z() && z <= b.high.z() && b.high.y() > height {
+                height = b.high.y()
+            }
+        }
+        ret height
+    }
+    fn cell(self: Self, p: Vec3) -> Option[usize] {
+        let x =(p.x() - self.origin.x()) / self.pitch let z =(p.z() - self.origin.z()) / self.pitch
+        if x != x || z != z || x < 0 || z < 0 || x >= self.width as f32 || z >= self.depth as f32 {
+            ret Option[usize]::None
+        }
+        let index =(z as usize) * self.width +(x as usize)
+        if self.heights.get(index).unwrap_or( - 1000000) < - 999999 {
+            ret Option[usize]::None
+        }
+        ret Option[usize]::Some(index)
+    }
+    fn point(self: Self, index: usize) -> Vec3 {
+        ret Vec3::new(self.origin.x() +((index % self.width) as f32) * self.pitch + self.pitch * 0.5, self.heights.get(index).unwrap_or(0), self.origin.z() +((index / self.width) as f32) * self.pitch + self.pitch * 0.5)
+    }
+    /// Reject unreachable destinations; never fall back to a line through obstacles.
+    pub fn route(self: Self, start: Vec3, target: Vec3) -> Vec[Vec3] {
+        ret self.route_with_radius(start, target, 0.45)
+    }
+    fn clear(self: Self, point: Vec3, radius: f32) -> bool {
+        for dx in vec![ - radius, radius] {
+            for dz in vec![ - radius, radius] {
+                if absolute(self.surface(point.x() + dx, point.z() + dz) - point.y()) > 0.6 {
+                    ret false
+                }
+            }
+        }
+        for box in self.boxes {
+            if box.high.y() > point.y() + 0.6 && box.low.y() < point.y() + 2 && point.x() + radius > box.low.x() && point.x() - radius < box.high.x() && point.z() + radius > box.low.z() && point.z() - radius < box.high.z() {
+                ret false
+            }
+        }
+        ret true
+    }
+    pub fn route_with_radius(self: Self, start: Vec3, target: Vec3, radius: f32) -> Vec[Vec3] {
+        let mut result = Vec[Vec3]::new()
+        if !(radius >= 0.05 && radius <= 100) {
+            ret result
+        }
+        let first = match self.cell(start) {
+            Some(v) => v None => {
+                ret result
+            }
+        }
+        let last = match self.cell(target) {
+            Some(v) => v None => {
+                ret result
+            }
+        }
+        if !self.clear(self.point(first), radius) || !self.clear(Vec3::new(target.x(), self.point(last).y(), target.z()), radius) {
+            ret result
+        }
+        let mut costs = Vec[f32]::new() let mut parents = Vec[usize]::new() let mut closed = Vec[bool]::new()
+        for i in 0..self.heights.len() {
+            costs.push(1000000) parents.push(i) closed.push(false)
+        }
+        costs.set(first, 0) let mut open = vec![first]
+        while open.len() > 0 {
+            let mut best = 0_usize let mut score = 1000000_f32
+            for i in 0..open.len() {
+                let cell = open.get(i).unwrap_or(first)
+                let p = self.point(cell) let q = self.point(last)
+                let f = costs.get(cell).unwrap_or(1000000) + absolute(p.x() - q.x()) + absolute(p.z() - q.z())
+                if f < score {
+                    score = f best = i
+                }
+            }
+            let current = open.get(best).unwrap_or(first)
+            let mut rest = Vec[usize]::new()
+            for i in 0..open.len() {
+                if i != best {
+                    rest.push(open.get(i).unwrap_or(first))
+                }
+            }
+            open = rest
+            if current == last {
+                break
+            }
+            closed.set(current, true)
+            let x = current % self.width let z = current / self.width
+            let mut neighbours = Vec[usize]::new()
+            if x > 0 {
+                neighbours.push(current - 1)
+            }
+            if x + 1 < self.width {
+                neighbours.push(current + 1)
+            }
+            if z > 0 {
+                neighbours.push(current - self.width)
+            }
+            if z + 1 < self.depth {
+                neighbours.push(current + self.width)
+            }
+            for next in neighbours {
+                let h = self.heights.get(next).unwrap_or( - 1000000)
+                if !closed.get(next).unwrap_or(true) && h > - 999999 && absolute(h - self.heights.get(current).unwrap_or(0)) <= 0.6 && self.clear(self.point(next), radius) {
+                    let cost = costs.get(current).unwrap_or(1000000) + self.pitch
+                    if cost < costs.get(next).unwrap_or(1000000) {
+                        if costs.get(next).unwrap_or(1000000) == 1000000 {
+                            open.push(next)
+                        }
+                        costs.set(next, cost) parents.set(next, current)
+                    }
+                }
+            }
+        }
+        if costs.get(last).unwrap_or(1000000) == 1000000 {
+            ret result
+        }
+        let mut reverse = vec![last] let mut current = last
+        while current != first && reverse.len() <= self.heights.len() {
+            current = parents.get(current).unwrap_or(first) reverse.push(current)
+        }
+        let mut i = reverse.len()
+        while i > 0 {
+            i -= 1 result.push(self.point(reverse.get(i).unwrap_or(first)))
+        }
+        // Keep the requested endpoint rather than visibly snapping to a cell centre.
+        result.push(Vec3::new(target.x(), self.heights.get(last).unwrap_or(0), target.z()))
+        ret result
+    }
+    pub fn can_place(self: Self, point: Vec3, radius: f32) -> bool {
+        match self.cell(point) {
+            Some(cell) => {
+                ret radius >= 0.05 && radius <= 100 && absolute(self.point(cell).y() - point.y()) <= 0.6 && self.clear(point, radius)
+            }
+            None => {
+            }
+        }
+        ret false
+    }
+    pub fn block(self: mut Self, point: Vec3, radius: f32) ->() {
+        self.boxes.push(NavigationBox {
+                point.sub(Vec3::new(radius, 0, radius)), point.add(Vec3::new(radius, 10, radius))
+            }
+        )
+    }
+    pub fn hit(self: Self, origin: Vec3, direction: Vec3) -> Option[Vec3] {
+        let mut nearest = 1000000_f32 let mut found = Option[Vec3]::None
+        if absolute(direction.y()) < 0.000001 {
+            ret found
+        }
+        for b in self.boxes {
+            let t =(b.high.y() - origin.y()) / direction.y()
+            if t > 0 && t < nearest {
+                let p = origin.add(direction.scale(t))
+                if p.x() >= b.low.x() && p.x() <= b.high.x() && p.z() >= b.low.z() && p.z() <= b.high.z() {
+                    nearest = t found = Option[Vec3]::Some(p)
+                }
+            }
+        }
+        for terrain in self.terrains {
+            let local = terrain.inverse.transform_point(origin)
+            let dir = terrain.inverse.transform_point(origin.add(direction)).sub(local)
+            match terrain_ray(terrain.asset, local, dir) {
+                Some(hit) => {
+                    let world = terrain.world.transform_point(hit) let distance = world.sub(origin).length() if distance < nearest {
+                        nearest = distance found = Option[Vec3]::Some(world)
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret found
+    }
+}

@@ -1,0 +1,116 @@
+//! Native events, preload closure, terrain placement, cancellation and overlap.
+import core::vec::Vec
+import core::option::Option
+
+import std::io::eprintln
+import std::os::{mkdir_all, write_file_atomic}
+import std::path::Path
+
+import graphene::blueprint::*
+import graphene::physics::component::PhysicsComponent
+import graphene::runtime::InputSnapshot
+import graphene::scene::transform::Transform
+import graphene::scene::world::Scene
+import graphene::terrain::model::TerrainAsset
+import linalg::{Mat4, Vec3}
+
+fn main() -> u32 {
+    let project = Path::new("target/placement-check").resolve().as_str()
+    mkdir_all(project + "/Content/Blueprints")
+    let mut building = BlueprintAsset::new("placement-building", "Building")
+    building.components.push(BlueprintComponent {
+            2, 1, "Box", "static-mesh", Transform::identity(), "cube", "default", true
+        }
+    )
+    let reference = "Content/Blueprints/Building.graphene-blueprint.json"
+    write_file_atomic(project + "/" + reference, blueprint_stringify(building))
+    let mut controller = BlueprintAsset::new("placement-controller", "Controller")
+    controller.nodes.push(BlueprintNode::new(1, "game-event", BlueprintType::Exec).with_text("Build"))
+    controller.nodes.push(BlueprintNode::new(2, "constant", BlueprintType::String).with_value(BlueprintValue::String(reference)))
+    controller.nodes.push(BlueprintNode::new(3, "constant", BlueprintType::F32).with_value(BlueprintValue::F32(4)))
+    controller.nodes.push(BlueprintNode::new(4, "begin-placement", BlueprintType::Exec))
+    controller.connect(1, "then", 4, "in") controller.connect(2, "value", 4, "asset") controller.connect(3, "value", 4, "radius")
+    controller.nodes.push(BlueprintNode::new(5, "placement-completed", BlueprintType::Exec))
+    controller.nodes.push(BlueprintNode::new(6, "constant", BlueprintType::String).with_value(BlueprintValue::String("Built")))
+    controller.nodes.push(BlueprintNode::new(7, "emit-event", BlueprintType::Exec))
+    controller.connect(5, "then", 7, "in") controller.connect(6, "value", 7, "value")
+    controller.nodes.push(BlueprintNode::new(10, "begin-play", BlueprintType::Exec))
+    controller.nodes.push(BlueprintNode::new(11, "constant", BlueprintType::String).with_value(BlueprintValue::String("credits")))
+    controller.nodes.push(BlueprintNode::new(12, "constant", BlueprintType::I32).with_value(BlueprintValue::I32(10000)))
+    controller.nodes.push(BlueprintNode::new(13, "to-text", BlueprintType::I32))
+    controller.nodes.push(BlueprintNode::new(14, "publish-value", BlueprintType::Exec))
+    controller.nodes.push(BlueprintNode::new(15, "constant", BlueprintType::String).with_value(BlueprintValue::String("power")))
+    controller.nodes.push(BlueprintNode::new(16, "constant", BlueprintType::I32).with_value(BlueprintValue::I32(100)))
+    controller.nodes.push(BlueprintNode::new(17, "to-text", BlueprintType::I32))
+    controller.nodes.push(BlueprintNode::new(18, "publish-value", BlueprintType::Exec))
+    controller.connect(10, "then", 14, "in") controller.connect(11, "value", 14, "name") controller.connect(12, "value", 13, "value") controller.connect(13, "text", 14, "value")
+    controller.connect(14, "then", 18, "in") controller.connect(15, "value", 18, "name") controller.connect(16, "value", 17, "value") controller.connect(17, "text", 18, "value")
+    write_file_atomic(project + "/Content/Blueprints/Controller.graphene-blueprint.json", blueprint_stringify(controller))
+    let mut scene = Scene::new()
+    let actor = scene.create_entity("Controller", Transform::identity())
+    scene.set_blueprint(actor, Option[BlueprintInstance]::Some(BlueprintInstance {
+                "Content/Blueprints/Controller.graphene-blueprint.json", Vec[BlueprintOverride]::new()
+            }
+        ))
+    let classes = match load_blueprint_classes(project, scene) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret 1
+        }
+    }
+    if classes.len() != 2 {
+        ret 2
+    }
+    let build = match prepare_blueprint_build(project, "native/blueprint", blueprint_compiler_path(), vec![controller, building]) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret 3
+        }
+    }
+    if !build.cached && run_blueprint_build(build.compiler, build.directory, build.library, build.receipt, build.key) != 0 {
+        ret 4
+    }
+    let mut simulation = BlueprintSimulation::new()
+    match simulation.start(project, scene, build.library, build.semantic, classes) {
+        Ok(_) => {
+        }
+        Err(e) => {
+            eprintln(e) ret 5
+        }
+    }
+    let published = simulation.take_events()
+    if published.len() != 2 || published.get(0).unwrap_or("") != "@value:credits=10000" || published.get(1).unwrap_or("") != "@value:power=100" {
+        ret 12
+    }
+    let grid = NavigationGrid::from_surfaces(Vec[NavigationBox]::new(), vec![NavigationTerrain {
+                TerrainAsset::flat(257, 4), Mat4::identity(), Mat4::identity()
+            }
+        ], 2)
+    if grid.route(Vec3::new( - 400, 0, 0), Vec3::new(400, 0, 0)).len() == 0 {
+        ret 6
+    }
+    simulation.set_navigation(grid)
+    simulation.game_event("Build")
+    if simulation.scene().len() <= scene.len() {
+        ret 7
+    }
+    simulation.pointer_hover(Vec3::new(20, 50, 0), Vec3::new(0, - 1, 0))
+    simulation.pointer_click(Vec3::new(20, 50, 0), Vec3::new(0, - 1, 0), false)
+    simulation.tick(0, InputSnapshot::empty())
+    if simulation.take_events().get(0).unwrap_or("") != "Built" {
+        ret 8
+    }
+    let count = simulation.scene().len()
+    simulation.game_event("Build")
+    simulation.pointer_click(Vec3::new(20, 50, 0), Vec3::new(0, - 1, 0), false)
+    if simulation.take_events().len() != 0 {
+        ret 9
+    }
+    simulation.pointer_click(Vec3::new(20, 50, 0), Vec3::new(0, - 1, 0), true)
+    if simulation.scene().len() != count {
+        ret 10
+    }
+    simulation.stop()
+    if scene.len() != 1 || simulation.scene().len() != 0 {
+        ret 11
+    }
+    ret 0
+}

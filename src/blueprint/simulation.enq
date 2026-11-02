@@ -1,5 +1,6 @@
 import linalg::Vec3
-import physics::CharacterConfig
+import physics::{Body, CharacterConfig, Rotation, Shape}
+import physics::math::{atan2, cos, sqrt}
 
 import refrain::physics::component::PhysicsComponent
 import refrain::physics::scene::{PhysicsMesh, scene_physics}
@@ -12,12 +13,19 @@ import core::vec::Vec
 import std::os::{file_exists, read_file}
 import std::path::Path
 
+import json::{Json, field, parse}
+
 import mod::codec::{blueprint_parse, blueprint_semantic_source}
 import mod::input::load_blueprint_input
 import mod::model::*
 import mod::native::{BlueprintModule, BlueprintRuntimeInstance}
+import mod::navigation::{NavigationGrid, NavigationRoute}
 import mod::validate::{validate_blueprint, validate_blueprint_instance}
-import refrain::runtime::{InputMap, InputSnapshot, PhysicsWorld, RuntimeConfig, RuntimeSession, RuntimeTransform, World}
+import refrain::gameplay::save::{load_world, save_world}
+import refrain::gameplay::service::{GameplayReply, GameplayRequest, gameplay_property, gameplay_request}
+import refrain::gameplay::world::{GameplayState, GameplayWorld}
+import refrain::runtime::{CharacterSnapshot, InputMap, InputSnapshot, PhysicsWorld, RuntimeConfig, RuntimeSession, RuntimeTransform, World}
+import refrain::scene::json_value::json_vec3
 import refrain::scene::transform::Transform
 import refrain::scene::world::Scene
 
@@ -42,6 +50,33 @@ struct LiveBlueprint {
     components: Vec[BlueprintComponentBinding]
     active: bool
 }
+struct NavigationMove {
+    actor: u64
+    points: Vec[Vec3]
+    next: usize
+    speed: f32
+    offset: f32
+    radius: f32
+}
+struct SavedBlueprint {
+    actor: u64
+    bindings: Vec[BlueprintComponentBinding]
+    properties: Vec[BlueprintOverride]
+    selected: bool
+}
+struct SavedGame {
+    version: u32
+    semantic: str
+    scene: Scene
+    instances: Vec[SavedBlueprint]
+    gameplay: GameplayState
+    navigation: NavigationGrid
+    moves: Vec[NavigationMove]
+    look: Vec3
+    strategy_view: Option[Transform]
+    control_mode: str
+    characters: Vec[CharacterSnapshot]
+}
 pub struct BlueprintSimulation {
     module: Option[BlueprintModule]
     session: RuntimeSession
@@ -53,6 +88,21 @@ pub struct BlueprintSimulation {
     keys: Vec[u32]
     jump_pending: bool
     controller_input: bool
+    project: str
+    classes: Vec[BlueprintClass]
+    placement_owner: u64
+    placement_asset: str
+    placement_radius: f32
+    placement_point: Option[Vec3]
+    preview_root: u64
+    preview_bindings: Vec[BlueprintComponentBinding]
+    navigation: NavigationGrid
+    moves: Vec[NavigationMove]
+    gameplay: GameplayWorld<H>
+    outbound: Vec[str]
+    look_rotation: Vec3
+    strategy_view: Option[Transform]
+    previous_control_mode: str
 }
 pub fn blueprint_class_semantic(classes: Vec[BlueprintClass]) -> str {
     let mut semantic = ""
@@ -98,6 +148,50 @@ pub fn load_blueprint_classes(project: str, scene: Scene) -> Result[Vec[Blueprin
             }
         }
     }
+    // Explicit constant asset references form the preload dependency closure.
+    let mut index = 0_usize
+    let suffix = ".graphene-blueprint.json"
+    while index < classes.len() {
+        let owner = classes.get(index).unwrap_or(BlueprintClass {
+                "", BlueprintAsset::new("", "missing")
+            }
+        )
+        for node in owner.asset.nodes {
+            match node.value {
+                String(reference) => {
+                    if reference.byte_len() > suffix.byte_len() && reference.slice_bytes(reference.byte_len() - suffix.byte_len(), suffix.byte_len()) == suffix {
+                        let path = root.join(reference).resolve().as_str()
+                        if path.byte_len() <= root.as_str().byte_len() + 1 || path.slice_bytes(0, root.as_str().byte_len() + 1) != root.as_str() + "/" {
+                            ret Result::Err("Blueprint reference leaves project")
+                        }
+                        let mut found = false for class in classes {
+                            if class.path == path {
+                                found = true
+                            }
+                        }
+                        if !found {
+                            if classes.len() >= 128 || !file_exists(path) {
+                                ret Result::Err("Blueprint dependency missing or limit exceeded: " + reference)
+                            }
+                            let asset = blueprint_parse(read_file(path))?
+                            if validate_blueprint(asset).len() != 0 {
+                                ret Result::Err("Invalid referenced Blueprint: " + reference)
+                            }
+                            for class in classes {
+                                if class.asset.id == asset.id {
+                                    ret Result::Err("Duplicate Blueprint identity")
+                                }
+                            }
+                            classes.push(BlueprintClass { path, asset })
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        index += 1
+    }
     ret Result[Vec[BlueprintClass], str]::Ok(classes)
 }
 fn copy_scene(source: Scene) -> Scene {
@@ -115,12 +209,326 @@ fn copy_scene(source: Scene) -> Scene {
 }
 
 impl for BlueprintSimulation {
+    pub fn gameplay_json(self: Self, requested: u64) -> Json {
+        let actor = if requested == 0 {
+            self.gameplay.control.controlled()
+        } else {
+            requested
+        }
+        let mut items = Vec[Json]::new() let mut capacity = 0_u32 let mut total = 0_u32
+        let i = self.gameplay.inventory_index(actor)
+        if i < self.gameplay.inventories.len() {
+            let cargo = self.gameplay.inventories.get_unchecked_borrowed(i).cargo capacity = cargo.capacity total = cargo.total()
+            for stack in cargo.stacks {
+                if items.len() < 64 {
+                    items.push(Json::Object(vec![field("item", Json::Number(stack.item.fmt())), field("count", Json::Number(stack.count.fmt()))]))
+                }
+            }
+        }
+        let mut health = Json::Null for vital in self.gameplay.vitals {
+            if vital.actor == actor {
+                health = Json::Number(vital.health.fmt())
+            }
+        }
+        let mut production = Json::Null for machine in self.gameplay.production.machines {
+            if machine.actor == actor {
+                production = Json::Object(vec![field("status", Json::String(machine.status)), field("completed", Json::Number(machine.completed.fmt())), field("remaining", Json::Number(machine.remaining.fmt()))])
+            }
+        }
+        let position = match self.scene.get(actor) {
+            Some(entity) => {
+                let p = entity.transform().position() Json::Array(vec![Json::Number(p.x().fmt()), Json::Number(p.y().fmt()), Json::Number(p.z().fmt())])
+            }
+            None => Json::Null
+        }
+        let mut occupant = 0_u64 let mut seated = 0_u64
+        for body in self.gameplay.bodies {
+            if body.actor == actor {
+                occupant = body.occupant seated = body.seated_in
+            }
+        }
+        let mut actors = Vec[Json]::new()
+        for live in self.instances {
+            if actors.len() >= 200 {
+                break
+            }
+            match self.scene.get(live.actor) {
+                Some(entity) => {
+                    let p = entity.transform().position()
+                    actors.push(Json::Object(vec![field("id", Json::Number(live.actor.fmt())), field("name", Json::String(entity.name())), field("alive", Json::Bool(self.gameplay.is_alive(live.actor))), field("position", Json::Array(vec![Json::Number(p.x().fmt()), Json::Number(p.y().fmt()), Json::Number(p.z().fmt())]))]))
+                }
+                None => {
+                }
+            }
+        }
+        ret Json::Object(vec![field("ok", Json::Bool(true)), field("mode", Json::String(self.gameplay.control.mode)), field("controlledActor", Json::Number(self.gameplay.control.controlled().fmt())), field("engineer", Json::Number(self.gameplay.control.engineer.fmt())), field("terminal", Json::Number(self.gameplay.control.terminal.fmt())), field("remote", Json::Number(self.gameplay.control.remote.fmt())), field("vehicle", Json::Number(self.gameplay.control.vehicle.fmt())), field("actor", Json::Number(actor.fmt())), field("position", position), field("capacity", Json::Number(capacity.fmt())), field("cargoTotal", Json::Number(total.fmt())), field("items", Json::Array(items)), field("health", health), field("production", production), field("occupant", Json::Number(occupant.fmt())), field("seatedIn", Json::Number(seated.fmt())), field("runtimeActors", Json::Number(self.instances.len().fmt())), field("actors", Json::Array(actors)), field("conveyors", Json::Number(self.gameplay.logistics.links.len().fmt()))])
+    }
+    pub fn save_game(self: Self, slot: str) -> Result[(), str] {
+        if self.placement_owner != 0 {
+            ret Result::Err("Finish or cancel construction placement before saving")
+        }
+        let mut instances = Vec[SavedBlueprint]::new()
+        for live in self.instances {
+            let mut values = Vec[BlueprintOverride]::new()
+            let entity = match self.scene.get(live.actor) {
+                Some(v) => v None => {
+                    ret Result::Err("Runtime actor is missing")
+                }
+            }
+            let path = match entity.blueprint() {
+                Some(v) => self.project + "/" + v.asset None => ""
+            }
+            for class in self.classes {
+                if class.path == path {
+                    for property in class.asset.properties {
+                        match live.instance.property(property.id) {
+                            Some(value) => values.push(BlueprintOverride {
+                                    property.id, value
+                                }
+                            ) None => {
+                            }
+                        }
+                    }
+                    for node in class.asset.nodes {
+                        for field in 0_usize..4_usize {
+                            let id = gameplay_property(node.id, field as u64)
+                            match live.instance.property(id) {
+                                Some(value) => values.push(BlueprintOverride {
+                                        id, value
+                                    }
+                                ) None => {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            instances.push(SavedBlueprint {
+                    live.actor, live.components, values, live.instance.interaction(0, 0) > 0
+                }
+            )
+        }
+        ret save_world(self.project, slot, SavedGame {
+                1, blueprint_class_semantic(self.classes), self.scene, instances, self.gameplay.state(), self.navigation, self.moves, self.look_rotation, self.strategy_view, self.previous_control_mode, self.session.physics().character_snapshot()
+            }
+            ,
+        )
+    }
+    pub fn load_game(self: mut Self, slot: str) -> Result[(), str] {
+        let saved = load_world[SavedGame](self.project, slot)?
+        if saved.version != 1 || saved.semantic != blueprint_class_semantic(self.classes) || saved.instances.len() > 8192 || saved.scene.len() > 65536 || saved.gameplay.inventories.len() > 16384 || saved.navigation.width > 256 || saved.navigation.depth > 256 || saved.navigation.heights.len() != saved.navigation.width * saved.navigation.depth {
+            ret Result::Err("Save does not match this Blueprint program or exceeds world limits")
+        }
+        for cargo in saved.gameplay.inventories {
+            let mut total = 0_u64
+            for stack in cargo.cargo.stacks {
+                if stack.item == 0 {
+                    ret Result::Err("Invalid saved item")
+                }
+                total += stack.count as u64
+            }
+            if total > cargo.cargo.capacity as u64 || cargo.cargo.capacity > 1000000 || saved.scene.get(cargo.actor).is_none() {
+                ret Result::Err("Invalid saved inventory")
+            }
+        }
+        for link in saved.gameplay.logistics.links {
+            if link.source >= saved.gameplay.inventories.len() || link.destination >= saved.gameplay.inventories.len() || link.source == link.destination || link.packets.len() > 32 {
+                ret Result::Err("Invalid saved logistics")
+            }
+        }
+        let module = match self.module {
+            Some(v) => v None => {
+                ret Result::Err("No Blueprint program is loaded")
+            }
+        }
+        let mut restored = Vec[LiveBlueprint]::new()
+        for live in saved.instances {
+            let entity = match saved.scene.get(live.actor) {
+                Some(v) => v None => {
+                    ret Result::Err("Saved actor is missing")
+                }
+            }
+            let reference = match entity.blueprint() {
+                Some(v) => v None => {
+                    ret Result::Err("Saved actor class is missing")
+                }
+            }
+            let mut asset = Option[BlueprintAsset]::None
+            for class in self.classes {
+                if class.path == self.project + "/" + reference.asset {
+                    asset = Option[BlueprintAsset]::Some(class.asset)
+                }
+            }
+            let class = match asset {
+                Some(v) => v None => {
+                    ret Result::Err("Saved Blueprint is unavailable")
+                }
+            }
+            let native = match module.instantiate(class, reference, entity.transform()) {
+                Ok(v) => v Err(e) => {
+                    for old in restored {
+                        old.instance.destroy()
+                    }
+                    ret Result::Err(e)
+                }
+            }
+            native.pointer(live.actor, 0, Vec3::zero(), false)
+            if !native.invoke("construction", "", 0) || !native.invoke("begin-play", "", 0) {
+                native.destroy() for old in restored {
+                    old.instance.destroy()
+                }
+                ret Result::Err("Unable to restore Blueprint lifecycle")
+            }
+            for _ in 0_usize..16_usize {
+                if native.take_event() == "" {
+                    break
+                }
+            }
+            for value in live.properties {
+                native.set_property(value.property, value.value)
+            }
+            native.invoke("game-event", if live.selected {
+                    "@engine-selected"
+                } else {
+                    "@engine-deselected"
+                }
+                , 0,)
+            native.set_transform(0, entity.transform())
+            for binding in live.bindings {
+                match saved.scene.get(binding.entity) {
+                    Some(value) => {
+                        native.set_transform(binding.component, value.transform())
+                    }
+                    None => {
+                    }
+                }
+            }
+            restored.push(LiveBlueprint { live.actor, native, live.bindings, true })
+        }
+        let mut world = World::new()
+        for actor in saved.scene.entities() {
+            let t = actor.transform() world.spawn_actor_with_id(actor.id(), actor.name(), RuntimeTransform::new(t.position(), t.rotation(), t.scale()))
+        }
+        for actor in saved.scene.entities() {
+            world.set_parent(actor.id(), actor.parent())
+        }
+        let mut physics = self.session.physics()
+        let mut boxes = Vec[Body]::new()
+        for actor in saved.scene.entities() {
+            let c = actor.physics()
+            if c.mode == "static" && c.shape == "box" {
+                let t = actor.transform() boxes.push(Body::new(actor.id(), Shape::Box(c.half_extents), t.position(), 0).with_pose(t.position(), Rotation::from_euler(t.rotation())))
+            }
+        }
+        if !physics.restore_static_boxes(boxes) {
+            for old in restored {
+                old.instance.destroy()
+            }
+            ret Result::Err("Invalid saved collider")
+        }
+        if !physics.restore_characters(saved.characters) {
+            for old in restored {
+                old.instance.destroy()
+            }
+            ret Result::Err("Invalid saved character state")
+        }
+        for live in self.instances {
+            live.instance.destroy()
+        }
+        self.instances = restored self.scene = saved.scene self.scene.reindex() self.session = RuntimeSession::new(RuntimeConfig::defaults(), world, physics)
+        self.gameplay.restore(saved.gameplay) self.navigation = saved.navigation self.moves = saved.moves self.look_rotation = saved.look self.strategy_view = saved.strategy_view self.previous_control_mode = saved.control_mode
+        self.keys = Vec[u32]::new() self.outbound = Vec[str]::new() self.placement_owner = 0 self.placement_asset = "" self.preview_root = 0 self.preview_bindings = Vec[BlueprintComponentBinding]::new()
+        ret Result::Ok(())
+    }
     pub fn new() -> BlueprintSimulation {
         let config = RuntimeConfig::defaults()
         ret BlueprintSimulation {
             Option[BlueprintModule]::None, RuntimeSession::new(config, World::new(), PhysicsWorld::new(config.gravity())),
-            Scene::new(), Vec[LiveBlueprint]::new(), Vec[BlueprintRuntimeDiagnostic]::new(), "", InputMap::new(), Vec[u32]::new(), false, true
+            Scene::new(), Vec[LiveBlueprint]::new(), Vec[BlueprintRuntimeDiagnostic]::new(), "", InputMap::new(), Vec[u32]::new(), false, true, "", Vec[BlueprintClass]::new(), 0, "", 0, Option[Vec3]::None, 0, Vec[BlueprintComponentBinding]::new(), NavigationGrid::empty(), Vec[NavigationMove]::new(), GameplayWorld::new(), Vec[str]::new(), Vec3::zero(), Option[Transform]::None, ""
         }
+    }
+    /// Optional MinimapColor vector properties supply game-authored faction colours.
+    pub fn map_markers(self: Self) -> Vec[(Vec3, Vec3)] {
+        let mut markers = Vec[(Vec3, Vec3)]::new()
+        for live in self.instances {
+            if !live.active || live.components.len() == 0 || !self.gameplay.is_alive(live.actor) {
+                continue
+            }
+            let mut rendered = false
+            for binding in live.components {
+                match self.scene.get(binding.entity) {
+                    Some(entity) => {
+                        if entity.renderable().is_some() {
+                            rendered = true
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            if !rendered {
+                continue
+            }
+            let mut map_visible = true
+            let mut color = Vec3::new(0.2, 0.85, 0.35)
+            let source = match self.scene.get(live.actor) {
+                Some(actor) => match actor.blueprint() {
+                    Some(bp) => self.project + "/" + bp.asset None => ""
+                }
+                None => ""
+            }
+            for class in self.classes {
+                if class.path != source {
+                    continue
+                }
+                for property in class.asset.properties {
+                    if property.name == "MinimapVisible" {
+                        match live.instance.property(property.id) {
+                            Some(value) => {
+                                match value {
+                                    Bool(v) => {
+                                        map_visible = v
+                                    }
+                                    _ => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    if property.name == "MinimapColor" {
+                        match live.instance.property(property.id) {
+                            Some(value) => {
+                                match value {
+                                    Vector(c) => {
+                                        color = c
+                                    }
+                                    _ => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+            }
+            if !map_visible {
+                continue
+            }
+            if live.instance.interaction(0, 0) > 0 {
+                color = Vec3::new(1, 1, 0.6)
+            }
+            match self.scene.world_matrix(live.actor) {
+                Some(world) => {
+                    markers.push((world.transform_point(Vec3::zero()), color))
+                }
+                None => {
+                }
+            }
+        }
+        ret markers
     }
     pub fn scene(self: Self) -> Scene {
         ret self.scene
@@ -137,6 +545,9 @@ impl for BlueprintSimulation {
             for binding in live.components {
                 bindings.push(binding)
             }
+        }
+        for binding in self.preview_bindings {
+            bindings.push(binding)
         }
         ret bindings
     }
@@ -155,6 +566,11 @@ impl for BlueprintSimulation {
         self.module = Option[BlueprintModule]::None
         self.scene = Scene::new()
         self.keys = Vec[u32]::new() self.jump_pending = false
+        self.placement_owner = 0 self.placement_asset = "" self.placement_point = Option[Vec3]::None self.preview_root = 0 self.preview_bindings = Vec[BlueprintComponentBinding]::new()
+        self.classes = Vec[BlueprintClass]::new()
+        self.navigation = NavigationGrid::empty() self.moves = Vec[NavigationMove]::new()
+        self.gameplay = GameplayWorld::new() self.outbound = Vec[str]::new()
+        self.look_rotation = Vec3::zero() self.strategy_view = Option[Transform]::None self.previous_control_mode = ""
     }
     pub fn start(self: mut Self, project: str, authoring: Scene, library: str, semantic: str, classes: Vec[BlueprintClass]) -> Result[(), str] {
         let physics = scene_physics(authoring, Vec[PhysicsMesh]::new())?
@@ -162,7 +578,10 @@ impl for BlueprintSimulation {
     }
     pub fn start_with_physics(self: mut Self, project: str, authoring: Scene, library: str, semantic: str, classes: Vec[BlueprintClass], physics: PhysicsWorld) -> Result[(), str] {
         self.stop()
+        self.project = Path::new(project).resolve().as_str() self.classes = classes
+        self.gameplay.project = self.project
         self.input_map = load_blueprint_input(project)?
+        self.navigation = NavigationGrid::from_scene(authoring)
         if blueprint_class_semantic(classes) != semantic {
             ret Result[(), str]::Err("Blueprints changed since Compile")
         }
@@ -209,6 +628,9 @@ impl for BlueprintSimulation {
                     for component in asset.components {
                         let entity = self.scene.create_entity(actor.name() + "/" + component.name, component.transform)
                         self.scene.set_visible(entity, component.visible)
+                        if component.material != "default" {
+                            self.scene.set_material_path(entity, component.material)
+                        }
                         bindings.push(BlueprintComponentBinding {
                                 component.id, entity, component.mesh, component.material
                             }
@@ -237,15 +659,22 @@ impl for BlueprintSimulation {
             world.set_parent(actor.id(), actor.parent())
         }
         self.session = RuntimeSession::new(config, world, physics)
+        for live in self.instances {
+            live.instance.pointer(live.actor, 0, Vec3::zero(), false)
+        }
         self.dispatch("construction", "", 0)
         self.dispatch("begin-play", "", 0)
+        self.process_gameplay()
         self.sync()
         ret Result[(), str]::Ok(())
     }
     fn dispatch(self: mut Self, kind: str, action: str, delta: f32) ->() {
+        self.dispatch_for(0, kind, action, delta)
+    }
+    fn dispatch_for(self: mut Self, actor: u64, kind: str, action: str, delta: f32) ->() {
         let mut position = 0_usize
         for live in self.instances {
-            if live.active {
+            if live.active &&(actor == 0 || live.actor == actor) {
                 if !live.instance.invoke(kind, action, delta) {
                     let message = live.instance.error()
                     self.diagnostics.push(BlueprintRuntimeDiagnostic {
@@ -326,6 +755,8 @@ impl for BlueprintSimulation {
         }
     }
     pub fn tick(self: mut Self, elapsed: f32, input: InputSnapshot) ->() {
+        refrain::editor_performance::profile_phase(50_u32)
+        self.process_gameplay()
         let frame = self.session.begin_frame(elapsed, input)
         if frame.fixed_steps() > 0_u32 {
             let mut x = 0_f32 let mut z = 0_f32
@@ -345,17 +776,75 @@ impl for BlueprintSimulation {
                     }
                 }
             }
-            let direction = Vec3::new(x, 0_f32, z).normalized()
+            let yaw = self.look_rotation.y()
+            let sine = cos(yaw - 1.570796326795_f32) let cosine = cos(yaw)
+            let direction = Vec3::new(x * cosine + z * sine, 0_f32, z * cosine - x * sine).normalized()
+            let controlled = self.gameplay.control.controlled()
+            let player_active = self.gameplay.control.player != 0
+            let walking = self.gameplay.control.mode == "engineer" || self.gameplay.control.mode == "android"
+            let mut legacy_character = 0_u64
+            if player_active && self.gameplay.control.mode == "vehicle" && self.controller_input {
+                match self.scene.get(controlled) {
+                    Some(vehicle) => {
+                        let old = vehicle.transform()
+                        let elapsed = frame.fixed_delta_seconds() * frame.fixed_steps() as f32
+                        let p = old.position().add(direction.scale(12_f32 * elapsed))
+                        if self.navigation.can_place(p, 1.5) {
+                            let ground = self.navigation.surface_height(p.x(), p.z())
+                            let previous_ground = self.navigation.surface_height(old.position().x(), old.position().z())
+                            let offset = if previous_ground > - 999999 {
+                                old.position().y() - previous_ground
+                            } else {
+                                0_f32
+                            }
+                            self.set_actor_pose(controlled, Transform::new(Vec3::new(p.x(), ground + offset, p.z()), Vec3::new(0, yaw, 0), old.scale()))
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
             for actor in self.scene.entities() {
                 let c = actor.physics()
                 if c.mode == "character" {
-                    self.session.character_input(actor.id(), direction.scale(c.character.speed), self.jump_pending && self.controller_input)
+                    if legacy_character == 0 {
+                        legacy_character = actor.id()
+                    }
+                    let active = if player_active {
+                        walking && actor.id() == controlled
+                    } else {
+                        actor.id() == legacy_character
+                    }
+                    self.session.character_input(actor.id(), if active {
+                            direction.scale(c.character.speed)
+                        } else {
+                            Vec3::zero()
+                        }
+                        , active && self.jump_pending && self.controller_input,)
                 }
             }
             self.jump_pending = false
         }
+        refrain::editor_performance::profile_phase(56_u32)
+        self.transport_visuals()
+        refrain::editor_performance::profile_phase(51_u32)
         self.dispatch("tick", "", frame.delta_seconds())
+        refrain::editor_performance::profile_phase(50_u32)
+        self.process_gameplay()
+        refrain::editor_performance::profile_phase(52_u32)
+        for _ in 0_usize..(frame.fixed_steps() as usize) {
+            let completed = self.gameplay.production.step(self.gameplay.inventories, frame.fixed_delta_seconds())
+            self.gameplay.logistics.step(self.gameplay.inventories, frame.fixed_delta_seconds())
+            for actor in completed {
+                self.dispatch_for(actor, "game-event", "ProductionCompleted", 0)
+            }
+        }
+        self.process_placement()
+        refrain::editor_performance::profile_phase(53_u32)
+        self.navigate(frame.delta_seconds())
+        refrain::editor_performance::profile_phase(54_u32)
         self.sync()
+        refrain::editor_performance::profile_phase(55_u32)
         self.session.finish_frame(frame)
         for actor in self.session.world().actor_ids() {
             match self.session.world().transform(actor) {
@@ -380,8 +869,1077 @@ impl for BlueprintSimulation {
             }
         }
     }
+    /// Input is routed only by the game viewport, never editor panels or menus.
+    pub fn player_look(self: mut Self, dx: f32, dy: f32) ->() {
+        if !self.controller_input || self.gameplay.control.player == 0 || self.gameplay.control.mode == "rts" || self.gameplay.control.mode == "respawn" {
+            ret()
+        }
+        if !(dx >= - 4096 && dx <= 4096 && dy >= - 4096 && dy <= 4096) {
+            ret()
+        }
+        let mut pitch = self.look_rotation.x() - dy * 0.0025_f32
+        if pitch < - 1.48 {
+            pitch = - 1.48
+        }
+        if pitch > 1.48 {
+            pitch = 1.48
+        }
+        let mut yaw = self.look_rotation.y() - dx * 0.0025_f32
+        if yaw > 3.14159265 {
+            yaw -= 6.2831853
+        }
+        if yaw < - 3.14159265 {
+            yaw += 6.2831853
+        }
+        self.look_rotation = Vec3::new(pitch, yaw, 0)
+    }
+    pub fn camera_controls(self: mut Self, delta: f32, wheel: f32) ->() {
+        if self.gameplay.control.player != 0 {
+            let mode = self.gameplay.control.mode
+            for camera in self.scene.entities() {
+                if camera.component().kind() != "camera" {
+                    continue
+                }
+                if self.strategy_view.is_none() {
+                    self.strategy_view = Option[Transform]::Some(camera.transform())
+                }
+                if mode != "rts" {
+                    if self.previous_control_mode == "rts" {
+                        self.strategy_view = Option[Transform]::Some(camera.transform())
+                    }
+                    match self.scene.get(self.gameplay.control.controlled()) {
+                        Some(body) => {
+                            let eye = body.transform().position().add(Vec3::new(0, if mode == "vehicle" {
+                                        2_f32
+                                    } else {
+                                        0.7_f32
+                                    }
+                                    , 0,))
+                            self.scene.set_transform(camera.id(), Transform::new(eye, self.look_rotation, Vec3::new(1, 1, 1)))
+                            self.session.set_transform(camera.id(), RuntimeTransform::new(eye, self.look_rotation, Vec3::new(1, 1, 1)))
+                        }
+                        None => {
+                        }
+                    }
+                    self.previous_control_mode = mode ret()
+                }
+                if self.previous_control_mode != "rts" {
+                    if self.previous_control_mode == "engineer" {
+                        match self.scene.get(self.gameplay.control.terminal) {
+                            Some(terminal) => {
+                                self.strategy_view = Option[Transform]::Some(Transform::new(terminal.transform().position().add(Vec3::new(0, 65, 40)), Vec3::new( - 1, 0, 0), Vec3::new(1, 1, 1)))
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    match self.strategy_view {
+                        Some(view) => {
+                            self.scene.set_transform(camera.id(), view) self.session.set_transform(camera.id(), RuntimeTransform::new(view.position(), view.rotation(), view.scale()))
+                        }
+                        None => {
+                        }
+                    }
+                }
+                self.previous_control_mode = mode
+                break
+            }
+        }
+        let mut enabled = false for live in self.instances {
+            if live.active && live.instance.interaction(6, 0) > 0 {
+                enabled = true
+            }
+        }
+        if !enabled && self.gameplay.control.mode != "rts" {
+            ret()
+        }
+        for actor in self.scene.entities() {
+            if actor.component().kind() == "camera" {
+                let t = actor.transform() let mut p = t.position() let mut x = 0_f32 let mut z = 0_f32
+                if self.controller_input {
+                    for key in self.keys {
+                        if key == 97 {
+                            x -= 1
+                        }
+                        if key == 100 {
+                            x += 1
+                        }
+                        if key == 119 {
+                            z -= 1
+                        }
+                        if key == 115 {
+                            z += 1
+                        }
+                    }
+                }
+                let elapsed = if delta > 0 && delta < 0.1_f32 {
+                    delta
+                } else {
+                    0.1_f32
+                }
+                let speed = if p.y() > 60 {
+                    p.y() * 0.5_f32
+                } else {
+                    30_f32
+                }
+                p = p.add(Vec3::new(x, 0, z).normalized().scale(speed * elapsed))
+                if wheel != 0 {
+                    match self.scene.world_matrix(actor.id()) {
+                        Some(world) => {
+                            let forward = world.transform_point(Vec3::new(0, 0, - 1)).sub(world.transform_point(Vec3::zero())).normalized()
+                            if forward.y() < - 0.001 {
+                                let anchor = p.add(forward.scale( - p.y() / forward.y()))
+                                let factor = if wheel > 0 {
+                                    0.8_f32
+                                } else {
+                                    1.25_f32
+                                }
+                                let next = anchor.add(p.sub(anchor).scale(factor))
+                                if next.y() >= 15 && next.y() <= 2000 {
+                                    p = next
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                let ground = self.navigation.surface_height(p.x(), p.z())
+                if ground > - 999999 && p.y() < ground + 15 {
+                    p = Vec3::new(p.x(), ground + 15, p.z())
+                }
+                self.scene.set_transform(actor.id(), t.with_position(p))
+                self.session.set_transform(actor.id(), RuntimeTransform::new(p, t.rotation(), t.scale()))
+                ret()
+            }
+        }
+    }
+    pub fn focus_camera(self: mut Self, point: Vec3) ->() {
+        for actor in self.scene.entities() {
+            if actor.component().kind() != "camera" {
+                continue
+            }
+            let t = actor.transform()
+            match self.scene.world_matrix(actor.id()) {
+                Some(world) => {
+                    let forward = world.transform_point(Vec3::new(0, 0, - 1)).sub(world.transform_point(Vec3::zero())).normalized()
+                    if forward.y() >= - 0.001 {
+                        ret()
+                    }
+                    let anchor = t.position().add(forward.scale((point.y() - t.position().y()) / forward.y()))
+                    let p = t.position().add(Vec3::new(point.x() - anchor.x(), 0, point.z() - anchor.z()))
+                    self.scene.set_transform(actor.id(), t.with_position(p))
+                    self.session.set_transform(actor.id(), RuntimeTransform::new(p, t.rotation(), t.scale()))
+                }
+                None => {
+                }
+            }
+            ret()
+        }
+    }
+    pub fn set_navigation(self: mut Self, navigation: NavigationGrid) ->() {
+        self.navigation = navigation
+    }
+    pub fn game_event(self: mut Self, event: str) ->() {
+        self.dispatch("game-event", event, 0) self.process_gameplay() self.process_placement()
+    }
+    /// Process bounded work per frame. A completion can enqueue the next command,
+    /// but cyclic or malicious graphs cannot monopolize the editor thread.
+    fn process_gameplay(self: mut Self) ->() {
+        for body in self.gameplay.bodies {
+            match self.scene.get(body.actor) {
+                Some(actor) => self.gameplay.position(body.actor, actor.transform().position())
+                None => {
+                }
+            }
+        }
+        self.gameplay.validate()
+        for body in self.gameplay.bodies {
+            self.session.set_character_active(body.actor, body.seated_in == 0)
+            if body.seated_in != 0 {
+                match self.scene.get(body.seated_in) {
+                    Some(vehicle) => {
+                        match self.scene.get(body.actor) {
+                            Some(actor) => self.set_actor_pose(body.actor, actor.transform().with_position(vehicle.transform().position())) None => {
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+        let mut budget = 256_usize
+        for _ in 0_usize..16_usize {
+            let mut processed = false
+            for live in self.instances {
+                if !live.active {
+                    continue
+                }
+                for _ in 0_usize..16_usize {
+                    if budget == 0 {
+                        ret()
+                    }
+                    let event = live.instance.take_event()
+                    if event == "" {
+                        break
+                    }
+                    budget -= 1 processed = true
+                    match gameplay_request(event) {
+                        Some(request) => {
+                            match live.instance.transform(0) {
+                                Some(pose) => {
+                                    self.scene.set_transform(live.actor, pose) self.session.set_transform(live.actor, RuntimeTransform::new(pose.position(), pose.rotation(), pose.scale()))
+                                }
+                                None => {
+                                }
+                            }
+                            if request.operation == "world-load" {
+                                let reply = match self.load_game(request.text) {
+                                    Ok(_) => GameplayReply::done(0, 0, "World loaded") Err(e) => GameplayReply::failed(e)
+                                }
+                                self.complete_service(live.actor, request.node, reply) ret()
+                            }
+                            let previous_driver = self.gameplay.control.body()
+                            let previous_vehicle = self.gameplay.control.vehicle
+                            let previous_remote = self.gameplay.control.remote
+                            let actor_id = if request.actor == 0 {
+                                live.actor
+                            } else {
+                                request.actor
+                            }
+                            let reply = if request.operation == "world-save" {
+                                match self.save_game(request.text) {
+                                    Ok(_) => GameplayReply::done(0, 0, "World saved") Err(e) => GameplayReply::failed(e)
+                                }
+                            } else {
+                                match self.scene_service(live.actor, request) {
+                                    Some(value) => value
+                                    None => match self.scene.get(actor_id) {
+                                        Some(actor) => self.gameplay.command(live.actor, request, actor.transform().position())
+                                        None => GameplayReply::failed("Actor is not part of the runtime scene")
+                                    }
+                                }
+                            }
+                            if reply.ok && request.operation == "health-damage" && reply.text == "died" {
+                                self.session.remove_actor_physics(actor_id)
+                                match self.scene.get(actor_id) {
+                                    Some(actor) => {
+                                        if actor.physics().mode == "static" {
+                                            let mut c = actor.physics() c.mode = "off" self.scene.set_physics(actor_id, c) self.navigation = NavigationGrid::from_scene(self.scene).with_terrains(self.navigation.terrains)
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                                self.dispatch_for(actor_id, "game-event", "Died", 0) self.gameplay.validate()
+                            }
+                            if reply.ok && request.operation == "health-heal" && self.session.physics().solver().body(actor_id).is_none() {
+                                match self.scene.get(actor_id) {
+                                    Some(actor) => {
+                                        if actor.physics().mode == "character" {
+                                            self.session.add_character(actor_id, actor.transform().position(), actor.physics().character)
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            if reply.ok && request.operation == "control-register" &&(request.text == "engineer" || request.text == "android" || request.text == "human" || request.text == "npc") {
+                                match self.scene.get(actor_id) {
+                                    Some(actor) => {
+                                        if actor.physics().mode == "off" {
+                                            let mut physics = PhysicsComponent::defaults() physics.mode = "character" physics.shape = "capsule" physics.radius = 0.35 physics.half_height = 0.55 physics.character = CharacterConfig::defaults()
+                                            let position = actor.transform().position().add(Vec3::new(0, 0.9, 0))
+                                            if self.session.add_character(actor_id, position, physics.character) {
+                                                self.scene.set_physics(actor_id, physics) self.set_actor_pose(actor_id, actor.transform().with_position(position)) self.gameplay.position(actor_id, position)
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            if previous_vehicle != 0 && self.gameplay.control.vehicle == 0 {
+                                for body in self.gameplay.bodies {
+                                    if body.actor == previous_driver {
+                                        match self.scene.get(previous_driver) {
+                                            Some(actor) => self.set_actor_pose(previous_driver, actor.transform().with_position(body.position)) None => {
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if previous_remote != 0 && self.gameplay.control.remote == 0 {
+                                self.resume_ai(previous_remote)
+                            }
+                            live.instance.set_property(gameplay_property(request.node, 0), BlueprintValue::Bool(reply.ok))
+                            live.instance.set_property(gameplay_property(request.node, 1), BlueprintValue::I32(reply.count))
+                            live.instance.set_property(gameplay_property(request.node, 2), BlueprintValue::Actor(reply.actor))
+                            live.instance.set_property(gameplay_property(request.node, 3), BlueprintValue::String(reply.text))
+                            self.dispatch_for(live.actor, "game-event", "@service-completed:" + request.node.fmt(), 0)
+                        }
+                        None => {
+                            if event.byte_len() >= 9 && event.slice_bytes(0, 9) == "@service|" {
+                                self.logs += "Rejected malformed Blueprint engine-service request\n"
+                            } elif self.outbound.len() < 1024 {
+                                self.outbound.push(event)
+                            }
+                        }
+                    }
+                }
+            }
+            if !processed {
+                break
+            }
+        }
+    }
+    pub fn take_events(self: mut Self) -> Vec[str] {
+        self.process_gameplay()
+        let events = self.outbound self.outbound = Vec[str]::new()
+        ret events
+    }
+    fn complete_service(self: mut Self, actor: u64, node: u64, reply: GameplayReply) ->() {
+        for live in self.instances {
+            if live.actor == actor {
+                live.instance.set_property(gameplay_property(node, 0), BlueprintValue::Bool(reply.ok)) live.instance.set_property(gameplay_property(node, 1), BlueprintValue::I32(reply.count)) live.instance.set_property(gameplay_property(node, 2), BlueprintValue::Actor(reply.actor)) live.instance.set_property(gameplay_property(node, 3), BlueprintValue::String(reply.text))
+                self.dispatch_for(actor, "game-event", "@service-completed:" + node.fmt(), 0) ret()
+            }
+        }
+    }
+    fn resume_ai(self: mut Self, actor: u64) ->() {
+        let mut moves = Vec[NavigationMove]::new()
+        for movement in self.moves {
+            if movement.actor != actor || movement.points.len() == 0 {
+                moves.push(movement) continue
+            }
+            match self.scene.get(actor) {
+                Some(entity) => {
+                    let start = entity.transform().position()
+                    let target = movement.points.get_unchecked_borrowed(movement.points.len() - 1)
+                    let path = self.navigation.route_with_radius(start, target, movement.radius)
+                    if path.len() > 0 {
+                        moves.push(NavigationMove {
+                                actor, path, 0, movement.speed, start.y() - path.get_unchecked_borrowed(0).y(), movement.radius
+                            }
+                        )
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        self.moves = moves
+    }
+    fn set_actor_pose(self: mut Self, actor: u64, pose: Transform) ->() {
+        self.scene.set_transform(actor, pose)
+        self.session.set_transform(actor, RuntimeTransform::new(pose.position(), pose.rotation(), pose.scale()))
+        for live in self.instances {
+            if live.actor == actor {
+                live.instance.set_transform(0, pose) break
+            }
+        }
+    }
+    fn spawn_near(self: mut Self, anchor: u64, path: str, distance: u32, radius: u32) -> GameplayReply {
+        if self.instances.len() >= 4096 || distance == 0 || distance > 1000 || radius > 100 {
+            ret GameplayReply::failed("Invalid spawn distance, clearance or actor limit")
+        }
+        let source = match self.scene.get(anchor) {
+            Some(v) => v None => {
+                ret GameplayReply::failed("Spawn anchor is missing")
+            }
+        }
+        let mut selected = Option[BlueprintAsset]::None
+        for class in self.classes {
+            if class.path == self.project + "/" + path {
+                selected = Option[BlueprintAsset]::Some(class.asset)
+            }
+        }
+        let asset = match selected {
+            Some(v) => v None => {
+                ret GameplayReply::failed("Preload the Blueprint class using a constant asset reference")
+            }
+        }
+        let mut point = Option[Vec3]::None
+        for offset in vec![Vec3::new(1, 0, 0), Vec3::new(0, 0, 1), Vec3::new( - 1, 0, 0), Vec3::new(0, 0, - 1), Vec3::new(0.7, 0, 0.7), Vec3::new( - 0.7, 0, - 0.7)] {
+            let p = source.transform().position().add(offset.scale(distance as f32))
+            let height = self.navigation.surface_height(p.x(), p.z())
+            let ground = Vec3::new(p.x(), height, p.z())
+            if height > - 999999 && self.navigation.can_place(ground, radius as f32) {
+                point = Option[Vec3]::Some(ground) break
+            }
+        }
+        let position = match point {
+            Some(v) => v None => {
+                ret GameplayReply::failed("No clear spawn position")
+            }
+        }
+        let module = match self.module {
+            Some(v) => v None => {
+                ret GameplayReply::failed("No Blueprint program")
+            }
+        }
+        let transform = Transform::identity().with_position(position)
+        let reference = BlueprintInstance { path, Vec[BlueprintOverride]::new() }
+        let native = match module.instantiate(asset, reference, transform) {
+            Ok(v) => v Err(e) => {
+                ret GameplayReply::failed(e)
+            }
+        }
+        let actor = self.scene.create_entity(asset.name, transform) self.scene.set_blueprint(actor, Option[BlueprintInstance]::Some(reference))
+        let bindings = self.geometry(actor, asset)
+        let mut world = self.session.world() world.spawn_actor_with_id(actor, asset.name, RuntimeTransform::new(position, Vec3::zero(), Vec3::new(1, 1, 1))) self.session.set_world(world)
+        native.pointer(actor, 0, position, true) self.instances.push(LiveBlueprint {
+                actor, native, bindings, true
+            }
+        )
+        self.dispatch_for(actor, "construction", "", 0) self.dispatch_for(actor, "begin-play", "", 0)
+        ret GameplayReply::done(1, actor, "Spawned")
+    }
+    // Visuals are authored Blueprints; logistics keeps the authoritative cargo.
+    fn instantiate_at(self: mut Self, path: str, pose: Transform) -> GameplayReply {
+        if self.instances.len() >= 8192 {
+            ret GameplayReply::failed("Runtime actor limit reached")
+        }
+        let mut selected = Option[BlueprintAsset]::None
+        for class in self.classes {
+            if class.path == self.project + "/" + path {
+                selected = Option[BlueprintAsset]::Some(class.asset)
+            }
+        }
+        let asset = match selected {
+            Some(v) => v None => {
+                ret GameplayReply::failed("Preload the visual Blueprint with a constant asset reference")
+            }
+        }
+        let module = match self.module {
+            Some(v) => v None => {
+                ret GameplayReply::failed("No Blueprint program")
+            }
+        }
+        let reference = BlueprintInstance { path, Vec[BlueprintOverride]::new() }
+        let native = match module.instantiate(asset, reference, pose) {
+            Ok(v) => v Err(e) => {
+                ret GameplayReply::failed(e)
+            }
+        }
+        let actor = self.scene.create_entity(asset.name, pose)
+        self.scene.set_blueprint(actor, Option[BlueprintInstance]::Some(reference))
+        let bindings = self.geometry(actor, asset)
+        let mut world = self.session.world()
+        world.spawn_actor_with_id(actor, asset.name, RuntimeTransform::new(pose.position(), pose.rotation(), pose.scale()))
+        self.session.set_world(world)
+        native.pointer(actor, 0, pose.position(), true)
+        self.instances.push(LiveBlueprint { actor, native, bindings, true })
+        self.dispatch_for(actor, "construction", "", 0) self.dispatch_for(actor, "begin-play", "", 0)
+        ret GameplayReply::done(1, actor, "Spawned visual")
+    }
+    fn conveyor_service(self: mut Self, owner: u64, request: GameplayRequest) -> GameplayReply {
+        let mut cut = request.text.byte_len()
+        for b in 0_usize..request.text.byte_len() {
+            if request.text.byte_at(b) == 124 {
+                cut = b break
+            }
+        }
+        let path = if cut < request.text.byte_len() {
+            request.text.slice_bytes(cut + 1, request.text.byte_len() - cut - 1)
+        } else {
+            ""
+        }
+        if path == "" {
+            ret self.gameplay.command(owner, request, Vec3::zero())
+        }
+        let source_id = if request.actor == 0 {
+            owner
+        } else {
+            request.actor
+        }
+        let source = match self.scene.get(source_id) {
+            Some(v) => v.transform().position() None => {
+                ret GameplayReply::failed("Conveyor source is missing")
+            }
+        }
+        let destination = match self.scene.get(request.target) {
+            Some(v) => v.transform().position() None => {
+                ret GameplayReply::failed("Conveyor destination is missing")
+            }
+        }
+        let difference = destination.sub(source) let length = difference.length()
+        if length < 0.05 || length > 1000 {
+            ret GameplayReply::failed("Invalid conveyor length")
+        }
+        let mut progress_property = 0_u64 let mut items_property = 0_u64 let mut nominal = 1.2_f32
+        for class in self.classes {
+            if class.path != self.project + "/" + path {
+                continue
+            }
+            for property in class.asset.properties {
+                match property.default_value {
+                    F32(v) => {
+                        if property.name == "TransportProgress" {
+                            progress_property = property.id
+                        }
+                        if property.name == "TransportLength" && v > 0 {
+                            nominal = v
+                        }
+                    }
+                    I32(_) => {
+                        if property.name == "TransportItems" {
+                            items_property = property.id
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            }
+        }
+        if progress_property == 0 || items_property == 0 {
+            ret GameplayReply::failed("Visual needs TransportProgress:f32 and TransportItems:i32")
+        }
+        let reply = self.gameplay.command(owner, request, source)
+        if !reply.ok {
+            ret reply
+        }
+        let horizontal = sqrt(difference.x() * difference.x() + difference.z() * difference.z())
+        let rotation = Vec3::new( - atan2(difference.y(), horizontal), atan2(difference.x(), difference.z()), 0)
+        let visual = self.instantiate_at(path, Transform::new(source.add(destination).scale(0.5), rotation, Vec3::new(1, 1, length / nominal)))
+        if !visual.ok {
+            self.gameplay.logistics.links.pop() ret visual
+        }
+        let i = self.gameplay.logistics.links.len() - 1
+        let mut link = self.gameplay.logistics.links.get_unchecked_borrowed(i).snapshot()
+        link.visual_actor = visual.actor link.visual_instance = self.instances.len() - 1
+        link.progress_property = progress_property link.items_property = items_property
+        self.gameplay.logistics.links.set(i, link)
+        ret reply
+    }
+    fn transport_visuals(self: Self) ->() {
+        for link in self.gameplay.logistics.links {
+            if link.visual_actor == 0 || link.visual_instance >= self.instances.len() {
+                continue
+            }
+            let live = self.instances.get_unchecked_borrowed(link.visual_instance)
+            if live.actor != link.visual_actor {
+                continue
+            }
+            let mut count = 0_u32
+            for packet in link.packets {
+                count += packet.count
+            }
+            let progress = if link.packets.len() == 0 {
+                0_f32
+            } else {
+                1_f32 - link.packets.get_unchecked_borrowed(0).remaining / link.seconds
+            }
+            live.instance.set_property(link.progress_property, BlueprintValue::F32(progress))
+            live.instance.set_property(link.items_property, BlueprintValue::I32(count as i32))
+        }
+    }
+    fn scene_service(self: mut Self, owner: u64, request: GameplayRequest) -> Option[GameplayReply] {
+        let op = request.operation let actor = if request.actor == 0 {
+            owner
+        } else {
+            request.actor
+        }
+        if op == "conveyor-connect" {
+            ret Option[GameplayReply]::Some(self.conveyor_service(owner, request))
+        }
+        if op == "world-broadcast" {
+            self.dispatch("game-event", request.text, 0)
+            if self.outbound.len() < 1024 {
+                self.outbound.push(request.text)
+            }
+            ret Option[GameplayReply]::Some(GameplayReply::done(0, 0, "Broadcast"))
+        }
+        if op == "actor-find" {
+            for entity in self.scene.entities() {
+                if entity.name() == request.text && entity.parent().is_none() {
+                    ret Option[GameplayReply]::Some(GameplayReply::done(1, entity.id(), entity.name()))
+                }
+            }
+            ret Option[GameplayReply]::Some(GameplayReply::failed("Actor was not found"))
+        }
+        if op != "physics-static-box" && op != "find-nearest" && op != "distance-to" && op != "spawn-blueprint" && op != "actor-teleport" && op != "move-to-actor" {
+            ret Option[GameplayReply]::None
+        }
+        let source = match self.scene.get(actor) {
+            Some(v) => v None => {
+                ret Option[GameplayReply]::Some(GameplayReply::failed("Source actor is missing"))
+            }
+        }
+        if op == "physics-static-box" {
+            let value = match parse(request.text) {
+                Ok(v) => v Err(_) => Json::Null
+            }
+            let e = match json_vec3(value) {
+                Some(v) => v None => {
+                    ret Option[GameplayReply]::Some(GameplayReply::failed("Invalid box extents"))
+                }
+            }
+            if e.x() <= 0 || e.y() <= 0 || e.z() <= 0 || e.x() > 1000 || e.y() > 1000 || e.z() > 1000 {
+                ret Option[GameplayReply]::Some(GameplayReply::failed("Box extents must be in (0,1000]"))
+            }
+            let t = source.transform()
+            if !self.session.add_static_box(actor, t.position(), t.rotation(), e) {
+                ret Option[GameplayReply]::Some(GameplayReply::failed("Collider already exists or is invalid"))
+            }
+            let mut physics = PhysicsComponent::defaults() physics.mode = "static" physics.shape = "box" physics.half_extents = e self.scene.set_physics(actor, physics)
+            self.navigation.block(t.position(), if e.x() > e.z() {
+                    e.x()
+                } else {
+                    e.z()
+                }
+                ,
+            )
+            ret Option[GameplayReply]::Some(GameplayReply::done(1, actor, "Collider registered"))
+        }
+        if op == "spawn-blueprint" {
+            ret Option[GameplayReply]::Some(self.spawn_near(actor, request.text, request.count, request.item))
+        }
+        if op == "find-nearest" {
+            let mut closest = 0_u64 let mut distance = 1000000000000_f32
+            for live in self.instances {
+                let entity = match self.scene.get(live.actor) {
+                    Some(v) => v None => {
+                        continue
+                    }
+                }
+                if entity.id() == actor {
+                    continue
+                }
+                let alive = self.gameplay.is_alive(entity.id())
+                match entity.blueprint() {
+                    Some(reference) => {
+                        if alive && reference.asset == request.text {
+                            let d = entity.transform().position().sub(source.transform().position()) let squared = d.dot(d)
+                            if squared < distance {
+                                distance = squared closest = entity.id()
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+            ret Option[GameplayReply]::Some(if closest == 0 {
+                    GameplayReply::failed("No living actor of this class")
+                } else {
+                    GameplayReply::done((sqrt(distance) * 100_f32) as u32, closest, request.text)
+                }
+            )
+        }
+        let target = match self.scene.get(request.target) {
+            Some(v) => v None => {
+                ret Option[GameplayReply]::Some(GameplayReply::failed("Target actor is missing"))
+            }
+        }
+        if op == "actor-teleport" {
+            let p = target.transform().position().add(Vec3::new(2, 1, 2)) self.set_actor_pose(actor, source.transform().with_position(p)) self.gameplay.position(actor, p)
+            ret Option[GameplayReply]::Some(GameplayReply::done(1, actor, "Teleported"))
+        }
+        if op == "move-to-actor" {
+            if !self.gameplay.accepts_orders(actor) {
+                ret Option[GameplayReply]::Some(GameplayReply::failed("Unit is controlled, seated, dead or requires a driver"))
+            }
+            let mut reach = request.item as f32 + 0.6_f32
+            if target.physics().mode == "static" && target.physics().shape == "box" {
+                let e = target.physics().half_extents reach += if e.x() > e.z() {
+                    e.x()
+                } else {
+                    e.z()
+                }
+            }
+            let direction = Vec3::new(source.transform().position().x() - target.transform().position().x(), 0, source.transform().position().z() - target.transform().position().z()).normalized()
+            let approach = target.transform().position().add(direction.scale(reach))
+            let path = self.navigation.route_with_radius(source.transform().position(), approach, request.item as f32)
+            if request.count == 0 || request.count > 100 || path.len() == 0 {
+                ret Option[GameplayReply]::Some(GameplayReply::failed("No reachable route or invalid speed"))
+            }
+            let mut moves = Vec[NavigationMove]::new() for movement in self.moves {
+                if movement.actor != actor {
+                    moves.push(movement)
+                }
+            }
+            moves.push(NavigationMove {
+                    actor, path, 0, request.count as f32, source.transform().position().y() - path.get_unchecked_borrowed(0).y(), request.item as f32
+                }
+            ) self.moves = moves
+            ret Option[GameplayReply]::Some(GameplayReply::done(1, actor, "Moving"))
+        }
+        let d = target.transform().position().sub(source.transform().position())
+        ret Option[GameplayReply]::Some(GameplayReply::done((sqrt(d.dot(d)) * 100_f32) as u32, target.id(), "Centimetres"))
+    }
+    fn geometry(self: mut Self, actor: u64, asset: BlueprintAsset) -> Vec[BlueprintComponentBinding] {
+        let mut bindings = Vec[BlueprintComponentBinding]::new()
+        for component in asset.components {
+            let entity = self.scene.create_entity(asset.name + "/" + component.name, component.transform)
+            self.scene.set_visible(entity, component.visible)
+            if component.material != "default" {
+                self.scene.set_material_path(entity, component.material)
+            }
+            bindings.push(BlueprintComponentBinding {
+                    component.id, entity, component.mesh, component.material
+                }
+            )
+        }
+        for component in asset.components {
+            let mut entity = 0_u64 let mut parent = actor
+            for b in bindings {
+                if b.component == component.id {
+                    entity = b.entity
+                }
+                if b.component == component.parent {
+                    parent = b.entity
+                }
+            }
+            self.scene.set_parent(entity, Option[u64]::Some(parent))
+        }
+        ret bindings
+    }
+    fn clear_preview(self: mut Self) ->() {
+        for b in self.preview_bindings {
+            self.scene.remove(b.entity)
+        }
+        if self.preview_root != 0 {
+            self.scene.remove(self.preview_root)
+        }
+        self.preview_bindings = Vec[BlueprintComponentBinding]::new() self.preview_root = 0 self.placement_point = Option[Vec3]::None
+    }
+    fn process_placement(self: mut Self) ->() {
+        for live in self.instances {
+            let request = live.instance.take_placement()
+            if request != "" {
+                self.clear_preview()
+                if request == "@cancel" {
+                    let previous = self.placement_owner self.placement_owner = 0 self.placement_asset = "" if previous != 0 {
+                        self.dispatch_for(previous, "placement-cancelled", "", 0)
+                    }
+                } else {
+                    let absolute = Path::new(self.project).resolve().join(request).resolve().as_str()
+                    let mut found = false
+                    for class in self.classes {
+                        if class.path == absolute {
+                            found = true self.preview_root = self.scene.create_entity("Placement preview", Transform::identity()) self.preview_bindings = self.geometry(self.preview_root, class.asset)
+                        }
+                    }
+                    if found {
+                        self.placement_owner = live.actor self.placement_asset = absolute self.placement_radius = live.instance.placement_radius() self.scene.set_visible(self.preview_root, false)
+                    } else {
+                        self.placement_owner = 0 self.placement_asset = "" self.dispatch_for(live.actor, "placement-failed", "", 0)
+                    }
+                }
+            }
+        }
+    }
+    pub fn pointer_exit(self: mut Self) ->() {
+        self.placement_point = Option[Vec3]::None if self.preview_root != 0 {
+            self.scene.set_visible(self.preview_root, false)
+        }
+    }
+    fn placement_clear(self: Self, point: Vec3) -> bool {
+        if !self.navigation.can_place(point, self.placement_radius) {
+            ret false
+        }
+        for live in self.instances {
+            for binding in live.components {
+                match self.scene.get(binding.entity) {
+                    Some(entity) => {
+                        if !entity.visible() || binding.mesh == "" {
+                            continue
+                        }
+                        match self.scene.world_matrix(binding.entity) {
+                            Some(world) => {
+                                let mut low = Vec3::new(1000000, 1000000, 1000000) let mut high = low.scale( - 1)
+                                for x in vec![ - 0.6_f32, 0.6_f32] {
+                                    for y in vec![ - 0.6_f32, 0.6_f32] {
+                                        for z in vec![ - 0.6_f32, 0.6_f32] {
+                                            let p = world.transform_point(Vec3::new(x, y, z))
+                                            low = Vec3::new(if p.x() < low.x() {
+                                                    p.x()
+                                                } else {
+                                                    low.x()
+                                                }
+                                                , if p.y() < low.y() {
+                                                    p.y()
+                                                } else {
+                                                    low.y()
+                                                }
+                                                , if p.z() < low.z() {
+                                                    p.z()
+                                                } else {
+                                                    low.z()
+                                                }
+                                                ,
+                                            )
+                                            high = Vec3::new(if p.x() > high.x() {
+                                                    p.x()
+                                                } else {
+                                                    high.x()
+                                                }
+                                                , if p.y() > high.y() {
+                                                    p.y()
+                                                } else {
+                                                    high.y()
+                                                }
+                                                , if p.z() > high.z() {
+                                                    p.z()
+                                                } else {
+                                                    high.z()
+                                                }
+                                                ,
+                                            )
+                                        }
+                                    }
+                                }
+                                let r = self.placement_radius
+                                if point.x() + r > low.x() && point.x() - r < high.x() && point.z() + r > low.z() && point.z() - r < high.z() && high.y() > point.y() + 0.5 {
+                                    ret false
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+        ret true
+    }
+    pub fn pointer_hover(self: mut Self, origin: Vec3, direction: Vec3) ->() {
+        if self.placement_owner == 0 {
+            ret()
+        }
+        self.placement_point = self.navigation.hit(origin, direction)
+        match self.placement_point {
+            Some(point) => {
+                let valid = self.placement_clear(point) self.scene.set_transform(self.preview_root, Transform::identity().with_position(point)) self.scene.set_visible(self.preview_root, valid)
+            }
+            None => {
+                self.scene.set_visible(self.preview_root, false)
+            }
+        }
+    }
+    fn place(self: mut Self) ->() {
+        let owner = self.placement_owner
+        let point = match self.placement_point {
+            Some(p) => p None => {
+                self.dispatch_for(owner, "placement-failed", "", 0) ret()
+            }
+        }
+        if !self.placement_clear(point) || self.instances.len() >= 4096 {
+            self.dispatch_for(owner, "placement-failed", "", 0) ret()
+        }
+        let mut selected = Option[BlueprintAsset]::None
+        for class in self.classes {
+            if class.path == self.placement_asset {
+                selected = Option[BlueprintAsset]::Some(class.asset)
+            }
+        }
+        let asset = match selected {
+            Some(a) => a None => {
+                ret()
+            }
+        }
+        let module = match self.module {
+            Some(m) => m None => {
+                ret()
+            }
+        }
+        let transform = Transform::identity().with_position(point)
+        let relative = self.placement_asset.slice_bytes(self.project.byte_len() + 1, self.placement_asset.byte_len() - self.project.byte_len() - 1)
+        let instance = BlueprintInstance { relative, Vec[BlueprintOverride]::new() }
+        let native = match module.instantiate(asset, instance, transform) {
+            Ok(v) => v Err(_) => {
+                self.dispatch_for(owner, "placement-failed", "", 0) ret()
+            }
+        }
+        let actor = self.scene.create_entity(asset.name, transform)
+        self.scene.set_blueprint(actor, Option[BlueprintInstance]::Some(instance))
+        let bindings = self.geometry(actor, asset)
+        let mut world = self.session.world() world.spawn_actor_with_id(actor, asset.name, RuntimeTransform::new(point, Vec3::zero(), Vec3::new(1, 1, 1))) self.session.set_world(world)
+        native.pointer(actor, 0, point, true)
+        self.instances.push(LiveBlueprint { actor, native, bindings, true })
+        self.navigation.block(point, self.placement_radius)
+        self.clear_preview() self.placement_owner = 0 self.placement_asset = ""
+        self.dispatch_for(actor, "construction", "", 0) self.dispatch_for(actor, "begin-play", "", 0)
+        self.dispatch_for(owner, "placement-completed", "", 0)
+    }
+    pub fn pointer_click(self: mut Self, origin: Vec3, direction: Vec3, secondary: bool) ->() {
+        if self.placement_owner != 0 {
+            if secondary {
+                let owner = self.placement_owner self.clear_preview() self.placement_owner = 0 self.placement_asset = "" self.dispatch_for(owner, "placement-cancelled", "", 0)
+            } else {
+                self.pointer_hover(origin, direction) self.place()
+            }
+            ret()
+        }
+        let hit = self.navigation.hit(origin, direction)
+        let mut actor_hit = 0_u64
+        let point = hit.unwrap_or(Vec3::zero())
+        let mut nearest = if hit.is_some() {
+            point.sub(origin).length() + 0.1_f32
+        } else {
+            1000000_f32
+        }
+        for live in self.instances {
+            if live.active && self.scene.world_visible(live.actor) {
+                for binding in live.components {
+                    if binding.mesh != "" && self.scene.world_visible(binding.entity) {
+                        match self.scene.world_matrix(binding.entity) {
+                            Some(world) => {
+                                // Transform the ray to local space: slab intersection also handles rotated meshes.
+                                match world.inverse_affine() {
+                                    Some(inverse) => {
+                                        let local_origin = inverse.transform_point(origin)
+                                        let local_direction = inverse.transform_point(origin.add(direction)).sub(local_origin)
+                                        match navigation_ray_box(local_origin, local_direction) {
+                                            Some(t) => {
+                                                if t < nearest {
+                                                    nearest = t actor_hit = live.actor
+                                                }
+                                            }
+                                            None => {
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for live in self.instances {
+            live.instance.pointer(live.actor, actor_hit, point, hit.is_some())
+        }
+        self.dispatch(if secondary {
+                "secondary-pressed"
+            } else {
+                "primary-pressed"
+            }
+            , "", 0,)
+        self.navigate(0)
+        self.sync()
+    }
+    pub fn selected(self: Self, actor: u64) -> bool {
+        for live in self.instances {
+            if live.actor == actor && live.active {
+                ret live.instance.interaction(0, 0) > 0
+            }
+        }
+        ret false
+    }
+    pub fn navigation_routes(self: Self) -> Vec[NavigationRoute] {
+        let mut routes = Vec[NavigationRoute]::new()
+        for movement in self.moves {
+            if movement.next < movement.points.len() && self.selected(movement.actor) {
+                match self.scene.world_position(movement.actor) {
+                    Some(position) => routes.push(NavigationRoute {
+                            movement.actor, position.sub(Vec3::new(0, movement.offset, 0)), movement.points, movement.next
+                        }
+                    )
+                    None => {
+                    }
+                }
+            }
+        }
+        ret routes
+    }
+    fn navigate(self: mut Self, delta: f32) ->() {
+        for live in self.instances {
+            let command = live.instance.interaction(1, 0)
+            if command > 0 {
+                let _consumed = live.instance.interaction(4, 0)
+                let mut retained = Vec[NavigationMove]::new()
+                for movement in self.moves {
+                    if movement.actor != live.actor {
+                        retained.push(movement)
+                    }
+                }
+                self.moves = retained
+                if command == 2 {
+                    match live.instance.transform(0) {
+                        Some(transform) => {
+                            let target = Vec3::new(live.instance.interaction(2, 0), live.instance.interaction(2, 1), live.instance.interaction(2, 2))
+                            let start = self.scene.world_position(live.actor).unwrap_or(transform.position())
+                            let path = self.navigation.route_with_radius(start, target, live.instance.interaction(5, 0))
+                            if path.len() > 0 {
+                                self.moves.push(NavigationMove {
+                                        live.actor, path, 0, live.instance.interaction(3, 0), start.y() - path.get(0).unwrap_or(start).y(), live.instance.interaction(5, 0)
+                                    }
+                                )
+                            } else {
+                                self.dispatch_for(live.actor, "move-failed", "", 0)
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+            }
+        }
+        let mut retained = Vec[NavigationMove]::new()
+        for movement in self.moves {
+            let paused = !self.gameplay.accepts_orders(movement.actor)
+            if paused {
+                retained.push(movement) continue
+            }
+            let mut next = movement.next
+            let mut remaining = delta * movement.speed
+            for live in self.instances {
+                if live.actor == movement.actor && live.active {
+                    match live.instance.transform(0) {
+                        Some(transform) => {
+                            let start = self.scene.world_position(live.actor).unwrap_or(transform.position())
+                            let mut position = start
+                            while next < movement.points.len() && remaining > 0 {
+                                let goal = movement.points.get(next).unwrap_or(position).add(Vec3::new(0, movement.offset, 0))
+                                let vector = goal.sub(position) let distance = vector.length()
+                                if distance <= remaining {
+                                    position = goal remaining -= distance next += 1
+                                } else {
+                                    position = position.add(vector.scale(remaining / distance)) remaining = 0
+                                }
+                            }
+                            let local = self.scene.local_position_for_world(live.actor, position).unwrap_or(transform.position())
+                            let mut rotation = transform.rotation()
+                            let difference = position.sub(start)
+                            if difference.x() * difference.x() + difference.z() * difference.z() > 0.000001 {
+                                let before = self.scene.local_position_for_world(live.actor, start).unwrap_or(transform.position())
+                                let direction = local.sub(before)
+                                rotation = Vec3::new(rotation.x(), atan2( - direction.x(), - direction.z()), rotation.z())
+                            }
+                            let _moved = live.instance.set_transform(0, transform.with_position(local).with_rotation(rotation))
+                        }
+                        None => {
+                        }
+                    }
+                }
+            }
+            if next < movement.points.len() {
+                retained.push(NavigationMove {
+                        movement.actor, movement.points, next, movement.speed, movement.offset, movement.radius
+                    }
+                )
+            } else {
+                self.dispatch_for(movement.actor, "move-completed", "", 0)
+            }
+        }
+        self.moves = retained
+    }
     fn sync(self: mut Self) ->() {
         for live in self.instances {
+            let control = self.gameplay.control
+            let mut body_hidden = control.player != 0 &&(control.mode == "engineer" || control.mode == "android" || control.mode == "vehicle") && control.controlled() == live.actor
+            if self.gameplay.is_seated(live.actor) || !self.gameplay.is_alive(live.actor) {
+                body_hidden = true
+            }
             match live.instance.transform(0) {
                 Some(value) => {
                     self.scene.set_transform(live.actor, value)
@@ -395,12 +1953,50 @@ impl for BlueprintSimulation {
                 match live.instance.transform(binding.component) {
                     Some(value) => {
                         self.scene.set_transform(binding.entity, value)
+                        self.session.set_transform(binding.entity, RuntimeTransform::new(value.position(), value.rotation(), value.scale()))
                     }
                     None => {
                     }
                 }
-                self.scene.set_visible(binding.entity, live.instance.visible(binding.component))
+                self.scene.set_visible(binding.entity, !body_hidden && live.instance.visible(binding.component))
             }
         }
     }
+}
+
+/// Parameter t stays in world-ray units even after affine inverse transformation.
+fn navigation_ray_box(origin: Vec3, direction: Vec3) -> Option[f32] {
+    let mut near = 0_f32 let mut far = 1000000_f32
+    let origins = vec![origin.x(), origin.y(), origin.z()]
+    let directions = vec![direction.x(), direction.y(), direction.z()]
+    for axis in 0_usize..3_usize {
+        let o = origins.get(axis).unwrap_or(0) let d = directions.get(axis).unwrap_or(0)
+        if d > - 0.000001_f32 && d < 0.000001_f32 {
+            if o < - 0.6_f32 || o > 0.6_f32 {
+                ret Option[f32]::None
+            }
+        } else {
+            let a =( - 0.6_f32 - o) / d let b =(0.6_f32 - o) / d
+            let low = if a < b {
+                a
+            } else {
+                b
+            }
+            let high = if a > b {
+                a
+            } else {
+                b
+            }
+            if low > near {
+                near = low
+            }
+            if high < far {
+                far = high
+            }
+            if far < near {
+                ret Option[f32]::None
+            }
+        }
+    }
+    ret Option[f32]::Some(near)
 }

@@ -1,0 +1,82 @@
+//! Map coordinates stay correct at viewport edges and non-square widget sizes.
+import core::option::Option
+import core::vec::Vec
+
+import graphene::blueprint::{NavigationBox, NavigationGrid, NavigationTerrain}
+import graphene::game_ui::asset::{ui_asset_parse, ui_asset_stringify}
+import graphene::game_ui::minimap::UiMinimap
+import graphene::game_ui::model::{UiScreenAsset, UiWidget}
+import graphene::game_ui::view::{UiImage, build_ui_screen, game_ui_styles, ui_image_extent}
+import graphene::terrain::model::TerrainAsset
+import linalg::{Mat4, Vec3}
+import luma::{Event, Rect, UiLayer, event_pointer_down, event_pointer_up}
+fn main() -> u32 {
+    let image_size = ui_image_extent(572, 352)
+    if image_size.0 != 256 || image_size.1 != 157 {
+        ret 10
+    }
+    let thin_size = ui_image_extent(1, 4096)
+    if thin_size.0 != 1 || thin_size.1 != 256 {
+        ret 11
+    }
+    let grid = NavigationGrid::from_surfaces(Vec[NavigationBox]::new(), vec![NavigationTerrain {
+                TerrainAsset::flat(257, 4), Mat4::identity(), Mat4::identity()
+            }
+        ], 2)
+    let map = UiMinimap::prepare(grid)
+    if map.payload().byte_len() != 65544 {
+        ret 1
+    }
+    let bounds = Rect::new(100, 40, 200, 100)
+    let center = map.world_point(bounds, 200, 90).unwrap_or(Vec3::new(10000, 0, 0))
+    if center.x() != 0 || center.z() != 0 {
+        ret 2
+    }
+    let corner = map.world_point(bounds, - 100_f32, - 100_f32).unwrap_or(Vec3::zero())
+    if corner.x() != - 512 || corner.z() != - 512 {
+        ret 3
+    }
+    if UiMinimap::empty().world_point(bounds, 150, 60).is_some() {
+        ret 4
+    }
+    let mut screen = UiScreenAsset::new("map-check", "HUD")
+    screen.widgets.push(UiWidget::new(2, 1, "Minimap"))
+    if ui_asset_parse(ui_asset_stringify(screen.synchronized())).is_err() {
+        ret 5
+    }
+    let mut image_screen = UiScreenAsset::new("image-check", "HUD")
+    let mut button = UiWidget::new(2, 1, "Button") button.image = "Content/icon.png" button.text = "$800"
+    image_screen.widgets.push(button)
+    let mut layer = UiLayer::new(build_ui_screen(image_screen, Rect::new(0, 0, 1920, 1080), Vec[UiImage]::new()), game_ui_styles(), Rect::new(0, 0, 1920, 1080))
+    if layer.layout().hit(50, 40) != "game-ui-2" || layer.layout().hit(500, 500) != "" {
+        ret 6
+    }
+    let art = layer.layout().find_bounds("game-ui-2-art").unwrap_or(Rect::new(0, 0, 0, 0))
+    if art.x() != 27 || art.y() != 27 || art.right() > 264 || art.bottom() > 72 {
+        ret 8
+    }
+    let mut anchored = UiWidget::new(3, 1, "Text") anchored.anchor_x = 1 anchored.anchor_right = 1 anchored.align_x = 1 anchored.width = 100 anchored.x = - 6
+    image_screen.widgets.push(anchored)
+    let mut anchored_layer = UiLayer::new(build_ui_screen(image_screen, Rect::new(0, 0, 1920, 1080), Vec[UiImage]::new()), game_ui_styles(), Rect::new(0, 0, 1920, 1080))
+    if anchored_layer.layout().find_bounds("game-ui-3").unwrap_or(Rect::new(0, 0, 0, 0)).right() != 1914 {
+        ret 9
+    }
+    layer.input(Event {
+            event_pointer_down(), 50_f32, 40_f32, 0_f32, 0_f32, 0_u32, 1_u32, 0_u32, 0_f32, 0_f32, "", 0_u64
+        }
+    )
+    let clicked = layer.input(Event {
+            event_pointer_up(), 50_f32, 40_f32, 0_f32, 0_f32, 0_u32, 1_u32, 0_u32, 0_f32, 0_f32, "", 0_u64
+        }
+    )
+    if !clicked.consumed || clicked.target != "game-ui-2" || clicked.action != "click" {
+        ret 7
+    }
+    let mut disabled_screen = UiScreenAsset::new("disabled-check", "HUD")
+    button.enabled = false disabled_screen.widgets.push(button)
+    let mut disabled_layer = UiLayer::new(build_ui_screen(disabled_screen, Rect::new(0, 0, 1920, 1080), Vec[UiImage]::new()), game_ui_styles(), Rect::new(0, 0, 1920, 1080))
+    if disabled_layer.layout().find_widget("game-ui-2-disabled-overlay").is_none() || disabled_layer.layout().hit(50, 40) != "" {
+        ret 12
+    }
+    ret 0
+}

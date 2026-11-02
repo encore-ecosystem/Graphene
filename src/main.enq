@@ -11,7 +11,7 @@ import std::process::run_args_capture
 import std::thread::{JoinHandle, available_parallelism}
 import std::time::perf_counter_ms
 
-import graphene::{ActorCommand, ActorComponentCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, AntiAliasingMethod, ApprovalBroker, ApprovalRequest, AssetImportCommand, AutomationListener, AutomationScopes, AutomationServer, CameraComponent, DuplicateActorCommand, EditorCameraState, EditorState, EditorUiState, FlightInput, FrameGenerationMethod, GizmoGesture, GizmoProjection, GizmoSnap, GrapheneCommand, ImportedMeshAsset, LightComponent, MaterialId, MeshId, OperationCompletionCommand, PerformancePanel, PerspectiveCamera, PhysicsComponent, ProjectLoadedCommand, ProjectRequestCommand, RenderSettings, Renderable, Scene, SceneActor, SceneAsset, SceneComponent, SimulationCommand, StandardMaterial, TextureLoad, TextureLoader, TextureUpload, Transform, UpscalingQuality, ViewportInputState, ViewportRenderer, action_needs_confirmation, add_actor_mesh_name, anti_aliasing_methods, apply_editor_transform, automation_capability_token, automation_secure_file, camera_wheel_dolly, console_help, content_asset_matches, decode_console_command, discover_obj_assets, edit_default_material, editor_actors_from_scene, effective_anti_aliasing, effective_reconstruction, gesture_axis_add, gesture_axis_value, gesture_roots, guard_editor_action, guarded_action, import_mesh_asset, import_mesh_asset_as, load_material_asset_file, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color, normalize_simulation_mode, outliner_actor_matches, performance_counter_ns, plane_mesh, profile_begin, profile_event_wait, profile_finish, profile_phase, profile_ui, resolve_editor_pointer_target, save_material_asset_file, simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message, sphere_mesh, upscaling_qualities}
+import graphene::{ActorCommand, ActorComponentCommand, ActorNameCommand, ActorParentCommand, ActorSelectionCommand, ActorSelectionSetCommand, ActorTransformCommand, ActorTransformsCommand, ActorVisibilityCommand, AddActorCommand, AntiAliasingMethod, ApprovalBroker, ApprovalRequest, AssetImportCommand, AutomationListener, AutomationScopes, AutomationServer, CameraComponent, DuplicateActorCommand, EditorCameraState, EditorState, EditorUiState, FlightInput, FrameGenerationMethod, GizmoGesture, GizmoProjection, GizmoSnap, GrapheneCommand, ImportedMeshAsset, LightComponent, MaterialId, MeshId, OperationCompletionCommand, PerformancePanel, PerspectiveCamera, PhysicsComponent, ProjectLoadedCommand, ProjectRequestCommand, RenderSettings, Renderable, Scene, SceneActor, SceneAsset, SceneComponent, SimulationCommand, StandardMaterial, TextureLoad, TextureLoader, TextureUpload, Transform, UpscalingQuality, ViewportInputState, ViewportRenderer, action_needs_confirmation, add_actor_mesh_name, anti_aliasing_methods, apply_editor_transform, automation_capability_token, automation_secure_file, camera_wheel_dolly, console_help, content_asset_matches, decode_console_command, discover_obj_assets, edit_default_material, editor_actors_from_scene, effective_anti_aliasing, effective_reconstruction, gesture_axis_add, gesture_axis_value, gesture_roots, guard_editor_action, guarded_action, import_mesh_asset, import_mesh_asset_as, load_material_asset_file, material_asset_parse, material_asset_stringify, material_edit_action, material_preset_color, normalize_simulation_mode, outliner_actor_matches, performance_counter_ns, plane_mesh, profile_begin, profile_event_wait, profile_finish, profile_phase, profile_ui, resolve_editor_pointer_target, save_material_asset_file, simulation_mode_active, simulation_mode_is_play, simulation_mode_label, simulation_world_message, sphere_mesh, ui_update_snapshot, upscaling_qualities}
 import graphene::animation::character::{CharacterAsset, import_character}
 import graphene::animation::component::SkeletalMeshComponent
 import graphene::animation::import_job::CharacterImporter
@@ -20,6 +20,7 @@ import graphene::audio::model::AudioSource
 import graphene::audio::panel::AudioPanel
 import graphene::autolod_settings::AutoLodSettings
 import graphene::blueprint::*
+import graphene::blueprint::{NavigationGrid, NavigationTerrain}
 import graphene::blueprint::editor::BlueprintEditor
 import graphene::command_bus::{ActorComponentCommand, ActorMaterialCommand, BlueprintActorCommand}
 import graphene::content_browser::{ContentBrowser, ContentIcons}
@@ -28,6 +29,8 @@ import graphene::content_browser::input::{content_action, content_input}
 import graphene::content_browser::operations::content_publish_generated
 import graphene::content_browser::path::{ends, lower}
 import graphene::content_browser::view::{content_asset_info, content_popup, content_widget}
+import graphene::game_ui::asset::ui_asset_parse
+import graphene::mcp::authoring::{mcp_authored_blueprint, mcp_authored_path, mcp_authored_recipe}
 // Encore #169: owners of transitively accessed EditorUiState fields.
 import graphene::displacement::renderer::DisplacementStatistics
 import graphene::editor_actor_details::ActorDetails
@@ -2164,7 +2167,13 @@ fn viewport(simulation_mode: str, dragging: bool, object_count: u32,
 
     }
     viewport_header.push(viewport_bar)
-    viewport_header.push(Widget::button("viewport-stats-toggle", "Stats").with_classes(state_classes("toolbar-button stats-toggle", ui.viewport_stats)).with_attribute("aria-pressed", if ui.viewport_stats { "true" } else { "false" }).with_attribute("title", "Show frame statistics and graph"))
+    viewport_header.push(Widget::button("viewport-stats-toggle", "Stats").with_classes(state_classes("toolbar-button stats-toggle", ui.viewport_stats)).with_attribute("aria-pressed", if ui.viewport_stats {
+                "true"
+            } else {
+                "false"
+            }
+            ,
+        ).with_attribute("title", "Show frame statistics and graph"))
     viewport.push(viewport_header)
     if !simulation_mode_is_play(simulation_mode) && open_viewport_menu == "camera" {
         viewport.push(viewport_camera_strip(camera_mode, hovered, icons))
@@ -2709,7 +2718,7 @@ fn apply_builtin_lod_settings(renderer: mut ViewportRenderer&, project: str, mes
     }
 }
 
-fn blueprint_render_error(classes: Vec[BlueprintClass], plane: MeshId, sphere: MeshId,
+fn blueprint_render_error(project: str, classes: Vec[BlueprintClass], plane: MeshId, sphere: MeshId,
     imported: Vec[ImportedMeshAsset], uploaded: Vec[MeshId],) -> str {
     for class in classes {
         for component in class.asset.components {
@@ -2717,7 +2726,7 @@ fn blueprint_render_error(classes: Vec[BlueprintClass], plane: MeshId, sphere: M
                 if component.mesh != "cube" && !resolve_actor_gpu_mesh(component.mesh, plane, sphere, imported, uploaded).valid() {
                     ret class.asset.name + "/" + component.name + ": mesh asset not found: " + component.mesh
                 }
-                if component.material != "" && component.material != "default" {
+                if component.material != "" && component.material != "default" && load_material_asset_file(project + "/" + component.material).is_none() {
                     ret class.asset.name + "/" + component.name + ": material is not loaded: " + component.material
                 }
             }
@@ -4481,6 +4490,16 @@ fn present_loading(window: Window, project: str, brand: SvgDocument,
     ret window.is_open()
 }
 
+// Timers, profiler ticks and key events do not carry a pointer target.
+// Avoid walking the retained widget tree for every closed editor panel.
+fn editor_pointer_target(ui: mut ReactiveUi, event: Event) -> str {
+    let kind = event.kind()
+    if kind == event_pointer_move() || kind == event_pointer_down() || kind == event_pointer_up() || kind == event_scroll() {
+        ret ui.hit(event.x(), event.y())
+    }
+    ret ""
+}
+
 // The retained index handles missing IDs as well as present nodes in path depth.
 fn retained_bounds(ui: mut ReactiveUi, id: str) -> Option[Rect] {
     ret match ui.find_layout(id) {
@@ -5527,6 +5546,9 @@ fn main() -> u32 {
     let mut blueprint_program_semantic = ""
     let mut blueprint_classes = Vec[BlueprintClass]::new()
     let mut blueprint_simulation = BlueprintSimulation::new()
+    let mut runtime_gpu_bindings = Vec[SceneGpuBinding]::new()
+    let mut runtime_gpu_binding_revision = 0_u64
+    let mut runtime_gpu_source = Vec[graphene::scene::world::Entity]::new()
     let mut blueprint_playing = false
     let mut blueprint_tick_ns = performance_counter_ns()
     let mut blueprint_reported_diagnostics = 0_usize
@@ -5539,6 +5561,7 @@ fn main() -> u32 {
     let mut mcp_last_enabled = false
     let mut mcp_last_port = ui.mcp.port
     let mut mcp_input = luma::UiInputQueue::new()
+    let mut platform_input = luma::UiInputQueue::new()
     let mut mcp_jobs = McpJobs::new()
     let mut mcp_input_ticket = 0_u64
     let mut mcp_input_request = ""
@@ -5669,8 +5692,12 @@ fn main() -> u32 {
         } else {
             0_u64
         }
-        let mut event = if mcp_input.pending() {
+        let _platform_polled = platform_input.poll_window(window)
+        let synthetic_event = mcp_input.pending()
+        let mut event = if synthetic_event {
             mcp_input.next().unwrap_or(Event::none())
+        } elif platform_input.pending() {
+            platform_input.next().unwrap_or(Event::none())
         } elif (simulating || profiler_active || environment_active) && !redraw_pending && viewport_visible {
             window.poll()
         } else {
@@ -5698,7 +5725,36 @@ fn main() -> u32 {
             profile_event_wait(performance_counter_ns() - event_wait_started)
         }
         profile_ui(window.ui_timings())
+        window.set_ui_update_profiling(profiler_active)
         profile_begin()
+        let input_age = event.age_ns(window.input_clock_ns())
+        let mut input_coalesced = 0_u32
+        let input_sampled = event.kind() != event_none()
+        // A captured fly camera consumes the current held state before any
+        // expensive frame work. Releases and UI/shortcut transitions remain
+        // barriers routed normally below, without replaying stale flight ticks.
+        if !simulating && navigation.orbiting && navigation.pointer_locked &&
+        !navigation.orbit_pivot && !navigation.dolly && !moving_cube &&
+        project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" {
+            let mut batch = graphene::editor_input::CameraInputBatch::new(flight)
+            event = if synthetic_event {
+                batch.drain(event, mcp_input)
+            } else {
+                let _more = platform_input.poll_window(window)
+                batch.drain(event, platform_input)
+            }
+            flight = batch.flight
+            input_coalesced = batch.consumed
+            for key_event in batch.keys {
+                shortcuts.handle(key_event)
+            }
+            if batch.moved {
+                camera.look(batch.dx, batch.dy, false)
+                navigation.pointer_x = batch.x navigation.pointer_y = batch.y
+                viewport_redraw_pending = true redraw_pending = true
+            }
+        }
+        performance_panel.input_sample(input_age, platform_input.pending_count() + mcp_input.pending_count(), input_coalesced, input_sampled)
         // Polling the command transport must not turn an idle editor into
         // a UI update loop. Only real input, a command or pending background
         // work needs snapshots, hit-testing and retained-tree preparation.
@@ -5717,7 +5773,9 @@ fn main() -> u32 {
         } else {
             ""
         }
+        profile_phase(7_u32)
         let ui_update_pending = window.has_pending_bindings() || reactive_ui.needs_preparation()
+        profile_phase(11_u32)
         if texture_retirement_pending {
             viewport_renderer.collect_material_resources()
         }
@@ -5729,7 +5787,9 @@ fn main() -> u32 {
             ui.browser.open_project(project_root)
         }
         ui.lod_groups.sync(project_root, imported_meshes)
+        profile_phase(12_u32)
         let browser_polled = ui.browser.poll()
+        profile_phase(13_u32)
         let material_thumbnails_updated = material_thumbnails.poll(window, ui.browser)
         let content_polled = browser_polled || material_thumbnails_updated
         match ui.browser.take_import_result() {
@@ -5760,9 +5820,10 @@ fn main() -> u32 {
         !ui_update_pending && !aa_pending && !profiler_active && !(audio_panel.needs_tick() || particle_editor.needs_tick()) {
             continue
         }
+        profile_phase(8_u32)
         let released_ui = ui.pressed()
         if event.kind() == event_pointer_down() {
-            let hit = reactive_ui.hit(event.x(), event.y()) ui.press(hit)
+            let hit = editor_pointer_target(reactive_ui, event) ui.press(hit)
             if !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() {
                 ui.focus(hit)
             }
@@ -5788,7 +5849,7 @@ fn main() -> u32 {
             flight.clear()
             navigation.tick_ns = performance_counter_ns()
         }
-        if performance_panel.handle(event, reactive_ui.hit(event.x(), event.y()), ui.focused()) {
+        if performance_panel.handle(event, editor_pointer_target(reactive_ui, event), ui.focused()) {
             shortcuts.clear() event = Event::none()
         }
         let event_started = perf_counter_ms()
@@ -5850,7 +5911,7 @@ fn main() -> u32 {
         let mut content_chrome_dirty = content_polled || ui.browser.dirty
         let mut content_input_routed = false
         let mut local_action = ""
-        let mut dirty = mcp_input_ticket > 0 || profiler_active || aa_pending || content_polled || ui.browser.dirty || event.kind() == event_pointer_down() || event.kind() == event_pointer_up() || event.kind() == event_resize() || redraw_pending || ui_update_pending ||
+        let mut dirty = mcp_input_ticket > 0 || aa_pending || content_polled || ui.browser.dirty || event.kind() == event_pointer_down() || event.kind() == event_pointer_up() || event.kind() == event_resize() || redraw_pending || ui_update_pending ||
         (autolod_stats_changed && shading_mode != "lit" && shading_mode != "unlit")
         if ui_editor.poll() {
             dirty = true
@@ -5936,7 +5997,13 @@ fn main() -> u32 {
                         None => {
                         }
                     }
-                    result = mcp_with(profile_snapshot(mcp_limit(arguments)), "collecting", Json::Bool(mcp_profile_enabled))
+                    result = mcp_with(mcp_with(mcp_with(profile_snapshot(mcp_limit(arguments)), "input", performance_panel.input_snapshot()), "ui", ui_update_snapshot(window.ui_update_timings())), "collecting", Json::Bool(mcp_profile_enabled))
+                } elif operation == "editor.gameplay" {
+                    result = if blueprint_playing {
+                        blueprint_simulation.gameplay_json(mcp_unsigned(arguments.get("actor").unwrap_or(Json::Number("0"))).unwrap_or(0))
+                    } else {
+                        mcp_failed("Start Play to inspect the runtime world")
+                    }
                 } elif operation == "editor.render_settings" {
                     result = Json::Object(vec![field("ok", Json::Bool(true)), field("settings", mcp_rendering(ui.render_settings)), field("effectiveAA", Json::String(effective_reconstruction(ui.render_settings.anti_aliasing(), ui.aa_sample_counts, ui.reconstruction_capabilities).key())), field("capabilities", Json::Number(ui.reconstruction_capabilities.fmt())), field("status", Json::String(ui.reconstruction_status))])
                 } elif operation == "editor.set_render_settings" {
@@ -5985,6 +6052,64 @@ fn main() -> u32 {
                     result = mcp_jobs.import_asset(command_state, project_root, arguments)
                 } elif operation == "editor.job" {
                     result = mcp_jobs.status(mcp_string(arguments, "jobId"))
+                } elif operation == "editor.set_recipe" {
+                    result = match mcp_authored_recipe(ui.browser, arguments) {
+                        Ok(_) => mcp_ok("Recipe saved") Err(error) => mcp_failed(error)
+                    }
+                    content_chrome_dirty = true dirty = true
+                } elif operation == "editor.set_blueprint" {
+                    match mcp_authored_blueprint(ui.browser, arguments) {
+                        Ok(asset) => {
+                            let path = project_root + "/" + mcp_string(arguments, "path")
+                            let mut ready = !simulating && !building && !blueprint_build_worker.is_some()
+                            if ready && blueprint_path != path {
+                                let opened = command_state.execute(GrapheneCommand::OpenBlueprint(blueprint_parse(read_file(path)).unwrap_or(asset)))
+                                ready = opened.success()
+                                if ready {
+                                    blueprint_path = path blueprint_editor = BlueprintEditor::new()
+                                }
+                            }
+                            if ready {
+                                let edited = command_state.execute(GrapheneCommand::EditBlueprint(graphene::blueprint::document::BlueprintCommand::ReplaceAsset(asset)))
+                                if edited.success() {
+                                    result = match save_blueprint(path, command_state.blueprint_asset()) {
+                                        Ok(_) => {
+                                            command_state.blueprint_saved() mcp_ok("Blueprint saved; Undo is available in the graph editor")
+                                        }
+                                        Err(error) => mcp_failed(error)
+                                    }
+                                    blueprint_editor.refresh(command_state.blueprint_asset(), window.stylesheet()) blueprint_files = discover_blueprints(project_root)
+                                    blueprint_chrome_dirty = true content_chrome_dirty = true dirty = true
+                                } else {
+                                    result = mcp_failed(edited.message())
+                                }
+                            } else {
+                                result = mcp_failed("Save the current Blueprint, stop Play and wait for compilation first")
+                            }
+                        }
+                        Err(error) => {
+                            result = mcp_failed(error)
+                        }
+                    }
+                } elif operation == "editor.set_ui" {
+                    match mcp_authored_path(ui.browser, arguments, ".graphene-ui.json", true) {
+                        Ok(_) => {
+                            match ui_asset_parse(stringify(arguments.get("document").unwrap_or(Json::Null))) {
+                                Ok(asset) => {
+                                    result = match ui_editor.replace_asset(mcp_string(arguments, "path"), asset) {
+                                        Ok(_) => mcp_ok("UI saved; Undo is available in the designer") Err(error) => mcp_failed(error)
+                                    }
+                                    dirty = true content_chrome_dirty = true
+                                }
+                                Err(error) => {
+                                    result = mcp_failed(error)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            result = mcp_failed(error)
+                        }
+                    }
                 } elif operation == "editor.set_material" {
                     result = mcp_set_material(ui.browser, arguments)
                     if result.get("ok").unwrap_or(Json::Bool(false)).as_bool().unwrap_or(false) {
@@ -6208,11 +6333,11 @@ fn main() -> u32 {
         }
         genai_editor.poll(window) pbr_editor.poll(window)
         let genai_selected = selected_cube > 0 && genai_mesh_target(mesh_name_at(cube_mesh_names, selected_cube)) && !simulating
-        let genai_consumed = genai_editor.input(event, reactive_ui.hit(event.x(), event.y()), reactive_ui.layout(), simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "", genai_selected, dock_workspace.location(PanelId::new("genai")).is_some(), window)
+        let genai_consumed = genai_editor.input(event, editor_pointer_target(reactive_ui, event), reactive_ui.layout(), simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "", genai_selected, dock_workspace.location(PanelId::new("genai")).is_some(), window)
         if genai_consumed {
             ui.focus(genai_editor.focused()) dirty = true reactive_only = true shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
         }
-        if pbr_editor.input(event, reactive_ui.hit(event.x(), event.y()), reactive_ui.layout().find_bounds("material-instance-editor").is_some(), simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "", window, reactive_ui.layout()) {
+        if pbr_editor.input(event, editor_pointer_target(reactive_ui, event), reactive_ui.layout().find_bounds("material-instance-editor").is_some(), simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "", window, reactive_ui.layout()) {
             ui.focus(pbr_editor.focused()) dirty = true reactive_only = true shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
         }
         if pbr_editor.take_pick() != "" {
@@ -6250,6 +6375,7 @@ fn main() -> u32 {
             None => {
             }
         }
+        profile_phase(9_u32)
         let generated_material = genai_editor.take_apply()
         if generated_material != "" && genai_selected {
             let actor = cube_entities.get((selected_cube - 1) as usize).unwrap_or(0_u64)
@@ -6273,7 +6399,12 @@ fn main() -> u32 {
         if viewport_renderer.poll_terrain_materials() {
             viewport_redraw_pending = true dirty = true
         }
-        if material_texture_loader.sync(project_root, editor_scene, viewport_renderer) {
+        if material_texture_loader.sync(project_root, if blueprint_playing {
+                blueprint_simulation.scene()
+            } else {
+                editor_scene
+            }
+            , viewport_renderer,) {
             viewport_redraw_pending = true dirty = true
         }
         let terrain_selected_id = cube_entities.get(if selected_cube > 0 {
@@ -6285,7 +6416,7 @@ fn main() -> u32 {
         terrain_editor.select(editor_scene, terrain_selected_id, mesh_name_at(cube_mesh_names, selected_cube))
         let terrain_bounds = viewport_bounds(reactive_ui.layout())
         let terrain_ray = viewport_renderer.camera_ray_pose((event.x() - terrain_bounds.x()) *(viewport_renderer.width() as f32) / terrain_bounds.width(),(event.y() - terrain_bounds.y()) *(viewport_renderer.height() as f32) / terrain_bounds.height(), camera.position, camera.yaw, camera.pitch, camera.fov)
-        let terrain_consumed = terrain_editor.input(event, reactive_ui.hit(event.x(), event.y()), reactive_ui.layout(), terrain_ray,
+        let terrain_consumed = terrain_editor.input(event, editor_pointer_target(reactive_ui, event), reactive_ui.layout(), terrain_ray,
             simulating || project_dialog_mode != "" || unsaved_action != "" || open_menu != "" || ui.popup() != "" || pbr_editor.popup_open() || material_editor.popup_open() || blueprint_editor.popup_open() || ui_editor.popup_open(),
             reactive_ui.layout().find_bounds("terrain-panel").is_some(), window,)
         if terrain_consumed {
@@ -6298,7 +6429,8 @@ fn main() -> u32 {
         if terrain_editor.take_changed() {
             project_dirty = true viewport_redraw_pending = true dirty = true
         }
-        let ui_editor_target = reactive_ui.hit(event.x(), event.y())
+        profile_phase(10_u32)
+        let ui_editor_target = editor_pointer_target(reactive_ui, event)
         let ui_editor_popup_was_open = ui_editor.popup_open()
         let ui_editor_consumed = dock_workspace.location(PanelId::new("ui")).is_some() && project_dialog_mode == "" && unsaved_action == "" &&
         ui_editor.input(event, ui_editor_target, reactive_ui.layout(), window.stylesheet(), simulating, window)
@@ -6410,7 +6542,7 @@ fn main() -> u32 {
                     viewport_pixel_x, viewport_pixel_y, render_width,
                     render_height, viewport_density, event.x(), event.y(),).is_some()
                 let mut hover_hit = resolve_editor_pointer_target(
-                    over_viewport, reactive_ui.hit(event.x(), event.y()),)
+                    over_viewport, editor_pointer_target(reactive_ui, event),)
                 let toolbar_hit = toolbar_hover_target(layout, event.x(), event.y())
                 if toolbar_hit != "" {
                     hover_hit = toolbar_hit
@@ -6684,7 +6816,7 @@ fn main() -> u32 {
                 consume = true ui_chrome_dirty = true
             } elif owner == "ui-lod-groups" {
                 ui.lod_groups.set_layout(layout)
-                let hit = reactive_ui.hit(event.x(), event.y())
+                let hit = editor_pointer_target(reactive_ui, event)
                 if !ui.lod_groups.dragging() && event.kind() == event_pointer_down() &&(hit == "lod-cancel" || !retained_bounds(reactive_ui, "ui-local-popup").unwrap_or(Rect::new(0, 0, 0, 0)).contains(Point::new(event.x(), event.y()))) {
                     ui.lod_groups.cancel() ui.close() consume = true ui_chrome_dirty = true
                 } elif ui.lod_groups.input(event, hit, layout, window) {
@@ -6792,7 +6924,7 @@ fn main() -> u32 {
                 let popup_bounds = retained_bounds(reactive_ui, "ui-local-popup").unwrap_or(Rect::new(0, 0, 0, 0))
                 if popup_bounds.contains(Point::new(event.x(), event.y())) {
                     if !aa_popup {
-                        local_action = reactive_ui.hit(event.x(), event.y())
+                        local_action = editor_pointer_target(reactive_ui, event)
                         if local_action == "mcp-port" {
                             ui.focus("mcp-port") local_action = ""
                         }
@@ -6801,7 +6933,7 @@ fn main() -> u32 {
                         }
                     }
                 } else {
-                    let outside = reactive_ui.hit(event.x(), event.y())
+                    let outside = editor_pointer_target(reactive_ui, event)
                     ui.close()
                     if (outside.contains("ui-snap-step-") && outside != owner) || outside.contains("snap-toggle-") {
                         local_action = outside
@@ -6814,7 +6946,7 @@ fn main() -> u32 {
                 }
                 consume = true
             } elif aa_popup && event.kind() == event_pointer_up() {
-                if (released_ui.contains("anti-aliasing-") || released_ui.contains("reconstruction-") || released_ui == "ui-lod-groups" || released_ui == "menu-audio-action") && reactive_ui.hit(event.x(), event.y()) == released_ui {
+                if (released_ui.contains("anti-aliasing-") || released_ui.contains("reconstruction-") || released_ui == "ui-lod-groups" || released_ui == "menu-audio-action") && editor_pointer_target(reactive_ui, event) == released_ui {
                     local_action = released_ui
                     if !released_ui.contains("reconstruction-") {
                         ui.close()
@@ -6842,7 +6974,7 @@ fn main() -> u32 {
             let actor_target = if (event.kind() == event_key_down() || event.kind() == event_text_input()) && reactive_ui.focused_id() != "" {
                 reactive_ui.focused_id()
             } else {
-                reactive_ui.hit(event.x(), event.y())
+                editor_pointer_target(reactive_ui, event)
             }
             ui.actors.physics_expanded = ui.expanded("ui-section-physics")
             if ui.actors.input(event, actor_target, layout, command_state, window) {
@@ -6850,17 +6982,17 @@ fn main() -> u32 {
                 ui_chrome_dirty = true dirty = true event = Event::none()
             }
         }
-        if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && audio_panel.input(event, reactive_ui.hit(event.x(), event.y()), layout) {
+        if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && audio_panel.input(event, editor_pointer_target(reactive_ui, event), layout) {
             dirty = true reactive_only = true ui_chrome_dirty = true event = Event::none() shortcuts.clear() flight.clear() navigation.focused = false
         }
-        if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && particle_editor.input(event, reactive_ui.hit(event.x(), event.y()), layout, window) {
+        if project_dialog_mode == "" && unsaved_action == "" && ui.popup() == "" && particle_editor.input(event, editor_pointer_target(reactive_ui, event), layout, window) {
             dirty = true reactive_only = true ui_chrome_dirty = true event = Event::none() shortcuts.clear() flight.clear() navigation.focused = false
         }
-        if transform_field != "" && transform_editor.pointer_handles(event, reactive_ui.hit(event.x(), event.y()), transform_field) && !simulating && ui.popup() == "" {
+        if transform_field != "" && transform_editor.pointer_handles(event, editor_pointer_target(reactive_ui, event), transform_field) && !simulating && ui.popup() == "" {
             transform_editor = transform_editor.pointer_input(event, layout, transform_field, window)
             dirty = true ui_chrome_dirty = true event = Event::none()
         }
-        let content_target = reactive_ui.hit(event.x(), event.y())
+        let content_target = editor_pointer_target(reactive_ui, event)
         let content_file_input =(event.kind() == event_key_down() &&(event.control() || event.key() == key_delete() || event.key() == 1073741883 ||(event.key() == key_enter() && ui.browser.popup != ""))) ||
         (event.kind() == event_pointer_down() &&(content_target == "cb-confirm" || content_target == "cb-file-undo" || content_target == "cb-file-redo"))
         let content_references = if content_file_input {
@@ -6871,7 +7003,7 @@ fn main() -> u32 {
         if project_dialog_mode == "" && unsaved_action == "" && !pbr_editor.popup_open() && !material_editor.popup_open() && !blueprint_editor.popup_open() && !ui_editor.popup_open() && ui.popup() == "" &&
         (event.kind() != event_pointer_down() ||(transform_field == "" && !actor_name_focused && !ui.actors.editing())) {
             content_input_routed = true
-            if content_input(ui.browser, event, reactive_ui.hit(event.x(), event.y()), layout, reactive_ui, window, icons.content, ui.browser.editable, content_references) {
+            if content_input(ui.browser, event, editor_pointer_target(reactive_ui, event), layout, reactive_ui, window, icons.content, ui.browser.editable, content_references) {
                 dirty = true content_chrome_dirty = true layout = reactive_ui.layout()
                 if ui.browser.focus_id != "" {
                     ui.focus(ui.browser.focus_id)
@@ -7108,10 +7240,10 @@ fn main() -> u32 {
             }
         }
         if unsaved_action == "" && project_dialog_mode == "" {
-            if material_editor.color_input(event, reactive_ui.hit(event.x(), event.y()), layout, window.stylesheet(), window) {
+            if material_editor.color_input(event, editor_pointer_target(reactive_ui, event), layout, window.stylesheet(), window) {
                 if event.kind() == event_pointer_move() || event.kind() == event_pointer_down() || event.kind() == event_pointer_up() {
                     let cursor = if material_editor.popup_open() {
-                        match reactive_ui.find_widget(reactive_ui.hit(event.x(), event.y())) {
+                        match reactive_ui.find_widget(editor_pointer_target(reactive_ui, event)) {
                             Some(widget) => widget.style().pointer_cursor()
                             None => 0_u32
                         }
@@ -7124,13 +7256,13 @@ fn main() -> u32 {
             }
             let material_bounds = retained_bounds(reactive_ui, "material-canvas").unwrap_or(Rect::new(0, 0, 0, 0))
             let preview_bounds = retained_bounds(reactive_ui, "material-preview-surface").unwrap_or(Rect::new(0, 0, 0, 0))
-            if material_bounds.width() > 0 && material_editor.input(event, reactive_ui.hit(event.x(), event.y()), material_bounds, preview_bounds, window.stylesheet(), layout, window) {
+            if material_bounds.width() > 0 && material_editor.input(event, editor_pointer_target(reactive_ui, event), material_bounds, preview_bounds, window.stylesheet(), layout, window) {
                 dirty = true reactive_only = true shortcuts.clear() flight.clear() navigation.focused = false event = Event::none()
             }
             let canvas_bounds = retained_bounds(reactive_ui, "blueprint-canvas").unwrap_or(Rect::new(0, 0, 0, 0))
-            let target = reactive_ui.hit(event.x(), event.y())
+            let target = editor_pointer_target(reactive_ui, event)
             let old_revision = command_state.revision()
-            if blueprint_editor.input_with_text(command_state, event, target, canvas_bounds, window.stylesheet(), layout, window) {
+            if open_menu == "" && !add_actor_open && blueprint_editor.input_with_text(command_state, event, target, canvas_bounds, window.stylesheet(), layout, window) {
                 blueprint_paint_dirty = true dirty = true reactive_only = true
                 blueprint_chrome_dirty = blueprint_chrome_dirty || blueprint_editor.resizing() ||(event.kind() != event_pointer_move() && event.kind() != event_scroll())
                 shortcuts.clear()
@@ -7147,7 +7279,7 @@ fn main() -> u32 {
                 viewport_density, event.x(), event.y(),).is_some() &&
             project_dialog_mode == "" && unsaved_action == ""
             let mut target = resolve_editor_pointer_target(
-                over_viewport, reactive_ui.hit(event.x(), event.y()),)
+                over_viewport, editor_pointer_target(reactive_ui, event),)
             if blueprint_request != "" {
                 target = blueprint_request
             }
@@ -7289,7 +7421,13 @@ fn main() -> u32 {
                 ui.viewport_stats = !ui.viewport_stats
                 ui.focus(target)
                 ui_chrome_dirty = true dirty = true
-                let _stats_staged = window.stage_component(reactive_ui, "viewport-stats-toggle", Widget::button("viewport-stats-toggle", "Stats").with_classes(state_classes("toolbar-button stats-toggle", ui.viewport_stats)).with_attribute("aria-pressed", if ui.viewport_stats { "true" } else { "false" }).with_attribute("title", "Show frame statistics and graph"))
+                let _stats_staged = window.stage_component(reactive_ui, "viewport-stats-toggle", Widget::button("viewport-stats-toggle", "Stats").with_classes(state_classes("toolbar-button stats-toggle", ui.viewport_stats)).with_attribute("aria-pressed", if ui.viewport_stats {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                        ,
+                    ).with_attribute("title", "Show frame statistics and graph"))
                 target = ""
             }
             if target == "menu-genai-action" || target == "menu-terrain-action" || target == "menu-performance-action" || target == "menu-environment-action" || target == "menu-audio-action" || target == "menu-particles-action" || target == "menu-widget-action" {
@@ -7620,9 +7758,14 @@ fn main() -> u32 {
                     status_message = committed.message()
                 }
             }
-            let viewport_location = viewport_point_extent(
-                viewport_pixel_x, viewport_pixel_y, render_width, render_height,
-                viewport_density, event.x(), event.y(),)
+            // Cached image extents survive inactive dock tabs. Only the live
+            // surface target can start selection, gizmos or camera navigation.
+            let viewport_location = if viewport_visible && target == "viewport-surface" {
+                viewport_point_extent(viewport_pixel_x, viewport_pixel_y, render_width, render_height,
+                    viewport_density, event.x(), event.y(),)
+            } else {
+                Option[(f32, f32)]::None
+            }
             navigation.focused = viewport_location.is_some() && project_dialog_mode == "" && unsaved_action
             == ""
             let clicked_transform = transform_input_target(target)
@@ -9982,7 +10125,7 @@ fn main() -> u32 {
             }
         }
         if !content_input_routed && event.kind() == event_pointer_down() && project_dialog_mode == "" && unsaved_action == "" && transform_field == "" && !actor_name_focused && !ui.actors.editing() {
-            if content_input(ui.browser, event, reactive_ui.hit(event.x(), event.y()), layout, reactive_ui, window, icons.content, ui.browser.editable, content_references) {
+            if content_input(ui.browser, event, editor_pointer_target(reactive_ui, event), layout, reactive_ui, window, icons.content, ui.browser.editable, content_references) {
                 dirty = true content_chrome_dirty = true layout = reactive_ui.layout() event = Event::none()
             }
         }
@@ -10941,7 +11084,7 @@ fn main() -> u32 {
                         } else {
                             blueprint_program_semantic
                         }
-                        let render_error = blueprint_render_error(classes, plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes)
+                        let render_error = blueprint_render_error(project_root, classes, plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes)
                         if render_error != "" {
                             status_message = render_error let _stopped = command_state.execute(GrapheneCommand::StopSimulation) simulating = false simulation_mode = "" dirty = true
                         } else {
@@ -10979,6 +11122,35 @@ fn main() -> u32 {
                             }
                             match started {
                                 Ok(_) => {
+                                    let mut surfaces = Vec[NavigationTerrain]::new()
+                                    for actor in editor_scene.entities() {
+                                        let key = command_state.asset_name(actor.id())
+                                        match terrain_editor.navigation_asset(key) {
+                                            Some(asset) => {
+                                                match editor_scene.world_matrix(actor.id()) {
+                                                    Some(world) => {
+                                                        match world.inverse_affine() {
+                                                            Some(inverse) => {
+                                                                surfaces.push(NavigationTerrain {
+                                                                        asset, world, inverse
+                                                                    }
+                                                                )
+                                                            }
+                                                            None => {
+                                                            }
+                                                        }
+                                                    }
+                                                    None => {
+                                                    }
+                                                }
+                                            }
+                                            None => {
+                                            }
+                                        }
+                                    }
+                                    let navigation = NavigationGrid::from_scene(editor_scene).with_terrains(surfaces)
+                                    game_ui.prepare_minimap(navigation)
+                                    blueprint_simulation.set_navigation(navigation)
                                     blueprint_playing = true blueprint_tick_ns = performance_counter_ns() blueprint_reported_diagnostics = 0
                                 }
                                 Err(error) => {
@@ -11007,7 +11179,52 @@ fn main() -> u32 {
                 }
                 blueprint_simulation.set_controller_input(simulation_mode_is_play(simulation_mode) && ui.focused() == "viewport-surface")
                 if !game_ui.paused() {
+                    match game_ui.take_map_request() {
+                        Some(point) => {
+                            blueprint_simulation.focus_camera(point)
+                        }
+                        None => {
+                        }
+                    }
+                    for message in game_ui.take_events() {
+                        blueprint_simulation.game_event(message)
+                    }
+                    for message in blueprint_simulation.take_events() {
+                        game_ui.game_event(message)
+                    }
+                    if event.kind() == event_pointer_move() {
+                        if (event.buttons() & 4) != 0 && game_ui.hovered() == "" {
+                            blueprint_simulation.player_look(event.dx(), event.dy())
+                        }
+                        let bounds = layout.find_bounds("viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0))
+                        match viewport_renderer.game_pointer_ray(bounds, event.x(), event.y()) {
+                            Some(ray) => {
+                                blueprint_simulation.pointer_hover(ray.0, ray.1)
+                            }
+                            None => {
+                                blueprint_simulation.pointer_exit()
+                            }
+                        }
+                    }
+                }
+                if !game_ui.paused() && simulation_mode_is_play(simulation_mode) && event.kind() == event_pointer_down() && ui.popup() == "" && project_dialog_mode == "" &&(event.primary_down() ||(event.buttons() & 4) != 0) {
+                    let bounds = layout.find_bounds("viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0))
+                    match viewport_renderer.game_pointer_ray(bounds, event.x(), event.y()) {
+                        Some(ray) => {
+                            blueprint_simulation.pointer_click(ray.0, ray.1,(event.buttons() & 4) != 0) ui.focus("viewport-surface")
+                        }
+                        None => {
+                        }
+                    }
+                }
+                if !game_ui.paused() {
                     blueprint_simulation.tick(delta, InputSnapshot::empty())
+                    let wheel = if event.kind() == event_scroll() && game_ui.hovered() == "" && viewport_renderer.game_pointer_ray(layout.find_bounds("viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0)), event.x(), event.y()).is_some() {
+                        event.wheel_y()
+                    } else {
+                        0_f32
+                    }
+                    blueprint_simulation.camera_controls(delta, wheel)
                 }
                 let output = blueprint_simulation.take_log()
                 if output != "" {
@@ -11126,6 +11343,7 @@ fn main() -> u32 {
                 reactive_ui.invalidate_paint("environment-panel")
             }
         }
+        profile_phase(14_u32)
         let audio_scene = if blueprint_playing {
             blueprint_simulation.scene()
         } else {
@@ -11170,6 +11388,7 @@ fn main() -> u32 {
         let vfx_published = particle_editor.take_published() if vfx_published != "" {
             viewport_renderer.reload_particles(vfx_published) ui.browser.refresh() dirty = true content_chrome_dirty = true
         }
+        profile_phase(15_u32)
         let material_updated = material_editor.tick(window, window.stylesheet())
         let material_changed_path = material_editor.take_changed()
         if material_changed_path != "" {
@@ -11413,6 +11632,7 @@ fn main() -> u32 {
             viewport_only = true
         }
         let guide_only_update = moving_cube && event.kind() == event_pointer_move() && !gesture_transform_changed
+        profile_phase(16_u32)
         // Model and subtree changes share one complete CSS transaction before
         // surface geometry and retained paint targets are committed. Styling
         // each replacement in isolation loses parent context and inheritance.
@@ -11534,7 +11754,7 @@ fn main() -> u32 {
                 // Camera-only frames do not mutate scene state. Replaying all
                 // hierarchy and material updates here adds avoidable CPU work
                 // and repeatedly exercises owned scene graphs.
-                if scene_model_changed || material_texture_changed || material_edit_action(event_target) || moving_cube || simulating {
+                if !blueprint_playing &&(scene_model_changed || material_texture_changed || material_edit_action(event_target) || moving_cube || simulating) {
                     viewport_renderer.sync_cubes(object_count)
                     viewport_renderer.select_cubes(if simulation_mode_is_play(simulation_mode) {
                             Vec[u32]::new()
@@ -11566,48 +11786,83 @@ fn main() -> u32 {
             }
             if blueprint_playing {
                 let runtime_scene = blueprint_simulation.scene()
-                let mut bindings = Vec[SceneGpuBinding]::new()
-                let mut actor_index = 0_usize
-                for actor in editor_scene.entities() {
-                    if actor.blueprint().is_none() && actor.renderable().is_some() && actor.component().kind() == "" {
-                        let mesh_name = mesh_name_at(cube_mesh_names, actor_index as u32 + 1)
-                        let resolved = if terrain_key_path(mesh_name) != "" {
-                            terrain_editor.mesh(mesh_name)
-                        } else {
-                            resolve_actor_gpu_mesh(mesh_name, plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes)
-                        }
-                        bindings.push(SceneGpuBinding {
-                                actor.id(), if resolved.valid() {
-                                    resolved
-                                } else {
-                                    viewport_renderer.default_cube_mesh()
-                                }
-                            }
-                            ,
-                        )
-                    }
-                    actor_index += 1
-                }
-                for component in blueprint_simulation.component_bindings() {
-                    if component.mesh != "" {
-                        let resolved = resolve_actor_gpu_mesh(if component.mesh == "cube" {
-                                ""
+                if runtime_gpu_source.as_ptr() != runtime_scene.entities().as_ptr() || runtime_gpu_binding_revision != runtime_scene.binding_revision() || previous_simulation_mode != simulation_mode {
+                    let mut bindings = Vec[SceneGpuBinding]::new()
+                    let mut actor_index = 0_usize
+                    for actor in editor_scene.entities() {
+                        if actor.blueprint().is_none() && actor.renderable().is_some() && actor.component().kind() == "" {
+                            let mesh_name = mesh_name_at(cube_mesh_names, actor_index as u32 + 1)
+                            let resolved = if terrain_key_path(mesh_name) != "" {
+                                terrain_editor.mesh(mesh_name)
                             } else {
-                                component.mesh
+                                resolve_actor_gpu_mesh(mesh_name, plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes)
                             }
-                            , plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes,)
-                        bindings.push(SceneGpuBinding {
-                                component.entity, if component.mesh == "cube" {
-                                    viewport_renderer.default_cube_mesh()
-                                } else {
-                                    resolved
+                            bindings.push(SceneGpuBinding {
+                                    actor.id(), if resolved.valid() {
+                                        resolved
+                                    } else {
+                                        viewport_renderer.default_cube_mesh()
+                                    }
                                 }
-                            }
-                            ,
-                        )
+                                ,
+                            )
+                        }
+                        actor_index += 1
+                    }
+                    for component in blueprint_simulation.component_bindings() {
+                        if component.mesh != "" {
+                            let resolved = resolve_actor_gpu_mesh(if component.mesh == "cube" {
+                                    ""
+                                } else {
+                                    component.mesh
+                                }
+                                , plane_gpu_mesh, sphere_gpu_mesh, imported_meshes, imported_gpu_meshes,)
+                            bindings.push(SceneGpuBinding {
+                                    component.entity, if component.mesh == "cube" {
+                                        viewport_renderer.default_cube_mesh()
+                                    } else {
+                                        resolved
+                                    }
+                                }
+                                ,
+                            )
+                        }
+                    }
+                    runtime_gpu_bindings = bindings
+                    runtime_gpu_binding_revision = runtime_scene.binding_revision()
+                    runtime_gpu_source = runtime_scene.entities()
+                }
+                viewport_renderer.sync_scene_instances(runtime_scene, runtime_gpu_bindings)
+                let mut selected_owners = Vec[u64]::new()
+                for actor in editor_scene.entities() {
+                    if blueprint_simulation.selected(actor.id()) {
+                        selected_owners.push(actor.id())
                     }
                 }
-                viewport_renderer.sync_scene_instances(runtime_scene, bindings)
+                let mut runtime_selected = Vec[u32]::new()
+                let mut runtime_index = 1_u32
+                for actor in runtime_scene.entities() {
+                    let mut parent = actor.parent().unwrap_or(0)
+                    for _depth in 0_usize..64_usize {
+                        let mut selected = false
+                        for owner in selected_owners {
+                            if actor.id() == owner || parent == owner {
+                                selected = true
+                            }
+                        }
+                        if selected {
+                            runtime_selected.push(runtime_index) break
+                        }
+                        if parent == 0 || selected_owners.len() == 0 {
+                            break
+                        }
+                        parent = match runtime_scene.get(parent) {
+                            Some(value) => value.parent().unwrap_or(0) None => 0
+                        }
+                    }
+                    runtime_index += 1
+                }
+                viewport_renderer.runtime_selection(runtime_selected)
                 let mut terrain_runtime_index = 0_u32
                 for actor in runtime_scene.entities() {
                     let key = command_state.asset_name(actor.id())
@@ -11718,8 +11973,13 @@ fn main() -> u32 {
                     }
                     // A shared image becomes sampleable only after its first
                     // successful render. Never require it to exist beforehand.
+                    let camera_scene = if blueprint_playing {
+                        blueprint_simulation.scene()
+                    } else {
+                        editor_scene
+                    }
                     let view_actor = if simulation_mode_is_play(simulation_mode) {
-                        first_scene_camera(editor_scene)
+                        first_scene_camera(camera_scene)
                     } else {
                         pilot_id
                     }
@@ -11731,7 +11991,7 @@ fn main() -> u32 {
                         }
                         None => 0.0_f32
                     }
-                    viewport_renderer.set_camera_override(scene_camera(editor_scene, view_actor), view_aspect)
+                    viewport_renderer.set_camera_override(scene_camera(camera_scene, view_actor), view_aspect)
                     if viewport_renderer.retire_generated_images(render_width, render_height) {
                         window.clear_external_vulkan_images() last_play_frame = Option[PreparedFrame]::None
                     }
@@ -11795,7 +12055,9 @@ fn main() -> u32 {
                     }
                     if simulation_mode_is_play(simulation_mode) {
                         let game_bounds = retained_bounds(reactive_ui, "viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0))
-                        composed = game_ui.compose(composed, viewport_renderer.game_ui_bounds(game_bounds))
+                        profile_phase(45_u32)
+                        composed = game_ui.compose(composed, viewport_renderer.game_ui_bounds(game_bounds), blueprint_simulation.scene(), blueprint_simulation.map_markers(), blueprint_simulation.navigation_routes(), scene_camera(blueprint_simulation.scene(), first_scene_camera(blueprint_simulation.scene())))
+                        profile_phase(5_u32)
                     }
                     match retained_bounds(reactive_ui, "material-canvas") {
                         Some(bounds) => {
@@ -11807,20 +12069,24 @@ fn main() -> u32 {
                     if ui.popup() == "ui-lod-groups" {
                         ui.lod_groups.set_layout(layout) composed = ui.lod_groups.compose(composed, window.stylesheet())
                     }
+                    profile_phase(57_u32)
                     composed = performance_panel.compose_stats(composed, window.stylesheet(), ui.viewport_stats)
-                composed = composed.with_display_overlay(hint_display, hint_clip)
+                    profile_phase(5_u32)
+                    composed = composed.with_display_overlay(hint_display, hint_clip)
                     let pbr_composed = pbr_editor.compose(composed)
                     let genai_composed = genai_editor.compose(composed)
                     let material_composed = material_editor.compose(composed, material_preview_environment(viewport_renderer, camera.position), environment_active)
                     let image = ExternalVulkanImage::new(viewport_renderer.external_image() as u64,
                         viewport_renderer.allocation_width(), viewport_renderer.allocation_height(), viewport_renderer.external_layout(),)
                     .with_region(0, 0, render_width, render_height)
+                    profile_phase(44_u32)
                     let camera_ready = compose_camera_preview(window, viewport_renderer, composed, editor_scene, cube_entities.get(if selected_cube > 0 {
                                 (selected_cube - 1) as usize
                             } else {
                                 cube_entities.len()
                             }
                         ).unwrap_or(0_u64))
+                    profile_phase(5_u32)
                     if !camera_ready {
                         viewport_redraw_pending = true
                     }
@@ -11878,7 +12144,8 @@ fn main() -> u32 {
                 }
                 if simulation_mode_is_play(simulation_mode) {
                     let game_bounds = retained_bounds(reactive_ui, "viewport-surface").unwrap_or(Rect::new(0, 0, 0, 0))
-                    composed = game_ui.compose(composed, viewport_renderer.game_ui_bounds(game_bounds))
+                    composed = game_ui.compose(composed, viewport_renderer.game_ui_bounds(game_bounds), blueprint_simulation.scene(), blueprint_simulation.map_markers(), blueprint_simulation.navigation_routes(), scene_camera(blueprint_simulation.scene(), first_scene_camera(blueprint_simulation.scene())))
+                    profile_phase(5_u32)
                 }
                 match retained_bounds(reactive_ui, "material-canvas") {
                     Some(bounds) => {

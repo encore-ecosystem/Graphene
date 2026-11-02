@@ -1,0 +1,76 @@
+//! Ground feedback follows remaining corners, camera projection and clipping.
+import core::vec::Vec
+import graphene::blueprint::NavigationRoute
+import graphene::game_ui::navigation::{navigation_display, navigation_project, navigation_ring_points, navigation_route_points}
+import graphene::scene::camera::PerspectiveCamera
+import linalg::Vec3
+import luma::{DisplayCommand, Rect}
+
+fn close(a: f32, b: f32) -> bool {
+    ret a > b - 0.01 && a < b + 0.01
+}
+fn main() -> u32 {
+    let bounds = Rect::new(100, 50, 800, 400)
+    let camera = PerspectiveCamera::new(Vec3::new(0, 10, 10), Vec3::zero(), 1.5707963, 1, 100)
+    let center = navigation_project(bounds, camera, Vec3::zero()).unwrap_or(luma::Point::new(0, 0))
+    if !close(center.x(), 500) || !close(center.y(), 250) {
+        ret 1
+    }
+    if navigation_project(bounds, camera, Vec3::new(0, 20, 20)).is_some() || navigation_project(Rect::new(0, 0, 0, 0), camera, Vec3::zero()).is_some() {
+        ret 2
+    }
+    let corner = NavigationRoute {
+        42, Vec3::new(1, 0, 0), vec![Vec3::new( - 10, 0, - 10), Vec3::new(2, 0, 0), Vec3::new(4, 0, 0), Vec3::new(4, 0, - 4)], 1
+    }
+    let remaining = navigation_route_points(corner)
+    if remaining.len() != 3 || remaining.get_unchecked_borrowed(0).x() != 1 || remaining.get_unchecked_borrowed(1).x() != 4 || remaining.get_unchecked_borrowed(2).z() != - 4 {
+        ret 3
+    }
+    let arrived = NavigationRoute { 42, Vec3::zero(), corner.points, corner.points.len() }
+    if navigation_route_points(arrived).len() != 0 {
+        ret 4
+    }
+    let mut long = Vec[Vec3]::new()
+    for i in 0..1024 {
+        long.push(Vec3::new((i as f32) * 0.01, 0, 0))
+    }
+    let route = NavigationRoute { 42, Vec3::zero(), long, 0 }
+    if navigation_route_points(route).len() != 2 {
+        ret 5
+    }
+    let display = navigation_display(bounds, camera, vec![route])
+    if display.len() < 60 || display.len() > 140 {
+        ret 6
+    }
+    if navigation_display(bounds, camera, Vec[NavigationRoute]::new()).len() != 0 {
+        ret 7
+    }
+    // A route crossing the eye plane must be clipped, not projected through it.
+    let clipped = navigation_display(bounds, camera, vec![NavigationRoute {
+                42, Vec3::new(0, 20, 20), vec![Vec3::zero()], 0
+            }
+        ])
+    for command in clipped.commands() {
+        match command {
+            DisplayCommand::Line(line) => {
+                for value in vec![line.x0(), line.x1(), line.y0(), line.y1()] {
+                    if !(value >= - 100000 && value <= 100000) {
+                        ret 8
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    let ring = navigation_ring_points(Vec3::zero(), 4)
+    if ring.len() != 33 || ring.get_unchecked_borrowed(32).x() != 4 || ring.get_unchecked_borrowed(32).z() != 0 {
+        ret 9
+    }
+    for point in ring {
+        if !close(point.x() * point.x() + point.z() * point.z(), 16) {
+            ret 10
+        }
+    }
+    ret 0
+}

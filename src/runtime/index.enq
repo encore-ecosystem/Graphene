@@ -1,0 +1,32 @@
+//! Bounded direct ID lookup. Very large imported IDs retain a checked fallback.
+import core::option::Option
+import core::vec::Vec
+pub struct ActorIndex {
+    slots: Vec[usize]
+}
+
+impl for ActorIndex {
+    pub fn new() -> Self {
+        ret Self { Vec[usize]::new() }
+    }
+    pub fn insert(self: mut Self, id: u64, slot: usize) ->() {
+        if id == 0 || id >= 262144 {
+            ret()
+        }
+        while self.slots.len() <= id as usize {
+            self.slots.push(0)
+        }
+        self.slots.set(id as usize, slot + 1)
+    }
+    pub fn get(self: Self, id: u64) -> Option[usize] {
+        if id >= self.slots.len() as u64 {
+            ret Option[usize]::None
+        }
+        let slot = self.slots.get_unchecked_borrowed(id as usize)
+        ret if slot == 0 {
+            Option[usize]::None
+        } else {
+            Option[usize]::Some(slot - 1)
+        }
+    }
+}

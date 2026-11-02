@@ -7,8 +7,10 @@ import core::vec::Vec
 
 import json::{Json, stringify}
 
+import mod::gameplay::{gameplay_slot, gameplay_types}
 import mod::model::*
 import mod::validate::validate_blueprint
+import refrain::gameplay::service::{gameplay_operation, gameplay_property}
 
 pub struct BlueprintSourceRange {
     asset: str
@@ -73,6 +75,9 @@ fn input_expression(asset: BlueprintAsset, prefix: str, node: u64, pin: str) -> 
             ret output_name(prefix, link.source.node, link.source.pin) + "(s, h, dt)"
         }
     }
+    if pin == "visual" {
+        ret "\"\""
+    }
     // Generation is only called after full validation.
     ret "INVALID_UNCONNECTED_INPUT"
 }
@@ -121,6 +126,45 @@ fn transform_field(operation: str) -> str {
 }
 fn expression(asset: BlueprintAsset, prefix: str, node: BlueprintNode, pin: str) -> str {
     let operation = node.operation
+    if gameplay_operation(operation) {
+        let field = if pin == "count" {
+            1_usize
+        } elif pin == "actor" {
+            2_usize
+        } else {
+            3_usize
+        }
+        let slot = index(gameplay_slot(asset, node.id, field)) + "_u32"
+        ret if field == 1 {
+            "gbp_get_i32(s," + slot + ")"
+        } elif field == 2 {
+            "gbp_get_id(s," + slot + ")"
+        } else {
+            "gbp_get_string(s," + slot + ")"
+        }
+    }
+    if operation == "self-actor" || operation == "cursor-actor" {
+        ret "gbp_query_actor(s, h, " +(if operation == "self-actor" {
+                "0_u32"
+            } else {
+                "1_u32"
+            }
+        ) + ", " + id(node.id) + "_u64)"
+    }
+    if operation == "is-selected" || operation == "cursor-valid" {
+        ret "(gbp_query_scalar(s, h, " +(if operation == "is-selected" {
+                "1_u32"
+            } else {
+                "2_u32"
+            }
+        ) + ", 0_u32, " + id(node.id) + "_u64) > 0_f32)"
+    }
+    if operation == "cursor-position" {
+        ret "BpVector { gbp_query_scalar(s,h,0_u32,0_u32," + id(node.id) + "_u64), gbp_query_scalar(s,h,0_u32,1_u32," + id(node.id) + "_u64), gbp_query_scalar(s,h,0_u32,2_u32," + id(node.id) + "_u64) }"
+    }
+    if operation == "to-text" {
+        ret "Debug::fmt(" + input_expression(asset, prefix, node.id, "value") + ")"
+    }
     if operation == "constant" {
         ret literal(node.value)
     }
@@ -164,6 +208,72 @@ fn expression(asset: BlueprintAsset, prefix: str, node: BlueprintNode, pin: str)
 fn execution(asset: BlueprintAsset, prefix: str, node: BlueprintNode) -> str {
     let operation = node.operation
     let mut body = "    if !gbp_ok(s) { ret () }\n"
+    if gameplay_operation(operation) {
+        let mut actor = "0_u64" let mut target = "0_u64" let mut item = "0_i32" let mut count = "0_i32" let mut text = "\"\"" let mut visual = "\"\""
+        for pin in blueprint_pins(node) {
+            if !pin.output && pin.key != "in" {
+                let value = input_expression(asset, prefix, node.id, pin.key)
+                if pin.key == "visual" {
+                    visual = value
+                }
+                if pin.key == "extents" {
+                    text = "bp_vector_text(" + value + ")"
+                }
+                if pin.key == "actor" {
+                    actor = value
+                }
+                if pin.key == "target" {
+                    target = value
+                }
+                if pin.key == "item" || pin.key == "team" || pin.key == "grid" || pin.key == "clearance" {
+                    item = value
+                }
+                if pin.key == "count" || pin.key == "capacity" || pin.key == "player" || pin.key == "enabled" || pin.key == "maximum" || pin.key == "amount" || pin.key == "value" || pin.key == "distance" || pin.key == "speed" {
+                    count = value
+                }
+                if pin.key == "rate" {
+                    count = value
+                }
+                if pin.key == "seconds" {
+                    text = "Debug::fmt(" + value + ")"
+                }
+                if pin.key == "kind" || pin.key == "recipe" || pin.key == "slot" || pin.key == "key" || pin.key == "asset" || pin.key == "name" {
+                    text = value
+                }
+            }
+        }
+        if operation == "conveyor-connect" {
+            text = "(" + text + ") + \"|\" + " + visual
+        }
+        body += "    let actor = " + actor + "\n    let target = " + target + "\n    let item = " + item + "\n    let count = " + count + "\n    let text = " + text + "\n    if !gbp_ok(s) { ret () }\n"
+        body += "    if item < 0_i32 || count < 0_i32 {\n    gbp_set_string(s," + index(gameplay_slot(asset, node.id, 3)) + "_u32,\"Quantity and identity must be nonnegative\")\n" + next_statement(asset, prefix, node.id, "failed") + "    ret ()\n    }\n"
+        body += "    gbp_emit_event(s,h,\"@service|" + id(node.id) + "|" + operation + "|\" + Debug::fmt(actor) + \"|\" + Debug::fmt(target) + \"|\" + Debug::fmt(item) + \"|\" + Debug::fmt(count) + \"|\" + text," + id(node.id) + "_u64)\n"
+        ret body
+    }
+    if operation == "strategy-camera" {
+        body += "    gbp_command(s,h,5_u32,0_f32,0_f32,0_f32,0_f32,0_f32," + id(node.id) + "_u64)\n"
+    }
+    if operation == "publish-value" {
+        body += "    gbp_emit_event(s,h,\"@value:\" + " + input_expression(asset, prefix, node.id, "name") + " + \"=\" + " + input_expression(asset, prefix, node.id, "value") + ", " + id(node.id) + "_u64)\n"
+    }
+    if operation == "emit-event" {
+        body += "    gbp_emit_event(s,h," + input_expression(asset, prefix, node.id, "value") + ", " + id(node.id) + "_u64)\n"
+    }
+    if operation == "begin-placement" {
+        body += "    gbp_begin_placement(s,h," + input_expression(asset, prefix, node.id, "asset") + ", " + input_expression(asset, prefix, node.id, "radius") + ", " + id(node.id) + "_u64)\n"
+    }
+    if operation == "cancel-placement" {
+        body += "    gbp_begin_placement(s,h,\"\",0_f32," + id(node.id) + "_u64)\n"
+    }
+    if operation == "set-selected" {
+        body += "    let selected = " + input_expression(asset, prefix, node.id, "value") + "\n    gbp_command(s,h,1_u32,if selected {1_f32} else {0_f32},0_f32,0_f32,0_f32,0_f32," + id(node.id) + "_u64)\n"
+    }
+    if operation == "stop-movement" {
+        body += "    gbp_command(s,h,3_u32,0_f32,0_f32,0_f32,0_f32,0_f32," + id(node.id) + "_u64)\n"
+    }
+    if operation == "move-to" {
+        body += "    let point = " + input_expression(asset, prefix, node.id, "value") + "\n    let speed = " + input_expression(asset, prefix, node.id, "speed") + "\n    let radius = " + input_expression(asset, prefix, node.id, "radius") + "\n    if !gbp_ok(s) { ret () }\n    gbp_command(s,h,4_u32,point.x,point.y,point.z,speed,radius," + id(node.id) + "_u64)\n"
+    }
     if operation == "branch" {
         body += "    let condition = " + input_expression(asset, prefix, node.id, "condition") + "\n    if !gbp_ok(s) { ret () }\n    if condition {\n" +
         next_statement(asset, prefix, node.id, "true") + "    } else {\n" + next_statement(asset, prefix, node.id, "false") + "    }\n"
@@ -198,8 +308,9 @@ fn execution(asset: BlueprintAsset, prefix: str, node: BlueprintNode) -> str {
     ret body + next_statement(asset, prefix, node.id, "then")
 }
 fn source_header() -> str {
-    ret "//! Generated Blueprint program; edit its source asset instead.\nstruct BpVector { x: f32 y: f32 z: f32 }\n" +
-    "extern fn gbp_ok(s: usize) -> bool\nextern fn gbp_get_bool(s: usize, p: u32) -> bool\nextern fn gbp_get_i32(s: usize, p: u32) -> i32\nextern fn gbp_get_f32(s: usize, p: u32, axis: u32) -> f32\nextern fn gbp_get_string(s: usize, p: u32) -> str\nextern fn gbp_get_id(s: usize, p: u32) -> u64\n" +
+    ret "//! Generated Blueprint program; edit its source asset instead.\nimport core::fmt::Debug\nstruct BpVector { x: f32 y: f32 z: f32 }\n" +
+    "fn bp_vector_text(v:BpVector)->str { ret \"[\" + Debug::fmt(v.x) + \",\" + Debug::fmt(v.y) + \",\" + Debug::fmt(v.z) + \"]\" }\n" +
+    "extern fn gbp_emit_event(s: usize,h: usize,text: str,node: u64) -> ()\nextern fn gbp_begin_placement(s: usize,h: usize,path: str,radius: f32,node: u64) -> ()\nextern fn gbp_query_actor(s: usize,h: usize,field: u32,node: u64) -> u64\nextern fn gbp_query_scalar(s: usize,h: usize,field: u32,axis: u32,node: u64) -> f32\nextern fn gbp_command(s: usize,h: usize,kind: u32,x: f32,y: f32,z: f32,speed: f32,radius: f32,node: u64) -> ()\nextern fn gbp_ok(s: usize) -> bool\nextern fn gbp_get_bool(s: usize, p: u32) -> bool\nextern fn gbp_get_i32(s: usize, p: u32) -> i32\nextern fn gbp_get_f32(s: usize, p: u32, axis: u32) -> f32\nextern fn gbp_get_string(s: usize, p: u32) -> str\nextern fn gbp_get_id(s: usize, p: u32) -> u64\n" +
     "extern fn gbp_set_bool(s: usize, p: u32, v: bool) -> ()\nextern fn gbp_set_i32(s: usize, p: u32, v: i32) -> ()\nextern fn gbp_set_f32(s: usize, p: u32, axis: u32, v: f32) -> ()\nextern fn gbp_set_string(s: usize, p: u32, v: str) -> ()\nextern fn gbp_set_id(s: usize, p: u32, v: u64) -> ()\n" +
     "extern fn gbp_transform(s: usize, h: usize, c: u64, field: u32, axis: u32, node: u64) -> f32\nextern fn gbp_visible(s: usize, h: usize, c: u64, node: u64) -> bool\nextern fn gbp_set_visible(s: usize, h: usize, c: u64, value: bool, node: u64) -> ()\nextern fn gbp_set_transform(s: usize, h: usize, c: u64, field: u32, x: f32, y: f32, z: f32, add: bool, node: u64) -> ()\nextern fn gbp_print(s: usize, h: usize, value: str, node: u64) -> ()\nextern fn gbp_div_i32(s: usize, a: i32, b: i32, node: u64) -> i32\nextern fn gbp_div_f32(s: usize, a: f32, b: f32, node: u64) -> f32\n"
 }
@@ -224,6 +335,7 @@ fn c_type(value_type: BlueprintType) -> str {
 }
 pub fn generate_blueprints(assets: Vec[BlueprintAsset]) -> Result[BlueprintGenerated, str] {
     let mut source = source_header()
+    let mut source_line = line_count(source)
     let mut registry = ""
     let mut classes = "static const gbp_class gbp_classes[] = {\n"
     let mut ranges = Vec[BlueprintSourceRange]::new()
@@ -238,23 +350,59 @@ pub fn generate_blueprints(assets: Vec[BlueprintAsset]) -> Result[BlueprintGener
         }
         let prefix = "c" + index(class_index)
         let init = prefix + "_init"
-        source += "pub fn " + init + "(s: usize, h: usize, dt: f32) -> () {\n"
+        let mut class_source = "pub fn " + init + "(s: usize, h: usize, dt: f32) -> () {\n"
         let mut slot = 0_usize
         let mut property_table = "static const gbp_property " + prefix + "_properties[] = {\n"
         for property in asset.properties {
-            source += property_write(index(slot) + "_u32", property.default_value.value_type(), literal(property.default_value))
+            class_source += property_write(index(slot) + "_u32", property.default_value.value_type(), literal(property.default_value))
             property_table += "{UINT64_C(" + id(property.id) + "), " + c_type(property.default_value.value_type()) + "},\n"
             slot += 1
         }
-        source += "}\n"
+        for node in asset.nodes {
+            if gameplay_operation(node.operation) {
+                let mut field = 0_u64
+                for kind in gameplay_types() {
+                    let value = match kind {
+                        Bool => BlueprintValue::Bool(false) I32 => BlueprintValue::I32(0) Actor => BlueprintValue::Actor(0) _ => BlueprintValue::String("")
+                    }
+                    class_source += property_write(index(slot) + "_u32", kind, literal(value))
+                    property_table += "{UINT64_C(" + id(gameplay_property(node.id, field)) + "), " + c_type(kind) + "},\n"
+                    slot += 1 field += 1
+                }
+            }
+        }
+        class_source += "}\n"
         if slot == 0 {
             property_table += "{0, 0},\n"
         }
         registry += property_table + "};\nextern void " + mangled(init) + "(uintptr_t, uintptr_t, float);\n"
         let mut event_count = 0_usize
         let mut event_table = "static const gbp_event " + prefix + "_events[] = {\n"
+        for selected in vec![false, true] {
+            let name = prefix + if selected {
+                "_restore_selected"
+            } else {
+                "_restore_deselected"
+            }
+            let action = if selected {
+                "@engine-selected"
+            } else {
+                "@engine-deselected"
+            }
+            let flag = if selected {
+                "1_f32"
+            } else {
+                "0_f32"
+            }
+            class_source += "pub fn " + name + "(s:usize,h:usize,dt:f32)->() { gbp_command(s,h,1_u32," + flag + ",0_f32,0_f32,0_f32,0_f32,0_u64) }\n"
+            registry += "extern void " + mangled(name) + "(uintptr_t,uintptr_t,float);\n"
+            event_table += "{\"game-event\"," + quote(action) + "," + mangled(name) + "},\n" event_count += 1
+        }
+        source_line += line_count(class_source) - 1
+        source += class_source
         for node in asset.nodes {
-            let first = line_count(source)
+            let first = source_line
+            let mut node_source = ""
             let mut has_execution = blueprint_event(node.operation)
             for pin in blueprint_pins(node) {
                 if !pin.output && pin.value_type.name() == "exec" {
@@ -263,19 +411,28 @@ pub fn generate_blueprints(assets: Vec[BlueprintAsset]) -> Result[BlueprintGener
             }
             if has_execution {
                 let name = function_name(prefix, node.id)
-                source += "pub fn " + name + "(s: usize, h: usize, dt: f32) -> () {\n" + execution(asset, prefix, node) + "}\n"
+                node_source += "pub fn " + name + "(s: usize, h: usize, dt: f32) -> () {\n" + execution(asset, prefix, node) + "}\n"
                 if blueprint_event(node.operation) {
                     registry += "extern void " + mangled(name) + "(uintptr_t, uintptr_t, float);\n"
                     event_table += "{" + quote(node.operation) + ", " + quote(node.text) + ", " + mangled(name) + "},\n"
                     event_count += 1
                 }
+                if gameplay_operation(node.operation) {
+                    let completion = name + "_completed"
+                    node_source += "pub fn " + completion + "(s:usize,h:usize,dt:f32)->() {\n    if !gbp_ok(s) { ret () }\n    if gbp_get_bool(s," + index(gameplay_slot(asset, node.id, 0)) + "_u32) {\n" + next_statement(asset, prefix, node.id, "completed") + "    } else {\n" + next_statement(asset, prefix, node.id, "failed") + "    }\n}\n"
+                    registry += "extern void " + mangled(completion) + "(uintptr_t, uintptr_t, float);\n"
+                    event_table += "{\"game-event\", " + quote("@service-completed:" + id(node.id)) + ", " + mangled(completion) + "},\n"
+                    event_count += 1
+                }
             }
             for pin in blueprint_pins(node) {
                 if pin.output && pin.value_type.name() != "exec" {
-                    source += "fn " + output_name(prefix, node.id, pin.key) + "(s: usize, h: usize, dt: f32) -> " + type_name(pin.value_type) + " {\n    ret " + expression(asset, prefix, node, pin.key) + "\n}\n"
+                    node_source += "fn " + output_name(prefix, node.id, pin.key) + "(s: usize, h: usize, dt: f32) -> " + type_name(pin.value_type) + " {\n    ret " + expression(asset, prefix, node, pin.key) + "\n}\n"
                 }
             }
-            ranges.push(BlueprintSourceRange { asset.id, node.id, first, line_count(source) - 1 })
+            source_line += line_count(node_source) - 1
+            source += node_source
+            ranges.push(BlueprintSourceRange { asset.id, node.id, first, source_line - 1 })
         }
         if event_count == 0 {
             event_table += "{NULL, NULL, NULL},\n"

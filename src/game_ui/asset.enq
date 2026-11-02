@@ -103,6 +103,20 @@ pub fn ui_asset_validate(asset: UiScreenAsset) -> Result[(), str] {
         if w.image != "" && !ui_path_valid(w.image) {
             ret Result[(), str]::Err("Images must be project Content paths")
         }
+        if w.binding.byte_len() >= 6 && w.binding.slice_bytes(0, 6) == "hover:" {
+            let target = mod::tooltip::tooltip_target(w.binding) let mut found = false
+            for source in asset.widgets {
+                if target == "game-ui-" + Debug::fmt(source.id) {
+                    if mod::tooltip::tooltip_owner(asset, source.id) != 0 {
+                        ret Result[(), str]::Err("A tooltip cannot target itself or another tooltip")
+                    }
+                    found = true
+                }
+            }
+            if !found {
+                ret Result[(), str]::Err("Hover binding must reference an existing widget ID")
+            }
+        }
         if w.parent == 0 {
             roots += 1 if w.kind != "Canvas" {
                 ret Result[(), str]::Err("Screen root must be a Canvas")

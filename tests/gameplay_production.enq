@@ -1,0 +1,66 @@
+//! Fuel, brownouts, blocked output and cargo-in-transit must conserve items.
+import core::vec::Vec
+import graphene::gameplay::inventory::{ActorInventory, Inventory, ItemStack}
+import graphene::gameplay::logistics::CargoLink
+import graphene::gameplay::production::{ProductionMachine, ProductionSystem}
+import graphene::gameplay::recipe::{ProductionRecipe, recipe_parse}
+
+fn main() -> u32 {
+    if recipe_parse("{\"format\":\"graphene-recipe\",\"version\":1,\"id\":\"x\",\"name\":\"x\",\"seconds\":0,\"power\":0,\"inputs\":[],\"outputs\":[]}").is_ok() {
+        ret 1
+    }
+    let mut fuel = Inventory::new(10) fuel.insert(1, 1)
+    let mut ore = Inventory::new(10) ore.insert(2, 2)
+    let mut cargo = vec![ActorInventory { 1, fuel }, ActorInventory { 2, ore }, ActorInventory {
+            3, Inventory::new(1)
+        }
+    ]
+    let generator = ProductionRecipe {
+        "generator", "Generator", 1, - 100, vec![ItemStack { 1, 1 }], Vec[ItemStack]::new()
+    }
+    let smelt = ProductionRecipe {
+        "smelt", "Smelt", 0.5, 20, vec![ItemStack { 2, 2 }], vec![ItemStack {
+                3, 1
+            }
+        ]
+    }
+    let mut system = ProductionSystem::new()
+    system.machines.push(ProductionMachine::new(1, 0, 1, generator))
+    system.machines.push(ProductionMachine::new(2, 1, 1, smelt))
+    system.step(cargo, 0.25)
+    if cargo.get_unchecked_borrowed(0).cargo.count(1) != 0 || cargo.get_unchecked_borrowed(1).cargo.count(2) != 0 || cargo.get_unchecked_borrowed(1).cargo.count(3) != 0 {
+        ret 2
+    }
+    let completed = system.step(cargo, 0.25)
+    if completed.len() != 1 || completed.get_unchecked_borrowed(0) != 2 || cargo.get_unchecked_borrowed(1).cargo.count(3) != 1 {
+        ret 3
+    }
+    let mut belt = CargoLink::new(1, 2, 3, 4, 0.5)
+    belt.step(cargo, 0.25)
+    if cargo.get_unchecked_borrowed(1).cargo.count(3) != 0 || cargo.get_unchecked_borrowed(2).cargo.count(3) != 0 || belt.packets.len() != 1 {
+        ret 4
+    }
+    belt.step(cargo, 0.25) belt.step(cargo, 0.25)
+    if cargo.get_unchecked_borrowed(2).cargo.count(3) != 1 || belt.packets.len() != 0 {
+        ret 5
+    }
+    let mut source = cargo.get_unchecked_borrowed(1).cargo.snapshot() source.insert(3, 1)
+    cargo.set(1, ActorInventory { 2, source })
+    belt.step(cargo, 0.25) belt.step(cargo, 1)
+    if belt.packets.len() != 1 || cargo.get_unchecked_borrowed(2).cargo.count(3) != 1 {
+        ret 6
+    }
+    let mut destination = cargo.get_unchecked_borrowed(2).cargo.snapshot() destination.remove(3, 1)
+    cargo.set(2, ActorInventory { 3, destination }) belt.step(cargo, 0.1)
+    if belt.packets.len() != 0 || cargo.get_unchecked_borrowed(2).cargo.count(3) != 1 {
+        ret 7
+    }
+    // A different power grid must not borrow generation from grid 1.
+    let mut stock = Inventory::new(10) stock.insert(2, 2) cargo.push(ActorInventory { 4, stock })
+    let mut isolated = ProductionMachine::new(4, 3, 2, smelt) isolated.enabled = true system.machines.push(isolated)
+    system.step(cargo, 0.25)
+    if cargo.get_unchecked_borrowed(3).cargo.count(2) != 2 || system.machines.get_unchecked_borrowed(2).status != "no-power" {
+        ret 8
+    }
+    ret 0
+}

@@ -4,6 +4,7 @@ import core::vec::Vec
 
 import linalg::Vec3
 
+import refrain::gameplay::service::gameplay_operation
 import refrain::scene::transform::Transform
 
 pub enum BlueprintType {
@@ -229,15 +230,138 @@ pub fn blueprint_ui_action(operation: str) -> i32 {
 }
 
 pub fn blueprint_event(operation: str) -> bool {
-    ret operation == "construction" || operation == "begin-play" || operation == "tick" ||
+    ret operation == "game-event" || operation == "placement-completed" || operation == "placement-failed" || operation == "placement-cancelled" || operation == "primary-pressed" || operation == "secondary-pressed" || operation == "move-completed" || operation == "move-failed" || operation == "construction" || operation == "begin-play" || operation == "tick" ||
     operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change" || operation == "ui-destruct"
 }
 pub fn blueprint_pins(node: BlueprintNode) -> Vec[BlueprintPin] {
     let exec = BlueprintType::Exec
     let value_type = node.value_type
     let operation = node.operation
-    if operation == "construction" || operation == "begin-play" || operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change" || operation == "ui-destruct" {
+    if gameplay_operation(operation) {
+        let mut pins = vec![input("in", exec), output("completed", exec), output("failed", exec), output("count", BlueprintType::I32), output("actor", BlueprintType::Actor), output("text", BlueprintType::String)]
+        if operation == "physics-static-box" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("extents", BlueprintType::Vector)) ret pins
+        }
+        if operation == "world-broadcast" || operation == "actor-find" {
+            pins.push(input("name", BlueprintType::String)) ret pins
+        }
+        if operation == "team-value-get" || operation == "team-value-set" {
+            pins.push(input("team", BlueprintType::I32)) pins.push(input("key", BlueprintType::String))
+            if operation == "team-value-set" {
+                pins.push(input("value", BlueprintType::I32))
+            }
+            ret pins
+        }
+        if operation == "health-register" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("team", BlueprintType::I32)) pins.push(input("maximum", BlueprintType::I32)) ret pins
+        }
+        if operation == "health-get" || operation == "health-team" {
+            pins.push(input("actor", BlueprintType::Actor)) ret pins
+        }
+        if operation == "health-damage" || operation == "health-heal" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("amount", BlueprintType::I32)) ret pins
+        }
+        if operation == "inventory-transfer-all" || operation == "distance-to" || operation == "actor-teleport" || operation == "control-seat-ai" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("target", BlueprintType::Actor)) ret pins
+        }
+        if operation == "find-nearest" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("asset", BlueprintType::String)) ret pins
+        }
+        if operation == "spawn-blueprint" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("asset", BlueprintType::String)) pins.push(input("distance", BlueprintType::I32)) pins.push(input("clearance", BlueprintType::I32)) ret pins
+        }
+        if operation == "move-to-actor" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("target", BlueprintType::Actor)) pins.push(input("speed", BlueprintType::I32)) pins.push(input("clearance", BlueprintType::I32)) ret pins
+        }
+        if operation == "control-autonomy" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("enabled", BlueprintType::I32)) ret pins
+        }
+        if operation == "control-body" {
+            ret pins
+        }
+        if operation == "control-set-power" {
+            pins.push(input("actor", BlueprintType::Actor)) pins.push(input("enabled", BlueprintType::I32)) ret pins
+        }
+        if operation != "world-save" && operation != "world-load" && operation != "control-leave-vehicle" && operation != "control-return" && operation != "control-exit-terminal" && operation != "control-state" {
+            pins.push(input("actor", BlueprintType::Actor))
+        }
+        if operation == "inventory-transfer" {
+            pins.push(input("target", BlueprintType::Actor))
+        }
+        if operation == "inventory-add" || operation == "inventory-remove" || operation == "inventory-count" || operation == "inventory-transfer" {
+            pins.push(input("item", BlueprintType::I32))
+        }
+        if operation == "control-register" || operation == "control-start" {
+            pins.push(input("team", BlueprintType::I32))
+        }
+        if operation == "inventory-create" {
+            pins.push(input("capacity", BlueprintType::I32))
+        }
+        if operation == "inventory-add" || operation == "inventory-remove" || operation == "inventory-transfer" {
+            pins.push(input("count", BlueprintType::I32))
+        }
+        if operation == "control-start" {
+            pins.push(input("player", BlueprintType::I32))
+        }
+        if operation == "control-register" {
+            pins.push(input("kind", BlueprintType::String))
+        }
+        if operation == "craft-recipe" || operation == "production-configure" {
+            pins.push(input("recipe", BlueprintType::String))
+        }
+        if operation == "production-configure" {
+            pins.push(input("grid", BlueprintType::I32))
+        }
+        if operation == "production-enable" {
+            pins.push(input("enabled", BlueprintType::I32))
+        }
+        if operation == "world-save" || operation == "world-load" {
+            pins.push(input("slot", BlueprintType::String))
+        }
+        if operation == "conveyor-connect" {
+            pins.push(input("target", BlueprintType::Actor)) pins.push(input("item", BlueprintType::I32)) pins.push(input("rate", BlueprintType::I32)) pins.push(input("seconds", BlueprintType::F32))
+            pins.push(BlueprintPin { "visual", BlueprintType::String, false, false })
+        }
+        ret pins
+    }
+    if operation == "game-event" || operation == "placement-completed" || operation == "placement-failed" || operation == "placement-cancelled" || operation == "primary-pressed" || operation == "secondary-pressed" || operation == "move-completed" || operation == "move-failed" || operation == "construction" || operation == "begin-play" || operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change" || operation == "ui-destruct" {
         ret vec![output("then", exec)]
+    }
+    if operation == "to-text" {
+        ret vec![input("value", value_type), output("text", BlueprintType::String)]
+    }
+    if operation == "publish-value" {
+        ret vec![input("in", exec), input("name", BlueprintType::String), input("value", BlueprintType::String), output("then", exec)]
+    }
+    if operation == "emit-event" {
+        ret vec![input("in", exec), input("value", BlueprintType::String), output("then", exec)]
+    }
+    if operation == "begin-placement" {
+        ret vec![input("in", exec), input("asset", BlueprintType::String), input("radius", BlueprintType::F32), output("then", exec)]
+    }
+    if operation == "strategy-camera" {
+        ret vec![input("in", exec), output("then", exec)]
+    }
+    if operation == "cancel-placement" {
+        ret vec![input("in", exec), output("then", exec)]
+    }
+    if operation == "cursor-position" {
+        ret vec![output("value", BlueprintType::Vector)]
+    }
+    if operation == "cursor-actor" || operation == "self-actor" {
+        ret vec![output("value", BlueprintType::Actor)]
+    }
+    if operation == "cursor-valid" || operation == "is-selected" {
+        ret vec![output("value", BlueprintType::Bool)]
+    }
+    if operation == "set-selected" {
+        ret vec![input("in", exec), input("value", BlueprintType::Bool), output("then", exec)]
+    }
+    if operation == "move-to" {
+        ret vec![input("in", exec), input("value", BlueprintType::Vector), input("speed", BlueprintType::F32), input("radius", BlueprintType::F32), output("then", exec)]
+    }
+    if operation == "stop-movement" {
+        ret vec![input("in", exec), output("then", exec)]
     }
     if blueprint_ui_action(operation) != 0 {
         ret vec![input("in", exec), output("then", exec)]

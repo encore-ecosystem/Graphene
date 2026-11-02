@@ -291,13 +291,10 @@ pub fn content_action(browser: mut ContentBrowser, target: str, window: Window, 
     browser.dirty = true
 }
 pub fn content_input(browser: mut ContentBrowser, event: Event, target: str, layout: WidgetLayout, reactive: mut ReactiveUi, window: Window, icons: ContentIcons, editable: bool, live: Vec[str]) -> bool {
-    // Docked contents can overflow a compact host. The visible asset area
-    // and the retained target must participate in routing, including empty rows.
+    // A tab retains its last geometry while inactive. Route focus from the
+    // current hit ancestry so cached asset bounds cannot capture another editor.
     let point = Point::new(event.x(), event.y())
-    let panel = match reactive.find_layout("content-browser") {
-        Some(area) => area.bounds() None => Rect::new(0, 0, 0, 0)
-    }
-    let inside = panel.contains(point) || browser.bounds.contains(point) || target.contains("cb-")
+    let inside = target == "content-browser" || target.contains("cb-") || reactive.target_within(target, "content-browser")
     if event.kind() == event_focus_lost() {
         if browser.drag_request {
             browser.emit("cancel-drag", "")

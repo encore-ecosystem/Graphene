@@ -10,6 +10,8 @@ import core::vec::Vec
 import linalg::Vec3
 import physics::{Body, CharacterConfig, CharacterState, DynamicsWorld, PhysicsStats, Rotation, Shape, move_character}
 
+import mod::index::ActorIndex
+
 pub struct RuntimeTransform {
     position: Vec3
     rotation: Vec3
@@ -487,6 +489,7 @@ impl for Actor {
 pub struct World {
     actors: Vec[Actor]
     next_id: u64
+    lookup: ActorIndex
 }
 
 fn actor_index(actors: Vec[Actor], id: u64) -> usize {
@@ -507,9 +510,24 @@ fn actor_index(actors: Vec[Actor], id: u64) -> usize {
 }
 
 impl for World {
+    fn find_index(self: Self, id: u64) -> usize {
+        match self.lookup.get(id) {
+            Some(slot) => {
+                if slot < self.actors.len() && self.actors.get_unchecked_borrowed(slot).id == id {
+                    ret slot
+                }
+            }
+            None => {
+                if id < 262144 {
+                    ret self.actors.len()
+                }
+            }
+        }
+        ret actor_index(self.actors, id)
+    }
     pub fn new() -> World {
         ret World {
-            Vec[Actor]::new(), 1_u64
+            Vec[Actor]::new(), 1_u64, ActorIndex::new()
         }
     }
     pub fn actor_count(self: Self) -> usize {
@@ -530,6 +548,7 @@ impl for World {
             }
             ,
         )
+        self.lookup.insert(id, self.actors.len() - 1)
         ret id
     }
     pub fn spawn_actor_with_id(self: mut Self, id: u64, name: str, transform: RuntimeTransform) -> bool {
@@ -537,13 +556,14 @@ impl for World {
             ret false
         }
         self.actors.push(Actor { id, name, transform, Option[u64]::None, true })
+        self.lookup.insert(id, self.actors.len() - 1)
         if id >= self.next_id {
             self.next_id = id + 1
         }
         ret true
     }
     pub fn despawn_actor(self: mut Self, id: u64) -> bool {
-        let index = actor_index(self.actors, id)
+        let index = self.find_index(id)
         if index >= self.actors.len() {
             ret false
         }
@@ -556,13 +576,16 @@ impl for World {
             cursor = cursor + 1_usize
         }
         self.actors = remaining
+        self.lookup = ActorIndex::new() for i in 0_usize..self.actors.len() {
+            self.lookup.insert(self.actors.get_unchecked_borrowed(i).id, i)
+        }
         ret true
     }
     pub fn contains(self: Self, id: u64) -> bool {
-        ret actor_index(self.actors, id) < self.actors.len()
+        ret self.find_index(id) < self.actors.len()
     }
     pub fn actor(self: Self, id: u64) -> Option[Actor] {
-        match self.actors.get(actor_index(self.actors, id)) {
+        match self.actors.get(self.find_index(id)) {
             Option[Actor]::Some(actor) => {
                 ret Option[Actor]::Some(actor)
             }
@@ -582,12 +605,21 @@ impl for World {
         ret Option[RuntimeTransform]::None
     }
     pub fn set_transform(self: mut Self, id: u64, transform: RuntimeTransform) -> bool {
-        let index = actor_index(self.actors, id)
+        let index = self.find_index(id)
         if index >= self.actors.len() {
             ret false
         }
         match self.actors.get(index) {
             Option[Actor]::Some(actor) => {
+                let old = actor.transform()
+                let a = old.position() let b = transform.position()
+                let c = old.rotation() let d = transform.rotation()
+                let e = old.scale() let f = transform.scale()
+                if a.x() == b.x() && a.y() == b.y() && a.z() == b.z() &&
+                c.x() == d.x() && c.y() == d.y() && c.z() == d.z() &&
+                e.x() == f.x() && e.y() == f.y() && e.z() == f.z() {
+                    ret true
+                }
                 self.actors.set(index, Actor {
                         actor.id(), actor.name(), transform, actor.parent(), actor.active()
                     }
@@ -611,7 +643,7 @@ impl for World {
         ret false
     }
     pub fn set_parent(self: mut Self, id: u64, parent: Option[u64]) -> bool {
-        let index = actor_index(self.actors, id)
+        let index = self.find_index(id)
         if index >= self.actors.len() {
             ret false
         }
@@ -763,12 +795,19 @@ impl for CollisionEvent {
         ret self.penetration
     }
 }
+pub struct CharacterSnapshot {
+    actor: u64
+    config: CharacterConfig
+    state: CharacterState
+    active: bool
+}
 struct CharacterBinding {
     actor: u64
     config: CharacterConfig
     state: CharacterState
     wish: Vec3
     jump: bool
+    active: bool
 }
 pub struct PhysicsWorld {
     solver: DynamicsWorld
@@ -778,6 +817,62 @@ pub struct PhysicsWorld {
 }
 
 impl for PhysicsWorld {
+    pub fn restore_static_boxes(self: mut Self, boxes: Vec[Body]) -> bool {
+        for body in boxes {
+            if !body.valid() {
+                ret false
+            }
+        }
+        for body in boxes {
+            if self.solver.body(body.id).is_some() {
+                self.solver.replace(body)
+            } else {
+                self.solver.add(body)
+            }
+        }
+        ret true
+    }
+    pub fn remove_actor(self: mut Self, actor: u64) ->() {
+        self.solver.remove(actor)
+        let mut remaining = Vec[CharacterBinding]::new() for c in self.characters {
+            if c.actor != actor {
+                remaining.push(c)
+            }
+        }
+        self.characters = remaining
+    }
+    pub fn character_snapshot(self: Self) -> Vec[CharacterSnapshot] {
+        let mut result = Vec[CharacterSnapshot]::new()
+        for c in self.characters {
+            result.push(CharacterSnapshot {
+                    c.actor, c.config, c.state, c.active
+                }
+            )
+        }
+        ret result
+    }
+    pub fn restore_characters(self: mut Self, snapshot: Vec[CharacterSnapshot]) -> bool {
+        for c in snapshot {
+            if !c.config.valid() {
+                ret false
+            }
+        }
+        for c in self.characters {
+            self.solver.remove(c.actor)
+        }
+        self.characters = Vec[CharacterBinding]::new()
+        for c in snapshot {
+            if !self.add_character(c.actor, c.state.position, c.config) {
+                ret false
+            }
+            self.characters.set(self.characters.len() - 1, CharacterBinding {
+                    c.actor, c.config, c.state, Vec3::zero(), false, c.active
+                }
+                ,
+            )
+        }
+        ret true
+    }
     /// Compatibility floor for existing gameplay scripts. Scene physics uses
     /// without_floor(), so only explicitly authored colliders block movement.
     pub fn new(gravity: Vec3) -> Self {
@@ -859,7 +954,7 @@ impl for PhysicsWorld {
             ret false
         }
         self.characters.push(CharacterBinding {
-                actor, c, CharacterState::new(p), Vec3::zero(), false
+                actor, c, CharacterState::new(p), Vec3::zero(), false, true
             }
         ) ret true
     }
@@ -869,7 +964,7 @@ impl for PhysicsWorld {
                 Some(c) => {
                     if c.actor == actor {
                         self.characters.set(i, CharacterBinding {
-                                c.actor, c.config, c.state, wish, c.jump || jump
+                                c.actor, c.config, c.state, wish, c.jump || jump, c.active
                             }
                             ,
                         ) ret true
@@ -877,6 +972,23 @@ impl for PhysicsWorld {
                 }
                 None => {
                 }
+            }
+        }
+        ret false
+    }
+    /// Seated characters keep their body identity without running walking/gravity.
+    pub fn set_character_active(self: mut Self, actor: u64, active: bool) -> bool {
+        for i in 0_usize..self.characters.len() {
+            let c = self.characters.get_unchecked_borrowed(i)
+            if c.actor == actor {
+                if c.active == active {
+                    ret true
+                }
+                self.characters.set(i, CharacterBinding {
+                        c.actor, c.config, c.state, Vec3::zero(), false, active
+                    }
+                    ,
+                ) ret true
             }
         }
         ret false
@@ -891,7 +1003,12 @@ impl for PhysicsWorld {
             if body.id != 18446744073709551615_u64 {
                 match world.transform(body.id) {
                     Some(t) => {
-                        self.solver.replace(body.with_pose(t.position(), Rotation::from_euler(t.rotation())))
+                        let p = t.position() let old = body.position
+                        let q = Rotation::from_euler(t.rotation()) let r = body.rotation
+                        if p.x() != old.x() || p.y() != old.y() || p.z() != old.z() ||
+                        q.x != r.x || q.y != r.y || q.z != r.z || q.w != r.w {
+                            self.solver.replace(body.with_pose(p, q))
+                        }
                     }
                     None => {
                         removed.push(body.id)
@@ -905,6 +1022,9 @@ impl for PhysicsWorld {
         for i in 0_usize..self.characters.len() {
             match self.characters.get(i) {
                 Some(c) => {
+                    if !c.active {
+                        continue
+                    }
                     match world.transform(c.actor) {
                         Some(t) => {
                             let state = if t.position().sub(c.state.position).dot(t.position().sub(c.state.position)) > 0.000001_f32 {
@@ -916,13 +1036,17 @@ impl for PhysicsWorld {
                             world.set_transform(c.actor, t.with_position(next.position))
                             match self.solver.body(c.actor) {
                                 Some(b) => {
-                                    self.solver.replace(b.with_pose(next.position, Rotation::identity()))
+                                    let p = next.position let old = b.position let q = b.rotation
+                                    if p.x() != old.x() || p.y() != old.y() || p.z() != old.z() ||
+                                    q.x != 0 || q.y != 0 || q.z != 0 || q.w != 1 {
+                                        self.solver.replace(b.with_pose(p, Rotation::identity()))
+                                    }
                                 }
                                 None => {
                                 }
                             }
                             self.characters.set(i, CharacterBinding {
-                                    c.actor, c.config, next, c.wish, false
+                                    c.actor, c.config, next, c.wish, false, true
                                 }
                                 ,
                             )
@@ -1002,6 +1126,18 @@ impl for RuntimeSession {
     }
     pub fn character_input(self: mut Self, actor: u64, wish: Vec3, jump: bool) -> bool {
         ret self.physics.character_input(actor, wish, jump)
+    }
+    pub fn set_character_active(self: mut Self, actor: u64, active: bool) -> bool {
+        ret self.physics.set_character_active(actor, active)
+    }
+    pub fn add_character(self: mut Self, actor: u64, position: Vec3, config: CharacterConfig) -> bool {
+        ret self.physics.add_character(actor, position, config)
+    }
+    pub fn add_static_box(self: mut Self, actor: u64, position: Vec3, rotation: Vec3, extents: Vec3) -> bool {
+        ret self.physics.add_native_body(Body::new(actor, Shape::Box(extents), position, 0).with_pose(position, Rotation::from_euler(rotation)))
+    }
+    pub fn remove_actor_physics(self: mut Self, actor: u64) ->() {
+        self.physics.remove_actor(actor)
     }
     pub fn set_world(self: mut Self, world: World) ->() {
         self.world = world

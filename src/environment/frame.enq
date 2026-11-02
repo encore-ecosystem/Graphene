@@ -68,6 +68,59 @@ impl for EnvironmentFrame {
         }
         ret data
     }
+    /// Update an owned lighting packet without constructing and copying a
+    /// mostly-zero 2112-word weather payload on every frame. Clear removed
+    /// volumes as well, so a shorter packet cannot retain old weather zones.
+    pub fn write_shader_values(self: Self, data: mut Vec[f32], offset: usize) ->() {
+        while data.len() < offset + 2112_usize {
+            data.push(0)
+        }
+        let old = data.get_unchecked_borrowed(offset + 36) as usize
+        let previous = if old > 64_usize {
+            64_usize
+        } else {
+            old
+        }
+        let count = if self.volumes.len() > 64_usize {
+            64_usize
+        } else {
+            self.volumes.len()
+        }
+        let head = self.values()
+        for i in 0_usize..head.len() {
+            data.set(offset + i, head.get_unchecked_borrowed(i))
+        }
+        let w = self.global_weather
+        let weather = vec![w.cloudiness, w.rain, w.snow, w.fog, w.wind.x(), w.wind.y(), w.wind.z(), w.temperature, w.wetness, w.snow_coverage]
+        for i in 0_usize..weather.len() {
+            data.set(offset + 4 + i, weather.get_unchecked_borrowed(i))
+        }
+        data.set(offset + 36, self.volumes.len() as f32)
+        let clear_count = if previous > count {
+            previous
+        } else {
+            count
+        }
+        for i in 0_usize..clear_count {
+            for word in 0_usize..32_usize {
+                data.set(offset + 40 + i * 32 + word, 0)
+            }
+        }
+        for i in 0_usize..count {
+            let volume = self.volumes.get_unchecked_borrowed(i)
+            let mut packed = vec![volume.center.x(), volume.center.y(), volume.center.z(), volume.feather]
+            for axis in volume.gradients() {
+                packed.push(axis.x()) packed.push(axis.y()) packed.push(axis.z()) packed.push(0)
+            }
+            let v = volume.weather
+            for value in vec![v.cloudiness, v.rain, v.snow, v.fog, v.wind.x(), v.wind.y(), v.wind.z(), v.temperature, v.wetness, v.snow_coverage, v.storm, 0.0_f32, 0_f32, 0_f32, 0_f32, 0_f32] {
+                packed.push(value)
+            }
+            for word in 0_usize..packed.len() {
+                data.set(offset + 40 + i * 32 + word, packed.get_unchecked_borrowed(word))
+            }
+        }
+    }
     pub fn values(self: Self) -> Vec[f32] {
         let w = self.weather let sun = self.sun_direction() let ambient = self.ambient()
         let mut values = vec![if self.enabled {

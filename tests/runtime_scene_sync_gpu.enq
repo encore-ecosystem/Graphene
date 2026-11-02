@@ -1,0 +1,106 @@
+//! Runtime render entities survive repeated frames and reordered hierarchies.
+import core::option::Option
+import core::vec::Vec
+
+import graphene::{Scene, Transform, ViewportRenderer}
+import graphene::physics::component::PhysicsComponent
+import graphene::preview::SceneGpuBinding
+import linalg::Vec3
+import luma::{RendererKind, VulkanFeatureRequest, Window}
+
+fn main() -> u32 {
+    let window = Window::create_with_renderer_features("Runtime scene synchronization", 128, 128, RendererKind::DirectVulkan, VulkanFeatureRequest::advanced_rendering())
+    let interop = window.vulkan_interop()
+    if !window.available() || !interop.valid() {
+        window.destroy() ret 1
+    }
+    let mut view = match ViewportRenderer::create_retained(interop.instance(), interop.physical_device(), interop.render_device(), interop.swapchain(), 128, 128) {
+        Some(v) => v None => {
+            window.destroy() ret 2
+        }
+    }
+    let mut scene = Scene::new()
+    scene.create_entity_with_id(900000001, "parent", Transform::identity().with_position(Vec3::new(4, 0, 0)))
+    scene.create_entity_with_id(77, "child", Transform::identity().with_position(Vec3::new(2, 0, 0)))
+    scene.set_parent(77, Option[u64]::Some(900000001))
+    let mut bindings = Vec[SceneGpuBinding]::new()
+    bindings.push(SceneGpuBinding { 77, view.default_cube_mesh() })
+    view.sync_scene_instances(scene, bindings)
+    let root = view.cubes.get_unchecked_borrowed(0)
+    let child = view.cubes.get_unchecked_borrowed(1)
+    for _ in 0_usize..20_usize {
+        view.sync_scene_instances(scene, bindings)
+    }
+    let mut result = 0_u32
+    if view.cubes.len() != 2 || view.cubes.get_unchecked_borrowed(0) != root || view.cubes.get_unchecked_borrowed(1) != child || view.scene.world_position(child).unwrap_or(Vec3::zero()).x() != 6 {
+        result = 3
+    }
+    // A different source can have the same IDs/revision but another hierarchy.
+    let mut sibling = Scene::new()
+    sibling.create_entity_with_id(900000001, "parent", Transform::identity().with_position(Vec3::new(4, 0, 0)))
+    sibling.create_entity_with_id(77, "child", Transform::identity().with_position(Vec3::new(2, 0, 0)))
+    sibling.set_parent(900000001, Option[u64]::Some(77))
+    if sibling.binding_revision() != scene.binding_revision() {
+        result = 6
+    }
+    view.sync_scene_instances(sibling, bindings)
+    if view.scene.world_position(child).unwrap_or(Vec3::zero()).x() != 2 {
+        result = 7
+    }
+    view.sync_scene_instances(scene, bindings)
+    scene.set_transform(900000001, Transform::identity().with_position(Vec3::new(5, 0, 0)))
+    view.sync_scene_instances(scene, bindings)
+    if view.scene.world_position(child).unwrap_or(Vec3::zero()).x() != 7 {
+        result = 8
+    }
+    scene.set_physics(77, PhysicsComponent::defaults().with_value("mass", 2))
+    view.sync_scene_instances(scene, bindings)
+    match view.scene.get(child) {
+        Some(e) => {
+            if e.physics().mass != 2 {
+                result = 9
+            }
+        }
+        None => {
+            result = 9
+        }
+    }
+    view.sync_scene_instances(scene, Vec[SceneGpuBinding]::new())
+    match view.scene.get(child) {
+        Some(e) => {
+            if e.renderable().is_some() {
+                result = 10
+            }
+        }
+        None => {
+            result = 10
+        }
+    }
+    view.sync_scene_instances(scene, bindings)
+    // Reverse parent/child storage slots without leaving a transient render cycle.
+    let mut restored = Scene::new()
+    restored.create_entity_with_id(77, "child", Transform::identity().with_position(Vec3::new(2, 0, 0)))
+    restored.create_entity_with_id(900000001, "parent", Transform::identity().with_position(Vec3::new(8, 0, 0)))
+    restored.set_parent(77, Option[u64]::Some(900000001))
+    view.sync_scene_instances(restored, bindings)
+    if view.scene.world_position(root).unwrap_or(Vec3::zero()).x() != 10 {
+        result = 4
+    }
+    match view.scene.get(root) {
+        Some(entity) => {
+            if entity.renderable().is_none() {
+                result = 4
+            }
+        }
+        None => {
+            result = 4
+        }
+    }
+    restored.remove(77)
+    view.sync_scene_instances(restored, Vec[SceneGpuBinding]::new())
+    if view.cubes.len() != 1 || view.scene.world_position(view.cubes.get_unchecked_borrowed(0)).unwrap_or(Vec3::zero()).x() != 8 {
+        result = 5
+    }
+    view.destroy() window.destroy()
+    ret result
+}

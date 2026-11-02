@@ -1,0 +1,75 @@
+//! Exercise actual generated native calls, typed actor identity and queued movement.
+import core::vec::Vec
+import std::io::eprintln
+
+import graphene::blueprint::*
+import graphene::scene::transform::Transform
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut asset = BlueprintAsset::new("interaction-abi-test", "Interaction")
+    asset.nodes.push(BlueprintNode::new(1, "primary-pressed", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(2, "cursor-actor", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(3, "self-actor", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(4, "equal", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(5, "set-selected", BlueprintType::Bool))
+    asset.nodes.push(BlueprintNode::new(6, "secondary-pressed", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(7, "is-selected", BlueprintType::Bool))
+    asset.nodes.push(BlueprintNode::new(8, "branch", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(9, "cursor-position", BlueprintType::Vector))
+    asset.nodes.push(BlueprintNode::new(10, "constant", BlueprintType::F32).with_value(BlueprintValue::F32(8)))
+    asset.nodes.push(BlueprintNode::new(11, "move-to", BlueprintType::Exec))
+    asset.connect(1, "then", 5, "in") asset.connect(2, "value", 4, "a") asset.connect(3, "value", 4, "b") asset.connect(4, "value", 5, "value")
+    asset.connect(6, "then", 8, "in") asset.connect(7, "value", 8, "condition") asset.connect(8, "true", 11, "in") asset.connect(9, "value", 11, "value") asset.connect(10, "value", 11, "speed")
+    asset.nodes.push(BlueprintNode::new(12, "constant", BlueprintType::F32).with_value(BlueprintValue::F32(1)))
+    asset.connect(12, "value", 11, "radius")
+    let build = match prepare_blueprint_build(".", "native/blueprint", blueprint_compiler_path(), vec![asset]) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret 1
+        }
+    }
+    if !build.cached && run_blueprint_build(build.compiler, build.directory, build.library, build.receipt, build.key) != 0 {
+        eprintln(build.directory) ret 2
+    }
+    let module = match BlueprintModule::open(build.library) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret 3
+        }
+    }
+    let instance = match module.instantiate(asset, BlueprintInstance {
+            "Interaction", Vec[BlueprintOverride]::new()
+        }
+        , Transform::identity(),) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret 4
+        }
+    }
+    if !instance.invoke("construction", "", 0) || !instance.invoke("begin-play", "", 0) {
+        ret 5
+    }
+    instance.pointer(42, 42, Vec3::new(10, 20, 30), true)
+    if !instance.invoke("primary-pressed", "", 0) || instance.interaction(0, 0) != 1 {
+        ret 6
+    }
+    if !instance.invoke("secondary-pressed", "", 0) {
+        eprintln(instance.error()) ret 7
+    }
+    if instance.interaction(1, 0) != 2 || instance.interaction(2, 0) != 10 || instance.interaction(2, 2) != 30 || instance.interaction(3, 0) != 8 {
+        ret 8
+    }
+    let _consumed = instance.interaction(4, 0)
+    if instance.interaction(1, 0) != 0 {
+        ret 9
+    }
+    instance.pointer(42, 0, Vec3::zero(), false)
+    if !instance.invoke("primary-pressed", "", 0) || instance.interaction(0, 0) != 0 {
+        ret 10
+    }
+    if !instance.invoke("secondary-pressed", "", 0) || instance.interaction(1, 0) != 0 {
+        ret 11
+    }
+    if !instance.destroy() || !module.close() {
+        ret 12
+    }
+    ret 0
+}

@@ -138,3 +138,18 @@ material behavior. Report: https://github.com/encore-ecosystem/encore/issues/171
 Regression: compile unused public records containing vector fields in both
 normal and standalone paths, with and without reachable vector construction;
 all emitted ownership helpers must have complete container layouts.
+
+## Heap node call accepts an inline receiver and corrupts the call ABI
+
+Confirmed with installed Encore 0.1.12-neumann (SHA-256
+`66fed6804fad740c75dfbcd01ddf098cce7fe981e6ee7d069bd1536c685c295f`).
+A dependency-free Store<H> with two Vec fields, `add(self: mut Self)` and
+`state(self: Self)` builds successfully but exits 139. The original Graphene
+backtrace retained an invalid Vec payload (0x4) in GameplayWorld.state before
+binary encoding began. Explicit `Self&` and `mut Self&` receivers build and exit
+0 with the same compiler. Graphene now uses the documented node receivers;
+this does not fix the compiler's missing receiver-representation diagnostic.
+Reproducer: `target/industrial-session/receiver-probe/broken.enq.txt`.
+Report: https://github.com/encore-ecosystem/encore/issues/180.
+Regression: inline-receiver calls on heap nodes must either be rejected or
+perform a correct payload conversion, including records with owning Vec fields.

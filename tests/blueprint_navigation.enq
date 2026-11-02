@@ -1,0 +1,74 @@
+//! Routes must cross the bridge, reject water, and avoid disconnected surfaces.
+import core::vec::Vec
+import graphene::blueprint::{BlueprintAsset, BlueprintNode, BlueprintType, BlueprintValue, NavigationBox, NavigationGrid, generate_blueprints, validate_blueprint}
+import linalg::Vec3
+
+fn banks() -> Vec[NavigationBox] {
+    ret vec![NavigationBox { Vec3::new( - 30, - 2, - 30), Vec3::new( - 6, 0, 30) }, NavigationBox {
+            Vec3::new(6, - 2, - 30), Vec3::new(30, 0, 30)
+        }
+    ]
+}
+fn main() -> u32 {
+    let disconnected = NavigationGrid::from_boxes(banks(), 2)
+    if disconnected.route(Vec3::new( - 20, 1, - 10), Vec3::new(20, 1, 10)).len() != 0 {
+        ret 1
+    }
+    let mut boxes = banks()
+    boxes.push(NavigationBox { Vec3::new( - 8, 0, 18), Vec3::new(8, 0.25, 26) })
+    boxes.push(NavigationBox { Vec3::new( - 24, 0, - 4), Vec3::new( - 16, 10, 4) })
+    let grid = NavigationGrid::from_boxes(boxes, 2)
+    let path = grid.route(Vec3::new( - 20, 1, - 10), Vec3::new(20, 1, 10))
+    if path.len() == 0 {
+        ret 2
+    }
+    let mut crossed = false
+    for point in path {
+        if point.x() > - 6 && point.x() < 6 {
+            if point.z() < 18.45 || point.z() > 25.55 {
+                ret 3
+            }
+            crossed = true
+        }
+        if point.x() > - 24 && point.x() < - 16 && point.z() > - 4 && point.z() < 4 {
+            ret 4
+        }
+    }
+    if grid.route_with_radius(Vec3::new( - 20, 1, - 10), Vec3::new(20, 1, 10), 5).len() != 0 {
+        ret 13
+    }
+    if !crossed {
+        ret 5
+    }
+    if grid.route(Vec3::new( - 20, 1, - 10), Vec3::new(0, 0, 0)).len() != 0 {
+        ret 6
+    }
+    if grid.route(Vec3::new( - 20, 1, - 10), Vec3::new(999999, 0, 0)).len() != 0 {
+        ret 7
+    }
+    if grid.hit(Vec3::new(0, 20, 0), Vec3::new(0, - 1, 0)).is_some() {
+        ret 8
+    }
+    if grid.hit(Vec3::new(0, 20, 22), Vec3::new(0, - 1, 0)).is_none() {
+        ret 9
+    }
+    let mut asset = BlueprintAsset::new("interaction-test", "Interaction")
+    asset.nodes.push(BlueprintNode::new(1, "primary-pressed", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(2, "cursor-actor", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(3, "self-actor", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(4, "equal", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(5, "set-selected", BlueprintType::Bool))
+    asset.connect(1, "then", 5, "in") asset.connect(2, "value", 4, "a") asset.connect(3, "value", 4, "b") asset.connect(4, "value", 5, "value")
+    if validate_blueprint(asset).len() != 0 {
+        ret 10
+    }
+    let generated = match generate_blueprints(vec![asset]) {
+        Ok(v) => v Err(_) => {
+            ret 11
+        }
+    }
+    if !generated.source.contains("gbp_query_actor") || !generated.source.contains("gbp_command") {
+        ret 12
+    }
+    ret 0
+}

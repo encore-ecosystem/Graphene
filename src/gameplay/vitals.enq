@@ -1,0 +1,18 @@
+//! Small authoritative health records; gameplay decides damage and death responses.
+pub struct VitalState {
+    actor: u64
+    team: u32
+    maximum: u32
+    health: u32
+}
+
+impl for VitalState {
+    pub fn snapshot(self: Self) -> Self {
+        ret Self { self.actor, self.team, self.maximum, self.health }
+    }
+}
+pub struct TeamValue {
+    team: u32
+    key: str
+    value: u32
+}

@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define GBP_ABI_VERSION 1u
+#define GBP_ABI_VERSION 3u
 #if defined(__aarch64__) || defined(_M_ARM64)
 #define GBP_ARCH "aarch64"
 #elif defined(__x86_64__) || defined(_M_X64)
@@ -43,6 +43,11 @@ typedef struct {
     bool (*read_visible)(void *, uint64_t, bool *);
     bool (*write_visible)(void *, uint64_t, bool);
     bool (*print)(void *, const char *, size_t);
+    float (*query_scalar)(void *, uint32_t, uint32_t);
+    uint64_t (*query_actor)(void *, uint32_t);
+    bool (*command)(void *, uint32_t, const float *);
+    bool (*event)(void *, const char *, size_t);
+    bool (*placement)(void *, const char *, size_t, float);
 } gbp_host_v1;
 
 typedef struct {

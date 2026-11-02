@@ -1,0 +1,142 @@
+//! Tactical movement feedback above the scene image and beneath the HUD.
+import core::option::Option
+import core::vec::Vec
+
+import std::math::tan
+
+import linalg::Vec3
+import luma::{Color, DisplayList, Point, Rect}
+
+import refrain::blueprint::navigation::NavigationRoute
+import refrain::scene::camera::PerspectiveCamera
+
+struct RouteProjection {
+    bounds: Rect
+    camera: PerspectiveCamera
+    forward: Vec3
+    right: Vec3
+    up: Vec3
+    half: f32
+}
+
+impl for RouteProjection {
+    pub fn new(bounds: Rect, camera: PerspectiveCamera) -> Self {
+        let forward = camera.target().sub(camera.position()).normalized()
+        let right = forward.cross(camera.up()).normalized()
+        ret Self {
+            bounds, camera, forward, right, right.cross(forward), tan(camera.vertical_fov() * 0.5)
+        }
+    }
+    pub fn local(self: Self, world: Vec3) -> Vec3 {
+        let delta = world.sub(self.camera.position())
+        ret Vec3::new(delta.dot(self.right), delta.dot(self.up), delta.dot(self.forward))
+    }
+    pub fn screen(self: Self, local: Vec3) -> Point {
+        let scale = self.bounds.height() /(2 * self.half * local.z())
+        ret Point::new(self.bounds.x() + self.bounds.width() * 0.5 + local.x() * scale, self.bounds.y() + self.bounds.height() * 0.5 - local.y() * scale)
+    }
+    pub fn segment(self: Self, list: mut DisplayList, from: Vec3, to: Vec3, width: f32, color: Color) ->() {
+        let mut a = self.local(from) let mut b = self.local(to)
+        let near = self.camera.near_clip() let far = self.camera.far_clip()
+        if (a.z() < near && b.z() < near) ||(a.z() > far && b.z() > far) {
+            ret()
+        }
+        if a.z() < near {
+            a = a.add(b.sub(a).scale((near - a.z()) /(b.z() - a.z())))
+        }
+        if b.z() < near {
+            b = b.add(a.sub(b).scale((near - b.z()) /(a.z() - b.z())))
+        }
+        if a.z() > far {
+            a = a.add(b.sub(a).scale((far - a.z()) /(b.z() - a.z())))
+        }
+        if b.z() > far {
+            b = b.add(a.sub(b).scale((far - b.z()) /(a.z() - b.z())))
+        }
+        let first = self.screen(a) let last = self.screen(b)
+        list.line(first.x(), first.y(), last.x(), last.y(), width + 2, Color::rgba(4, 16, 9, 220))
+        list.line(first.x(), first.y(), last.x(), last.y(), width, color)
+    }
+}
+pub fn navigation_project(bounds: Rect, camera: PerspectiveCamera, world: Vec3) -> Option[Point] {
+    if bounds.width() <= 0 || bounds.height() <= 0 {
+        ret Option[Point]::None
+    }
+    let projection = RouteProjection::new(bounds, camera) let p = projection.local(world)
+    if !(p.z() >= camera.near_clip() && p.z() <= camera.far_clip()) {
+        ret Option[Point]::None
+    }
+    ret Option[Point]::Some(projection.screen(p))
+}
+/// Remove straight runs without replacing any turn or change in slope.
+pub fn navigation_route_points(route: NavigationRoute) -> Vec[Vec3] {
+    let mut result = Vec[Vec3]::new()
+    if route.next >= route.points.len() {
+        ret result
+    }
+    result.push(route.origin)
+    let mut start = route.origin let mut end = route.points.get_unchecked_borrowed(route.next)
+    for i in route.next + 1..route.points.len() {
+        let next = route.points.get_unchecked_borrowed(i)
+        let a = end.sub(start) let b = next.sub(end)
+        if a.cross(b).length() > 0.00001 *(a.length() * b.length() + 1) || a.dot(b) < 0 {
+            result.push(end) start = end
+        }
+        end = next
+    }
+    result.push(end) ret result
+}
+/// Rotate by pi/16 rather than evaluating a local trig approximation over 2pi.
+/// The repeated first point also makes closure independent of float drift.
+pub fn navigation_ring_points(goal: Vec3, radius: f32) -> Vec[Vec3] {
+    let mut points = Vec[Vec3]::new()
+    let mut x = radius let mut z = 0_f32
+    for i in 0..32 {
+        points.push(goal.add(Vec3::new(x, 0.1, z)))
+        let next_x = x * 0.98078528_f32 - z * 0.19509032_f32
+        z = x * 0.19509032_f32 + z * 0.98078528_f32 x = next_x
+    }
+    points.push(goal.add(Vec3::new(radius, 0.1, 0))) ret points
+}
+pub fn navigation_display(bounds: Rect, camera: PerspectiveCamera, routes: Vec[NavigationRoute]) -> DisplayList {
+    let mut list = DisplayList::new()
+    if bounds.width() <= 0 || bounds.height() <= 0 || routes.len() == 0 {
+        ret list
+    }
+    let projection = RouteProjection::new(bounds, camera)
+    let color = Color::rgb(142, 239, 160)
+    list.clip(bounds)
+    for route in routes {
+        let points = navigation_route_points(route)
+        if points.len() >= 2 {
+            for i in 1_usize..points.len() {
+                projection.segment(list, points.get_unchecked_borrowed(i - 1), points.get_unchecked_borrowed(i), 1.8, color)
+            }
+            let goal = points.get_unchecked_borrowed(points.len() - 1)
+            // A ground-plane ring keeps its perspective; a small cross stays
+            // legible when the camera is far above the destination.
+            let depth = projection.local(goal).z()
+            let desired: f32 = depth * projection.half * 16 / bounds.height()
+            let radius: f32 = if desired < 2.5 {
+                2.5
+            } elif desired > 12 {
+                12
+            } else {
+                desired
+            }
+            let ring = navigation_ring_points(goal, radius)
+            for i in 1_usize..ring.len() {
+                projection.segment(list, ring.get_unchecked_borrowed(i - 1), ring.get_unchecked_borrowed(i), 2, color)
+            }
+            match navigation_project(bounds, camera, goal) {
+                Some(p) => {
+                    list.line(p.x() - 3, p.y(), p.x() + 3, p.y(), 2, color)
+                    list.line(p.x(), p.y() - 3, p.x(), p.y() + 3, 2, color)
+                }
+                None => {
+                }
+            }
+        }
+    }
+    list.clear_clip() ret list
+}

@@ -1,0 +1,23 @@
+//! Compiler bookkeeping for asynchronous typed engine-service nodes.
+import core::vec::Vec
+import mod::model::{BlueprintAsset, BlueprintType}
+import refrain::gameplay::service::{gameplay_operation, gameplay_property}
+
+pub fn gameplay_slot(asset: BlueprintAsset, node: u64, field: usize) -> usize {
+    let mut slot = asset.properties.len()
+    for entry in asset.nodes {
+        if gameplay_operation(entry.operation) {
+            if entry.id == node {
+                ret slot + field
+            }
+            slot += 4
+        }
+    }
+    ret slot
+}
+pub fn gameplay_types() -> Vec[BlueprintType] {
+    ret vec![BlueprintType::Bool, BlueprintType::I32, BlueprintType::Actor, BlueprintType::String]
+}
+pub fn gameplay_reserved(id: u64) -> bool {
+    ret id >= gameplay_property(0, 0)
+}

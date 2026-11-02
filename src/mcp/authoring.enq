@@ -1,0 +1,59 @@
+//! Validated asset authoring requests. The host commits graph edits through documents.
+import core::result::Result
+import std::os::write_file_atomic
+
+import json::{Json, stringify}
+
+import mod::protocol::mcp_string
+import refrain::blueprint::{BlueprintAsset, blueprint_parse, validate_blueprint}
+import refrain::content_browser::ContentBrowser
+import refrain::content_browser::files::content_stat
+import refrain::gameplay::recipe::recipe_canonical
+
+pub fn mcp_authored_path(browser: ContentBrowser, params: Json, suffix: str, existing: bool) -> Result[str, str] {
+    if !browser.editable {
+        ret Result::Err("Stop Play and build before editing content")
+    }
+    let path = mcp_string(params, "path")
+    if path.byte_len() < 9 + suffix.byte_len() || path.byte_len() > 4096 || path.slice_bytes(0, 8) != "Content/" || path.contains("..") || path.contains("\\") || path.contains(":") || path.slice_bytes(path.byte_len() - suffix.byte_len(), suffix.byte_len()) != suffix {
+        ret Result::Err("Choose a project Content asset with the correct extension")
+    }
+    if existing {
+        let info = content_stat(browser.project, path)
+        if (info & 3) != 1 ||(info >> 2) > 4194304 {
+            ret Result::Err("Choose an existing project asset no larger than 4 MiB")
+        }
+    } else {
+        let mut slash = 7_usize
+        for i in 8_usize..path.byte_len() {
+            if path.byte_at(i) == 47 {
+                slash = i
+            }
+        }
+        if content_stat(browser.project, path.slice_bytes(0, slash)) != 2 {
+            ret Result::Err("Create the parent Content folder first")
+        }
+    }
+    ret Result::Ok(browser.project + "/" + path)
+}
+pub fn mcp_authored_blueprint(browser: ContentBrowser, params: Json) -> Result[BlueprintAsset, str] {
+    let _path = mcp_authored_path(browser, params, ".graphene-blueprint.json", true)?
+    let source = stringify(params.get("document").unwrap_or(Json::Null))
+    if source.byte_len() > 4194304 {
+        ret Result::Err("Blueprint is too large")
+    }
+    let asset = blueprint_parse(source)?
+    if asset.domain != "actor" || validate_blueprint(asset).len() != 0 {
+        ret Result::Err("Blueprint did not pass actor graph validation")
+    }
+    ret Result::Ok(asset)
+}
+pub fn mcp_authored_recipe(browser: mut ContentBrowser, params: Json) -> Result[(), str] {
+    let path = mcp_authored_path(browser, params, ".grecipe", false)?
+    let source = recipe_canonical(stringify(params.get("document").unwrap_or(Json::Null)))?
+    if write_file_atomic(path, source) != 0 {
+        ret Result::Err("Unable to save recipe asset")
+    }
+    browser.refresh()
+    ret Result::Ok(())
+}

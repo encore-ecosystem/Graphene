@@ -1,0 +1,70 @@
+//! Rich hover panels preserve asset data and work for disabled and focused controls.
+import core::vec::Vec
+import graphene::game_ui::asset::{ui_asset_parse, ui_asset_stringify, ui_asset_validate}
+import graphene::game_ui::model::{UiScreenAsset, UiWidget}
+import graphene::game_ui::tooltip::{tooltip_focus, tooltip_hover, tooltip_owner, tooltip_preview, tooltip_target, tooltip_view}
+import graphene::game_ui::view::{UiImage, build_ui_screen, game_ui_styles}
+import luma::{Point, Rect, UiLayer, Widget}
+
+fn main() -> u32 {
+    let mut asset = UiScreenAsset::new("tips", "Tooltips")
+    let mut button = UiWidget::new(2, 1, "Button") button.name = "Disabled Button" button.x = 900 button.y = 420 button.width = 80 button.height = 80 button.enabled = false
+    let mut card = UiWidget::new(3, 1, "Overlay") card.name = "First Card" card.binding = "hover:2" card.x = 450 card.y = 420 card.width = 430 card.height = 244
+    let mut body = UiWidget::new(4, 3, "Text") body.text = "Building information" body.width = 390 body.height = 80
+    let mut second = UiWidget::new(5, 1, "Button") second.name = "Second Button" second.x = 1000 second.y = 420 second.width = 80 second.height = 80
+    let mut next = UiWidget::new(6, 1, "Overlay") next.name = "Second Card" next.binding = "hover:5"
+    asset.widgets.push(button) asset.widgets.push(card) asset.widgets.push(body) asset.widgets.push(second) asset.widgets.push(next)
+    if tooltip_target("hover:2") != "game-ui-2" || tooltip_target("hover:2x") != "" || tooltip_target("value:credits") != "" || tooltip_owner(asset, 4) != 3 {
+        ret 1
+    }
+    if ui_asset_validate(asset).is_err() {
+        ret 2
+    }
+    match ui_asset_parse(ui_asset_stringify(asset)) {
+        Ok(decoded) => {
+            if decoded.widget(3).unwrap_or(card).binding != "hover:2" {
+                ret 3
+            }
+        }
+        Err(_) => {
+            ret 4
+        }
+    }
+    let bounds = Rect::new(0, 0, 1920, 1080)
+    let mut layer = UiLayer::new(build_ui_screen(tooltip_view(asset, ""), bounds, Vec[UiImage]::new()), game_ui_styles(), bounds)
+    if tooltip_hover(asset, layer.layout(), Point::new(930, 450), "") != "game-ui-2" {
+        ret 5
+    }
+    if tooltip_focus(asset, "game-ui-5") != "game-ui-5" || tooltip_focus(asset, "game-ui-1") != "" {
+        ret 6
+    }
+    let showing = tooltip_view(asset, "game-ui-2")
+    if !showing.widget(3).unwrap_or(card).visible || showing.widget(6).unwrap_or(next).visible || !asset.widget(6).unwrap_or(next).visible {
+        ret 7
+    }
+    layer.set_root(build_ui_screen(showing, bounds, Vec[UiImage]::new()), bounds)
+    if tooltip_hover(asset, layer.layout(), Point::new(890, 450), "game-ui-2") != "game-ui-2" || tooltip_hover(asset, layer.layout(), Point::new(500, 550), "game-ui-2") != "game-ui-2" {
+        ret 8
+    }
+    if tooltip_hover(asset, layer.layout(), Point::new(1030, 450), "game-ui-2") != "game-ui-5" || tooltip_hover(asset, layer.layout(), Point::new(200, 200), "game-ui-2") != "" {
+        ret 9
+    }
+    if layer.layout().find_widget("game-ui-4").unwrap_or(Widget::panel("")).style().pointer_events() {
+        ret 10
+    }
+    if !tooltip_preview(asset, 4).widget(3).unwrap_or(card).visible || tooltip_preview(asset, 2).widget(3).unwrap_or(card).visible {
+        ret 11
+    }
+    let mut invalid = asset.snapshot() let mut changed = Vec[UiWidget]::new()
+    for w in invalid.widgets {
+        let mut copy = w.snapshot() if w.id == 3 {
+            copy.binding = "hover:999"
+        }
+        changed.push(copy)
+    }
+    invalid.widgets = changed
+    if ui_asset_validate(invalid).is_ok() {
+        ret 12
+    }
+    ret 0
+}

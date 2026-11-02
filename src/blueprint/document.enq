@@ -5,7 +5,7 @@ import core::vec::Vec
 
 import mod::codec::{blueprint_semantic_source, blueprint_stringify}
 import mod::model::*
-import mod::validate::blueprint_connection_error
+import mod::validate::{blueprint_connection_error, validate_blueprint}
 
 pub struct BlueprintMove {
     node: u64
@@ -17,6 +17,7 @@ pub struct BlueprintClipboard {
     links: Vec[BlueprintLink]
 }
 pub enum BlueprintCommand {
+    ReplaceAsset(BlueprintAsset)
     AddNode(BlueprintNode)
     SetNode(BlueprintNode)
     DeleteNodes(Vec[u64])
@@ -179,6 +180,12 @@ impl for BlueprintDocument {
             snapshot_blueprint(self.asset)
         }
         match command {
+            ReplaceAsset(asset) => {
+                if asset.id != self.asset.id || asset.domain != self.asset.domain || validate_blueprint(asset).len() != 0 {
+                    ret Result::Err("Replacement must preserve identity/domain and pass validation")
+                }
+                self.asset = snapshot_blueprint(asset)
+            }
             BeginGesture => {
                 if self.gesture.is_some() {
                     ret Result[(), str]::Err("a Blueprint gesture is already active")

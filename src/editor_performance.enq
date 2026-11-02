@@ -1,8 +1,10 @@
 //! Session-only frame profiler controls and retained charts. Native fixed-size
 //! history keeps measurement allocation out of the editor's frame loop.
 import core::vec::Vec
+import core::option::Option
+
 import json::{Json, field}
-import luma::{Color, DisplayList, Event, PreparedFrame, Rect, Style, StyleSheet, UiTimings, Widget, WidgetLayout, event_key_down, event_pointer_down, horizontal, key_left, key_right, vertical}
+import luma::{Color, DisplayList, DisplayPoint, Event, PreparedFrame, Rect, Style, StyleSheet, UiStageTimings, UiTimings, UiUpdateTimings, Widget, WidgetLayout, event_key_down, event_pointer_down, horizontal, key_left, key_right, vertical}
 
 import mod::performance::performance_counter_ns
 extern fn graphene_profiler_enable(device: usize, enabled: bool) ->()
@@ -94,6 +96,66 @@ fn cpu_name(label: u64) -> str {
         "Render preparation / record"
     } elif label == 5 {
         "UI composition / submit"
+    } elif label == 7 {
+        "UI invalidation check"
+    } elif label == 8 {
+        "Editor requests / input setup"
+    } elif label == 9 {
+        "Material / terrain preparation"
+    } elif label == 10 {
+        "Editor panel input routing"
+    } elif label == 11 {
+        "Asset configuration"
+    } elif label == 12 {
+        "Content Browser jobs"
+    } elif label == 13 {
+        "Material thumbnail jobs"
+    } elif label == 14 {
+        "Audio / VFX update"
+    } elif label == 15 {
+        "Editor preview update"
+    } elif label == 16 {
+        "Retained UI transaction"
+    } elif label == 30 {
+        "Render: camera / environment"
+    } elif label == 31 {
+        "Render: scene snapshot"
+    } elif label == 32 {
+        "Render: frame inputs"
+    } elif label == 33 {
+        "Render: GI / geometry preparation"
+    } elif label == 34 {
+        "Render: scene recording"
+    } elif label == 35 {
+        "Render: AA / overlay submission"
+    } elif label == 40 {
+        "Render: displacement preparation"
+    } elif label == 41 {
+        "Render: GI preparation"
+    } elif label == 42 {
+        "Render: virtual geometry preparation"
+    } elif label == 43 {
+        "Render: ray lighting preparation"
+    } elif label == 44 {
+        "Editor camera preview"
+    } elif label == 45 {
+        "Game UI composition"
+    } elif label == 50 {
+        "Gameplay service processing"
+    } elif label == 51 {
+        "Compiled Blueprint tick"
+    } elif label == 52 {
+        "Production / logistics"
+    } elif label == 53 {
+        "Unit navigation"
+    } elif label == 54 {
+        "Blueprint transform synchronization"
+    } elif label == 55 {
+        "Physics / pose publication"
+    } elif label == 57 {
+        "Viewport Stats update"
+    } elif label == 56 {
+        "Transport visuals"
     } elif label >= 20_u64 && label < 24_u64 {
         "Record worker " +(label - 19_u64).fmt()
     } elif label == 24_u64 {
@@ -155,8 +217,42 @@ fn gpu_name(label: u64) -> str {
         "Sky light update"
     }
 }
-fn color(sheet: StyleSheet, name: str) -> Color {
-    ret sheet.style(Widget::label("").with_classes("g-perf-" + name), false, false, false).foreground()
+// Profiler roles belong to Graphene. Resolve their CSS only when the theme
+// changes; chart samples never change selector inputs or inherited colors.
+struct PerformanceColors {
+    revision: Option[u64]
+    values: Vec[(str, Color)]
+}
+
+impl for PerformanceColors {
+    pub fn new() -> Self<H> {
+        ret PerformanceColors<H>{ Option[u64]::None, Vec[(str, Color)]::with_capacity(16) }
+    }
+    pub fn matches(self: Self&, sheet: StyleSheet) -> bool {
+        ret match self.revision {
+            Some(value) => value == sheet.revision() None => false
+        }
+    }
+    pub fn get(self: mut Self&, sheet: StyleSheet, name: str) -> Color {
+        if !self.matches(sheet) {
+            self.values.clear()
+            self.revision = Option[u64]::Some(sheet.revision())
+        }
+        for entry in self.values {
+            if entry.0 == name {
+                ret entry.1
+            }
+        }
+        let result = if name == "hud" {
+            sheet.style(Widget::panel("").with_classes("g-perf-hud"), false, false, false).background()
+        } else {
+            sheet.style(Widget::label("").with_classes("g-perf-" + name), false, false, false).foreground()
+        }
+        if self.values.len() < 16 {
+            self.values.push((name, result))
+        }
+        ret result
+    }
 }
 fn control(id: str, text: str, active: bool, disabled: bool) -> Widget {
     ret Widget::button(id, text).with_classes("g-perf-button" + if active {
@@ -174,6 +270,7 @@ fn control(id: str, text: str, active: bool, disabled: bool) -> Widget {
 }
 
 pub struct PerformancePanel {
+    colors: PerformanceColors<H>
     stats_cache: DisplayList
     stats_bounds: Rect
     stats_refreshed: u64
@@ -201,13 +298,29 @@ pub struct PerformancePanel {
     displacement_summary: str
     reconstruction_sample: u64
     reconstruction_counts:(u64, u64, u64)
+    input_age: Option[u64]
+    input_queued: usize
+    input_coalesced: u32
 }
 
 impl for PerformancePanel {
     pub fn new() -> Self {
         ret Self {
-            DisplayList::new(), Rect::new(0, 0, 0, 0), 0_u64, false, false, false, false, 60_u32, 0_u64, true, Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), DisplayList::new(), 0_usize, false, "", "", 0_u64,(0_u64, 0_u64, 0_u64)
+            PerformanceColors::new(), DisplayList::new(), Rect::new(0, 0, 0, 0), 0_u64, false, false, false, false, 60_u32, 0_u64, true, Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0), DisplayList::new(), DisplayList::new(), DisplayList::new(), 0_usize, false, "", "", 0_u64,(0_u64, 0_u64, 0_u64), Option[u64]::None, 0_usize, 0_u32
         }
+    }
+    pub fn input_sample(self: mut Self, age: Option[u64], queued: usize, coalesced: u32, sampled: bool) ->() {
+        if sampled {
+            self.input_age = age self.input_coalesced = coalesced
+        }
+        self.input_queued = queued
+    }
+    pub fn input_snapshot(self: Self) -> Json {
+        ret Json::Object(vec![field("ageNs", match self.input_age {
+                        Some(ns) => Json::Number(ns.fmt()) None => Json::Null
+                    }
+                    ,
+                ), field("queued", Json::Number(self.input_queued.fmt())), field("coalesced", Json::Number(self.input_coalesced.fmt()))])
     }
     pub fn sync(self: mut Self, device: usize, opened: bool, drawable: bool) ->() {
         self.sync_capture(device, opened, drawable, false)
@@ -446,7 +559,7 @@ impl for PerformancePanel {
     }
     fn table_display(self: Self, sheet: StyleSheet) -> DisplayList {
         let mut list = DisplayList::new()
-        let text = color(sheet, "text") let muted = color(sheet, "muted")
+        let text = self.colors.get(sheet, "text") let muted = self.colors.get(sheet, "muted")
         let rows = self.table_rows()
         for index in 0_usize..rows.len() {
             let y = self.table_bounds.y() + 4 +(index as f32) * 18
@@ -477,15 +590,15 @@ impl for PerformancePanel {
             } else {
                 "Frame #" + selected(2_u32).fmt() + "  " + duration(selected(3_u32)) + "  ·  CPU " + duration(selected(4_u32)) + "  ·  GPU " + gpu_state(selected(7_u32)) + "  ·  Wait " + duration(selected(6_u32))
             }
-            , color(sheet, "text"),)
+            , self.colors.get(sheet, "text"),)
         list.text(x, y + 18, self.reconstruction_summary + if self.displacement_summary != "" {
                 "  ·  " + self.displacement_summary
             } else {
                 ""
             }
-            , color(sheet, "muted"),)
+            , self.colors.get(sheet, "muted"),)
         if self.summary_bounds.width() > 1050 {
-            list.text(self.summary_bounds.right() - 210, y, "Mean " + duration(mean) + "  P95 " + duration(p95), color(sheet, "muted"))
+            list.text(self.summary_bounds.right() - 210, y, "Mean " + duration(mean) + "  P95 " + duration(p95), self.colors.get(sheet, "muted"))
         }
         ret list
     }
@@ -509,13 +622,13 @@ impl for PerformancePanel {
         } else {
             "Collecting 60 complete CPU/GPU frames for analysis"
         }
-        list.text(self.footer_bounds.x() + 3, self.footer_bounds.y() + 2, message, color(sheet, "muted"))
+        list.text(self.footer_bounds.x() + 3, self.footer_bounds.y() + 2, message, self.colors.get(sheet, "muted"))
         ret list
     }
     fn history_display(self: Self, sheet: StyleSheet) -> DisplayList {
-        let frame_color = color(sheet, "frame") let cpu_color = color(sheet, "cpu") let gpu_color = color(sheet, "gpu")
-        let grid_color = color(sheet, "grid") let budget_color = color(sheet, "budget") let muted_color = color(sheet, "muted") let text_color = color(sheet, "text")
-        let mut list = DisplayList::new() let bounds = self.history_bounds
+        let frame_color = self.colors.get(sheet, "frame") let cpu_color = self.colors.get(sheet, "cpu") let gpu_color = self.colors.get(sheet, "gpu")
+        let grid_color = self.colors.get(sheet, "grid") let budget_color = self.colors.get(sheet, "budget") let muted_color = self.colors.get(sheet, "muted") let text_color = self.colors.get(sheet, "text")
+        let mut list = DisplayList::with_capacity(32, 0) let bounds = self.history_bounds
         if bounds.width() < 60 || bounds.height() < 40 {
             ret list
         }
@@ -542,7 +655,15 @@ impl for PerformancePanel {
         list.line(x, budget_y, x + width, budget_y, 1, budget_color)
         list.text(x + 4, budget_y - 13, duration(budget), budget_color)
         for series in 0_usize..3_usize {
-            let mut last_x = x let mut last_y = y + height let mut previous_valid = false
+            let tint = if series == 0 {
+                frame_color
+            } elif series == 1 {
+                cpu_color
+            } else {
+                gpu_color
+            }
+            let mut points = Vec[DisplayPoint]::with_capacity(count as usize)
+            let mut selected_x = Option[f32]::None
             for index in 0_usize..count as usize {
                 let valid = series != 2 || value(index, 7_u32) == 1
                 let ns = value(index, if series == 0 {
@@ -566,28 +687,27 @@ impl for PerformancePanel {
                         fraction
                     }
                 )
-                if index > 0 && valid && previous_valid {
-                    list.line(last_x, last_y, px, py, 1.5_f32, if series == 0 {
-                            frame_color
-                        } elif series == 1 {
-                            cpu_color
-                        } else {
-                            gpu_color
-                        }
-                        ,
-                    )
+                if valid {
+                    points.push(DisplayPoint::new(px, py))
+                } elif points.len() > 0 {
+                    list.path(points, 1.5_f32, tint, false)
+                    points = Vec[DisplayPoint]::with_capacity(count as usize)
                 }
                 if value(index, 2_u32) == selected(2_u32) && series == 0 {
-                    list.line(px, y, px, y + height, 1, text_color)
+                    selected_x = Option[f32]::Some(px)
                 }
-                last_x = px last_y = py previous_valid = valid
+            }
+            list.path(points, 1.5_f32, tint, false)
+            match selected_x {
+                Some(px) => list.line(px, y, px, y + height, 1, text_color) None => {
+                }
             }
         }
         list.text(x, y + height + 3, "Last " + count.fmt() + " frames · click to inspect", muted_color)
         ret list
     }
     fn timeline_display(self: Self, sheet: StyleSheet) -> DisplayList {
-        let cpu_color = color(sheet, "cpu") let gpu_color = color(sheet, "gpu") let child_color = color(sheet, "gpu-child") let muted_color = color(sheet, "muted")
+        let cpu_color = self.colors.get(sheet, "cpu") let gpu_color = self.colors.get(sheet, "gpu") let child_color = self.colors.get(sheet, "gpu-child") let muted_color = self.colors.get(sheet, "muted")
         let mut list = DisplayList::new() let bounds = self.timeline_bounds
         if bounds.width() < 60 || bounds.height() < 60 {
             ret list
@@ -656,10 +776,10 @@ impl for PerformancePanel {
         }
         let x = bounds.right() - width - 10 let y = bounds.y() + 10
         let now = performance_counter_ns()
-        if self.stats_refreshed == 0 || now - self.stats_refreshed >= 100000000_u64 || self.stats_bounds != bounds {
+        if self.stats_refreshed == 0 || now - self.stats_refreshed >= 100000000_u64 || self.stats_bounds != bounds || !self.colors.matches(sheet) {
             self.stats_refreshed = now self.stats_bounds = bounds
-            let mut list = DisplayList::new()
-            list.fill_rect(Rect::new(x, y, width, 188), sheet.style(Widget::panel("").with_classes("g-perf-hud"), false, false, false).background())
+            let mut list = DisplayList::with_capacity(32, 0)
+            list.fill_rect(Rect::new(x, y, width, 206), self.colors.get(sheet, "hud"))
             let count = value(0_usize, 0_u32) as usize
             let first = if count > 120 {
                 count - 120
@@ -689,8 +809,8 @@ impl for PerformancePanel {
                 } else {
                     fps.fmt() + " FPS · Frame " + duration(frame_ns)
                 }
-                , color(sheet, "text"),)
-            list.text(x + 8, y + 24, "CPU work " + duration(value(sample, 4_u32)), color(sheet, "cpu"))
+                , self.colors.get(sheet, "text"),)
+            list.text(x + 8, y + 24, "CPU work " + duration(value(sample, 4_u32)), self.colors.get(sheet, "cpu"))
             let state = value(sample, 7_u32)
             list.text(x + 8, y + 42, "GPU " + if count == 0 {
                     "Pending"
@@ -703,8 +823,8 @@ impl for PerformancePanel {
                 } else {
                     "Unavailable"
                 }
-                , color(sheet, "gpu"),)
-            list.text(x + 8, y + 60, "Wait / Present " + duration(value(sample, 6_u32)), color(sheet, "muted"))
+                , self.colors.get(sheet, "gpu"),)
+            list.text(x + 8, y + 60, "Wait / Present " + duration(value(sample, 6_u32)), self.colors.get(sheet, "muted"))
             let bottleneck = unsafe {
                 graphene_profiler_bottleneck()
             }
@@ -719,7 +839,7 @@ impl for PerformancePanel {
                 } else {
                     "Collecting samples"
                 }
-                , color(sheet, "muted"),)
+                , self.colors.get(sheet, "muted"),)
             let mut maximum = 16666667_u64
             for i in first..count {
                 for channel in 0_usize..3_usize {
@@ -732,9 +852,13 @@ impl for PerformancePanel {
                     }
                 }
             }
-            let gx = x + 8 let gy = y + 102 let gw = width - 16 let gh = 60_f32
+            list.text(x + 8, y + 96, "Input " + match self.input_age {
+                    Some(ns) => duration(ns) None => "—"
+                }
+                + " · queue " + self.input_queued.fmt(), self.colors.get(sheet, "muted"),)
+            let gx = x + 8 let gy = y + 120 let gw = width - 16 let gh = 60_f32
             let reference = gy + gh *(1_f32 - 16666667_f32 / maximum as f32)
-            list.line(gx, reference, gx + gw, reference, 1_f32, color(sheet, "budget"))
+            list.line(gx, reference, gx + gw, reference, 1_f32, self.colors.get(sheet, "budget"))
             for series in 0_usize..3_usize {
                 let field = if series == 0 {
                     3_u32
@@ -743,7 +867,7 @@ impl for PerformancePanel {
                 } else {
                     5_u32
                 }
-                let tint = color(sheet, if series == 0 {
+                let tint = self.colors.get(sheet, if series == 0 {
                         "frame"
                     } elif series == 1 {
                         "cpu"
@@ -752,21 +876,24 @@ impl for PerformancePanel {
                     }
                     ,
                 )
-                let mut px = gx let mut py = gy + gh let mut previous_valid = false
+                let mut points = Vec[DisplayPoint]::with_capacity(count - first)
                 for i in first..count {
                     let valid = series != 2 || value(i, 7_u32) == 1
                     let nx = gx + gw *((i - first) as f32) / 119_f32
                     let ny = gy + gh *(1_f32 - value(i, field) as f32 / maximum as f32)
-                    if previous_valid && valid {
-                        list.line(px, py, nx, ny, 1.5_f32, tint)
+                    if valid {
+                        points.push(DisplayPoint::new(nx, ny))
+                    } elif points.len() > 0 {
+                        list.path(points, 1.5_f32, tint, false)
+                        points = Vec[DisplayPoint]::with_capacity(count - first)
                     }
-                    px = nx py = ny previous_valid = valid
                 }
+                list.path(points, 1.5_f32, tint, false)
             }
-            list.text(x + 8, y + 170, "Frame", color(sheet, "frame"))
-            list.text(x + 68, y + 170, "CPU", color(sheet, "cpu"))
-            list.text(x + 112, y + 170, "GPU", color(sheet, "gpu"))
-            list.text(x + width - 80, y + 170, "16.7 ms ref", color(sheet, "muted"))
+            list.text(x + 8, y + 188, "Frame", self.colors.get(sheet, "frame"))
+            list.text(x + 68, y + 188, "CPU", self.colors.get(sheet, "cpu"))
+            list.text(x + 112, y + 188, "GPU", self.colors.get(sheet, "gpu"))
+            list.text(x + width - 80, y + 188, "16.7 ms ref", self.colors.get(sheet, "muted"))
             self.stats_cache = list
         }
         ret frame.with_display_overlay(self.stats_cache, bounds)
@@ -844,7 +971,8 @@ pub fn profile_snapshot(limit: usize) -> Json {
     let bottleneck = unsafe {
         graphene_profiler_bottleneck()
     }
-    ret Json::Object(vec![field("ok", Json::Bool(true)), field("samples", Json::Array(samples)), field("events", Json::Array(events)), field("averageFrameNs", Json::Number(average.fmt())), field("p95FrameNs", Json::Number(p95.fmt())), field("bottleneck", Json::String(if bottleneck == 1 {
+    let native_ui = Json::Object(vec![field("acquireNs", Json::Number(selected(12_u32).fmt())), field("presentNs", Json::Number(selected(13_u32).fmt())), field("gpuPreparationNs", Json::Number(selected(14_u32).fmt())), field("geometryUploadBytes", Json::Number(selected(15_u32).fmt()))])
+    ret Json::Object(vec![field("ok", Json::Bool(true)), field("samples", Json::Array(samples)), field("events", Json::Array(events)), field("eventFrame", Json::Number(selected(2_u32).fmt())), field("uiNative", native_ui), field("averageFrameNs", Json::Number(average.fmt())), field("p95FrameNs", Json::Number(p95.fmt())), field("bottleneck", Json::String(if bottleneck == 1 {
                         "cpu"
                     } elif bottleneck == 2 {
                         "gpu"
@@ -856,4 +984,12 @@ pub fn profile_snapshot(limit: usize) -> Json {
                         "insufficient-samples"
                     }
                 ))])
+}
+
+fn ui_stage_snapshot(stage: UiStageTimings) -> Json {
+    ret Json::Object(vec![field("elapsedNs", Json::Number(stage.elapsed_ns().fmt())), field("maximumNs", Json::Number(stage.maximum_ns().fmt())), field("calls", Json::Number(stage.calls().fmt())), field("units", Json::Number(stage.units().fmt()))])
+}
+/// Cumulative, opt-in retained work. Compare snapshots to isolate an interval.
+pub fn ui_update_snapshot(timings: UiUpdateTimings) -> Json {
+    ret Json::Object(vec![field("transaction", ui_stage_snapshot(timings.transaction())), field("other", ui_stage_snapshot(timings.other())), field("bindings", ui_stage_snapshot(timings.bindings())), field("styles", ui_stage_snapshot(timings.styles())), field("reconcile", ui_stage_snapshot(timings.reconcile())), field("layout", ui_stage_snapshot(timings.layout())), field("paint", ui_stage_snapshot(timings.paint())), field("fullCascades", Json::Number(timings.full_cascades().fmt())), field("subtreeCascades", Json::Number(timings.subtree_cascades().fmt()))])
 }

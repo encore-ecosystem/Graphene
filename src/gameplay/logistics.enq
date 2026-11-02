@@ -1,0 +1,89 @@
+//! Packed cargo packets in transit; no scene actor per item and no global bank.
+import core::vec::Vec
+import mod::inventory::ActorInventory
+
+pub struct CargoPacket {
+    count: u32
+    remaining: f32
+}
+pub struct CargoLink {
+    source: usize
+    destination: usize
+    item: u32
+    rate: f32
+    seconds: f32
+    credit: f32
+    packets: Vec[CargoPacket]
+    visual_actor: u64
+    visual_instance: usize
+    progress_property: u64
+    items_property: u64
+}
+pub struct LogisticsSystem {
+    links: Vec[CargoLink]
+}
+
+impl for CargoLink {
+    pub fn new(source: usize, destination: usize, item: u32, rate: f32, seconds: f32) -> Self {
+        ret Self {
+            source, destination, item, rate, seconds, 0, Vec[CargoPacket]::new(), 0, 0, 0, 0
+        }
+    }
+    pub fn snapshot(self: Self) -> Self {
+        let mut packets = Vec[CargoPacket]::new() for packet in self.packets {
+            packets.push(packet)
+        }
+        ret Self {
+            self.source, self.destination, self.item, self.rate, self.seconds, self.credit, packets, self.visual_actor, self.visual_instance, self.progress_property, self.items_property
+        }
+    }
+    pub fn step(self: mut Self, inventories: mut Vec[ActorInventory], seconds: f32) ->() {
+        if self.source >= inventories.len() || self.destination >= inventories.len() || self.source == self.destination {
+            ret()
+        }
+        let source = inventories.get_unchecked_borrowed(self.source) let destination = inventories.get_unchecked_borrowed(self.destination)
+        let mut input = source.cargo.snapshot() let mut output = destination.cargo.snapshot()
+        let mut pending = Vec[CargoPacket]::new()
+        for packet in self.packets {
+            let remaining = packet.remaining - seconds
+            if remaining <= 0 && output.insert(self.item, packet.count) {
+            } else {
+                pending.push(CargoPacket {
+                        packet.count, if remaining < 0 {
+                            0_f32
+                        } else {
+                            remaining
+                        }
+                    }
+                )
+            }
+        }
+        self.credit += seconds * self.rate
+        // Backpressure cannot accumulate an unbounded burst while stopped.
+        if self.credit > self.rate {
+            self.credit = self.rate
+        }
+        let mut count = self.credit as u32
+        if count > input.count(self.item) {
+            count = input.count(self.item)
+        }
+        if count > 0 && pending.len() < 32 && input.remove(self.item, count) {
+            pending.push(CargoPacket { count, self.seconds }) self.credit -= count as f32
+        }
+        self.packets = pending
+        inventories.set(self.source, ActorInventory { source.actor, input })
+        inventories.set(self.destination, ActorInventory { destination.actor, output })
+    }
+}
+
+impl for LogisticsSystem {
+    pub fn new() -> Self {
+        ret Self { Vec[CargoLink]::new() }
+    }
+    pub fn step(self: mut Self, inventories: mut Vec[ActorInventory], seconds: f32) ->() {
+        for i in 0_usize..self.links.len() {
+            let mut link = self.links.get_unchecked_borrowed(i).snapshot()
+            link.step(inventories, seconds) self.links.set(i, link)
+        }
+    }
+}

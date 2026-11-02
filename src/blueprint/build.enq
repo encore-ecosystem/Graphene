@@ -1,14 +1,17 @@
 //! Explicit Compile jobs use immutable snapshots and ordinary Encore builds.
 import core::result::Result
 import core::vec::Vec
-import json::{Json, field, stringify, parse}
-import mod::codec::blueprint_semantic_source
-import mod::codegen::{BlueprintGenerated, BlueprintSourceRange, generate_blueprints}
-import mod::model::BlueprintAsset
+
 import std::os::{cwd, env, file_exists, file_sha256, mkdir_all, read_file, write_file, write_file_atomic}
 import std::path::Path
 import std::process::run_args_capture
 import std::string::String
+
+import json::{Json, field, parse, stringify}
+
+import mod::codec::blueprint_semantic_source
+import mod::codegen::{BlueprintGenerated, BlueprintSourceRange, generate_blueprints}
+import mod::model::BlueprintAsset
 
 extern fn graphene_bp_stage(parent: str) -> str
 extern fn graphene_bp_target() -> str
@@ -81,7 +84,7 @@ pub fn prepare_blueprint_build(project: str, support: str, compiler: str, assets
     for asset in assets {
         semantic += blueprint_semantic_source(asset) + "\n"
     }
-    let identity = semantic + "\nabi-v1\n" + graphene_bp_target() + "\nrelease\n" + compiler_hash + "\n" + abi_hash + "\n" + runtime_hash + "\n" + generated.source + "\n" + generated.registry
+    let identity = semantic + "\nabi-v3\n" + graphene_bp_target() + "\nrelease\n" + compiler_hash + "\n" + abi_hash + "\n" + runtime_hash + "\n" + generated.source + "\n" + generated.registry
     write(root.join("identity"), identity)?
     let key = file_sha256(root.join("identity").as_str())
     if key.byte_len() != 64 {

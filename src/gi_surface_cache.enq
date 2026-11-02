@@ -1,0 +1,108 @@
+//! CPU capture cards depend on render geometry/materials, not camera motion.
+import core::vec::Vec
+import linalg::{Mat4, Vec3}
+
+import mod::dynamic_gi::{SdfBox, SurfaceCacheSample}
+
+pub struct GiSurfaceInput {
+    entity: u64
+    mesh: u64
+    material: u64
+    world: Mat4
+    minimum: Vec3
+    maximum: Vec3
+    albedo: Vec3
+}
+
+fn same_vector(a: Vec3, b: Vec3) -> bool {
+    ret a.x() == b.x() && a.y() == b.y() && a.z() == b.z()
+}
+fn same_matrix(a: Mat4, b: Mat4) -> bool {
+    ret a.m00 == b.m00 && a.m01 == b.m01 && a.m02 == b.m02 && a.m03 == b.m03 &&
+    a.m10 == b.m10 && a.m11 == b.m11 && a.m12 == b.m12 && a.m13 == b.m13 &&
+    a.m20 == b.m20 && a.m21 == b.m21 && a.m22 == b.m22 && a.m23 == b.m23 &&
+    a.m30 == b.m30 && a.m31 == b.m31 && a.m32 == b.m32 && a.m33 == b.m33
+}
+fn same_input(a: GiSurfaceInput, b: GiSurfaceInput) -> bool {
+    ret a.entity == b.entity && a.mesh == b.mesh && a.material == b.material &&
+    same_matrix(a.world, b.world) && same_vector(a.minimum, b.minimum) &&
+    same_vector(a.maximum, b.maximum) && same_vector(a.albedo, b.albedo)
+}
+
+pub struct GiSurfaceCache {
+    sources: Vec[GiSurfaceInput]
+    boxes: Vec[SdfBox]
+    samples: Vec[SurfaceCacheSample]
+    rebuilds: u64
+}
+
+impl for GiSurfaceCache {
+    pub fn new() -> Self {
+        ret Self {
+            Vec[GiSurfaceInput]::new(), Vec[SdfBox]::new(), Vec[SurfaceCacheSample]::new(), 0
+        }
+    }
+    /// The existing GI budget is 320 samples, 24 per actor. Keep source order
+    /// stable so cached radiance-history slots retain their original identity.
+    pub fn update(self: mut Self, inputs: Vec[GiSurfaceInput]) -> bool {
+        let count = if inputs.len() > 13_usize {
+            13_usize
+        } else {
+            inputs.len()
+        }
+        let mut unchanged = self.rebuilds > 0 && count == self.sources.len()
+        if unchanged {
+            for i in 0_usize..count {
+                if !same_input(inputs.get_unchecked_borrowed(i), self.sources.get_unchecked_borrowed(i)) {
+                    unchanged = false break
+                }
+            }
+        }
+        if unchanged {
+            ret false
+        }
+        let mut sources = Vec[GiSurfaceInput]::with_capacity(count)
+        let mut boxes = Vec[SdfBox]::with_capacity(count)
+        let mut samples = Vec[SurfaceCacheSample]::with_capacity(count * 24)
+        let normals = vec![Vec3::new(1, 0, 0), Vec3::new( - 1, 0, 0), Vec3::new(0, 1, 0),
+            Vec3::new(0, - 1, 0), Vec3::new(0, 0, 1), Vec3::new(0, 0, - 1)]
+        for i in 0_usize..count {
+            let source = inputs.get_unchecked_borrowed(i)
+            sources.push(source)
+            let center = source.minimum.add(source.maximum).scale(0.5_f32)
+            let extent = source.maximum.sub(source.minimum).scale(0.5_f32)
+            let world = source.world let world_center = world.transform_point(center)
+            let x = world.transform_point(center.add(Vec3::new(extent.x(), 0, 0))).sub(world_center).length()
+            let y = world.transform_point(center.add(Vec3::new(0, extent.y(), 0))).sub(world_center).length()
+            let z = world.transform_point(center.add(Vec3::new(0, 0, extent.z()))).sub(world_center).length()
+            boxes.push(SdfBox::new(world_center, Vec3::new(x, y, z), Vec3::zero()))
+            for face in 0_usize..6_usize {
+                let local_normal = normals.get_unchecked_borrowed(face)
+                let normal = world.transform_point(center.add(local_normal)).sub(world_center).normalized()
+                for texel in 0_usize..4_usize {
+                    let u = if texel == 0 || texel == 2 {
+                        - 0.5_f32
+                    } else {
+                        0.5_f32
+                    }
+                    let v = if texel < 2 {
+                        - 0.5_f32
+                    } else {
+                        0.5_f32
+                    }
+                    let tangent = if local_normal.x() != 0 {
+                        Vec3::new(0, extent.y() * u, extent.z() * v)
+                    } elif local_normal.y() != 0 {
+                        Vec3::new(extent.x() * u, 0, extent.z() * v)
+                    } else {
+                        Vec3::new(extent.x() * u, extent.y() * v, 0)
+                    }
+                    let p = center.add(Vec3::new(local_normal.x() * extent.x(), local_normal.y() * extent.y(), local_normal.z() * extent.z())).add(tangent)
+                    samples.push(SurfaceCacheSample::new(world.transform_point(p), normal, source.albedo))
+                }
+            }
+        }
+        self.sources = sources self.boxes = boxes self.samples = samples self.rebuilds += 1
+        ret true
+    }
+}

@@ -1,6 +1,8 @@
 //! Validation is independent of code generation and never mutates the document.
 import core::vec::Vec
+import mod::gameplay::gameplay_reserved
 import mod::model::{BlueprintAsset, BlueprintDiagnostic, BlueprintInstance, BlueprintLink, BlueprintNode, BlueprintType, blueprint_event, blueprint_pin, blueprint_pins, blueprint_ui_action}
+import refrain::gameplay::service::gameplay_operation
 
 /// Edge validation does not reject unrelated unfinished inputs in the document.
 pub fn blueprint_connection_error(asset: BlueprintAsset, link: BlueprintLink) -> str {
@@ -181,6 +183,9 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
     let mut property_ids = Vec[u64]::new()
     let mut property_names = Vec[str]::new()
     for property in asset.properties {
+        if gameplay_reserved(property.id) {
+            errors.push(diagnostic(0, "", "property ID uses the reserved engine-service namespace"))
+        }
         if property.id == 0 || contains(property_ids, property.id) {
             errors.push(diagnostic(0, "", "property IDs must be unique and nonzero"))
         }
@@ -202,7 +207,16 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
         }
         node_ids.push(node.id)
         let operation = node.operation
-        if asset.domain == "ui" &&(component_operation(operation) || operation == "input-pressed" || operation == "input-released") {
+        if operation == "game-event" && node.text.byte_len() >= 8 && node.text.slice_bytes(0, 8) == "@engine-" {
+            errors.push(diagnostic(node.id, "", "event name is reserved for engine state restoration"))
+        }
+        if operation == "game-event" && node.text.byte_len() >= 19 && node.text.slice_bytes(0, 19) == "@service-completed:" {
+            errors.push(diagnostic(node.id, "", "event name is reserved for engine-service completion"))
+        }
+        if gameplay_operation(operation) &&(asset.domain != "actor" || node.id > 1000000) {
+            errors.push(diagnostic(node.id, "", "engine-service nodes require an actor graph and ID <= 1000000"))
+        }
+        if asset.domain == "ui" &&(operation == "primary-pressed" || operation == "secondary-pressed" || operation == "cursor-position" || operation == "cursor-actor" || operation == "self-actor" || operation == "cursor-valid" || operation == "is-selected" || operation == "set-selected" || operation == "move-to" || operation == "stop-movement" || operation == "move-completed" || operation == "move-failed" || component_operation(operation) || operation == "input-pressed" || operation == "input-released") {
             errors.push(diagnostic(node.id, "", "actor operation is unavailable in UI graphs"))
         }
         if asset.domain != "ui" &&(blueprint_ui_action(operation) != 0 || operation == "ui-click" || operation == "ui-change" || operation == "ui-destruct") {
@@ -216,7 +230,7 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
             errors.push(diagnostic(node.id, "", "unknown node operation: " + operation))
         }
         if blueprint_event(operation) {
-            if operation != "input-pressed" && operation != "input-released" && operation != "ui-click" && operation != "ui-change" && node.text != "" {
+            if operation != "game-event" && operation != "input-pressed" && operation != "input-released" && operation != "ui-click" && operation != "ui-change" && node.text != "" {
                 errors.push(diagnostic(node.id, "", "only input events accept an action name"))
             }
             let key = operation + ":" + node.text
@@ -226,7 +240,7 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
                 }
             }
             events.push(key)
-            if (operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change") && node.text == "" {
+            if (operation == "game-event" || operation == "input-pressed" || operation == "input-released" || operation == "ui-click" || operation == "ui-change") && node.text == "" {
                 errors.push(diagnostic(node.id, "", "input action name is required"))
             }
         }
@@ -247,6 +261,9 @@ pub fn validate_blueprint(asset: BlueprintAsset) -> Vec[BlueprintDiagnostic] {
         }
         if operation == "constant" && node.value.value_type().name() != node.value_type.name() {
             errors.push(diagnostic(node.id, "value", "constant type mismatch"))
+        }
+        if operation == "to-text" && node.value_type.name() != "i32" && node.value_type.name() != "f32" && node.value_type.name() != "bool" {
+            errors.push(diagnostic(node.id, "value", "To Text requires i32, f32 or bool"))
         }
         if operation == "equal" && node.value_type.name() == "exec" {
             errors.push(diagnostic(node.id, "", "execution pins are not comparable values"))

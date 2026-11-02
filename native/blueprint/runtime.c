@@ -163,6 +163,26 @@ static bool gbp_get_property(void *handle, uint64_t id, gbp_value *output) {
     if (!value || !output) return false;
     *output = *value; return true;
 }
+float gbp_query_scalar(uintptr_t state, uintptr_t host, uint32_t field, uint32_t axis, uint64_t node) {
+    const gbp_host_v1 *api=gbp_host(state,host,node);
+    return api && api->query_scalar ? api->query_scalar(api->context,field,axis) : 0;
+}
+uint64_t gbp_query_actor(uintptr_t state, uintptr_t host, uint32_t field, uint64_t node) {
+    const gbp_host_v1 *api=gbp_host(state,host,node);
+    return api && api->query_actor ? api->query_actor(api->context,field) : 0;
+}
+void gbp_command(uintptr_t state, uintptr_t host, uint32_t kind, float x, float y, float z, float speed, float radius, uint64_t node) {
+    const gbp_host_v1 *api=gbp_host(state,host,node); const float value[5]={x,y,z,speed,radius};
+    if (!api || !api->command || !api->command(api->context,kind,value)) gbp_fail((gbp_state *)state,node,"interaction command rejected");
+}
+void gbp_emit_event(uintptr_t state,uintptr_t host,gbp_string text,uint64_t node) {
+ const gbp_host_v1 *api=gbp_host(state,host,node);
+ if(!api || !api->event || !text.object || !api->event(api->context,text.object->data,text.object->length))gbp_fail((gbp_state *)state,node,"event rejected or outbox full");
+}
+void gbp_begin_placement(uintptr_t state,uintptr_t host,gbp_string path,float radius,uint64_t node) {
+ const gbp_host_v1 *api=gbp_host(state,host,node);
+ if(!api || !api->placement || !api->placement(api->context,path.object?path.object->data:"",path.object?path.object->length:0,radius))gbp_fail((gbp_state *)state,node,"placement request rejected");
+}
 static bool gbp_equal_slice(const char *text, const char *bytes, size_t length) {
     return text && strlen(text) == length && (!length || (bytes && memcmp(text, bytes, length) == 0));
 }
@@ -175,6 +195,8 @@ static bool gbp_invoke(void *handle, const gbp_host_v1 *host, const char *kind, 
     else if (begin) { if (state->begun || !state->constructing) return false; state->begun = true; }
     else if (!state->begun) return false;
     if (!construction && !begin && !gbp_equal_slice("tick", kind, kind_length) &&
+        !gbp_equal_slice("primary-pressed", kind, kind_length) && !gbp_equal_slice("secondary-pressed", kind, kind_length) &&
+        !gbp_equal_slice("game-event", kind, kind_length) && !gbp_equal_slice("placement-completed", kind, kind_length) && !gbp_equal_slice("placement-failed", kind, kind_length) && !gbp_equal_slice("placement-cancelled", kind, kind_length) && !gbp_equal_slice("move-completed", kind, kind_length) && !gbp_equal_slice("move-failed", kind, kind_length) &&
         !gbp_equal_slice("input-pressed", kind, kind_length) && !gbp_equal_slice("input-released", kind, kind_length) &&
         !gbp_equal_slice("ui-click", kind, kind_length) && !gbp_equal_slice("ui-change", kind, kind_length) && !gbp_equal_slice("ui-destruct", kind, kind_length)) return false;
     for (size_t i = 0; i < state->class_info->event_count; ++i) {

@@ -1,4 +1,5 @@
-import mod::command_bus::ActorPhysicsCommand
+import mod::blueprint::model::{BlueprintInstance, BlueprintOverride}
+import mod::command_bus::{ActorPhysicsCommand, BlueprintActorCommand}
 import mod::physics::component::PhysicsComponent
 //! Stable JSON command envelopes shared by Automation API and MCP adapters.
 
@@ -254,6 +255,28 @@ pub fn decode_scene_batch(params: Json) -> Result[Vec[GrapheneCommand], Protocol
 }
 
 fn decode_payload(method: str, params: Json) -> Result[GrapheneCommand, ProtocolError] {
+    if method == "scene.add_blueprint" {
+        let name = params.get("name").unwrap_or(Json::Null).as_str().unwrap_or("")
+        let asset = params.get("asset").unwrap_or(Json::Null).as_str().unwrap_or("")
+        let suffix = ".graphene-blueprint.json"
+        if name == "" || name.byte_len() > 256 || asset.byte_len() < 9 + suffix.byte_len() || asset.slice_bytes(0, 8) != "Content/" || asset.contains("..") || asset.contains("\\") || asset.contains(":") || asset.slice_bytes(asset.byte_len() - suffix.byte_len(), suffix.byte_len()) != suffix {
+            ret Result::Err(ProtocolError::new("Choose a named project Blueprint asset"))
+        }
+        match decode_transform(params) {
+            Some(transform) => {
+                ret Result::Ok(GrapheneCommand::AddBlueprintActor(BlueprintActorCommand {
+                            name, BlueprintInstance {
+                                asset, Vec[BlueprintOverride]::new()
+                            }
+                            , transform
+                        }
+                    ))
+            }
+            None => {
+                ret Result::Err(ProtocolError::new("Blueprint actor requires a valid transform"))
+            }
+        }
+    }
     if method == "scene.set_physics" {
         match actor_field(params) {
             Some(actor) => {

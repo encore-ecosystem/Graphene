@@ -1,0 +1,152 @@
+//! Conservation, rollback and control-chain regressions, plus real compiled nodes.
+import core::vec::Vec
+import std::io::eprintln
+
+import graphene::blueprint::*
+import graphene::gameplay::control::*
+import graphene::gameplay::inventory::{Inventory, ItemStack}
+import graphene::gameplay::service::{gameplay_property, gameplay_request}
+import graphene::gameplay::world::GameplayWorld
+import graphene::scene::transform::Transform
+import linalg::Vec3
+
+fn inventory_checks() -> bool {
+    let mut cargo = Inventory::new(10)
+    if !cargo.insert(1, 8) || cargo.insert(2, 3) || cargo.total() != 8 {
+        ret false
+    }
+    if cargo.exchange(vec![ItemStack { 1, 9 }], vec![ItemStack { 2, 2 }]) || cargo.count(1) != 8 {
+        ret false
+    }
+    if cargo.exchange(vec![ItemStack { 1, 4 }, ItemStack { 1, 5 }], Vec[ItemStack]::new()) || cargo.count(1) != 8 {
+        ret false
+    }
+    if !cargo.exchange(vec![ItemStack { 1, 8 }], vec![ItemStack { 2, 10 }]) || cargo.count(1) != 0 || cargo.count(2) != 10 {
+        ret false
+    }
+    let mut copy = cargo.snapshot() copy.remove(2, 5)
+    ret cargo.count(2) == 10 && copy.count(2) == 5 && !cargo.insert(0, 1)
+}
+fn control_checks() -> bool {
+    let mut bodies = vec![ControlBody::new(1, 1, "engineer", Vec3::zero()), ControlBody::new(2, 1, "terminal", Vec3::zero()), ControlBody::new(3, 1, "android", Vec3::zero()), ControlBody::new(4, 1, "human", Vec3::zero()), ControlBody::new(5, 1, "vehicle", Vec3::zero())]
+    let mut player = ControlSession::new(1, 1, 1)
+    if possess_android(player, bodies, 3) || !enter_terminal(player, bodies, 2) || possess_android(player, bodies, 4) || !possess_android(player, bodies, 3) {
+        ret false
+    }
+    if !board_vehicle(player, bodies, 5) || player.controlled() != 5 || bodies.get_unchecked_borrowed(4).occupant != 3 {
+        ret false
+    }
+    let mut terminal = bodies.get_unchecked_borrowed(1).snapshot() terminal.powered = false bodies.set(1, terminal)
+    validate_control(player, bodies)
+    if player.mode != "engineer" || player.controlled() != 1 || bodies.get_unchecked_borrowed(2).controller != 0 || bodies.get_unchecked_borrowed(4).occupant != 0 {
+        ret false
+    }
+    if accepts_move_order(bodies.get_unchecked_borrowed(4)) {
+        ret false
+    }
+    let mut vehicle = bodies.get_unchecked_borrowed(4).snapshot() vehicle.autonomous = true
+    ret accepts_move_order(vehicle)
+}
+fn service_checks() -> bool {
+    if gameplay_request("@service|1|inventory-add|1|0|-1|2|").is_some() || gameplay_request("@service|1|inventory-add|1|0|1|18446744073709551616|").is_some() {
+        ret false
+    }
+    let request = gameplay_request("@service|71|control-register|13|0|1|0|android|test")
+    match request {
+        Some(value) => {
+            if value.node != 71 || value.actor != 13 || value.text != "android|test" {
+                ret false
+            }
+        }
+        None => {
+            ret false
+        }
+    }
+    let mut world = GameplayWorld::new()
+    for event in vec!["@service|1|inventory-create|1|0|0|10|", "@service|2|inventory-create|2|0|0|2|", "@service|3|inventory-add|1|0|4|8|"] {
+        let command = match gameplay_request(event) {
+            Some(v) => v None => {
+                ret false
+            }
+        }
+        if !world.command(1, command, Vec3::zero()).ok {
+            ret false
+        }
+    }
+    let request = match gameplay_request("@service|4|inventory-transfer|1|2|4|3|") {
+        Some(v) => v None => {
+            ret false
+        }
+    }
+    if world.command(1, request, Vec3::zero()).ok || world.inventories.get_unchecked_borrowed(0).cargo.count(4) != 8 || world.inventories.get_unchecked_borrowed(1).cargo.total() != 0 {
+        ret false
+    }
+    ret true
+}
+fn compiled_checks() -> bool {
+    let mut asset = BlueprintAsset::new("gameplay-services-test", "Services")
+    asset.nodes.push(BlueprintNode::new(1, "begin-play", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(2, "self-actor", BlueprintType::Actor))
+    asset.nodes.push(BlueprintNode::new(3, "constant", BlueprintType::I32).with_value(BlueprintValue::I32(10)))
+    asset.nodes.push(BlueprintNode::new(4, "inventory-create", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(5, "constant", BlueprintType::I32).with_value(BlueprintValue::I32(2)))
+    asset.nodes.push(BlueprintNode::new(6, "inventory-add", BlueprintType::Exec))
+    asset.nodes.push(BlueprintNode::new(7, "to-text", BlueprintType::I32))
+    asset.nodes.push(BlueprintNode::new(8, "print", BlueprintType::String))
+    asset.connect(1, "then", 4, "in") asset.connect(2, "value", 4, "actor") asset.connect(3, "value", 4, "capacity")
+    asset.connect(4, "completed", 6, "in") asset.connect(2, "value", 6, "actor") asset.connect(5, "value", 6, "item") asset.connect(3, "value", 6, "count")
+    asset.connect(6, "completed", 8, "in") asset.connect(6, "count", 7, "value") asset.connect(7, "text", 8, "value")
+    let build = match prepare_blueprint_build(".", "native/blueprint", blueprint_compiler_path(), vec![asset]) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret false
+        }
+    }
+    if !build.cached && run_blueprint_build(build.compiler, build.directory, build.library, build.receipt, build.key) != 0 {
+        eprintln(build.directory) ret false
+    }
+    let module = match BlueprintModule::open(build.library) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret false
+        }
+    }
+    let instance = match module.instantiate(asset, BlueprintInstance {
+            "test", Vec[BlueprintOverride]::new()
+        }
+        , Transform::identity(),) {
+        Ok(v) => v Err(e) => {
+            eprintln(e) ret false
+        }
+    }
+    instance.pointer(42, 0, Vec3::zero(), false)
+    if !instance.invoke("construction", "", 0) || !instance.invoke("begin-play", "", 0) {
+        eprintln(instance.error()) ret false
+    }
+    let event = instance.take_event()
+    if event != "@service|4|inventory-create|42|0|0|10|" {
+        eprintln("Unexpected request: " + event) ret false
+    }
+    if !instance.set_property(gameplay_property(4, 0), BlueprintValue::Bool(true)) || !instance.invoke("game-event", "@service-completed:4", 0) || instance.take_event() != "@service|6|inventory-add|42|0|2|10|" {
+        ret false
+    }
+    instance.set_property(gameplay_property(6, 0), BlueprintValue::Bool(true)) instance.set_property(gameplay_property(6, 1), BlueprintValue::I32(10))
+    if !instance.invoke("game-event", "@service-completed:6", 0) || !instance.take_log().contains("10") {
+        ret false
+    }
+    instance.destroy()
+    ret module.close()
+}
+fn main() -> u32 {
+    if !inventory_checks() {
+        ret 1
+    }
+    if !control_checks() {
+        ret 2
+    }
+    if !service_checks() {
+        ret 3
+    }
+    if !compiled_checks() {
+        ret 4
+    }
+    ret 0
+}

@@ -1,0 +1,176 @@
+//! Authoritative control chain. Bodies, cargo and crew remain in the world.
+import core::vec::Vec
+import linalg::Vec3
+
+pub struct ControlBody {
+    actor: u64
+    team: u32
+    kind: str
+    position: Vec3
+    alive: bool
+    powered: bool
+    controller: u32
+    occupant: u64
+    seated_in: u64
+    autonomous: bool
+}
+pub struct ControlSession {
+    player: u32
+    team: u32
+    engineer: u64
+    terminal: u64
+    remote: u64
+    vehicle: u64
+    mode: str
+}
+
+impl for ControlBody {
+    pub fn snapshot(self: Self) -> Self {
+        ret Self {
+            self.actor, self.team, self.kind, self.position, self.alive, self.powered, self.controller, self.occupant, self.seated_in, self.autonomous
+        }
+    }
+    pub fn new(actor: u64, team: u32, kind: str, position: Vec3) -> Self {
+        ret Self { actor, team, kind, position, true, true, 0, 0, 0, false }
+    }
+}
+
+impl for ControlSession {
+    pub fn new(player: u32, team: u32, engineer: u64) -> Self {
+        ret Self { player, team, engineer, 0, 0, 0, "engineer" }
+    }
+    pub fn body(self: Self) -> u64 {
+        ret if self.remote != 0 {
+            self.remote
+        } else {
+            self.engineer
+        }
+    }
+    pub fn controlled(self: Self) -> u64 {
+        ret if self.vehicle != 0 {
+            self.vehicle
+        } else {
+            self.body()
+        }
+    }
+}
+fn index(bodies: Vec[ControlBody], actor: u64) -> usize {
+    for i in 0_usize..bodies.len() {
+        if bodies.get_unchecked_borrowed(i).actor == actor {
+            ret i
+        }
+    }
+    ret bodies.len()
+}
+fn near(a: Vec3, b: Vec3, radius: f32) -> bool {
+    let d = a.sub(b)
+    ret d.dot(d) <= radius * radius
+}
+pub fn enter_terminal(session: mut ControlSession, bodies: mut Vec[ControlBody], terminal: u64) -> bool {
+    if session.player == 0 || session.mode != "engineer" || session.vehicle != 0 {
+        ret false
+    }
+    let e = index(bodies, session.engineer) let t = index(bodies, terminal)
+    if e == bodies.len() || t == bodies.len() {
+        ret false
+    }
+    let engineer = bodies.get_unchecked_borrowed(e) let console = bodies.get_unchecked_borrowed(t)
+    if !engineer.alive || !console.alive || !console.powered || console.kind != "terminal" || console.team != session.team || engineer.team != session.team || !near(engineer.position, console.position, 4) {
+        ret false
+    }
+    session.terminal = terminal session.mode = "rts"
+    ret true
+}
+pub fn possess_android(session: mut ControlSession, bodies: mut Vec[ControlBody], actor: u64) -> bool {
+    if session.mode != "rts" {
+        ret false
+    }
+    let i = index(bodies, actor)
+    if i == bodies.len() {
+        ret false
+    }
+    let mut body = bodies.get_unchecked_borrowed(i).snapshot()
+    if body.kind != "android" || !body.alive || body.team != session.team || body.controller != 0 || body.seated_in != 0 {
+        ret false
+    }
+    body.controller = session.player bodies.set(i, body)
+    session.remote = actor session.mode = "android"
+    ret true
+}
+pub fn board_vehicle(session: mut ControlSession, bodies: mut Vec[ControlBody], actor: u64) -> bool {
+    if session.mode != "engineer" && session.mode != "android" {
+        ret false
+    }
+    let d = index(bodies, session.body()) let v = index(bodies, actor)
+    if d == bodies.len() || v == bodies.len() {
+        ret false
+    }
+    let mut driver = bodies.get_unchecked_borrowed(d).snapshot() let mut vehicle = bodies.get_unchecked_borrowed(v).snapshot()
+    if !driver.alive || !vehicle.alive || driver.team != session.team || vehicle.team != session.team || vehicle.kind != "vehicle" || vehicle.occupant != 0 || driver.seated_in != 0 || !near(driver.position, vehicle.position, 4) {
+        ret false
+    }
+    driver.seated_in = actor vehicle.occupant = driver.actor vehicle.controller = session.player
+    bodies.set(d, driver) bodies.set(v, vehicle)
+    session.vehicle = actor session.mode = "vehicle"
+    ret true
+}
+pub fn leave_vehicle(session: mut ControlSession, bodies: mut Vec[ControlBody]) -> bool {
+    if session.vehicle == 0 {
+        ret false
+    }
+    let d = index(bodies, session.body()) let v = index(bodies, session.vehicle)
+    if d < bodies.len() {
+        let mut driver = bodies.get_unchecked_borrowed(d).snapshot() driver.seated_in = 0
+        if v < bodies.len() {
+            driver.position = bodies.get_unchecked_borrowed(v).position.add(Vec3::new(2, 1, 0))
+        }
+        bodies.set(d, driver)
+    }
+    if v < bodies.len() {
+        let mut vehicle = bodies.get_unchecked_borrowed(v).snapshot() vehicle.occupant = 0 vehicle.controller = 0 bodies.set(v, vehicle)
+    }
+    session.vehicle = 0 session.mode = if session.remote == 0 {
+        "engineer"
+    } else {
+        "android"
+    }
+    ret true
+}
+pub fn return_control(session: mut ControlSession, bodies: mut Vec[ControlBody]) ->() {
+    if session.vehicle != 0 {
+        leave_vehicle(session, bodies)
+    }
+    let i = index(bodies, session.remote)
+    if i < bodies.len() {
+        let mut body = bodies.get_unchecked_borrowed(i).snapshot() body.controller = 0 bodies.set(i, body)
+    }
+    session.remote = 0
+    session.mode = if session.terminal == 0 {
+        "engineer"
+    } else {
+        "rts"
+    }
+}
+pub fn exit_terminal(session: mut ControlSession, bodies: mut Vec[ControlBody]) ->() {
+    return_control(session, bodies) session.terminal = 0 session.mode = "engineer"
+}
+pub fn validate_control(session: mut ControlSession, bodies: mut Vec[ControlBody]) ->() {
+    let e = index(bodies, session.engineer) let t = index(bodies, session.terminal)
+    if e == bodies.len() || !bodies.get_unchecked_borrowed(e).alive {
+        exit_terminal(session, bodies) session.mode = "respawn" ret()
+    }
+    if session.terminal != 0 &&(t == bodies.len() || !bodies.get_unchecked_borrowed(t).alive || !bodies.get_unchecked_borrowed(t).powered) {
+        exit_terminal(session, bodies) ret()
+    }
+    let r = index(bodies, session.remote)
+    if session.remote != 0 &&(r == bodies.len() || !bodies.get_unchecked_borrowed(r).alive) {
+        return_control(session, bodies)
+    }
+    let v = index(bodies, session.vehicle)
+    if session.vehicle != 0 &&(v == bodies.len() || !bodies.get_unchecked_borrowed(v).alive) {
+        leave_vehicle(session, bodies)
+    }
+}
+pub fn accepts_move_order(body: ControlBody) -> bool {
+    ret body.alive && body.controller == 0 && body.seated_in == 0 &&(body.kind != "vehicle" || body.autonomous || body.occupant != 0)
+}

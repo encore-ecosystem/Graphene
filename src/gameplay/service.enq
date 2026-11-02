@@ -1,0 +1,87 @@
+//! Typed Blueprint requests carried by the existing bounded native event queue.
+//! There is no game-specific policy or new native runtime implementation here.
+import core::option::Option
+import core::vec::Vec
+
+pub struct GameplayRequest {
+    node: u64
+    operation: str
+    actor: u64
+    target: u64
+    item: u32
+    count: u32
+    text: str
+}
+pub struct GameplayReply {
+    ok: bool
+    count: i32
+    actor: u64
+    text: str
+}
+pub fn gameplay_operations() -> Vec[str] {
+    ret vec!["physics-static-box", "world-save", "world-load", "world-broadcast", "actor-find", "find-nearest", "distance-to", "move-to-actor", "spawn-blueprint", "actor-teleport", "team-value-get", "team-value-set", "health-register", "health-get", "health-team", "health-damage", "health-heal", "inventory-transfer-all", "control-autonomy", "control-seat-ai", "inventory-create", "inventory-add", "inventory-remove", "inventory-count", "inventory-transfer", "craft-recipe", "production-configure", "production-status", "production-enable", "conveyor-connect", "control-body", "control-set-power", "control-register", "control-start", "control-terminal", "control-possess", "control-board", "control-leave-vehicle", "control-return", "control-exit-terminal", "control-state"]
+}
+pub fn gameplay_operation(key: str) -> bool {
+    for operation in gameplay_operations() {
+        if key == operation {
+            ret true
+        }
+    }
+    ret false
+}
+/// Reserved property namespace for per-node completion values.
+pub fn gameplay_property(node: u64, field: u64) -> u64 {
+    ret 9223372036854775808_u64 + node * 4 + field
+}
+pub fn gameplay_number(text: str) -> Option[u64] {
+    if text.byte_len() == 0 || text.byte_len() > 20 {
+        ret Option[u64]::None
+    }
+    let mut value = 0_u64
+    for i in 0_usize..text.byte_len() {
+        let c = text.byte_at(i)
+        if c < 48 || c > 57 || value > 1844674407370955161_u64 ||(value == 1844674407370955161_u64 && c > 53) {
+            ret Option[u64]::None
+        }
+        value = value * 10 +(c - 48) as u64
+    }
+    ret Option[u64]::Some(value)
+}
+pub fn gameplay_request(event: str) -> Option[GameplayRequest] {
+    if event.byte_len() < 9 || event.byte_len() > 8192 || event.slice_bytes(0, 9) != "@service|" {
+        ret Option[GameplayRequest]::None
+    }
+    let mut parts = Vec[str]::new() let mut start = 9_usize
+    for i in start..event.byte_len() {
+        if event.byte_at(i) == 124 && parts.len() < 6 {
+            parts.push(event.slice_bytes(start, i - start)) start = i + 1
+        }
+    }
+    if parts.len() != 6 {
+        ret Option[GameplayRequest]::None
+    }
+    let node = gameplay_number(parts.get_unchecked_borrowed(0)).unwrap_or(0)
+    let operation = parts.get_unchecked_borrowed(1)
+    let actor = gameplay_number(parts.get_unchecked_borrowed(2)).unwrap_or(18446744073709551615_u64)
+    let target = gameplay_number(parts.get_unchecked_borrowed(3)).unwrap_or(18446744073709551615_u64)
+    let item = gameplay_number(parts.get_unchecked_borrowed(4)).unwrap_or(18446744073709551615_u64)
+    let count = gameplay_number(parts.get_unchecked_borrowed(5)).unwrap_or(18446744073709551615_u64)
+    if node == 0 || node > 1000000 || actor == 18446744073709551615_u64 || target == 18446744073709551615_u64 || item > 2147483647 || count > 2147483647 || !gameplay_operation(operation) {
+        ret Option[GameplayRequest]::None
+    }
+    ret Option[GameplayRequest]::Some(GameplayRequest {
+            node, operation, actor, target, item as u32, count as u32, event.slice_bytes(start, event.byte_len() - start)
+        }
+    )
+}
+
+impl for GameplayReply {
+    pub fn failed(message: str) -> Self {
+        ret Self { false, 0, 0, message }
+    }
+    pub fn done(count: u32, actor: u64, text: str) -> Self {
+        ret Self {
+            true, count as i32, actor, text
+        }
+    }
+}

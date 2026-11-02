@@ -1,0 +1,504 @@
+//! Session-owned services. Actor identities refer to physical world objects.
+import core::vec::Vec
+import core::result::Result
+
+import std::os::read_file
+
+import linalg::Vec3
+
+import mod::control::*
+import mod::inventory::{ActorInventory, Inventory, ItemStack}
+import mod::logistics::{CargoLink, LogisticsSystem}
+import mod::production::{ProductionMachine, ProductionSystem}
+import mod::recipe::{ProductionRecipe, recipe_parse}
+import mod::service::{GameplayReply, GameplayRequest}
+import mod::vitals::{TeamValue, VitalState}
+import refrain::content_browser::files::content_stat
+import refrain::runtime::index::ActorIndex
+import refrain::scene::json_value::parse_number
+pub struct GameplayWorld {
+    inventories: Vec[ActorInventory]
+    bodies: Vec[ControlBody]
+    control: ControlSession
+    production: ProductionSystem
+    project: str
+    logistics: LogisticsSystem
+    vitals: Vec[VitalState]
+    teams: Vec[TeamValue]
+    inventory_lookup: ActorIndex
+    body_lookup: ActorIndex
+    vital_lookup: ActorIndex
+}
+
+pub struct GameplayState {
+    inventories: Vec[ActorInventory]
+    bodies: Vec[ControlBody]
+    control: ControlSession
+    production: ProductionSystem
+    logistics: LogisticsSystem
+    vitals: Vec[VitalState]
+    teams: Vec[TeamValue]
+}
+
+impl for GameplayWorld {
+    pub fn is_alive(self: Self&, actor: u64) -> bool {
+        match self.vital_lookup.get(actor) {
+            Some(i) => {
+                ret self.vitals.get_unchecked_borrowed(i).health != 0
+            }
+            None => {
+                if actor < 262144 {
+                    ret true
+                }
+            }
+        }
+        for vital in self.vitals {
+            if vital.actor == actor {
+                ret vital.health != 0
+            }
+        }
+        ret true
+    }
+    pub fn is_seated(self: Self&, actor: u64) -> bool {
+        match self.body_lookup.get(actor) {
+            Some(i) => {
+                ret self.bodies.get_unchecked_borrowed(i).seated_in != 0
+            }
+            None => {
+                if actor < 262144 {
+                    ret false
+                }
+            }
+        }
+        for body in self.bodies {
+            if body.actor == actor {
+                ret body.seated_in != 0
+            }
+        }
+        ret false
+    }
+    pub fn accepts_orders(self: Self&, actor: u64) -> bool {
+        if !self.is_alive(actor) {
+            ret false
+        }
+        match self.body_lookup.get(actor) {
+            Some(i) => {
+                ret accepts_move_order(self.bodies.get_unchecked_borrowed(i))
+            }
+            None => {
+                if actor < 262144 {
+                    ret true
+                }
+            }
+        }
+        for body in self.bodies {
+            if body.actor == actor {
+                ret accepts_move_order(body)
+            }
+        }
+        ret true
+    }
+    pub fn state(self: Self&) -> GameplayState {
+        ret GameplayState {
+            self.inventories, self.bodies, self.control, self.production, self.logistics, self.vitals, self.teams
+        }
+    }
+    pub fn restore(self: mut Self&, state: GameplayState) ->() {
+        self.inventories = state.inventories self.bodies = state.bodies self.control = state.control self.production = state.production self.logistics = state.logistics self.vitals = state.vitals self.teams = state.teams
+        self.inventory_lookup = ActorIndex::new() self.body_lookup = ActorIndex::new() self.vital_lookup = ActorIndex::new()
+        for i in 0_usize..self.inventories.len() {
+            self.inventory_lookup.insert(self.inventories.get_unchecked_borrowed(i).actor, i)
+        }
+        for i in 0_usize..self.bodies.len() {
+            self.body_lookup.insert(self.bodies.get_unchecked_borrowed(i).actor, i)
+        }
+        for i in 0_usize..self.vitals.len() {
+            self.vital_lookup.insert(self.vitals.get_unchecked_borrowed(i).actor, i)
+        }
+    }
+    pub fn new() -> GameplayWorld<H> {
+        ret GameplayWorld<H> {
+            Vec[ActorInventory]::new(), Vec[ControlBody]::new(), ControlSession::new(0, 0, 0), ProductionSystem::new(), "", LogisticsSystem::new(), Vec[VitalState]::new(), Vec[TeamValue]::new(), ActorIndex::new(), ActorIndex::new(), ActorIndex::new()
+        }
+    }
+    pub fn position(self: mut Self&, actor: u64, position: Vec3) ->() {
+        match self.body_lookup.get(actor) {
+            Some(i) => {
+                let mut body = self.bodies.get_unchecked_borrowed(i).snapshot() body.position = position self.bodies.set(i, body) ret()
+            }
+            None => {
+                if actor < 262144 {
+                    ret()
+                }
+            }
+        }
+        for i in 0_usize..self.bodies.len() {
+            let mut body = self.bodies.get_unchecked_borrowed(i).snapshot()
+            if body.actor == actor {
+                body.position = position self.bodies.set(i, body) ret()
+            }
+        }
+    }
+    pub fn validate(self: mut Self&) ->() {
+        validate_control(self.control, self.bodies)
+    }
+    pub fn load_recipe(self: Self&, path: str) -> Result[ProductionRecipe, str] {
+        if path.byte_len() < 17 || path.slice_bytes(0, 8) != "Content/" || path.contains("..") || path.contains("\\") || path.contains(":") || path.slice_bytes(path.byte_len() - 8, 8) != ".grecipe" {
+            ret Result::Err("Choose a project recipe asset")
+        }
+        let info = content_stat(self.project, path)
+        if (info & 3) != 1 ||(info >> 2) > 65536 {
+            ret Result::Err("Recipe is missing or too large")
+        }
+        ret recipe_parse(read_file(self.project + "/" + path))
+    }
+    pub fn inventory_index(self: Self&, actor: u64) -> usize {
+        match self.inventory_lookup.get(actor) {
+            Some(i) => {
+                ret i
+            }
+            None => {
+                if actor < 262144 {
+                    ret self.inventories.len()
+                }
+            }
+        }
+        for i in 0_usize..self.inventories.len() {
+            if self.inventories.get_unchecked_borrowed(i).actor == actor {
+                ret i
+            }
+        }
+        ret self.inventories.len()
+    }
+    pub fn command(self: mut Self&, owner: u64, request: GameplayRequest, position: Vec3) -> GameplayReply {
+        let actor = if request.actor == 0 {
+            owner
+        } else {
+            request.actor
+        }
+        let op = request.operation
+        if op == "control-body" {
+            ret if self.control.player == 0 {
+                GameplayReply::failed("Player control is not initialized")
+            } else {
+                GameplayReply::done(0, self.control.body(), self.control.mode)
+            }
+        }
+        if op == "control-set-power" {
+            for i in 0_usize..self.bodies.len() {
+                let mut body = self.bodies.get_unchecked_borrowed(i).snapshot() if body.actor == actor {
+                    body.powered = request.count != 0 self.bodies.set(i, body) validate_control(self.control, self.bodies) ret GameplayReply::done(request.count, actor, "Power updated")
+                }
+            }
+            ret GameplayReply::failed("Control body is not registered")
+        }
+        if op == "control-autonomy" {
+            for i in 0_usize..self.bodies.len() {
+                let mut body = self.bodies.get_unchecked_borrowed(i).snapshot()
+                if body.actor == actor && body.kind == "vehicle" {
+                    body.autonomous = request.count != 0 self.bodies.set(i, body) ret GameplayReply::done(request.count, actor, "Autonomy updated")
+                }
+            }
+            ret GameplayReply::failed("Vehicle is not registered")
+        }
+        if op == "control-seat-ai" {
+            let mut driver_index = self.bodies.len() let mut vehicle_index = self.bodies.len()
+            for i in 0_usize..self.bodies.len() {
+                let b = self.bodies.get_unchecked_borrowed(i) if b.actor == actor {
+                    driver_index = i
+                }
+                if b.actor == request.target {
+                    vehicle_index = i
+                }
+            }
+            if driver_index == self.bodies.len() || vehicle_index == self.bodies.len() {
+                ret GameplayReply::failed("Driver or vehicle is missing")
+            }
+            let mut driver = self.bodies.get_unchecked_borrowed(driver_index).snapshot() let mut vehicle = self.bodies.get_unchecked_borrowed(vehicle_index).snapshot()
+            let delta = driver.position.sub(vehicle.position)
+            if !driver.alive || !vehicle.alive || driver.team != vehicle.team ||(driver.kind != "human" && driver.kind != "android") || vehicle.kind != "vehicle" || driver.controller != 0 || driver.seated_in != 0 || vehicle.occupant != 0 || delta.dot(delta) > 16 {
+                ret GameplayReply::failed("AI driver requires a nearby free team seat")
+            }
+            driver.seated_in = vehicle.actor vehicle.occupant = driver.actor
+            self.bodies.set(driver_index, driver) self.bodies.set(vehicle_index, vehicle)
+            ret GameplayReply::done(1, vehicle.actor, "AI driver boarded")
+        }
+        if op == "team-value-get" || op == "team-value-set" {
+            if request.item == 0 || request.text == "" || request.text.byte_len() > 128 {
+                ret GameplayReply::failed("Team and value key are required")
+            }
+            for index in 0_usize..self.teams.len() {
+                let value = self.teams.get_unchecked_borrowed(index)
+                if value.team == request.item && value.key == request.text {
+                    if op == "team-value-set" {
+                        self.teams.set(index, TeamValue {
+                                value.team, value.key, request.count
+                            }
+                            ,
+                        )
+                    }
+                    ret GameplayReply::done(if op == "team-value-set" {
+                            request.count
+                        } else {
+                            value.value
+                        }
+                        , 0, request.text,)
+                }
+            }
+            if op == "team-value-set" {
+                self.teams.push(TeamValue {
+                        request.item, request.text, request.count
+                    }
+                )
+            }
+            ret GameplayReply::done(if op == "team-value-set" {
+                    request.count
+                } else {
+                    0_u32
+                }
+                , 0, request.text,)
+        }
+        if op == "health-register" {
+            if actor == 0 || request.count == 0 || request.count > 1000000 {
+                ret GameplayReply::failed("Invalid maximum health")
+            }
+            for vital in self.vitals {
+                if vital.actor == actor {
+                    ret GameplayReply::failed("Health is already registered")
+                }
+            }
+            self.vitals.push(VitalState { actor, request.item, request.count, request.count })
+            self.vital_lookup.insert(actor, self.vitals.len() - 1)
+            ret GameplayReply::done(request.count, actor, "alive")
+        }
+        if op == "health-damage" || op == "health-heal" || op == "health-get" || op == "health-team" {
+            for i in 0_usize..self.vitals.len() {
+                let mut vital = self.vitals.get_unchecked_borrowed(i).snapshot()
+                if vital.actor == actor {
+                    if op == "health-team" {
+                        ret GameplayReply::done(vital.team, actor, "")
+                    }
+                    let alive = vital.health != 0
+                    if op == "health-damage" {
+                        vital.health = if request.count >= vital.health {
+                            0_u32
+                        } else {
+                            vital.health - request.count
+                        }
+                    }
+                    if op == "health-heal" {
+                        vital.health += if request.count > vital.maximum - vital.health {
+                            vital.maximum - vital.health
+                        } else {
+                            request.count
+                        }
+                    }
+                    self.vitals.set(i, vital)
+                    for b in 0_usize..self.bodies.len() {
+                        let mut body = self.bodies.get_unchecked_borrowed(b).snapshot()
+                        if body.actor == actor {
+                            body.alive = vital.health != 0 if !body.alive {
+                                body.seated_in = 0
+                            }
+                            self.bodies.set(b, body)
+                        }
+                        if vital.health == 0 && body.occupant == actor {
+                            body.occupant = 0 body.controller = 0 self.bodies.set(b, body)
+                        }
+                    }
+                    ret GameplayReply::done(vital.health, actor, if alive && vital.health == 0 {
+                            "died"
+                        } elif vital.health == 0 {
+                            "dead"
+                        } else {
+                            "alive"
+                        }
+                        ,
+                    )
+                }
+            }
+            ret GameplayReply::failed("Health is not registered")
+        }
+        let i = self.inventory_index(actor)
+        if op == "inventory-transfer-all" {
+            let d = self.inventory_index(request.target)
+            if i == self.inventories.len() || d == self.inventories.len() || i == d {
+                ret GameplayReply::failed("Choose two physical inventories")
+            }
+            let source = self.inventories.get_unchecked_borrowed(i) let destination = self.inventories.get_unchecked_borrowed(d)
+            let mut cargo = destination.cargo.snapshot()
+            if !cargo.exchange(Vec[ItemStack]::new(), source.cargo.stacks) {
+                ret GameplayReply::failed("Destination cannot hold all cargo")
+            }
+            let count = source.cargo.total()
+            self.inventories.set(i, ActorInventory { actor, Inventory::new(source.cargo.capacity) }) self.inventories.set(d, ActorInventory {
+                    request.target, cargo
+                }
+                ,
+            )
+            ret GameplayReply::done(count, request.target, "Transferred all cargo")
+        }
+        if op == "conveyor-connect" {
+            let d = self.inventory_index(request.target)
+            let mut cut = request.text.byte_len()
+            for b in 0_usize..request.text.byte_len() {
+                if request.text.byte_at(b) == 124 {
+                    cut = b break
+                }
+            }
+            let seconds = parse_number(request.text.slice_bytes(0, cut)).unwrap_or(0)
+            if i == self.inventories.len() || d == self.inventories.len() || i == d || request.item == 0 || request.count == 0 || request.count > 1000 || seconds < 0.05 || seconds > 3600 || self.logistics.links.len() >= 16384 {
+                ret GameplayReply::failed("Invalid conveyor inventories, item, rate or travel time")
+            }
+            for link in self.logistics.links {
+                if link.source == i && link.destination == d && link.item == request.item {
+                    ret GameplayReply::failed("Conveyor is already connected")
+                }
+            }
+            self.logistics.links.push(CargoLink::new(i, d, request.item, request.count as f32, seconds))
+            ret GameplayReply::done(0, request.target, "Connected")
+        }
+        if op == "craft-recipe" || op == "production-configure" {
+            if i == self.inventories.len() {
+                ret GameplayReply::failed("Create the machine inventory first")
+            }
+            let recipe = match self.load_recipe(request.text) {
+                Ok(v) => v Err(e) => {
+                    ret GameplayReply::failed(e)
+                }
+            }
+            if op == "craft-recipe" {
+                let mut cargo = self.inventories.get_unchecked_borrowed(i).cargo.snapshot()
+                if !cargo.exchange(recipe.inputs, recipe.outputs) {
+                    ret GameplayReply::failed("Recipe needs ingredients and output space")
+                }
+                self.inventories.set(i, ActorInventory { actor, cargo })
+                ret GameplayReply::done(1, actor, recipe.name)
+            }
+            if request.item >= 256 {
+                ret GameplayReply::failed("Power grid must be in 0..255")
+            }
+            for m in 0_usize..self.production.machines.len() {
+                let machine = self.production.machines.get_unchecked_borrowed(m)
+                if machine.actor == actor {
+                    if machine.running {
+                        ret GameplayReply::failed("Finish the current cycle before changing recipes")
+                    }
+                    let mut configured = ProductionMachine::new(actor, i, request.item, recipe) configured.completed = machine.completed self.production.machines.set(m, configured)
+                    ret GameplayReply::done(0, actor, "Recipe changed")
+                }
+            }
+            self.production.machines.push(ProductionMachine::new(actor, i, request.item, recipe))
+            ret GameplayReply::done(0, actor, "Configured")
+        }
+        if op == "production-status" || op == "production-enable" {
+            for m in 0_usize..self.production.machines.len() {
+                let mut machine = self.production.machines.get_unchecked_borrowed(m).snapshot()
+                if machine.actor == actor {
+                    if op == "production-enable" {
+                        machine.enabled = request.count != 0 self.production.machines.set(m, machine)
+                    }
+                    ret GameplayReply::done(machine.completed, actor, machine.status)
+                }
+            }
+            ret GameplayReply::failed("Machine is not configured")
+        }
+        if op == "inventory-create" {
+            if actor == 0 || i < self.inventories.len() || request.count == 0 || request.count > 1000000 {
+                ret GameplayReply::failed("Inventory already exists or capacity is invalid")
+            }
+            self.inventories.push(ActorInventory { actor, Inventory::new(request.count) })
+            self.inventory_lookup.insert(actor, self.inventories.len() - 1)
+            ret GameplayReply::done(0, actor, "Inventory created")
+        }
+        if op == "inventory-add" || op == "inventory-remove" || op == "inventory-count" || op == "inventory-transfer" {
+            if i == self.inventories.len() || request.item == 0 {
+                ret GameplayReply::failed("Inventory or item is missing")
+            }
+            let source = self.inventories.get_unchecked_borrowed(i)
+            if op == "inventory-count" {
+                ret GameplayReply::done(source.cargo.count(request.item), actor, "")
+            }
+            let mut cargo = source.cargo.snapshot()
+            if op == "inventory-transfer" {
+                let d = self.inventory_index(request.target)
+                if d == self.inventories.len() || d == i {
+                    ret GameplayReply::failed("Transfer requires another inventory")
+                }
+                let destination = self.inventories.get_unchecked_borrowed(d)
+                let mut target_cargo = destination.cargo.snapshot()
+                // Exact transfers make branching in Blueprint predictable.
+                if cargo.count(request.item) < request.count || target_cargo.free() < request.count {
+                    ret GameplayReply::failed("Insufficient cargo or destination is full")
+                }
+                if !cargo.remove(request.item, request.count) || !target_cargo.insert(request.item, request.count) {
+                    ret GameplayReply::failed("Invalid cargo")
+                }
+                self.inventories.set(i, ActorInventory { actor, cargo })
+                self.inventories.set(d, ActorInventory { request.target, target_cargo })
+                ret GameplayReply::done(request.count, request.target, "Transferred")
+            }
+            let ok = if op == "inventory-add" {
+                cargo.insert(request.item, request.count)
+            } else {
+                cargo.remove(request.item, request.count)
+            }
+            if !ok {
+                ret GameplayReply::failed("Insufficient cargo or inventory is full")
+            }
+            let count = cargo.count(request.item)
+            self.inventories.set(i, ActorInventory { actor, cargo })
+            ret GameplayReply::done(count, actor, "")
+        }
+        if op == "control-register" {
+            if actor == 0 || request.item == 0 {
+                ret GameplayReply::failed("Actor and team are required")
+            }
+            for body in self.bodies {
+                if body.actor == actor {
+                    ret GameplayReply::failed("Body is already registered")
+                }
+            }
+            let kind = request.text
+            if kind != "engineer" && kind != "android" && kind != "human" && kind != "npc" && kind != "vehicle" && kind != "terminal" {
+                ret GameplayReply::failed("Unknown controllable body kind")
+            }
+            self.bodies.push(ControlBody::new(actor, request.item, kind, position))
+            self.body_lookup.insert(actor, self.bodies.len() - 1)
+            ret GameplayReply::done(0, actor, "Registered")
+        }
+        if op == "control-start" {
+            if self.control.player != 0 || request.item == 0 || request.count == 0 {
+                ret GameplayReply::failed("Player is already started or identity is missing")
+            }
+            for body in self.bodies {
+                if body.actor == actor && body.team == request.item && body.kind == "engineer" && body.alive {
+                    self.control = ControlSession::new(request.count, request.item, actor)
+                    ret GameplayReply::done(0, actor, "engineer")
+                }
+            }
+            ret GameplayReply::failed("Start requires a living team engineer")
+        }
+        if self.control.player == 0 {
+            ret GameplayReply::failed("Player control is not initialized")
+        }
+        let ok = match op {
+            "control-terminal" => enter_terminal(self.control, self.bodies, actor)
+            "control-possess" => possess_android(self.control, self.bodies, actor)
+            "control-board" => board_vehicle(self.control, self.bodies, actor)
+            "control-leave-vehicle" => leave_vehicle(self.control, self.bodies)
+            "control-return" => {
+                return_control(self.control, self.bodies) true
+            }
+            "control-exit-terminal" => {
+                exit_terminal(self.control, self.bodies) true
+            }
+            "control-state" => true
+            _ => false
+        }
+        if !ok {
+            ret GameplayReply::failed("Control transition is unavailable")
+        }
+        ret GameplayReply::done(0, self.control.controlled(), self.control.mode)
+    }
+}

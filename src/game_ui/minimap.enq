@@ -1,0 +1,116 @@
+//! Cached navigation overview and live camera/unit overlay. No scene render pass.
+import core::option::Option
+import core::vec::Vec
+
+import std::math::tan
+
+import linalg::Vec3
+import luma::{Color, DisplayList, Point, Rect}
+
+import refrain::blueprint::navigation::NavigationGrid
+import refrain::scene::component::SceneComponent
+import refrain::scene::world::Scene
+extern fn graphene_content_pixels(address: usize, count: usize) -> str
+
+pub struct UiMinimap {
+    origin: Vec3
+    extent: Vec3
+    payload: str
+}
+fn clamp(v: f32, a: f32, b: f32) -> f32 {
+    ret if v < a {
+        a
+    } elif v > b {
+        b
+    } else {
+        v
+    }
+}
+
+impl for UiMinimap {
+    pub fn empty() -> Self {
+        ret Self { Vec3::zero(), Vec3::zero(), "" }
+    }
+    pub fn prepare(grid: NavigationGrid) -> Self {
+        let origin = grid.map_origin() let extent = grid.map_extent()
+        if extent.x() <= 0 || extent.z() <= 0 {
+            ret Self::empty()
+        }
+        let mut pixels = vec![128_u32, 128_u32]
+        for z in 0_usize..128_usize {
+            for x in 0_usize..128_usize {
+                let h = grid.surface_height(origin.x() +((x as f32) + 0.5) * extent.x() / 128, origin.z() +((z as f32) + 0.5) * extent.z() / 128)
+                let shade = clamp(h, 0_f32, 70_f32)
+                let r =(45 + shade * 0.65) as u32 let g =(63 + shade * 0.65) as u32 let b =(35 + shade * 0.6) as u32
+                pixels.push(if h < - 999999 {
+                        0xff131714_u32
+                    } elif h < - 0.5 {
+                        0xff604c27_u32
+                    } else {
+                        0xff000000_u32 | r |(g << 8_u32) |(b << 16_u32)
+                    }
+                )
+            }
+        }
+        let payload = unsafe {
+            graphene_content_pixels(pixels.as_ptr() as usize, pixels.len())
+        }
+        ret Self { origin, extent, payload }
+    }
+    pub fn payload(self: Self) -> str {
+        ret self.payload
+    }
+    pub fn world_point(self: Self, bounds: Rect, x: f32, y: f32) -> Option[Vec3] {
+        if self.extent.x() <= 0 || self.extent.z() <= 0 || bounds.width() <= 0 || bounds.height() <= 0 {
+            ret Option[Vec3]::None
+        }
+        ret Option[Vec3]::Some(Vec3::new(self.origin.x() + clamp((x - bounds.x()) / bounds.width(), 0_f32, 1_f32) * self.extent.x(), 0, self.origin.z() + clamp((y - bounds.y()) / bounds.height(), 0_f32, 1_f32) * self.extent.z()))
+    }
+    fn project(self: Self, bounds: Rect, p: Vec3) -> Point {
+        ret Point::new(bounds.x() +(p.x() - self.origin.x()) * bounds.width() / self.extent.x(), bounds.y() +(p.z() - self.origin.z()) * bounds.height() / self.extent.z())
+    }
+    pub fn display(self: Self, bounds: Rect, scene: Scene, markers: Vec[(Vec3, Vec3)], aspect: f32) -> DisplayList {
+        let mut list = DisplayList::new()
+        if self.extent.x() <= 0 || self.extent.z() <= 0 {
+            ret list
+        }
+        list.clip(bounds)
+        for marker in markers {
+            let p = self.project(bounds, marker.0) let c = marker.1
+            list.fill_rect(Rect::new(p.x() - 3, p.y() - 3, 6, 6), Color::rgb((clamp(c.x(), 0_f32, 1_f32) * 255) as u8,(clamp(c.y(), 0_f32, 1_f32) * 255) as u8,(clamp(c.z(), 0_f32, 1_f32) * 255) as u8))
+            list.stroke_rect(Rect::new(p.x() - 3, p.y() - 3, 6, 6), Color::rgb(8, 12, 8))
+        }
+        for actor in scene.entities() {
+            match actor.component() {
+                Camera(camera) => {
+                    match scene.world_matrix(actor.id()) {
+                        Some(world) => {
+                            let origin = world.transform_point(Vec3::zero())
+                            let tangent = tan(camera.fov * 0.00872664626_f32)
+                            let mut corners = Vec[Point]::new()
+                            for xy in vec![( - 1_f32, - 1_f32),(1_f32, - 1_f32),(1_f32, 1_f32),( - 1_f32, 1_f32)] {
+                                let ray = world.transform_point(Vec3::new(xy.0 * tangent * aspect, xy.1 * tangent, - 1)).sub(origin).normalized()
+                                let distance = if ray.y() < - 0.001 {
+                                    - origin.y() / ray.y()
+                                } else {
+                                    2000_f32
+                                }
+                                corners.push(self.project(bounds, origin.add(ray.scale(distance))))
+                            }
+                            for i in 0_usize..4_usize {
+                                let a = corners.get(i).unwrap_or(Point::new(0, 0)) let b = corners.get((i + 1) % 4).unwrap_or(a)
+                                list.line(a.x(), a.y(), b.x(), b.y(), 1.5, Color::rgb(234, 224, 143))
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                    break
+                }
+                _ => {
+                }
+            }
+        }
+        list.clear_clip() ret list
+    }
+}

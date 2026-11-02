@@ -1,0 +1,71 @@
+//! Authored recipe data. Signed power: consumption > 0, generation < 0.
+import core::result::Result
+import core::vec::Vec
+
+import json::{Json, parse, stringify}
+
+import mod::inventory::ItemStack
+import mod::service::gameplay_number
+import refrain::scene::json_value::parse_number
+
+pub struct ProductionRecipe {
+    id: str
+    name: str
+    seconds: f32
+    power: f32
+    inputs: Vec[ItemStack]
+    outputs: Vec[ItemStack]
+}
+fn stacks(root: Json, field: str) -> Result[Vec[ItemStack], str] {
+    let values = match root.get(field).unwrap_or(Json::Null).as_array() {
+        Some(v) => v None => {
+            ret Result::Err("Recipe requires an array: " + field)
+        }
+    }
+    if values.len() > 64 {
+        ret Result::Err("Too many recipe stacks")
+    }
+    let mut output = Vec[ItemStack]::new()
+    for value in values {
+        let item = gameplay_number(value.get("item").unwrap_or(Json::Null).as_number().unwrap_or("")).unwrap_or(0)
+        let count = gameplay_number(value.get("count").unwrap_or(Json::Null).as_number().unwrap_or("")).unwrap_or(0)
+        if item == 0 || item > 2147483647 || count == 0 || count > 1000000 {
+            ret Result::Err("Invalid recipe item or quantity")
+        }
+        for stack in output {
+            if stack.item == item as u32 {
+                ret Result::Err("Duplicate recipe item")
+            }
+        }
+        output.push(ItemStack { item as u32, count as u32 })
+    }
+    ret Result::Ok(output)
+}
+pub fn recipe_parse(source: str) -> Result[ProductionRecipe, str] {
+    if source.byte_len() > 65536 {
+        ret Result::Err("Recipe is too large")
+    }
+    let root = match parse(source) {
+        Ok(v) => v Err(_) => {
+            ret Result::Err("Invalid recipe JSON")
+        }
+    }
+    if root.get("format").unwrap_or(Json::Null).as_str().unwrap_or("") != "graphene-recipe" || root.get("version").unwrap_or(Json::Null).as_number().unwrap_or("") != "1" {
+        ret Result::Err("Unsupported recipe format/version")
+    }
+    let id = root.get("id").unwrap_or(Json::Null).as_str().unwrap_or("")
+    let name = root.get("name").unwrap_or(Json::Null).as_str().unwrap_or("")
+    let seconds = parse_number(root.get("seconds").unwrap_or(Json::Null).as_number().unwrap_or("")).unwrap_or(0)
+    let power = parse_number(root.get("power").unwrap_or(Json::Null).as_number().unwrap_or("")).unwrap_or(1000001)
+    let inputs = stacks(root, "inputs")? let outputs = stacks(root, "outputs")?
+    if id == "" || id.byte_len() > 128 || name == "" || name.byte_len() > 256 || seconds < 0.05 || seconds > 86400 || power < - 1000000 || power > 1000000 ||(outputs.len() == 0 && power >= 0) ||(inputs.len() == 0 && power < 0) {
+        ret Result::Err("Invalid recipe identity, duration, power or products")
+    }
+    ret Result::Ok(ProductionRecipe { id, name, seconds, power, inputs, outputs })
+}
+pub fn recipe_canonical(source: str) -> Result[str, str] {
+    let _recipe = recipe_parse(source)?
+    ret match parse(source) {
+        Ok(v) => Result::Ok(stringify(v)) Err(_) => Result::Err("Invalid recipe")
+    }
+}

@@ -7,6 +7,7 @@ import std::os::read_file
 import luma::{Color, Insets, Rect, Style, StyleSheet, Widget, WidgetLayout, horizontal, layout_widget, vertical}
 
 import mod::model::{UiScreenAsset, UiWidget}
+import mod::tooltip::{tooltip_owner, tooltip_target}
 import refrain::content_browser::path::ends
 import refrain::native_asset::load_native_texture
 import refrain::texture_asset::decode_png
@@ -16,10 +17,10 @@ pub fn ui_widget_id(id: u64) -> str {
 }
 // Authored geometry stays in the cascade, so hover/focus can change visual state.
 pub fn game_ui_styles() -> StyleSheet {
-    ret StyleSheet::parse(".game-ui { font-family: Inter; } .game-ui-button:hover, .game-ui-select:hover { background: #354b68; border-color: #7da5d9; } .game-ui-button:active, .game-ui-select:active { background: #244e78; } .game-ui-button:focus-visible, .game-ui-select:focus-visible, .game-ui-slider:focus-visible, .game-ui-input:focus-visible, .game-ui-checkbox:focus-visible { border: 2px solid #91c7ff; } .game-ui-button:disabled, .game-ui-select:disabled { background: #242a34; color: #929bad; }")
+    ret StyleSheet::parse(".game-ui { font-family: Inter; } .game-ui-button:hover, .game-ui-select:hover { background: #354b68; border-color: #7da5d9; } .game-ui-button:active, .game-ui-select:active { background: #244e78; } .game-ui-button:focus-visible, .game-ui-select:focus-visible, .game-ui-slider:focus-visible, .game-ui-input:focus-visible, .game-ui-checkbox:focus-visible { border: 2px solid #91c7ff; } .game-ui-button:disabled, .game-ui-select:disabled { background: #242a34; color: #929bad; } .game-ui-image-button { background: #302a24; border: 2px solid #81725c; } .game-ui-image-button:hover { background: #75654e; border-color: #fff0b8; } .game-ui-image-button:active { background: #9b3027; border-color: #f4a75c; } .game-ui-image-button:focus-visible { border: 2px solid #fff0b8; }")
 }
 pub fn game_ui_widget_style(kind: str, scale: f32) -> Style {
-    let mut style = Style::default().with_background(Color::rgba(0, 0, 0, 0)).with_foreground(Color::rgb(244, 246, 250)).with_radius(8 * scale).with_font_size(20 * scale)
+    let mut style = Style::default().with_pointer_events(true).with_background(Color::rgba(0, 0, 0, 0)).with_foreground(Color::rgb(244, 246, 250)).with_radius(8 * scale).with_font_size(20 * scale)
     if kind == "Vertical" || kind == "Horizontal" || kind == "Scroll" {
         style = style.with_background(Color::rgba(22, 28, 40, 242)).with_border(scale, Color::rgb(58, 71, 93))
     } elif kind == "Button" || kind == "Select" {
@@ -34,6 +35,34 @@ pub fn game_ui_widget_style(kind: str, scale: f32) -> Style {
 pub struct UiImage {
     path: str
     payload: str
+}
+pub fn ui_image_extent(width: u32, height: u32) ->(usize, usize) {
+    if width == 0 || height == 0 {
+        ret(1_usize, 1_usize)
+    }
+    let longest = if width > height {
+        width
+    } else {
+        height
+    }
+    let divisor = if longest > 256 {
+        longest as f32 / 256_f32
+    } else {
+        1_f32
+    }
+    let w =(width as f32 / divisor) as usize let h =(height as f32 / divisor) as usize
+    ret(if w > 0 {
+            w
+        } else {
+            1_usize
+        }
+        , if h > 0 {
+            h
+        } else {
+            1_usize
+        }
+        ,
+    )
 }
 pub fn load_ui_images(project: str, asset: UiScreenAsset) -> Vec[UiImage] {
     let mut images = Vec[UiImage]::new()
@@ -52,10 +81,11 @@ pub fn load_ui_images(project: str, asset: UiScreenAsset) -> Vec[UiImage] {
                     }
                 ) {
                     Ok(image) => {
-                        let mut pixels = vec![256_u32, 256_u32]
-                        for y in 0_usize..256_usize {
-                            for x in 0_usize..256_usize {
-                                pixels.push(image.pixels.get((y *(image.height as usize) / 256) *(image.width as usize) + x *(image.width as usize) / 256).unwrap_or(0))
+                        let size = ui_image_extent(image.width, image.height)
+                        let mut pixels = vec![size.0 as u32, size.1 as u32]
+                        for y in 0_usize..size.1 {
+                            for x in 0_usize..size.0 {
+                                pixels.push(image.pixels.get((y *(image.height as usize) / size.1) *(image.width as usize) + x *(image.width as usize) / size.0).unwrap_or(0))
                             }
                         }
                         unsafe {
@@ -93,8 +123,19 @@ fn authored_color(value: str) -> Color {
 fn widget_tree(asset: UiScreenAsset, w: UiWidget, parent: UiWidget, parent_width: f32, parent_height: f32, scale: f32, images: Vec[UiImage]) -> Widget {
     let id = ui_widget_id(w.id)
     let mut widget = match w.kind {
-        "Text" => Widget::label(w.text).with_id(id).with_classes("game-ui-text")
-        "Button" => Widget::button(id, w.text).with_classes("game-ui-button")
+        "Text" => Widget::label(w.text).with_id(id).with_classes("game-ui-text").with_text_wrap(tooltip_owner(asset, w.id) != 0)
+        "Button" => Widget::button(id, if w.image == "" {
+                w.text
+            } else {
+                ""
+            }
+            ,
+        ).with_classes(if w.image == "" {
+                "game-ui-button"
+            } else {
+                "game-ui-button game-ui-image-button"
+            }
+        )
         "Progress" => Widget::progress(w.value).with_id(id).with_classes("game-ui-progress")
         "Slider" => Widget::slider(id, w.value).with_classes("game-ui-slider")
         "Checkbox" => Widget::checkbox(id, w.text, w.value >= 0.5_f32).with_classes("game-ui-checkbox")
@@ -105,6 +146,14 @@ fn widget_tree(asset: UiScreenAsset, w: UiWidget, parent: UiWidget, parent_width
                                 }
                             ) as f32)) + 0.5_f32) as usize).unwrap_or(w.text)).with_classes("game-ui-select")
         "Input" => Widget::input(id, w.text).with_classes("game-ui-input")
+        "Minimap" => {
+            let mut payload = "" for image in images {
+                if image.path == "@minimap" {
+                    payload = image.payload
+                }
+            }
+            Widget::image(id, payload).with_classes("game-ui-minimap")
+        }
         "Image" => {
             let mut payload = "" for image in images {
                 if image.path == w.image {
@@ -141,6 +190,12 @@ fn widget_tree(asset: UiScreenAsset, w: UiWidget, parent: UiWidget, parent_width
         w.height * scale
     }
     let mut style = game_ui_widget_style(w.kind, scale).with_width(width).with_height(height).with_displayed(w.visible).with_visibility(w.visible).with_font_size(w.font_size * scale).with_radius(w.radius * scale)
+    if w.parent == 0 {
+        style = style.with_pointer_events(false)
+    }
+    if w.kind == "Button" && w.image != "" {
+        style = style.with_padding(Insets::all(0)).with_overflow_hidden(true)
+    }
     if free && w.parent != 0 {
         style = style.with_absolute(true).with_left(parent_width * w.anchor_x + w.x * scale - width * w.align_x).with_top(parent_height * w.anchor_y + w.y * scale - height * w.align_y)
     }
@@ -169,6 +224,12 @@ fn widget_tree(asset: UiScreenAsset, w: UiWidget, parent: UiWidget, parent_width
             style = style.with_background(authored_color(w.color))
         }
     }
+    if tooltip_owner(asset, w.id) != 0 {
+        style = style.with_pointer_events(false)
+        if tooltip_target(w.binding) != "" {
+            style = style.with_border(scale, Color::rgb(129, 114, 92)).with_overflow_hidden(true)
+        }
+    }
     if !free {
         let growing = w.fill || parent.kind == "Horizontal"
         style = style.with_flex_shrink(if growing {
@@ -191,9 +252,30 @@ fn widget_tree(asset: UiScreenAsset, w: UiWidget, parent: UiWidget, parent_width
         )
     }
     widget = widget.with_computed_style(style).with_disabled(!w.enabled).with_attribute("aria-label", w.name)
+    if w.kind == "Button" && w.image != "" {
+        let mut payload = "" for image in images {
+            if image.path == w.image {
+                payload = image.payload
+            }
+        }
+        widget.push(Widget::image(id + "-art", payload).with_style(Style::default().with_absolute(true).with_left(3 * scale).with_top(3 * scale).with_width(width - 6 * scale).with_height(height - 6 * scale).with_radius(w.radius * scale).with_pointer_events(false)))
+        if w.text != "" {
+            widget.push(Widget::label(w.text).with_style(Style::default().with_absolute(true).with_left(5 * scale).with_top(height - 25 * scale).with_width(width - 10 * scale).with_height(22 * scale).with_font_size(w.font_size * scale).with_foreground(Color::rgb(246, 237, 205)).with_background(Color::rgba(10, 10, 10, 210)).with_pointer_events(false)))
+        }
+    }
+    if w.kind == "Button" && w.image != "" && !w.enabled {
+        // The game skin uses a dark scrim over image content, preserving its
+        // cached pixels and giving disabled controls the same state in Design/Play.
+        widget.push(Widget::panel(id + "-disabled-overlay").with_style(Style::default().with_absolute(true).with_left(3 * scale).with_top(3 * scale).with_width(width - 6 * scale).with_height(height - 6 * scale).with_background(Color::rgba(0, 0, 0, 175)).with_pointer_events(false)))
+    }
     for child in asset.widgets {
         if child.parent == w.id {
-            widget.push(widget_tree(asset, child, w, width - w.padding * scale * 2, height - w.padding * scale * 2, scale, images))
+            let inset = if w.kind == "Vertical" || w.kind == "Horizontal" || w.kind == "Scroll" {
+                w.padding * scale * 2
+            } else {
+                0_f32
+            }
+            widget.push(widget_tree(asset, child, w, width - inset, height - inset, scale, images))
         }
     }
     ret widget

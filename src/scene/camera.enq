@@ -53,6 +53,9 @@ impl for PerspectiveCamera {
     pub fn position(self: Self) -> Vec3 {
         ret self.position
     }
+    pub fn up(self: Self) -> Vec3 {
+        ret self.up
+    }
     pub fn target(self: Self) -> Vec3 {
         ret self.target
     }

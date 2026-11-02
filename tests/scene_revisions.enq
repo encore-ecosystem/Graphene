@@ -1,0 +1,58 @@
+//! Unchanged state must keep derived scene snapshots valid.
+import core::option::Option
+import graphene::{Scene, Transform}
+import graphene::physics::component::PhysicsComponent
+import graphene::scene::component::SceneComponent
+import graphene::scene::renderable::{MaterialId, MeshId, Renderable}
+import linalg::Vec3
+
+fn main() -> u32 {
+    let mut scene = Scene::new()
+    let root = scene.create_entity("root", Transform::identity())
+    let child = scene.create_entity("child", Transform::identity().with_position(Vec3::new(2, 0, 0)))
+    scene.set_parent(child, Option[u64]::Some(root))
+    scene.set_renderable(child, Option[Renderable]::Some(Renderable::new(MeshId::new(1), MaterialId::new(2))))
+    let revision = scene.revision()
+    let bindings = scene.binding_revision()
+    for _ in 0_usize..100_usize {
+        scene.set_component(root, SceneComponent::None)
+        scene.set_physics(root, PhysicsComponent::defaults())
+        if !scene.set_transform(root, Transform::identity()) || !scene.set_visible(child, true) ||
+        !scene.set_renderable(child, Option[Renderable]::Some(Renderable::new(MeshId::new(1), MaterialId::new(2)))) {
+            ret 1
+        }
+    }
+    if scene.revision() != revision {
+        ret 2
+    }
+    if scene.set_visible(99999, true) || scene.set_transform(99999, Transform::identity()) || scene.set_renderable(99999, Option[Renderable]::None) || scene.revision() != revision {
+        ret 3
+    }
+    scene.set_transform(root, Transform::identity().with_position(Vec3::new(3, 0, 0)))
+    if scene.binding_revision() != bindings {
+        ret 9
+    }
+    if scene.revision() != revision + 1 || scene.world_position(child).unwrap_or(Vec3::zero()).x() != 5 {
+        ret 4
+    }
+    scene.set_visible(root, false)
+    if scene.visible_render_items().len() != 0 || scene.revision() != revision + 2 {
+        ret 5
+    }
+    scene.set_visible(root, true)
+    scene.set_renderable(child, Option[Renderable]::None)
+    if scene.binding_revision() != bindings + 1 {
+        ret 10
+    }
+    if scene.visible_render_items().len() != 0 || scene.revision() != revision + 4 {
+        ret 6
+    }
+    if scene.entity_index(child).unwrap_or(99) != 1 || scene.entity_index(99999).is_some() {
+        ret 7
+    }
+    scene.remove(root)
+    if scene.entity_index(root).is_some() || scene.entity_index(child).unwrap_or(99) != 0 {
+        ret 8
+    }
+    ret 0
+}

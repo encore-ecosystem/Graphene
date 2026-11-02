@@ -7,7 +7,7 @@ import std::math::tan
 import std::path::Path
 
 import linalg::{Mat4, Vec3}
-import luma::Rect
+import luma::{Point, Rect}
 
 import mod::animation::component::CharacterMorphChoice
 import mod::animation::picking::{AnimationPick, pick_animation}
@@ -23,12 +23,14 @@ import mod::displacement::scene::{DisplacementActorIdentity, DisplacementInput, 
 import mod::dynamic_gi::{GpuDynamicGi, SdfBox, SdfSphere, SurfaceCacheSample}
 import mod::editor_gesture::gizmo_angle
 import mod::editor_gizmo_handle::{gizmo_extra_hit, gizmo_handle_contains, gizmo_plane_handle_mesh}
+import mod::editor_performance::profile_phase
 import mod::editor_selection_outline::SelectionOutline
 import mod::environment::frame::*
 import mod::environment::model::bounded
 import mod::environment::precipitation::PrecipitationView
 import mod::environment::sky_view::EnvironmentView
 import mod::environment::system::{EnvironmentFrame, EnvironmentSystem}
+import mod::gi_surface_cache::{GiSurfaceCache, GiSurfaceInput}
 import mod::lod_groups::{LodGroup, LodGroups}
 import mod::material_images::MaterialImageRequest
 import mod::material_program::{MaterialProgram, material_program_key, material_program_layout}
@@ -49,7 +51,7 @@ import mod::scene::lighting::{scene_light_values, scene_sun}
 import mod::scene::primitive::{MeshData, cube_mesh, editor_grid_mesh, gizmo_ring_mesh, gizmo_tip_mesh}
 import mod::scene::renderable::{MaterialId, MeshId, RenderItem, Renderable}
 import mod::scene::transform::Transform
-import mod::scene::world::Scene
+import mod::scene::world::{Entity, Scene}
 import mod::shaders::{material_fragment_spirv, material_vertex_spirv}
 import mod::terrain::gpu_materials::TerrainGpuMaterials
 import mod::terrain::model::TerrainAsset
@@ -57,6 +59,7 @@ import mod::texture_asset::TextureImage
 import mod::texture_gpu::TextureUpload
 import mod::virtual_geometry::VirtualGeometry
 import mod::virtual_geometry_gpu::{GpuVirtualGeometry, VirtualGeometryInstance, gpu_virtual_geometry_available, gpu_virtual_geometry_available, gpu_virtual_geometry_candidate_count, gpu_virtual_geometry_cluster_count, gpu_virtual_geometry_destroy, gpu_virtual_geometry_draw, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_draw_slot, gpu_virtual_geometry_error, gpu_virtual_geometry_main_visible_count, gpu_virtual_geometry_maximum_lod, gpu_virtual_geometry_minimum_ratio, gpu_virtual_geometry_page_capacity, gpu_virtual_geometry_pbr_groups, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_pipeline_for_mode, gpu_virtual_geometry_post_candidate_count, gpu_virtual_geometry_post_visible_count, gpu_virtual_geometry_program_groups, gpu_virtual_geometry_record_debug, gpu_virtual_geometry_record_error, gpu_virtual_geometry_replace_texture_groups, gpu_virtual_geometry_resident_pages, gpu_virtual_geometry_selected_lod, gpu_virtual_geometry_selected_triangle_count, gpu_virtual_geometry_target_ratio, gpu_virtual_geometry_texture_groups, gpu_virtual_geometry_traversal_instances}
+import mod::virtual_instance_index::VirtualInstanceIndex
 
 /// Stable source entity identity to a renderer-owned mesh resource.
 pub struct SceneGpuBinding {
@@ -187,6 +190,14 @@ pub struct ViewportRenderer {
     borrowed_target: bool
     consumer_swapchain: usize
     consumer_frames: u64
+    applied_material_bindings: u64
+    applied_material_mode: u32
+    gi_surfaces: GiSurfaceCache
+    instance_bindings: Vec[u64]
+    // Retaining the source vector makes backing-storage identity safe against
+    // allocator address reuse when a different Scene has the same revision.
+    instance_source: Vec[Entity]
+    virtual_instance_index: VirtualInstanceIndex
 }
 
 fn viewport_renderer_is_editor_actor(
@@ -662,7 +673,7 @@ fn viewport_target(instance: GraphicsInstance, device: GraphicsDevice, swapchain
             DirectionalLight::new(Vec3::new( - 0.45_f32, - 0.8_f32, - 0.35_f32),
                 Vec3::new(1.0_f32, 0.97_f32, 0.92_f32), 1.15_f32,),
             Vec[Swapchain]::new(), 0_u32, swapchain.width(), swapchain.height(),
-            borrowed_target, consumer_swapchain, 0_u64
+            borrowed_target, consumer_swapchain, 0_u64, 0_u64, 4294967295_u32, GiSurfaceCache::new(), Vec[u64]::new(), Vec[Entity]::new(), VirtualInstanceIndex::new()
         }
         ,)
 }
@@ -739,6 +750,7 @@ impl for ViewportRenderer {
 
     pub fn set_material_project(self: mut Self&, project: str) ->() {
         if self.pbr_project != project {
+            self.applied_material_bindings = 0
             self.displacement.invalidate()
             for texture in self.terrain_materials.drain() {
                 self.retired_material_textures.push(texture)
@@ -763,7 +775,7 @@ impl for ViewportRenderer {
                 self.retired_material_textures.push(texture)
             }
         }
-        self.frame_scene_revision = 0 self.invalidate_anti_aliasing() ret true
+        self.frame_scene_revision = 0 self.applied_material_bindings = 0 self.invalidate_anti_aliasing() ret true
     }
     pub fn has_pbr_material(self: Self&, path: str) -> bool {
         for entry in self.pbr_materials {
@@ -952,7 +964,7 @@ impl for ViewportRenderer {
             }
         }
         self.displacement.set_material_program(textures.get_unchecked_borrowed(0_usize).native_handle(), program)
-        self.frame_scene_revision = 0 self.invalidate_anti_aliasing() ret true
+        self.frame_scene_revision = 0 self.applied_material_bindings = 0 self.invalidate_anti_aliasing() ret true
     }
     pub fn graphics_device(self: Self&) -> GraphicsDevice {
         ret self.device
@@ -1121,8 +1133,16 @@ impl for ViewportRenderer {
 
     fn fork_pbr_view(self: mut Self&, source: usize, material: PbrMaterialEntry) -> Option[VirtualMeshEntry<H>] {
         let mut original = self.virtual_meshes.get_unchecked_borrowed(source)
-        let mut view = original.geometry.fork_view(self.device, self.aa.target(), self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(), vec![4294967295_u32], 1, 1)
+        // Materials can finish loading while a Blueprint tab hides the viewport,
+        // before AA has allocated its first render target.
+        let target = if self.aa.target().available() {
+            self.aa.target()
+        } else {
+            self.swapchain
+        }
+        let mut view = original.geometry.fork_view(self.device, target, self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(), vec![4294967295_u32], 1, 1)
         if !gpu_virtual_geometry_available(view) {
+            gpu_virtual_geometry_destroy(view)
             ret Option::None
         }
         view.set_material_program(material.program)
@@ -1142,6 +1162,10 @@ impl for ViewportRenderer {
         if self.pbr_materials.len() == 0 {
             ret()
         }
+        if self.applied_material_bindings == self.scene.binding_revision() && self.applied_material_mode == self.shading_mode {
+            ret()
+        }
+        let mut ready = true
         for material in self.pbr_materials {
             self.materials.set(material.id, if self.shading_mode == 10 {
                     material.material.with_unlit()
@@ -1204,6 +1228,7 @@ impl for ViewportRenderer {
                                         self.virtual_meshes.push(view) self.virtual_mesh_frame_ready.push(false)
                                     }
                                     None => {
+                                        ready = false
                                     }
                                 }
                             }
@@ -1213,6 +1238,10 @@ impl for ViewportRenderer {
                 None => {
                 }
             }
+        }
+        if ready {
+            self.applied_material_bindings = self.scene.binding_revision()
+            self.applied_material_mode = self.shading_mode
         }
         ret()
     }
@@ -1379,7 +1408,9 @@ impl for ViewportRenderer {
         let proxies = self.displacement.ray_instances(self.device, frame)
         let mut structures = Vec[AccelerationStructure]::new()
         let mut transforms = Vec[Mat4]::new()
-        let mut parts = vec![self.scene.revision().fmt()]
+        // The TLAS cache already checks every acceleration handle and world
+        // matrix. Camera, skybox and component revisions do not change it.
+        let mut parts = Vec[str]::new()
         for proxy in proxies {
             structures.push(proxy.acceleration) transforms.push(proxy.world)
             parts.push(proxy.generation)
@@ -1503,84 +1534,30 @@ impl for ViewportRenderer {
         spheres.push(SdfSphere::new(
                 self.primary_position.add(Vec3::new(0.0_f32, 4.0_f32, 0.0_f32)), 1.35_f32,
                 self.light.color().scale(self.light.intensity() * 0.55_f32),))
-        let mut samples = Vec[SurfaceCacheSample]::new()
-        let mut local_normals = Vec[Vec3]::new()
-        local_normals.push(Vec3::new(1.0_f32, 0.0_f32, 0.0_f32))
-        local_normals.push(Vec3::new( - 1.0_f32, 0.0_f32, 0.0_f32))
-        local_normals.push(Vec3::new(0.0_f32, 1.0_f32, 0.0_f32))
-        local_normals.push(Vec3::new(0.0_f32, - 1.0_f32, 0.0_f32))
-        local_normals.push(Vec3::new(0.0_f32, 0.0_f32, 1.0_f32))
-        local_normals.push(Vec3::new(0.0_f32, 0.0_f32, - 1.0_f32))
-        // Each of the six capture cards owns a small 2x2 texel footprint.
-        // Stable actor/face/texel ordering makes the corresponding GPU
-        // radiance-history slots persistent across frames.
+        let mut inputs = Vec[GiSurfaceInput]::with_capacity(13)
         for item in self.frame_items {
-            if viewport_renderer_is_editor_actor(self, item.entity()) &&
-            samples.len() + 24_usize <= 320_usize {
-                let mesh = self.object_mesh_for_entity(item.entity())
-                let bounds = self.mesh_local_bounds(mesh)
-                let local_center = bounds.0.add(bounds.1).scale(0.5_f32)
-                let local_extent = bounds.1.sub(bounds.0).scale(0.5_f32)
-                let world_center = item.world().transform_point(local_center)
-                let x_extent = item.world().transform_point(
-                    local_center.add(Vec3::new(local_extent.x(), 0.0_f32, 0.0_f32)),)
-                .sub(world_center).length()
-                let y_extent = item.world().transform_point(
-                    local_center.add(Vec3::new(0.0_f32, local_extent.y(), 0.0_f32)),)
-                .sub(world_center).length()
-                let z_extent = item.world().transform_point(
-                    local_center.add(Vec3::new(0.0_f32, 0.0_f32, local_extent.z())),)
-                .sub(world_center).length()
-                boxes.push(SdfBox::new(world_center,
-                        Vec3::new(x_extent, y_extent, z_extent), Vec3::zero(),))
-                let albedo = match self.materials.get(item.material()) {
-                    Option::Some(material) => material.base_color()
-                    Option::None => Vec3::new(0.72_f32, 0.72_f32, 0.72_f32)
-                }
-                let mut face = 0_usize
-                while face < 6_usize {
-                    let local_normal = match local_normals.get(face) {
-                        Option::Some(value) => value
-                        Option::None => Vec3::new(0.0_f32, 1.0_f32, 0.0_f32)
-                    }
-                    let normal = item.world().transform_point(
-                        local_center.add(local_normal),).sub(world_center).normalized()
-                    let mut texel = 0_usize
-                    while texel < 4_usize {
-                        let u = if texel == 0_usize || texel == 2_usize {
-                            - 0.5_f32
-                        } else {
-                            0.5_f32
-                        }
-                        let v = if texel < 2_usize {
-                            - 0.5_f32
-                        } else {
-                            0.5_f32
-                        }
-                        let tangent_u = if local_normal.x() != 0.0_f32 {
-                            Vec3::new(0.0_f32, local_extent.y() * u,
-                                local_extent.z() * v,)
-                        } else {
-                            if local_normal.y() != 0.0_f32 {
-                                Vec3::new(local_extent.x() * u, 0.0_f32,
-                                    local_extent.z() * v,)
-                            } else {
-                                Vec3::new(local_extent.x() * u,
-                                    local_extent.y() * v, 0.0_f32,)
-                            }
-                        }
-                        let local_position = local_center.add(Vec3::new(
-                                local_normal.x() * local_extent.x(),
-                                local_normal.y() * local_extent.y(),
-                                local_normal.z() * local_extent.z(),))
-                        .add(tangent_u)
-                        let position = item.world().transform_point(local_position)
-                        samples.push(SurfaceCacheSample::new(position, normal, albedo))
-                        texel += 1_usize
-                    }
-                    face += 1_usize
-                }
+            if inputs.len() >= 13_usize {
+                break
             }
+            if !viewport_renderer_is_editor_actor(self, item.entity()) {
+                continue
+            }
+            let mesh = self.object_mesh_for_entity(item.entity())
+            let bounds = self.mesh_local_bounds(mesh)
+            let albedo = match self.materials.get(item.material()) {
+                Some(material) => material.base_color()
+                None => Vec3::new(0.72_f32, 0.72_f32, 0.72_f32)
+            }
+            inputs.push(GiSurfaceInput {
+                    item.entity(), mesh.value(), item.material().value(), item.world(), bounds.0, bounds.1, albedo
+                }
+            )
+        }
+        self.gi_surfaces.update(inputs)
+        boxes = self.gi_surfaces.boxes
+        let mut samples = Vec[SurfaceCacheSample]::with_capacity(self.gi_surfaces.samples.len() + 18)
+        for sample in self.gi_surfaces.samples {
+            samples.push(sample)
         }
         // Camera-centered world radiance probes provide the low-frequency
         // fallback behind the denser on-surface cache. Snapping the lattice
@@ -1799,7 +1776,62 @@ impl for ViewportRenderer {
         let output_extent = camera_frame_extent(self.viewport_width, self.viewport_height, self.camera_override_aspect)
         let aspect = output_extent.0 as f32 / output_extent.1 as f32
         let lod_focal_y = camera.with_jitter(0, 0).projection(aspect).values().get(5).unwrap_or(1.0_f32)
-        let visible = self.frame_items
+        let mut keys = Vec[(u64, u64)]::with_capacity(self.virtual_meshes.len())
+        let mut groups = Vec[Vec[VirtualGeometryInstance]]::with_capacity(self.virtual_meshes.len())
+        for entry in self.virtual_meshes {
+            keys.push((if entry.enabled {
+                        entry.mesh
+                    } else {
+                        0_u64
+                    }
+                    , entry.material,))
+            groups.push(Vec[VirtualGeometryInstance]::new())
+        }
+        self.virtual_instance_index.update(keys)
+        // Resolve each render item's ownership/material/history once, then put
+        // it into the matching mesh/material streams in stable scene order.
+        for item in self.frame_items {
+            if !viewport_renderer_is_editor_actor(self, item.entity()) || self.displacement.handles(item.entity(), 0) {
+                continue
+            }
+            let mesh = self.object_mesh_for_entity(item.entity()).value()
+            let mut cursor = self.virtual_instance_index.head(mesh)
+            if cursor.is_none() {
+                continue
+            }
+            let pbr = self.pbr_material_for_entity(item.entity())
+            match self.materials.get(item.material()) {
+                Some(material) => {
+                    let previous = self.aa.temporal().previous(item)
+                    let instance = VirtualGeometryInstance {
+                        item.world(), material.base_color(), material.metallic(), material.roughness(), material.unlit(),
+                        if material.normal_texture() == "" {
+                            0.0_f32
+                        } else {
+                            material.normal_scale()
+                        }
+                        , material.normal_flip_y(),
+                        previous.0, previous.1, material.roughness_texture() != "", material.metallic_texture() != ""
+                    }
+                    for _ in 0_usize..self.virtual_meshes.len() {
+                        match cursor {
+                            Some(index) => {
+                                if self.virtual_instance_index.material(index) == pbr {
+                                    let mut group = groups.get_unchecked_borrowed(index)
+                                    group.push(instance) groups.set(index, group)
+                                }
+                                cursor = self.virtual_instance_index.next(index)
+                            }
+                            None => {
+                                break
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
         let mut any_ready = false
         let mut all_recorded = true
         for virtual_index in 0_usize..self.virtual_meshes.len() {
@@ -1807,6 +1839,11 @@ impl for ViewportRenderer {
             // vector's length. Borrow the checked slot without freezing it.
             let mut entry = self.virtual_meshes.get_unchecked_borrowed(virtual_index)
             entry.frame_ready = false
+            let instances = groups.get_unchecked_borrowed(virtual_index)
+            if instances.len() == 0 {
+                self.virtual_mesh_frame_ready.set(virtual_index, false)
+                continue
+            }
             entry.geometry.set_lights(self.scene_lights)
             entry.geometry.set_graph_shaders("", Vec[Vec[u32]]::new())
             if entry.geometry.set_shelter_texture(self.precipitation.shelter_texture()) {
@@ -1823,32 +1860,6 @@ impl for ViewportRenderer {
             if entry.enabled && gpu_virtual_geometry_available(entry.geometry) {
                 if !entry.geometry.configure_anti_aliasing(self.device, self.aa.target(), self.aa.method().samples(), self.aa.method().temporal(), self.aa.temporal().view_projection()) {
                     ret false
-                }
-                let mut instances = Vec[VirtualGeometryInstance]::new()
-                for item in visible {
-                    if self.displacement.handles(item.entity(), 0) {
-                        continue
-                    }
-                    if viewport_renderer_is_editor_actor(self, item.entity()) &&
-                    self.object_mesh_for_entity(item.entity()).value() == entry.mesh && self.pbr_material_for_entity(item.entity()) == entry.material {
-                        match self.materials.get(item.material()) {
-                            Option::Some(material) => {
-                                let previous = self.aa.temporal().previous(item)
-                                instances.push(VirtualGeometryInstance::new(
-                                        item.world(), material.base_color(),
-                                        material.metallic(), material.roughness(),
-                                        material.unlit(),).with_normal_map(
-                                        if material.normal_texture() == "" {
-                                            0.0_f32
-                                        } else {
-                                            material.normal_scale()
-                                        }
-                                        , material.normal_flip_y(),).with_pbr_maps(material.roughness_texture() != "", material.metallic_texture() != "").with_previous(previous.0, previous.1))
-                            }
-                            Option::None => {
-                            }
-                        }
-                    }
                 }
                 if instances.len() > 0_usize {
                     entry.frame_ready = gpu_virtual_geometry_record_debug(entry.geometry,
@@ -2040,7 +2051,7 @@ impl for ViewportRenderer {
             } else {
                 self.mesh_bounds_min.push(minimum) self.mesh_bounds_max.push(maximum)
             }
-            self.frame_scene_revision = 0_u64 self.invalidate_anti_aliasing()
+            self.frame_scene_revision = 0_u64 self.applied_material_bindings = 0 self.invalidate_anti_aliasing()
         }
         ret uploaded
     }
@@ -2389,6 +2400,7 @@ impl for ViewportRenderer {
             ret false
         }
         let index =(cube_index - 1_u32) as usize
+        self.instance_bindings.clear()
         self.object_meshes.set(index, mesh.value())
         match self.cubes.get(index) {
             Option::Some(entity) => {
@@ -2529,6 +2541,41 @@ impl for ViewportRenderer {
         let sx = bounds.width() /(self.viewport_width as f32) let sy = bounds.height() /(self.viewport_height as f32)
         ret Rect::new(bounds.x() +(((self.viewport_width - extent.0) / 2) as f32) * sx, bounds.y() +(((self.viewport_height - extent.1) / 2) as f32) * sy,(extent.0 as f32) * sx,(extent.1 as f32) * sy)
     }
+    /// Projection uses the same letterboxed image rectangle as rendering and game UI.
+    pub fn game_pointer_ray(self: Self&, bounds: Rect, x: f32, y: f32) -> Option[(Vec3, Vec3)] {
+        let image = self.game_ui_bounds(bounds)
+        if image.width() <= 0 || image.height() <= 0 || !image.contains(Point::new(x, y)) {
+            ret Option[(Vec3, Vec3)]::None
+        }
+        match self.camera_override {
+            Some(camera) => {
+                let forward = camera.target().sub(camera.position()).normalized()
+                let right = forward.cross(camera.up()).normalized()
+                let up = right.cross(forward).normalized()
+                let half = tan(camera.vertical_fov() * 0.5_f32)
+                let nx =((x - image.x()) / image.width() * 2_f32 - 1_f32) * half * image.width() / image.height()
+                let ny =(1_f32 -(y - image.y()) / image.height() * 2_f32) * half
+                ret Option[(Vec3, Vec3)]::Some((camera.position(), forward.add(right.scale(nx)).add(up.scale(ny)).normalized()))
+            }
+            None => {
+            }
+        }
+        ret Option[(Vec3, Vec3)]::None
+    }
+    pub fn runtime_selection(self: mut Self&, indices: Vec[u32]) ->() {
+        self.selection_entities.clear()
+        for index in indices {
+            if index > 0 {
+                match self.cubes.get((index - 1) as usize) {
+                    Some(entity) => {
+                        self.selection_entities.push(entity)
+                    }
+                    None => {
+                    }
+                }
+            }
+        }
+    }
     pub fn set_camera_override(self: mut Self&, camera: Option[PerspectiveCamera], aspect: f32) ->() {
         self.camera_override = camera self.camera_override_aspect = aspect
     }
@@ -2649,6 +2696,7 @@ impl for ViewportRenderer {
     }
 
     pub fn render_camera_pose(self: mut Self&, position: Vec3, yaw: f32, pitch: f32, fov: f32) -> bool {
+        profile_phase(30_u32)
         let render_started = performance_counter_ns()
         self.collect_retired_targets()
         self.apply_environment(position, false)
@@ -2673,6 +2721,7 @@ impl for ViewportRenderer {
         }
         self.renderer.set_view_pipelines(self.aa.solid_pipeline(), self.aa.double_sided_pipeline(), self.aa.method().temporal(), self.aa.temporal())
         self.renderer.set_indirect_ambient(self.indirect_ambient)
+        profile_phase(31_u32)
         self.prepare_scene_snapshot()
         let mut weather_items = Vec[RenderItem]::new()
         if self.environment.frame(position).needs_shelter() {
@@ -2686,6 +2735,7 @@ impl for ViewportRenderer {
             ret false
         }
         self.environment_view.prepare(self.aa.target(), camera, self.environment.frame(position))
+        profile_phase(32_u32)
         let raw = self.aa.target().try_acquire_frame()
         if !raw.available() {
             raw.destroy() ret false
@@ -2701,15 +2751,21 @@ impl for ViewportRenderer {
                 self.aa.target(), view, self.aa.render_width(), self.aa.render_height(), self.aa.method().samples(), self.aa.method().temporal(), self.aa.temporal().view_projection(), self.light, self.indirect_ambient, self.scene_lights, self.shading_mode, self.precipitation.shelter_texture()
             }
             , false, self.dynamic_gi.scene_storage(), self.dynamic_gi.surface_storage(), self.dynamic_gi.history_storage(),)
+        profile_phase(33_u32)
         raw.timing_mark(23_u32, true)
+        profile_phase(40_u32)
         let displaced_ready = self.prepare_displacement(raw, view, false, self.frame_items)
         raw.timing_mark(23_u32, false)
         raw.timing_mark(1_u32, true)
+        profile_phase(41_u32)
         let gi_recorded = self.record_dynamic_gi(raw.handle())
         raw.timing_mark(1_u32, false)
+        profile_phase(42_u32)
         let virtual_prepared = self.record_virtual_geometry(raw.handle(), self.aa.render_width(), self.aa.render_height(), position, yaw, pitch, fov)
+        profile_phase(43_u32)
         let lighting_ready = self.prepare_ray_lighting(raw, false)
         let prepared = displaced_ready && characters_ready && vfx_prepared && gi_recorded && virtual_prepared && lighting_ready
+        profile_phase(34_u32)
         let scene_pipeline = if self.shading_mode == 10 {
             self.composition_pipeline()
         } else {
@@ -2753,6 +2809,7 @@ impl for ViewportRenderer {
         if !rendered {
             ret false
         }
+        profile_phase(35_u32)
         let frame = self.swapchain.try_acquire_frame()
         if !frame.available() {
             frame.destroy() ret false
@@ -3200,6 +3257,9 @@ impl for ViewportRenderer {
     }
 
     pub fn sync_cubes(self: mut Self&, count: u32) ->() {
+        if self.cubes.len() != count as usize {
+            self.instance_bindings.clear()
+        }
         while self.cubes.len() > count as usize {
             self.remove_cube(self.cubes.len() as u32)
         }
@@ -3229,57 +3289,109 @@ impl for ViewportRenderer {
     pub fn sync_scene_instances(self: mut Self&, source: Scene, bindings: Vec[SceneGpuBinding]) ->() {
         self.sync_cubes(source.len() as u32)
         let entities = source.entities()
-        let mut index = 0_usize
+        let mut unchanged = self.instance_source.as_ptr() == entities.as_ptr() &&
+        self.instance_bindings.len() == bindings.len() * 2 + 1 && self.source_actor_ids.len() == entities.len()
+        if unchanged {
+            unchanged = self.instance_bindings.get_unchecked_borrowed(0) == source.binding_revision()
+        }
+        if unchanged {
+            for i in 0_usize..entities.len() {
+                if self.source_actor_ids.get_unchecked_borrowed(i) != entities.get_unchecked_borrowed(i).id() {
+                    unchanged = false break
+                }
+            }
+        }
+        if unchanged {
+            for i in 0_usize..bindings.len() {
+                let b = bindings.get_unchecked_borrowed(i)
+                if self.instance_bindings.get_unchecked_borrowed(1 + i * 2) != b.entity || self.instance_bindings.get_unchecked_borrowed(2 + i * 2) != b.mesh.value() {
+                    unchanged = false break
+                }
+            }
+        }
+        if unchanged {
+            for i in 0_usize..entities.len() {
+                let entity = self.cubes.get_unchecked_borrowed(i) let actor = entities.get_unchecked_borrowed(i)
+                self.scene.set_transform(entity, actor.transform())
+                self.scene.set_visible(entity, actor.visible())
+            }
+            ret()
+        }
+        let mut meshes = Vec[Option[MeshId]]::with_capacity(entities.len())
+        let mut parents = Vec[Option[u64]]::with_capacity(entities.len())
         for actor in entities {
-            match self.cubes.get(index) {
-                Some(entity) => {
-                    self.scene.set_parent(entity, Option[u64]::None)
-                    self.scene.set_transform(entity, actor.transform())
-                    self.scene.set_component(entity, actor.component()) self.scene.set_physics(entity, actor.physics()) self.scene.set_material_path(entity, actor.material_path())
-                    self.scene.set_visible(entity, actor.visible())
-                    let mut mesh = Option[MeshId]::None
-                    for binding in bindings {
-                        if binding.entity == actor.id() {
-                            mesh = Option[MeshId]::Some(binding.mesh)
-                        }
-                    }
-                    match mesh {
-                        Some(value) => {
-                            self.set_cube_mesh(index as u32 + 1, value)
-                        }
-                        None => {
-                            self.scene.set_renderable(entity, Option[Renderable]::None)
-                        }
+            meshes.push(Option[MeshId]::None)
+            let parent = match actor.parent() {
+                Some(id) => match source.entity_index(id) {
+                    Some(slot) => self.cubes.get(slot)
+                    None => Option[u64]::None
+                }
+                None => Option[u64]::None
+            }
+            parents.push(parent)
+        }
+        for binding in bindings {
+            match source.entity_index(binding.entity) {
+                Some(slot) => {
+                    meshes.set(slot, Option[MeshId]::Some(binding.mesh))
+                }
+                None => {
+                }
+            }
+        }
+        // Only changed relationships are detached. Detach them all before
+        // reattachment so a reordered/restored scene cannot create a temporary cycle.
+        for i in 0_usize..entities.len() {
+            let entity = self.cubes.get_unchecked_borrowed(i)
+            match self.scene.get(entity) {
+                Some(previous) => {
+                    if previous.parent() != parents.get_unchecked_borrowed(i) {
+                        self.scene.set_parent(entity, Option[u64]::None)
                     }
                 }
                 None => {
                 }
             }
-            index += 1
+            let actor = entities.get_unchecked_borrowed(i)
+            self.scene.set_transform(entity, actor.transform())
+            self.scene.set_component(entity, actor.component())
+            self.scene.set_physics(entity, actor.physics())
+            self.scene.set_material_path(entity, actor.material_path())
+            self.scene.set_visible(entity, actor.visible())
+            match meshes.get_unchecked_borrowed(i) {
+                Some(mesh) => {
+                    self.set_cube_mesh(i as u32 + 1, mesh)
+                }
+                None => {
+                    self.scene.set_renderable(entity, Option[Renderable]::None)
+                }
+            }
         }
-        index = 0
-        for actor in entities {
-            match actor.parent() {
-                Some(parent) => {
-                    let mut parent_index = 0_usize
-                    for candidate in entities {
-                        if candidate.id() == parent {
-                            match self.cubes.get(index) {
-                                Some(entity) => {
-                                    self.scene.set_parent(entity, self.cubes.get(parent_index))
-                                }
-                                None => {
-                                }
-                            }
-                        }
-                        parent_index += 1
+        for i in 0_usize..entities.len() {
+            let parent = parents.get_unchecked_borrowed(i)
+            let entity = self.cubes.get_unchecked_borrowed(i)
+            match self.scene.get(entity) {
+                Some(previous) => {
+                    if previous.parent() != parent {
+                        self.scene.set_parent(entity, parent)
                     }
                 }
                 None => {
                 }
             }
-            index += 1
         }
+        let mut ids = Vec[u64]::with_capacity(entities.len())
+        for actor in entities {
+            ids.push(actor.id())
+        }
+        self.source_actor_ids = ids
+        let mut signature = Vec[u64]::with_capacity(bindings.len() * 2 + 1)
+        signature.push(source.binding_revision())
+        for b in bindings {
+            signature.push(b.entity) signature.push(b.mesh.value())
+        }
+        self.instance_bindings = signature
+        self.instance_source = entities
     }
 
     pub fn remove_cube(self: mut Self&, cube_index: u32) -> bool {
@@ -3392,6 +3504,7 @@ impl for ViewportRenderer {
         }
     }
     pub fn sync_scene_settings(self: mut Self&, source: Scene, ids: Vec[u64], playing: bool) ->() {
+        self.instance_bindings.clear()
         self.vfx.sync(source, playing)
         self.animation.sync(source, playing)
         self.source_actor_ids = ids
@@ -3585,7 +3698,7 @@ impl for ViewportRenderer {
         let sun = state.sun_direction()
         self.light = DirectionalLight::new(sun.scale( - 1), self.authored_light.color(), self.authored_light.intensity() * bounded(sun.y() * 3, 0, 1) *(1 - state.weather.cloudiness * 0.65_f32))
         self.indirect_ambient = state.ambient()
-        let mut values = Vec[f32]::new()
+        let mut values = Vec[f32]::with_capacity(self.scene_lights.len())
         for value in self.scene_lights {
             values.push(value)
         }
@@ -3597,10 +3710,7 @@ impl for ViewportRenderer {
                 values.set(base + 11, values.get(base + 15).unwrap_or(0) * bounded( - sun.y() * 3, 0, 1))
             }
         }
-        let environment = state.shader_values()
-        for index in 0..environment.len() {
-            values.set(1028 + index, environment.get(index).unwrap_or(0))
-        }
+        state.write_shader_values(values, 1028)
         let shelter = if preview {
             self.preview_precipitation.shelter_info(position)
         } else {
@@ -4356,6 +4466,9 @@ impl for ViewportRenderer {
         ret self.aa.playing
     }
     pub fn set_playing(self: mut Self&, playing: bool) ->() {
+        if self.aa.playing != playing {
+            self.instance_bindings.clear()
+        }
         self.aa.set_playing(playing)
     }
     pub fn presentation_pending(self: Self&) -> bool {

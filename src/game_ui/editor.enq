@@ -244,6 +244,24 @@ impl for UiEditor {
             }
         }
     }
+    /// Automation uses the same document history and save path as the designer.
+    pub fn replace_asset(self: mut Self, path: str, asset: UiScreenAsset) -> Result[(), str] {
+        ui_asset_validate(asset)?
+        if self.busy() ||(self.changed() && self.path != path) {
+            ret Result::Err("Save the current UI document and wait for compilation first")
+        }
+        if self.path != path && !self.open(path) {
+            ret Result::Err("Unable to open UI document")
+        }
+        if self.document.asset().id != asset.id {
+            ret Result::Err("Replacement must preserve UI identity")
+        }
+        self.document.replace(asset) self.load_graph() self.dirty = true
+        if !self.save() {
+            ret Result::Err("Unable to save UI document")
+        }
+        ret Result::Ok(())
+    }
     fn template(self: mut Self, name: str) ->() {
         if self.document.dirty() {
             self.pending = "template:" + name self.message = "Save or discard changes before changing template" self.dirty = true ret()
@@ -382,7 +400,7 @@ impl for UiEditor {
             match asset.widget(self.selection) {
                 Some(w) => {
                     details.push(Widget::label(w.kind + " · " + Debug::fmt(w.id)).with_classes("ui-designer-section"))
-                    for item in vec![("name", "Name"),("text", "Text"),("x", "Offset X"),("y", "Offset Y"),("width", "Width"),("height", "Height"),("anchor-x", "Anchor X"),("anchor-y", "Anchor Y"),("anchor-right", "Anchor right"),("anchor-bottom", "Anchor bottom"),("align-x", "Align X"),("align-y", "Align Y"),("gap", "Gap"),("padding", "Padding"),("font-size", "Font size"),("radius", "Radius"),("value", "Value"),("color", "Color"),("image", "Image"),("binding", "Setting")] {
+                    for item in vec![("name", "Name"),("text", "Text"),("x", "Offset X"),("y", "Offset Y"),("width", "Width"),("height", "Height"),("anchor-x", "Anchor X"),("anchor-y", "Anchor Y"),("anchor-right", "Anchor right"),("anchor-bottom", "Anchor bottom"),("align-x", "Align X"),("align-y", "Align Y"),("gap", "Gap"),("padding", "Padding"),("font-size", "Font size"),("radius", "Radius"),("value", "Value"),("color", "Color"),("image", "Image"),("binding", "Binding")] {
                         details.push(self.entry(w, item.0, item.1))
                     }
                     for item in vec![("visible", w.visible),("enabled", w.enabled),("fill", w.fill)] {
@@ -435,7 +453,7 @@ impl for UiEditor {
                 if self.cached_revision != self.document.revision() {
                     self.cached = self.document.asset() self.cached_revision = self.document.revision()
                 }
-                let asset = self.cached
+                let asset = mod::tooltip::tooltip_preview(self.cached, self.selection)
                 if self.preview_revision != self.cached_revision || bounds.x() != self.bounds.x() || bounds.y() != self.bounds.y() || bounds.width() != self.bounds.width() || bounds.height() != self.bounds.height() {
                     self.bounds = bounds self.preview.set_root(build_ui_screen(asset, self.bounds, self.images), self.bounds) self.preview_revision = self.cached_revision
                 }
@@ -850,7 +868,7 @@ impl for UiEditor {
         if target.contains("uid-select-") {
             for w in self.document.asset().widgets {
                 if target == "uid-select-" + Debug::fmt(w.id) {
-                    self.selection = w.id self.dirty = true
+                    self.selection = w.id self.preview_revision = 0 self.dirty = true
                 }
             }
             ret true

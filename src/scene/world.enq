@@ -10,6 +10,34 @@ import mod::transform::Transform
 import refrain::blueprint::codec::{blueprint_instance_json, blueprint_instance_parse}
 import refrain::blueprint::model::BlueprintInstance
 import refrain::physics::component::PhysicsComponent
+import refrain::runtime::index::ActorIndex
+
+fn same_transform(a: Transform, b: Transform) -> bool {
+    let p = a.position() let q = b.position()
+    let r = a.rotation() let t = b.rotation()
+    let u = a.scale() let v = b.scale()
+    ret p.x() == q.x() && p.y() == q.y() && p.z() == q.z() &&
+    r.x() == t.x() && r.y() == t.y() && r.z() == t.z() &&
+    u.x() == v.x() && u.y() == v.y() && u.z() == v.z()
+}
+
+// The frequent runtime render-only actors, cameras and lights have scalar
+// settings. Other component variants conservatively invalidate as before.
+fn known_unchanged_component(a: SceneComponent, b: SceneComponent) -> bool {
+    ret match a {
+        SceneComponent::None => b.kind() == ""
+        SceneComponent::Camera(x) => match b {
+            SceneComponent::Camera(y) => x.fov == y.fov && x.aspect == y.aspect && x.near == y.near && x.far == y.far
+            _ => false
+        }
+        SceneComponent::Light(x) => match b {
+            SceneComponent::Light(y) => x.kind == y.kind && x.color.x() == y.color.x() && x.color.y() == y.color.y() && x.color.z() == y.color.z() &&
+            x.intensity == y.intensity && x.range == y.range && x.inner_angle == y.inner_angle && x.outer_angle == y.outer_angle && x.sun_angle == y.sun_angle
+            _ => false
+        }
+        _ => false
+    }
+}
 
 pub struct Entity {
     id: u64
@@ -27,6 +55,8 @@ pub struct Scene {
     entities: Vec[Entity]
     next_id: u64
     revision: u64
+    lookup: ActorIndex
+    binding_revision: u64
 }
 
 impl for Entity {
@@ -81,12 +111,16 @@ impl for Entity {
 impl for Scene {
     pub fn new() -> Scene {
         ret Scene {
-            Vec[Entity]::new(), 1_u64, 1_u64
+            Vec[Entity]::new(), 1_u64, 1_u64, ActorIndex::new(), 1_u64
         }
     }
     /// Monotonic invalidation token for render snapshots; scene files omit it.
     pub fn revision(self: Self) -> u64 {
         ret self.revision
+    }
+    /// Actor definitions and bindings change independently of animated poses.
+    pub fn binding_revision(self: Self) -> u64 {
+        ret self.binding_revision
     }
     pub fn len(self: Self) -> usize {
         ret self.entities.len()
@@ -110,12 +144,26 @@ impl for Scene {
             }
             ,
         )
+        self.lookup.insert(id, self.entities.len() - 1)
+        self.binding_revision += 1
         if id >= self.next_id {
             self.next_id = id + 1_u64
         }
         ret true
     }
     fn index_of(self: Self, id: u64) -> usize {
+        match self.lookup.get(id) {
+            Some(slot) => {
+                if slot < self.entities.len() && self.entities.get_unchecked_borrowed(slot).id == id {
+                    ret slot
+                }
+            }
+            None => {
+                if id < 262144 {
+                    ret self.entities.len()
+                }
+            }
+        }
         if id > 0_u64 && id <= self.entities.len() as u64 {
             match self.entities.get((id - 1_u64) as usize) {
                 Some(entity) => {
@@ -137,33 +185,16 @@ impl for Scene {
         ret self.entities.len()
     }
     pub fn get(self: Self, id: u64) -> Option[Entity] {
-        // Dense actor IDs are the common path. Retain sparse/imported IDs
-        // and deletion semantics through the existing checked fallback.
-        if id > 0_u64 && id <= self.entities.len() as u64 {
-            match self.entities.get((id - 1_u64) as usize) {
-                Some(entity) => {
-                    if entity.id == id {
-                        ret Option[Entity]::Some(entity)
-                    }
-                }
-                None => {
-                }
-            }
+        ret self.entities.get(self.index_of(id))
+    }
+    /// Dense storage slot for a stable actor ID; absent IDs never alias a slot.
+    pub fn entity_index(self: Self, id: u64) -> Option[usize] {
+        let index = self.index_of(id)
+        ret if index < self.entities.len() {
+            Option[usize]::Some(index)
+        } else {
+            Option[usize]::None
         }
-        let mut index = 0_usize
-        while index < self.entities.len() {
-            match self.entities.get(index) {
-                Option::Some(entity) => {
-                    if entity.id == id {
-                        ret Option[Entity]::Some(entity)
-                    }
-                }
-                Option::None => {
-                }
-            }
-            index = index + 1_usize
-        }
-        ret Option[Entity]::None
     }
     pub fn remove(self: mut Self, id: u64) -> bool {
         self.revision += 1_u64
@@ -194,8 +225,16 @@ impl for Scene {
         }
         if found {
             self.entities = remaining
+            self.reindex()
+            self.binding_revision += 1
         }
         ret found
+    }
+    pub fn reindex(self: mut Self) ->() {
+        self.lookup = ActorIndex::new()
+        for i in 0_usize..self.entities.len() {
+            self.lookup.insert(self.entities.get_unchecked_borrowed(i).id, i)
+        }
     }
     pub fn set_material_path(self: mut Self, id: u64, path: str) -> bool {
         if !material_reference_valid(path) {
@@ -211,7 +250,7 @@ impl for Scene {
                         e.id, e.name, e.transform, e.parent, e.visible, e.renderable, e.blueprint_source, e.component, e.physics, path
                     }
                     ,
-                ) self.revision += 1 ret true
+                ) self.revision += 1 self.binding_revision += 1 ret true
             }
             None => {
                 ret false
@@ -225,11 +264,14 @@ impl for Scene {
         let i = self.index_of(id)
         match self.entities.get(i) {
             Some(e) => {
+                if e.physics.same_settings(value) {
+                    ret true
+                }
                 self.entities.set(i, Entity {
                         e.id, e.name, e.transform, e.parent, e.visible, e.renderable, e.blueprint_source, e.component, value, e.material_path
                     }
                     ,
-                ) self.revision += 1_u64 ret true
+                ) self.revision += 1_u64 self.binding_revision += 1 ret true
             }
             None => {
                 ret false
@@ -237,25 +279,24 @@ impl for Scene {
         }
     }
     pub fn set_transform(self: mut Self, id: u64, transform: Transform) -> bool {
-        self.revision += 1_u64
-        let mut index = self.index_of(id)
-        while index < self.entities.len() {
-            match self.entities.get(index) {
-                Option::Some(entity) => {
-                    if entity.id == id {
-                        self.entities.set(index, Entity {
-                                entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
-                            }
-                            ,)
-                        ret true
+        let index = self.index_of(id)
+        match self.entities.get(index) {
+            Some(entity) => {
+                if same_transform(entity.transform, transform) {
+                    ret true
+                }
+                self.entities.set(index, Entity {
+                        entity.id, entity.name, transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                     }
-                }
-                Option::None => {
-                }
+                    ,
+                )
+                self.revision += 1
+                ret true
             }
-            index = index + 1_usize
+            None => {
+                ret false
+            }
         }
-        ret false
     }
     pub fn rename(self: mut Self, id: u64, name: str) -> bool {
         self.revision += 1_u64
@@ -282,28 +323,26 @@ impl for Scene {
         ret false
     }
     pub fn set_visible(self: mut Self, id: u64, visible: bool) -> bool {
-        self.revision += 1_u64
-        let mut index = self.index_of(id)
-        while index < self.entities.len() {
-            match self.entities.get(index) {
-                Option::Some(entity) => {
-                    if entity.id == id {
-                        self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
-                            }
-                            ,)
-                        ret true
+        let index = self.index_of(id)
+        match self.entities.get(index) {
+            Some(entity) => {
+                if entity.visible == visible {
+                    ret true
+                }
+                self.entities.set(index, Entity {
+                        entity.id, entity.name, entity.transform, entity.parent, visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                     }
-                }
-                Option::None => {
-                }
+                    ,
+                )
+                self.revision += 1
+                ret true
             }
-            index = index + 1_usize
+            None => {
+                ret false
+            }
         }
-        ret false
     }
     pub fn set_parent(self: mut Self, id: u64, parent: Option[u64]) -> bool {
-        self.revision += 1_u64
         if id == 0_u64 {
             ret false
         }
@@ -311,7 +350,10 @@ impl for Scene {
             Option::None => {
                 ret false
             }
-            Option::Some(_) => {
+            Option::Some(entity) => {
+                if entity.parent == parent {
+                    ret true
+                }
             }
         }
         match parent {
@@ -369,6 +411,7 @@ impl for Scene {
                                 entity.id, entity.name, entity.transform, parent, entity.visible, entity.renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
                             }
                             ,)
+                        self.revision += 1 self.binding_revision += 1
                         ret true
                     }
                 }
@@ -547,26 +590,32 @@ impl for Scene {
         ret cursor.is_none()
     }
     pub fn set_renderable(self: mut Self, id: u64, renderable: Option[Renderable]) -> bool {
-        self.revision += 1_u64
-        let mut index = self.index_of(id)
-        while index < self.entities.len() {
-            match self.entities.get(index) {
-                Option::Some(entity) => {
-                    if entity.id == id {
-                        self.entities.set(index, Entity {
-                                entity.id, entity.name, entity.transform, entity.parent, entity.visible,
-                                renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
-                            }
-                            ,)
-                        ret true
+        let index = self.index_of(id)
+        match self.entities.get(index) {
+            Some(entity) => {
+                let unchanged = match entity.renderable {
+                    Some(old) => match renderable {
+                        Some(next) => old.mesh().value() == next.mesh().value() && old.material().value() == next.material().value()
+                        None => false
                     }
+                    None => renderable.is_none()
                 }
-                Option::None => {
+                if unchanged {
+                    ret true
                 }
+                self.entities.set(index, Entity {
+                        entity.id, entity.name, entity.transform, entity.parent, entity.visible, renderable, entity.blueprint_source, entity.component, entity.physics, entity.material_path
+                    }
+                    ,
+                )
+                self.revision += 1
+                self.binding_revision += 1
+                ret true
             }
-            index = index + 1_usize
+            None => {
+                ret false
+            }
         }
-        ret false
     }
     pub fn set_blueprint(self: mut Self, id: u64, instance: Option[BlueprintInstance]) -> bool {
         self.revision += 1_u64
@@ -588,18 +637,22 @@ impl for Scene {
         ret false
     }
     pub fn set_component(self: mut Self, id: u64, component: SceneComponent) -> bool {
-        self.revision += 1_u64
         if !component.valid() {
             ret false
         }
         let index = self.index_of(id)
         match self.entities.get(index) {
             Some(entity) => {
+                if known_unchanged_component(entity.component, component) {
+                    ret true
+                }
                 self.entities.set(index, Entity {
                         entity.id, entity.name, entity.transform, entity.parent, entity.visible, entity.renderable, entity.blueprint_source, component, entity.physics, entity.material_path
                     }
                     ,
                 )
+                self.revision += 1
+                self.binding_revision += 1
                 ret true
             }
             None => {

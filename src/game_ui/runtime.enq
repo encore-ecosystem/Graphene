@@ -5,23 +5,40 @@ import core::result::Result
 import core::vec::Vec
 
 import audio::output_devices
-import luma::{Event, Insets, PreparedFrame, Rect, Size, UiLayer, Widget, WidgetLayout, anchored_popup_bounds, event_key_down, event_none, event_pointer_down, key_down, key_escape, key_up, vertical, widget_input}
+import linalg::Vec3
+import luma::{Event, Insets, Point, PreparedFrame, Rect, Size, UiLayer, Widget, WidgetLayout, anchored_popup_bounds, event_focus_lost, event_key_down, event_none, event_pointer_down, event_pointer_move, event_pointer_up, event_scroll, key_down, key_enter, key_escape, key_tab, key_up, vertical, widget_input}
 
 import mod::asset::{UiConfiguration, load_ui_asset}
 import mod::build::UiBuild
+import mod::minimap::UiMinimap
 import mod::model::{UiScreenAsset, UiWidget, ui_property}
+import mod::navigation::navigation_display
 import mod::settings::PlaySettings
 import mod::templates::ui_template
+import mod::tooltip::{tooltip_focus, tooltip_hover, tooltip_owner, tooltip_view}
 import mod::view::{UiImage, build_ui_screen, game_ui_styles, game_ui_widget_style, load_ui_images, ui_widget_id}
 import refrain::audio::model::AudioSettings
 import refrain::blueprint::{BlueprintInstance, BlueprintModule, BlueprintOverride, BlueprintRuntimeInstance, BlueprintValue}
+import refrain::blueprint::navigation::{NavigationGrid, NavigationRoute}
 import refrain::render_settings::{RenderSettings, anti_aliasing_methods, effective_frame_generation, effective_reconstruction}
+import refrain::scene::camera::PerspectiveCamera
 import refrain::scene::transform::Transform
+import refrain::scene::world::Scene
 
 struct UiScreenInstance {
     asset: UiScreenAsset
     runtime: BlueprintRuntimeInstance
     images: Vec[UiImage]
+    has_tick: bool
+}
+
+fn screen_has_tick(asset: UiScreenAsset) -> bool {
+    for node in asset.graph.nodes {
+        if node.operation == "tick" {
+            ret true
+        }
+    }
+    ret false
 }
 pub struct GameUi {
     project: str
@@ -48,6 +65,10 @@ pub struct GameUi {
     capabilities: u32
     sample_counts: u32
     select_index: usize
+    minimap: UiMinimap
+    map_request: Option[Vec3]
+    map_dragging: u64
+    tip_target: str
 }
 
 impl for GameUi {
@@ -55,7 +76,7 @@ impl for GameUi {
         let settings = PlaySettings { RenderSettings::defaults(), AudioSettings::defaults(), "" }
         let bounds = Rect::new(0, 0, 1, 1)
         ret Self {
-            "", Vec[UiScreenAsset]::new(), Vec[UiScreenInstance]::new(), Option[BlueprintModule]::None, UiBuild::new(), false, false, false, false, false, UiLayer::new(Widget::panel("game-ui-root"), game_ui_styles(), bounds), bounds, true, settings.snapshot(), settings.snapshot(), settings.snapshot(), false, false, vec![""], "", 0, 0, 1, 0_usize
+            "", Vec[UiScreenAsset]::new(), Vec[UiScreenInstance]::new(), Option[BlueprintModule]::None, UiBuild::new(), false, false, false, false, false, UiLayer::new(Widget::panel("game-ui-root"), game_ui_styles(), bounds), bounds, true, settings.snapshot(), settings.snapshot(), settings.snapshot(), false, false, vec![""], "", 0, 0, 1, 0_usize, UiMinimap::empty(), Option[Vec3]::None, 0, ""
         }
     }
     pub fn inspection_layout(self: mut Self) -> WidgetLayout {
@@ -74,7 +95,11 @@ impl for GameUi {
         ret self.layer.focused()
     }
     pub fn hovered(self: Self) -> str {
-        ret self.layer.hovered()
+        ret if self.layer.hovered() != "" {
+            self.layer.hovered()
+        } else {
+            self.tip_target
+        }
     }
     pub fn pressed(self: Self) -> str {
         ret self.layer.pressed()
@@ -175,7 +200,7 @@ impl for GameUi {
                 let error = runtime.error() runtime.destroy() self.close() ret Result[(), str]::Err(error)
             }
             self.instances.push(UiScreenInstance {
-                    asset, runtime, load_ui_images(self.project, asset)
+                    asset, runtime, load_ui_images(self.project, asset), screen_has_tick(asset)
                 }
             )
         }
@@ -195,7 +220,61 @@ impl for GameUi {
             }
         }
         self.module = Option[BlueprintModule]::None
-        self.active = false self.prepared = false self.starting = false self.paused = false self.settings_open = false self.layer.clear_state() self.layer_dirty = true self.selecting = 0
+        self.active = false self.prepared = false self.starting = false self.paused = false self.settings_open = false self.layer.clear_state() self.layer_dirty = true self.selecting = 0 self.minimap = UiMinimap::empty() self.map_request = Option[Vec3]::None self.map_dragging = 0 self.tip_target = ""
+    }
+    pub fn prepare_minimap(self: mut Self, grid: NavigationGrid) ->() {
+        self.minimap = UiMinimap::prepare(grid)
+        let mut instances = Vec[UiScreenInstance]::new()
+        for instance in self.instances {
+            let mut images = Vec[UiImage]::new() for image in instance.images {
+                if image.path != "@minimap" {
+                    images.push(image)
+                }
+            }
+            images.push(UiImage { "@minimap", self.minimap.payload() })
+            instances.push(UiScreenInstance {
+                    instance.asset, instance.runtime, images, instance.has_tick
+                }
+            )
+        }
+        self.instances = instances self.layer_dirty = true
+    }
+    pub fn take_map_request(self: mut Self) -> Option[Vec3] {
+        let point = self.map_request self.map_request = Option[Vec3]::None ret point
+    }
+    pub fn take_events(self: Self) -> Vec[str] {
+        let mut events = Vec[str]::new() for instance in self.instances {
+            for _ in 0_usize..16_usize {
+                let event = instance.runtime.take_event() if event == "" {
+                    break
+                }
+                events.push(event)
+            }
+        }
+        ret events
+    }
+    pub fn game_event(self: mut Self, event: str) ->() {
+        if event.byte_len() > 7 && event.slice_bytes(0, 7) == "@value:" {
+            let mut split = 7_usize while split < event.byte_len() && event.byte_at(split) != 61 {
+                split += 1
+            }
+            if split < event.byte_len() {
+                let binding = "value:" + event.slice_bytes(7, split - 7) let value = event.slice_bytes(split + 1, event.byte_len() - split - 1)
+                for instance in self.instances {
+                    for widget in instance.asset.widgets {
+                        if widget.binding == binding {
+                            instance.runtime.set_property(ui_property(widget.id, 0), BlueprintValue::String(value))
+                        }
+                    }
+                }
+                self.layer_dirty = true
+            }
+            ret()
+        }
+        for instance in self.instances {
+            instance.runtime.invoke("game-event", event, 0)
+        }
+        self.layer_dirty = true
     }
     pub fn take_stop(self: mut Self) -> bool {
         let result = self.stop_requested self.stop_requested = false ret result
@@ -282,8 +361,8 @@ impl for GameUi {
                 ret()
             }
         }
-        let mut asset = instance.asset.snapshot() let mut widgets = Vec[UiWidget]::new()
-        for source in asset.widgets {
+        let mut widgets = Vec[UiWidget]::new()
+        for source in instance.asset.widgets {
             let mut w = source.snapshot()
             match instance.runtime.property(ui_property(w.id, 0)) {
                 Some(stored) => {
@@ -367,13 +446,19 @@ impl for GameUi {
             }
             widgets.push(w)
         }
-        asset.widgets = widgets
+        let asset = instance.asset.view_with_widgets(widgets)
         self.instances.set(self.index(), UiScreenInstance {
-                asset, instance.runtime, instance.images
+                asset, instance.runtime, instance.images, instance.has_tick
             }
             ,
         )
-        let mut root = build_ui_screen(asset, self.bounds, instance.images)
+        let mut root = build_ui_screen(tooltip_view(asset, if self.paused || self.selecting != 0 {
+                    ""
+                } else {
+                    self.tip_target
+                }
+                ,
+            ), self.bounds, instance.images)
         if self.paused {
             root = root.with_computed_style(root.style().with_background(luma::Color::rgba(6, 10, 18, 180)))
         }
@@ -412,7 +497,7 @@ impl for GameUi {
         }
         self.layer.set_modal(self.paused) self.layer.set_root(root, self.bounds) self.layer_dirty = false
     }
-    pub fn compose(self: mut Self, frame: PreparedFrame, bounds: Rect) -> PreparedFrame {
+    pub fn compose(self: mut Self, frame: PreparedFrame, bounds: Rect, scene: Scene, markers: Vec[(Vec3, Vec3)], routes: Vec[NavigationRoute], camera: Option[PerspectiveCamera]) -> PreparedFrame {
         if !self.active || bounds.width() <= 0 || bounds.height() <= 0 {
             ret frame
         }
@@ -422,7 +507,37 @@ impl for GameUi {
         if self.layer_dirty {
             self.rebuild()
         }
-        ret self.layer.compose(frame)
+        let mut background = frame
+        if !self.paused {
+            match camera {
+                Some(camera) => {
+                    background = background.with_display_overlay(navigation_display(bounds, camera, routes), bounds)
+                }
+                None => {
+                }
+            }
+        }
+        let mut result = self.layer.compose(background)
+        if !self.paused {
+            match self.instances.get(self.index()) {
+                Some(instance) => {
+                    for w in instance.asset.widgets {
+                        if w.kind == "Minimap" && w.visible {
+                            match self.layer.layout().find_bounds(ui_widget_id(w.id)) {
+                                Some(map_bounds) => {
+                                    result = result.with_foreground_overlay(self.minimap.display(map_bounds, scene, markers, bounds.width() / bounds.height()), map_bounds)
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+        ret result
     }
     fn dispatch_action(self: mut Self, runtime: BlueprintRuntimeInstance) ->() {
         let previous_screen = self.index()
@@ -474,6 +589,7 @@ impl for GameUi {
             ret false
         }
         if event.kind() == event_key_down() && event.key() == key_escape() {
+            self.map_dragging = 0 self.tip_target = ""
             if event.shift() {
                 self.stop_requested = true ret true
             }
@@ -491,6 +607,52 @@ impl for GameUi {
         }
         if self.layer_dirty {
             self.rebuild()
+        }
+        let mut tip = self.tip_target
+        if event.kind() == event_pointer_move() || event.kind() == event_scroll() {
+            tip = ""
+            if !self.paused && self.selecting == 0 {
+                match self.instances.get(self.index()) {
+                    Some(instance) => {
+                        tip = tooltip_hover(instance.asset, self.layer.layout(), Point::new(event.x(), event.y()), self.tip_target)
+                    }
+                    None => {
+                    }
+                }
+            }
+        } elif event.kind() == event_pointer_down() || event.kind() == event_focus_lost() {
+            tip = ""
+        }
+        if tip != self.tip_target {
+            self.tip_target = tip self.layer_dirty = true self.rebuild()
+        }
+        if !self.paused {
+            if event.kind() == event_pointer_up() && self.map_dragging != 0 {
+                self.map_dragging = 0 ret true
+            }
+            if (event.kind() == event_pointer_down() && event.primary_down()) ||(event.kind() == event_pointer_move() && self.map_dragging != 0) {
+                match self.instances.get(self.index()) {
+                    Some(instance) => {
+                        for w in instance.asset.widgets {
+                            if w.kind != "Minimap" || !w.visible || !w.enabled {
+                                continue
+                            }
+                            match self.layer.layout().find_bounds(ui_widget_id(w.id)) {
+                                Some(bounds) => {
+                                    let inside = event.x() >= bounds.x() && event.y() >= bounds.y() && event.x() <= bounds.x() + bounds.width() && event.y() <= bounds.y() + bounds.height()
+                                    if inside || self.map_dragging == w.id {
+                                        self.map_request = self.minimap.world_point(bounds, event.x(), event.y()) self.map_dragging = w.id ret true
+                                    }
+                                }
+                                None => {
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                    }
+                }
+            }
         }
         if self.selecting != 0 && event.kind() == event_key_down() &&(event.key() == key_down() || event.key() == key_up()) {
             let instance = match self.instances.get(self.index()) {
@@ -524,8 +686,50 @@ impl for GameUi {
         if self.selecting != 0 && event.kind() == event_pointer_down() && !self.layer.layout().hit(event.x(), event.y()).contains("ui-game-option-") {
             self.selecting = 0 self.layer_dirty = true ret true
         }
+        // Noninteractive HUD surfaces still shield the battlefield beneath them.
+        if !self.paused && event.kind() == event_pointer_down() {
+            match self.instances.get(self.index()) {
+                Some(instance) => {
+                    for w in instance.asset.widgets {
+                        if !w.visible || tooltip_owner(instance.asset, w.id) != 0 ||(w.kind != "Image" && !(w.kind == "Button" && !w.enabled)) {
+                            continue
+                        }
+                        match self.layer.layout().find_bounds(ui_widget_id(w.id)) {
+                            Some(bounds) => {
+                                if event.x() >= bounds.x() && event.y() >= bounds.y() && event.x() < bounds.x() + bounds.width() && event.y() < bounds.y() + bounds.height() {
+                                    // Enabled controls may be layered over decorative frames.
+                                    let target = self.layer.layout().hit(event.x(), event.y())
+                                    if target == ui_widget_id(w.id) || w.kind == "Button" {
+                                        ret true
+                                    }
+                                }
+                            }
+                            None => {
+                            }
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
         let previous_screen = self.index()
         let input = self.layer.input(event)
+        if event.kind() == event_key_down() &&(event.key() == key_tab() || event.key() == key_enter() || event.key() == 32) {
+            let mut tip = ""
+            if !self.paused && self.selecting == 0 && event.key() == key_tab() {
+                match self.instances.get(self.index()) {
+                    Some(instance) => {
+                        tip = tooltip_focus(instance.asset, self.layer.focused())
+                    }
+                    None => {
+                    }
+                }
+            }
+            if tip != self.tip_target {
+                self.tip_target = tip self.layer_dirty = true
+            }
+        }
         if input.action == "" {
             ret input.consumed
         }
@@ -595,12 +799,7 @@ impl for GameUi {
         }
         match self.instances.get(self.index()) {
             Some(instance) => {
-                let mut ticks = false for node in instance.asset.graph.nodes {
-                    if node.operation == "tick" {
-                        ticks = true
-                    }
-                }
-                if !ticks {
+                if !instance.has_tick {
                     ret()
                 }
                 if !instance.runtime.invoke("tick", "", if elapsed > 0 && elapsed < 0.1_f32 {

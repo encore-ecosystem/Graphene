@@ -1,7 +1,67 @@
 //! Editor-owned viewport input state consumed by Luma `AppEvent` updates.
 
+import core::vec::Vec
+
 import linalg::Vec3
-import luma::AppEvent
+import luma::{AppEvent, Event, UiInputQueue, event_key_down, event_key_up, event_none, event_pointer_move}
+
+/// Captured camera input can advance to the latest held state without doing
+/// a simulation/render iteration for every repeated key or mouse sample.
+pub struct CameraInputBatch {
+    flight: FlightInput
+    dx: f32
+    dy: f32
+    x: f32
+    y: f32
+    moved: bool
+    consumed: u32
+    keys: Vec[Event]
+}
+
+fn flight_key(key: u32) -> bool {
+    ret key == 119 || key == 115 || key == 97 || key == 100 ||
+    key == 101 || key == 113 || key == 114 || key == 102 ||
+    key == 1073742049_u32 || key == 1073742053_u32
+}
+
+impl for CameraInputBatch {
+    pub fn new(flight: FlightInput) -> Self {
+        ret Self { flight, 0, 0, 0, 0, false, 0, Vec[Event]::new() }
+    }
+    /// A release, click, text, resize or unrelated shortcut is a barrier.
+    /// It remains available to the normal editor routing in the same frame.
+    pub fn absorb(self: mut Self, event: Event) -> bool {
+        if event.kind() == event_pointer_move() &&(event.buttons() & 4) != 0 {
+            self.dx += event.dx() self.dy += event.dy()
+            self.x = event.x() self.y = event.y() self.moved = true
+        } elif (event.kind() == event_key_down() || event.kind() == event_key_up()) && flight_key(event.key()) {
+            self.keys.push(event)
+            self.flight = self.flight.update(if event.kind() == event_key_down() {
+                    AppEvent::key_down(event.key(), event.modifiers(), "viewport-surface")
+                } else {
+                    AppEvent::key_up(event.key(), event.modifiers(), "viewport-surface")
+                }
+            )
+        } else {
+            ret false
+        }
+        self.consumed += 1 ret true
+    }
+    /// Consume only consecutive camera samples; never skip a UI transition.
+    pub fn drain(self: mut Self, first: Event, queue: mut UiInputQueue) -> Event {
+        let mut event = first
+        for _ in 0_usize..257_usize {
+            if !self.absorb(event) {
+                ret event
+            }
+            event = queue.next().unwrap_or(Event::none())
+            if event.kind() == event_none() {
+                ret event
+            }
+        }
+        ret event
+    }
+}
 
 pub struct FlightInput {
     forward: bool

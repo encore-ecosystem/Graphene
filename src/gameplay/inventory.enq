@@ -1,0 +1,110 @@
+//! Physical, bounded cargo. Transfers and recipe exchanges are atomic.
+import core::vec::Vec
+
+pub struct ItemStack {
+    item: u32
+    count: u32
+}
+pub struct Inventory {
+    capacity: u32
+    stacks: Vec[ItemStack]
+}
+pub struct ActorInventory {
+    actor: u64
+    cargo: Inventory
+}
+
+impl for Inventory {
+    pub fn new(capacity: u32) -> Self {
+        ret Self { capacity, Vec[ItemStack]::new() }
+    }
+    pub fn snapshot(self: Self) -> Self {
+        let mut stacks = Vec[ItemStack]::new()
+        for stack in self.stacks {
+            stacks.push(stack)
+        }
+        ret Self { self.capacity, stacks }
+    }
+    pub fn total(self: Self) -> u32 {
+        let mut total = 0_u32
+        for stack in self.stacks {
+            total += stack.count
+        }
+        ret total
+    }
+    pub fn count(self: Self, item: u32) -> u32 {
+        for stack in self.stacks {
+            if stack.item == item {
+                ret stack.count
+            }
+        }
+        ret 0
+    }
+    pub fn free(self: Self) -> u32 {
+        ret self.capacity - self.total()
+    }
+    pub fn insert(self: mut Self, item: u32, count: u32) -> bool {
+        if item == 0 || count > self.free() {
+            ret false
+        }
+        if count == 0 {
+            ret true
+        }
+        for i in 0_usize..self.stacks.len() {
+            let stack = self.stacks.get_unchecked_borrowed(i)
+            if stack.item == item {
+                self.stacks.set(i, ItemStack { item, stack.count + count })
+                ret true
+            }
+        }
+        self.stacks.push(ItemStack { item, count })
+        ret true
+    }
+    pub fn remove(self: mut Self, item: u32, count: u32) -> bool {
+        if self.count(item) < count {
+            ret false
+        }
+        if count == 0 {
+            ret true
+        }
+        for i in 0_usize..self.stacks.len() {
+            let stack = self.stacks.get_unchecked_borrowed(i)
+            if stack.item == item {
+                self.stacks.set(i, ItemStack { item, stack.count - count })
+                ret true
+            }
+        }
+        ret false
+    }
+    pub fn exchange(self: mut Self, inputs: Vec[ItemStack], outputs: Vec[ItemStack]) -> bool {
+        let mut next = self.snapshot()
+        for stack in inputs {
+            if !next.remove(stack.item, stack.count) {
+                ret false
+            }
+        }
+        for stack in outputs {
+            if !next.insert(stack.item, stack.count) {
+                ret false
+            }
+        }
+        self.stacks = next.stacks
+        ret true
+    }
+}
+
+/// Callers must supply distinct inventories. The actor-level API rejects self-transfers.
+pub fn transfer(source: mut Inventory, destination: mut Inventory, item: u32, requested: u32) -> u32 {
+    let mut count = requested
+    if count > source.count(item) {
+        count = source.count(item)
+    }
+    if count > destination.free() {
+        count = destination.free()
+    }
+    if count == 0 || !destination.insert(item, count) {
+        ret 0
+    }
+    source.remove(item, count)
+    ret count
+}

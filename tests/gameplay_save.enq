@@ -1,0 +1,60 @@
+//! Persistence must preserve physical cargo and reject invalid slot names.
+import core::vec::Vec
+import graphene::blueprint::{BlueprintOverride, BlueprintValue}
+import graphene::gameplay::save::{load_world, save_slot_path, save_world}
+import graphene::gameplay::service::gameplay_request
+import graphene::gameplay::world::{GameplayState, GameplayWorld}
+import graphene::scene::transform::Transform
+import graphene::scene::world::Scene
+import linalg::Vec3
+
+struct WorldSaveProbe {
+    scene: Scene
+    state: GameplayState
+    properties: Vec[BlueprintOverride]
+}
+fn main() -> u32 {
+    let project = "target/industrial-session/save-test"
+    if save_slot_path(project, "../escape").is_ok() || save_slot_path(project, "").is_ok() || save_slot_path(project, "a/b").is_ok() {
+        ret 1
+    }
+    let mut world = GameplayWorld::new()
+    for event in vec!["@service|1|inventory-create|1|0|0|50|", "@service|2|inventory-add|1|0|4|13|"] {
+        match gameplay_request(event) {
+            Some(request) => {
+                if !world.command(1, request, Vec3::zero()).ok {
+                    ret 2
+                }
+            }
+            None => {
+                ret 3
+            }
+        }
+    }
+    let mut scene = Scene::new() scene.create_entity("actor", Transform::identity())
+    let properties = vec![BlueprintOverride { 1, BlueprintValue::Vector(Vec3::new(1, 2, 3)) }, BlueprintOverride {
+            2, BlueprintValue::String("saved")
+        }
+    ]
+    if save_world(project, "test", WorldSaveProbe { scene, world.state(), properties }).is_err() {
+        ret 4
+    }
+    let saved = match load_world[WorldSaveProbe](project, "test") {
+        Ok(v) => v Err(_) => {
+            ret 5
+        }
+    }
+    if saved.scene.len() != 1 || saved.state.inventories.len() != 1 || saved.state.inventories.get_unchecked_borrowed(0).cargo.count(4) != 13 || saved.properties.len() != 2 {
+        ret 6
+    }
+    let mut restored = GameplayWorld::new() restored.restore(saved.state)
+    let request = match gameplay_request("@service|3|inventory-remove|1|0|4|3|") {
+        Some(v) => v None => {
+            ret 7
+        }
+    }
+    if !restored.command(1, request, Vec3::zero()).ok || restored.inventories.get_unchecked_borrowed(0).cargo.count(4) != 10 || world.inventories.get_unchecked_borrowed(0).cargo.count(4) != 13 {
+        ret 8
+    }
+    ret 0
+}

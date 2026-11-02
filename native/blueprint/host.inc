@@ -43,6 +43,14 @@ typedef struct graphene_bp_instance {
     size_t component_count, component_capacity;
     char log[65537];
     size_t log_length;
+    uint64_t actor_id, cursor_actor;
+    float cursor[3], destination[3], move_speed, move_radius;
+    bool cursor_valid, selected, strategy_camera;
+    uint32_t move_command;
+    char events[16][1025], placement[1025];
+    size_t event_head, event_count;
+    float placement_radius;
+    bool placement_pending;
     uintptr_t token;
 } graphene_bp_instance;
 
@@ -123,6 +131,53 @@ static bool graphene_bp_log(void *context, const char *bytes, size_t length) {
     instance->log_length += length; instance->log[instance->log_length++] = '\n';
     instance->log[instance->log_length] = '\0'; return true;
 }
+static float graphene_bp_query_scalar(void *context, uint32_t field, uint32_t axis) {
+    graphene_bp_instance *i = context;
+    if (field == 0 && axis < 3) return i->cursor[axis];
+    if (field == 1) return i->selected ? 1.0f : 0.0f;
+    if (field == 2) return i->cursor_valid ? 1.0f : 0.0f;
+    return 0;
+}
+static uint64_t graphene_bp_query_actor(void *context, uint32_t field) {
+    graphene_bp_instance *i = context;
+    return field == 0 ? i->actor_id : i->cursor_actor;
+}
+static bool graphene_bp_command(void *context, uint32_t kind, const float *value) {
+    graphene_bp_instance *i = context;
+    if (!value) return false;
+    if (kind == 1) { i->selected = value[0] != 0; return true; }
+    if (kind == 5) {i->strategy_camera=true;return true;}
+    if (kind == 3) { i->move_command = 3; return true; }
+    if ((kind != 2 && kind != 4) || !isfinite(value[3]) || value[3] <= 0 || value[3] > 1000 || (kind == 4 && (!isfinite(value[4]) || value[4] < 0.05f || value[4] > 100))) return false;
+    for (size_t axis=0; axis<3; ++axis) if (!isfinite(value[axis])) return false;
+    memcpy(i->destination, value, sizeof(i->destination));
+    i->move_speed=value[3]; i->move_radius=kind == 4 ? value[4] : 0.45f; i->move_command=2; return true;
+}
+static bool graphene_bp_event(void *context,const char *bytes,size_t length) {
+    graphene_bp_instance *i=context;
+    if (!bytes || !length || length>1024 || i->event_count == 16 || memchr(bytes,0,length)) return false;
+    size_t tail = (i->event_head + i->event_count) % 16;
+    memcpy(i->events[tail],bytes,length); i->events[tail][length]=0;
+    i->event_count++; return true;
+}
+static bool graphene_bp_placement(void *context,const char *bytes,size_t length,float radius) {
+    graphene_bp_instance *i=context;
+    if (length>1024 || (length && !bytes) || !isfinite(radius) || radius<0 || radius>100 || (length && memchr(bytes,0,length))) return false;
+    if(length)memcpy(i->placement,bytes,length);i->placement[length]=0;i->placement_radius=radius;i->placement_pending=true;return true;
+}
+encore_str graphene_bp_take_event(uintptr_t handle) {
+    graphene_bp_lock();
+    graphene_bp_instance *i=graphene_bp_instance_find(handle);
+    encore_str s=graphene_string(i && i->event_count ? i->events[i->event_head] : "");
+    if(i && i->event_count) { i->event_head=(i->event_head+1)%16; i->event_count--; }
+    graphene_bp_unlock();return s;
+}
+encore_str graphene_bp_take_placement(uintptr_t handle) {
+    graphene_bp_lock();graphene_bp_instance *i=graphene_bp_instance_find(handle);encore_str s=graphene_string(i && i->placement_pending?(i->placement[0]?i->placement:"@cancel"):"");if(i)i->placement_pending=false;graphene_bp_unlock();return s;
+}
+float graphene_bp_placement_radius(uintptr_t handle) {
+    graphene_bp_lock();graphene_bp_instance *i=graphene_bp_instance_find(handle);float r=i?i->placement_radius:0;graphene_bp_unlock();return r;
+}
 static void graphene_bp_library_close(void *library) {
 #if defined(_WIN32)
     FreeLibrary((HMODULE)library);
@@ -190,7 +245,8 @@ static uintptr_t graphene_bp_create_impl(uintptr_t handle, encore_str class_id) 
     if (!instance->state) { free(instance); graphene_bp_error("module instance initialization failed"); return 0; }
     instance->module = module;
     instance->host = (gbp_host_v1){ GBP_ABI_VERSION, sizeof(gbp_host_v1), instance, graphene_bp_read_transform,
-        graphene_bp_write_transform, graphene_bp_read_visible, graphene_bp_write_visible, graphene_bp_log };
+        graphene_bp_write_transform, graphene_bp_read_visible, graphene_bp_write_visible, graphene_bp_log,
+        graphene_bp_query_scalar, graphene_bp_query_actor, graphene_bp_command, graphene_bp_event, graphene_bp_placement };
     instance->next = graphene_bp_instances; graphene_bp_instances = instance; ++module->instances;
     return instance->token;
 }
@@ -295,6 +351,25 @@ GBP_LOCKED(encore_str, instance_error, (uintptr_t handle), (handle))
 GBP_LOCKED(uint64_t, error_node, (uintptr_t handle), (handle))
 GBP_LOCKED(encore_str, take_log, (uintptr_t handle), (handle))
 #undef GBP_LOCKED
+
+bool graphene_bp_pointer(uintptr_t handle, uint64_t actor, uint64_t cursor_actor, float x, float y, float z, bool valid) {
+    graphene_bp_lock(); graphene_bp_instance *i=graphene_bp_instance_find(handle);
+    if (i) { i->actor_id=actor; i->cursor_actor=cursor_actor; i->cursor[0]=x; i->cursor[1]=y; i->cursor[2]=z; i->cursor_valid=valid; }
+    graphene_bp_unlock(); return i != NULL;
+}
+float graphene_bp_interaction(uintptr_t handle, uint32_t field, uint32_t axis) {
+    graphene_bp_lock(); graphene_bp_instance *i=graphene_bp_instance_find(handle); float result=0;
+    if (i) {
+        if (field==0) result=i->selected ? 1 : 0;
+        if (field==1) result=(float)i->move_command;
+        if (field==2 && axis<3) result=i->destination[axis];
+        if (field==3) result=i->move_speed;
+        if (field==4) i->move_command=0;
+        if (field==5) result=i->move_radius;
+        if (field==6) result=i->strategy_camera ? 1 : 0;
+    }
+    graphene_bp_unlock(); return result;
+}
 
 /* Typed property reads copy values while the registry lock pins the instance.
  * This is ABI marshaling only; screen policy remains in Encore. */

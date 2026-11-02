@@ -28,6 +28,18 @@ fn finite(x: f32) -> bool {
 }
 
 impl for PhysicsComponent {
+    /// Exact authored settings, including controller collision/filter options.
+    pub fn same_settings(self: Self, other: Self) -> bool {
+        let a = self.character let b = other.character
+        ret self.mode == other.mode && self.shape == other.shape &&
+        self.half_extents.x() == other.half_extents.x() && self.half_extents.y() == other.half_extents.y() && self.half_extents.z() == other.half_extents.z() &&
+        self.radius == other.radius && self.half_height == other.half_height &&
+        self.mass == other.mass && self.friction == other.friction &&
+        self.restitution == other.restitution && self.gravity_scale == other.gravity_scale && self.sensor == other.sensor &&
+        a.radius == b.radius && a.half_height == b.half_height && a.speed == b.speed && a.jump_speed == b.jump_speed &&
+        a.gravity == b.gravity && a.slope_degrees == b.slope_degrees && a.step_height == b.step_height &&
+        a.ground_snap == b.ground_snap && a.skin == b.skin && a.mask == b.mask
+    }
     pub fn defaults() -> Self {
         ret Self {
             "off", "box", Vec3::new(0.5_f32, 0.5_f32, 0.5_f32), 0.5_f32, 0.5_f32, 1_f32, 0.6_f32, 0_f32, 1_f32, false, CharacterConfig::defaults()

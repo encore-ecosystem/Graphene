@@ -1,0 +1,98 @@
+//! Sparse identity, health, team progress and physical AI crew regression cases.
+import graphene::runtime::{World, RuntimeTransform}
+import std::os::{mkdir_all, write_file}
+
+import graphene::gameplay::service::{GameplayReply, GameplayRequest}
+import graphene::gameplay::world::GameplayWorld
+import graphene::scene::transform::Transform
+import graphene::scene::world::Scene
+import linalg::Vec3
+
+fn command(world: mut GameplayWorld&, op: str, actor: u64, target: u64, item: u32, count: u32, text: str) -> GameplayReply {
+    ret world.command(actor, GameplayRequest { 1, op, actor, target, item, count, text }, Vec3::zero())
+}
+fn main() -> u32 {
+    let mut scene = Scene::new() let mut runtime = World::new()
+    for n in 1_usize..3001_usize {
+        let id =(n * 3) as u64
+        if !scene.create_entity_with_id(id, "actor", Transform::identity()) || !runtime.spawn_actor_with_id(id, "actor", RuntimeTransform::identity()) {
+            ret 1
+        }
+    }
+    for id in vec![3_u64, 1500_u64, 8997_u64] {
+        if !scene.remove(id) || !runtime.despawn_actor(id) || scene.get(id).is_some() || runtime.contains(id) {
+            ret 2
+        }
+    }
+    for id in vec![6_u64, 1497_u64, 9000_u64] {
+        if !scene.set_transform(id, Transform::identity().with_position(Vec3::new(1, 2, 3))) || !runtime.set_transform(id, RuntimeTransform::identity().with_position(Vec3::new(1, 2, 3))) {
+            ret 3
+        }
+        match scene.get(id) {
+            Some(value) => {
+                if value.id() != id {
+                    ret 4
+                }
+            }
+            None => {
+                ret 4
+            }
+        }
+        match runtime.actor(id) {
+            Some(value) => {
+                if value.id() != id {
+                    ret 4
+                }
+            }
+            None => {
+                ret 4
+            }
+        }
+    }
+    if !scene.create_entity_with_id(999999999, "sparse", Transform::identity()) || scene.get(999999999).is_none() {
+        ret 5
+    }
+    let mut world = GameplayWorld::new()
+    for pair in vec![(1_u64, "engineer"),(2_u64, "human"),(3_u64, "vehicle")] {
+        let actor = pair.0 let kind = pair.1
+        if !command(world, "control-register", actor, 0, 1, 0, kind).ok {
+            ret 6
+        }
+    }
+    if world.accepts_orders(3) || !command(world, "control-seat-ai", 2, 3, 0, 0, "").ok || !world.accepts_orders(3) || !world.is_seated(2) {
+        ret 7
+    }
+    if !command(world, "health-register", 2, 0, 1, 100, "").ok || command(world, "health-damage", 2, 0, 0, 1000, "").text != "died" || world.is_alive(2) || world.accepts_orders(3) || world.is_seated(2) {
+        ret 8
+    }
+    if command(world, "health-damage", 2, 0, 0, 20, "").text == "died" {
+        ret 9
+    }
+    if command(world, "health-heal", 2, 0, 0, 100000, "").count != 100 || !world.is_alive(2) {
+        ret 10
+    }
+    if command(world, "team-value-get", 1, 0, 1, 0, "automation").count != 0 || !command(world, "team-value-set", 1, 0, 1, 1, "automation").ok || command(world, "team-value-get", 1, 0, 1, 0, "automation").count != 1 || command(world, "team-value-get", 1, 0, 2, 0, "automation").count != 0 {
+        ret 11
+    }
+    if !command(world, "control-autonomy", 3, 0, 0, 1, "").ok || !world.accepts_orders(3) {
+        ret 12
+    }
+    if command(world, "health-team", 2, 0, 0, 0, "").count != 1 {
+        ret 13
+    }
+    world.project = "target/industrial-session/world-test"
+    mkdir_all(world.project + "/Content")
+    write_file(world.project + "/Content/test.grecipe", "{\"format\":\"graphene-recipe\",\"version\":1,\"id\":\"test\",\"name\":\"test\",\"seconds\":1,\"power\":0,\"inputs\":[],\"outputs\":[{\"item\":5,\"count\":1}]}")
+    if !command(world, "inventory-create", 1, 0, 0, 50, "").ok || !command(world, "production-configure", 1, 0, 1, 0, "Content/test.grecipe").ok {
+        ret 14
+    }
+    world.production.step(world.inventories, 0.5)
+    if command(world, "production-configure", 1, 0, 1, 0, "Content/test.grecipe").ok {
+        ret 15
+    }
+    world.production.step(world.inventories, 0.5)
+    if !command(world, "production-configure", 1, 0, 1, 0, "Content/test.grecipe").ok || world.production.machines.get_unchecked_borrowed(0).completed != 1 {
+        ret 16
+    }
+    ret 0
+}

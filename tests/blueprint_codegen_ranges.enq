@@ -1,0 +1,40 @@
+//! Source diagnostics must still map to the right node across multiple classes.
+import core::fmt::Debug
+import core::vec::Vec
+
+import graphene::blueprint::{BlueprintAsset, BlueprintNode, BlueprintType, generate_blueprints}
+
+fn main() -> u32 {
+    let mut assets = Vec[BlueprintAsset]::new()
+    for c in 0_usize..3_usize {
+        let mut asset = BlueprintAsset::new("range-" + c.fmt(), "Ranges")
+        for n in 1_usize..81_usize {
+            asset.nodes.push(BlueprintNode::new(n as u64, "constant", BlueprintType::F32))
+        }
+        assets.push(asset)
+    }
+    let generated = match generate_blueprints(assets) {
+        Ok(v) => v Err(_) => {
+            ret 1
+        }
+    }
+    if generated.ranges.len() != 240 {
+        ret 2
+    }
+    let mut lines = Vec[str]::new()
+    let mut start = 0_usize
+    for i in 0_usize..generated.source.byte_len() {
+        if generated.source.byte_at(i) == 10 {
+            lines.push(generated.source.slice_bytes(start, i - start)) start = i + 1
+        }
+    }
+    for i in 0_usize..generated.ranges.len() {
+        let range = generated.ranges.get_unchecked_borrowed(i)
+        let first = lines.get(range.first_line - 1).unwrap_or("")
+        let last = lines.get(range.last_line - 1).unwrap_or("")
+        if !first.contains("fn c" +(i / 80).fmt() + "v" + range.node.fmt() + "_value(") || last != "}" {
+            ret 3
+        }
+    }
+    ret 0
+}

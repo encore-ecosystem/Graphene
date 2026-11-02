@@ -9,6 +9,8 @@ pub fn content_kind(path: str) -> str {
     let name = lower(path)
     ret if ends(name, ".gterrain") {
         "terrain"
+    } elif ends(name, ".grecipe") {
+        "recipe"
     } elif ends(name, ".graphene-ui.json") {
         "ui"
     } elif ends(name, ".gcharacter") {
@@ -45,6 +47,7 @@ pub fn content_kind(path: str) -> str {
 }
 pub fn content_kind_name(kind: str) -> str {
     ret match kind {
+        "recipe" => "Production Recipe"
         "terrain" => "Terrain" "ui" => "UI Screen" "character" => "Character" "skeleton" => "Skeleton" "skeletal-mesh" => "Skeletal Mesh" "animation-clip" => "Animation Clip" "particle-system" => "Particle System" "folder" => "Folder" "mesh" => "Static Mesh" "material" => "Material"
         "material-instance" => "Material Instance" "material-graph" => "Material Graph" "texture" => "Texture" "blueprint" => "Blueprint"
         "weather-preset" => "Weather Preset" "script" => "Encore Script" "scene" => "Scene" "sound" => "Sound" _ => "File"

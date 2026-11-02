@@ -1,0 +1,56 @@
+//! Versioned world storage, separate from editor scenes and project assets.
+import binary::{encode, decode}
+import core::result::Result
+import core::vec::Vec
+
+import std::os::{mkdir_all, read_file, write_file_atomic}
+extern fn graphene_asset_bytes(pointer: u8*, size: usize) -> str
+
+pub fn save_slot_path(project: str, slot: str) -> Result[str, str] {
+    if project == "" || slot.byte_len() == 0 || slot.byte_len() > 64 {
+        ret Result::Err("Invalid save slot")
+    }
+    for i in 0_usize..slot.byte_len() {
+        let c = slot.byte_at(i)
+        if !((c >= 48 && c <= 57) ||(c >= 65 && c <= 90) ||(c >= 97 && c <= 122) || c == 95 || c == 45) {
+            ret Result::Err("Save slots use letters, digits, - and _")
+        }
+    }
+    ret Result::Ok(project + "/Saves/" + slot + ".gsave")
+}
+#attr(safe)
+pub fn save_world[Value](project: str, slot: str, value: Value) -> Result[(), str] {
+    let path = save_slot_path(project, slot)?
+    let bytes = match encode(value) {
+        Ok(v) => v Err(_) => {
+            ret Result::Err("Unable to encode game world")
+        }
+    }
+    if bytes.len() > 33554432 {
+        ret Result::Err("Game world exceeds the save size limit")
+    }
+    if mkdir_all(project + "/Saves") != 0 {
+        ret Result::Err("Unable to create Saves folder")
+    }
+    let source = unsafe {
+        "GWS1" + graphene_asset_bytes(bytes.as_ptr(), bytes.len())
+    }
+    if write_file_atomic(path, source) != 0 {
+        ret Result::Err("Unable to commit world save")
+    }
+    ret Result::Ok(())
+}
+pub fn load_world[Value](project: str, slot: str) -> Result[Value, str] {
+    let path = save_slot_path(project, slot)?
+    let source = read_file(path)
+    if source.byte_len() < 12 || source.byte_len() > 33554436 || source.slice_bytes(0, 4) != "GWS1" {
+        ret Result::Err("Missing or invalid world save")
+    }
+    let mut bytes = Vec[u8]::with_capacity(source.byte_len() - 4)
+    for i in 4_usize..source.byte_len() {
+        bytes.push(source.byte_at(i))
+    }
+    ret match decode[Value](bytes) {
+        Ok(v) => Result::Ok(v) Err(_) => Result::Err("World save is damaged or uses a different schema")
+    }
+}

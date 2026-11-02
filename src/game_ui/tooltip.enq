@@ -1,0 +1,108 @@
+//! Authored information panels use hover:<widget id> visibility bindings.
+//! Their children stay ordinary UI widgets, including images and wrapped text.
+import core::fmt::Debug
+import core::option::Option
+import core::vec::Vec
+
+import luma::{Point, Rect, WidgetLayout}
+
+import mod::model::{UiScreenAsset, UiWidget}
+
+pub fn tooltip_target(binding: str) -> str {
+    if binding.byte_len() <= 6 || binding.slice_bytes(0, 6) != "hover:" {
+        ret ""
+    }
+    for i in 6_usize..binding.byte_len() {
+        if binding.byte_at(i) < 48 || binding.byte_at(i) > 57 {
+            ret ""
+        }
+    }
+    ret "game-ui-" + binding.slice_bytes(6, binding.byte_len() - 6)
+}
+pub fn tooltip_owner(asset: UiScreenAsset, id: u64) -> u64 {
+    let mut current = id
+    for depth in 0..64 {
+        let mut found = false
+        for w in asset.widgets {
+            if w.id == current {
+                if tooltip_target(w.binding) != "" {
+                    ret w.id
+                }
+                current = w.parent found = true break
+            }
+        }
+        if !found || current == 0 {
+            break
+        }
+    }
+    ret 0
+}
+pub fn tooltip_view(asset: UiScreenAsset, target: str) -> UiScreenAsset {
+    let mut widgets = Vec[UiWidget]::new()
+    for source in asset.widgets {
+        let mut w = source.snapshot() let control = tooltip_target(w.binding)
+        if control != "" {
+            w.visible = w.visible && target != "" && control == target
+        }
+        widgets.push(w)
+    }
+    ret asset.view_with_widgets(widgets)
+}
+pub fn tooltip_preview(asset: UiScreenAsset, selected: u64) -> UiScreenAsset {
+    let owner = tooltip_owner(asset, selected) let mut target = ""
+    for w in asset.widgets {
+        if w.id == owner {
+            target = tooltip_target(w.binding)
+        }
+    }
+    ret tooltip_view(asset, target)
+}
+pub fn tooltip_focus(asset: UiScreenAsset, focused: str) -> str {
+    for w in asset.widgets {
+        if w.visible && focused != "" && tooltip_target(w.binding) == focused {
+            ret focused
+        }
+    }
+    ret ""
+}
+fn inside(bounds: Rect, point: Point) -> bool {
+    ret bounds.width() > 0 && bounds.height() > 0 && bounds.contains(point)
+}
+pub fn tooltip_hover(asset: UiScreenAsset, layout: WidgetLayout, point: Point, current: str) -> str {
+    for w in asset.widgets {
+        let target = tooltip_target(w.binding)
+        if w.visible && target != "" {
+            match layout.find_bounds(target) {
+                Some(bounds) => {
+                    if inside(bounds, point) {
+                        ret target
+                    }
+                }
+                None => {
+                }
+            }
+        }
+    }
+    // Keep a card readable while crossing the small gap to it. A different
+    // target above always wins, so neighbouring icons switch without a delay.
+    for w in asset.widgets {
+        if current != "" && w.visible && tooltip_target(w.binding) == current {
+            match layout.find_bounds("game-ui-" + Debug::fmt(w.id)) {
+                Some(card) => {
+                    match layout.find_bounds(current) {
+                        Some(target) => {
+                            if inside(card, point) ||(point.x() >= card.x() && point.x() <= target.right() && point.y() >= target.y() && point.y() <= target.bottom()) {
+                                ret current
+                            }
+                        }
+                        None => {
+                        }
+                    }
+                }
+                None => {
+                }
+            }
+        }
+    }
+    ret ""
+}

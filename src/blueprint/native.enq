@@ -32,6 +32,12 @@ extern fn graphene_bp_property_f32(handle: usize, id: u64, axis: u32) -> f32
 extern fn graphene_bp_property_reference(handle: usize, id: u64) -> u64
 extern fn graphene_bp_property_string(handle: usize, id: u64) -> str
 
+extern fn graphene_bp_pointer(handle: usize, actor: u64, cursor_actor: u64, x: f32, y: f32, z: f32, valid: bool) -> bool
+extern fn graphene_bp_interaction(handle: usize, field: u32, axis: u32) -> f32
+
+extern fn graphene_bp_take_event(handle: usize) -> str
+extern fn graphene_bp_take_placement(handle: usize) -> str
+extern fn graphene_bp_placement_radius(handle: usize) -> f32
 pub struct BlueprintModule {
     handle: usize
 }
@@ -84,6 +90,28 @@ impl for BlueprintModule {
 }
 
 impl for BlueprintRuntimeInstance {
+    #attr(safe)
+    pub fn take_event(self: Self) -> str {
+        ret graphene_bp_take_event(self.handle)
+    }
+    #attr(safe)
+    pub fn take_placement(self: Self) -> str {
+        ret graphene_bp_take_placement(self.handle)
+    }
+    #attr(safe)
+    pub fn placement_radius(self: Self) -> f32 {
+        ret graphene_bp_placement_radius(self.handle)
+    }
+
+    #attr(safe)
+    pub fn pointer(self: Self, actor: u64, hit: u64, point: Vec3, valid: bool) ->() {
+        let _ok = graphene_bp_pointer(self.handle, actor, hit, point.x(), point.y(), point.z(), valid)
+    }
+    #attr(safe)
+    pub fn interaction(self: Self, field: u32, axis: u32) -> f32 {
+        ret graphene_bp_interaction(self.handle, field, axis)
+    }
+
     /// Copies one typed property out of the compiled instance; no borrowed pointers escape.
     #attr(safe)
     pub fn property(self: Self, id: u64) -> Option[BlueprintValue] {

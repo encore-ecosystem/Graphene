@@ -1,0 +1,54 @@
+//! A material view must initialize before AA has rendered its first frame.
+import core::option::Option
+import core::vec::Vec
+
+import graphene::{StandardMaterial, ViewportRenderer}
+import graphene::rhi::GpuTexture
+import graphene::texture_asset::TextureImage
+import linalg::Vec3
+import luma::{RendererKind, VulkanFeatureRequest, Window}
+
+fn main() -> u32 {
+    let window = Window::create_with_renderer_features("Material loading regression", 128, 128, RendererKind::DirectVulkan, VulkanFeatureRequest::advanced_rendering())
+    let interop = window.vulkan_interop()
+    if !window.available() || !interop.valid() {
+        window.destroy() ret 1
+    }
+    let mut renderer = match ViewportRenderer::create_retained(interop.instance(), interop.physical_device(), interop.render_device(), interop.swapchain(), 128, 128) {
+        Some(renderer) => renderer None => {
+            window.destroy() ret 1
+        }
+    }
+    renderer.sync_cubes(1)
+    let mut textures = Vec[GpuTexture]::new()
+    for i in 0..4 {
+        match renderer.upload_material_texture(TextureImage { 1, 1, vec![4294967295_u32] }) {
+            Some(upload) => {
+                upload.wait() textures.push(upload.finish())
+            }
+            None => {
+                renderer.destroy() window.destroy() ret 2
+            }
+        }
+    }
+    renderer.set_material_project("regression")
+    if !renderer.register_pbr_material("regression/Material.gmaterial", StandardMaterial::new(Vec3::new(1, 1, 1), 0.5, 0), textures, 0) {
+        renderer.destroy() window.destroy() ret 3
+    }
+    if renderer.pbr_materials.len() != 1 {
+        renderer.destroy() window.destroy() ret 4
+    }
+    let view = renderer.fork_pbr_view(0, renderer.pbr_materials.get_unchecked_borrowed(0))
+    let ready = view.is_some()
+    match view {
+        Some(view) => renderer.virtual_meshes.push(view)
+        None => {
+        }
+    }
+    renderer.destroy() window.destroy()
+    ret if ready {
+        0
+    } else {
+        5
+    }
+}
